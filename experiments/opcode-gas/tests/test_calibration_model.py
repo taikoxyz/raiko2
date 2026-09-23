@@ -9,6 +9,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "experiments" / "opcode-gas"))
 
 import opcode_gas
+import calibration_model
 from calibration_model import (
     AffineOpcodeModel,
     BlockCalibrationRow,
@@ -21,108 +22,207 @@ from calibration_model import (
 )
 
 
-ANCHORS = ("A0", "A1", "A2", "A3")
+ANCHORS = ("opcode:0x50", "opcode:0x5f", "opcode:0x80", "opcode:0x90")
+ANCHOR_Q = dict(zip(ANCHORS, map(Decimal, ("7", "9", "12", "15"))))
+ANCHOR_RAW_GAS = dict(zip(ANCHORS, (2, 2, 3, 3)))
 FEATURES = ("proposal_startup", "block_base", "tx_base", "native_value_transfer")
+OPCODE_FAMILIES = dict(
+    zip(("pop_family", "push_family", "dup_family", "swap_family"), ANCHORS)
+)
 
 
 def synthetic_affine_model(*, derived_zero=Decimal("5")):
-    opcode_keys = (*ANCHORS, "DERIVED")
+    derived_keys = ("DERIVED", *(f"DERIVED_{index:02d}" for index in range(97)))
+    opcode_keys = (*ANCHORS, *derived_keys)
+    anchor_basis = {
+        key: {
+            anchor: Fraction(int(key == anchor))
+            for anchor in ANCHORS
+        }
+        for key in opcode_keys
+    }
+    anchor_basis["DERIVED"][ANCHORS[0]] = Fraction(1, 2)
+    anchor_basis["DERIVED"][ANCHORS[1]] = Fraction(1, 4)
     return AffineOpcodeModel(
         opcode_keys=opcode_keys,
         anchor_keys=ANCHORS,
-        rank=1,
+        rank=98,
         nullity=4,
-        mu_zero={**{key: Decimal(0) for key in ANCHORS}, "DERIVED": derived_zero},
-        anchor_basis={
-            key: {
-                anchor: Fraction(int(key == anchor))
-                for anchor in ANCHORS
-            }
-            for key in opcode_keys
+        mu_zero={
+            **{key: Decimal(0) for key in ANCHORS},
+            **{key: derived_zero for key in derived_keys},
         },
+        anchor_basis=anchor_basis,
     )
 
 
 def synthetic_block_rows(
     *,
-    anchor_values=(Decimal("2"), Decimal("3"), Decimal("4"), Decimal("5")),
-    fixed_values=(Decimal("6"), Decimal("7"), Decimal("8"), Decimal("9")),
-    family_multipliers=(Decimal("1"), Decimal("1")),
-    column_scales=(1, 1, 1, 1, 1, 1, 1, 1),
-    derived_units=0,
+    body_scale=Decimal("2"),
+    common_opcode_overhead_per_operation=Decimal("6"),
+    fixed_values=(Decimal("6000"), Decimal("7000"), Decimal("8000"), Decimal("9000")),
+    fit_counts=(1, 2, 4, 8, 16),
+    holdout_count=32,
+    family_startups=None,
+    family_slope_offsets=None,
+    holdout_offsets=None,
+    derived_units_per_count=0,
 ):
-    parameters = (*anchor_values, *fixed_values)
-    rows = []
-    for family_index, family_multiplier in enumerate(family_multipliers):
-        for parameter_index, parameter in enumerate(parameters):
-            raw_gas = {key: 0 for key in (*ANCHORS, "DERIVED")}
-            features = {key: 0 for key in FEATURES}
-            scale = column_scales[parameter_index]
-            if parameter_index < len(ANCHORS):
-                raw_gas[ANCHORS[parameter_index]] = scale
-            else:
-                features[FEATURES[parameter_index - len(ANCHORS)]] = scale
-            raw_gas["DERIVED"] = derived_units
-            prover_gas = (
-                Decimal(derived_units) * Decimal("5")
-                + Decimal(scale) * parameter * family_multiplier
-            )
-            rows.append(
-                BlockCalibrationRow(
-                    row_id=f"family-{family_index}-parameter-{parameter_index}",
-                    workload_family=f"family-{family_index}",
-                    split="fit",
-                    prover_gas=prover_gas,
-                    raw_gas_by_key=raw_gas,
-                    feature_counts=features,
-                )
-            )
-    rows.append(
-        BlockCalibrationRow(
-            row_id="holdout",
-            workload_family="holdout-family",
-            split="holdout",
-            prover_gas=sum(parameters),
-            raw_gas_by_key={**{key: 1 for key in ANCHORS}, "DERIVED": 0},
-            feature_counts={key: 1 for key in FEATURES},
+    family_startups = family_startups or {}
+    family_slope_offsets = family_slope_offsets or {}
+    holdout_offsets = holdout_offsets or {}
+    anchor_values = {
+        key: (
+            body_scale * ANCHOR_Q[key]
+            + common_opcode_overhead_per_operation
         )
+        / Decimal(ANCHOR_RAW_GAS[key])
+        for key in ANCHORS
+    }
+    derived_multiplier = (
+        Decimal("5")
+        + anchor_values[ANCHORS[0]] / Decimal(2)
+        + anchor_values[ANCHORS[1]] / Decimal(4)
     )
+    rows = []
+    for family, anchor_key in OPCODE_FAMILIES.items():
+        for split, counts in (("fit", fit_counts), ("holdout", (holdout_count,))):
+            for count in counts:
+                raw_gas = {key: 0 for key in (*ANCHORS, "DERIVED")}
+                raw_gas[anchor_key] = ANCHOR_RAW_GAS[anchor_key] * count
+                raw_gas["DERIVED"] = derived_units_per_count * count
+                features = {key: 0 for key in FEATURES}
+                features["proposal_startup"] = 1000
+                prover_gas = (
+                    Decimal(1000) * fixed_values[0]
+                    + Decimal(family_startups.get(family, 0))
+                    + Decimal(count)
+                    * (
+                        Decimal(ANCHOR_RAW_GAS[anchor_key])
+                        * anchor_values[anchor_key]
+                        + Decimal(derived_units_per_count) * derived_multiplier
+                        + Decimal(family_slope_offsets.get(family, 0))
+                    )
+                )
+                if split == "holdout":
+                    prover_gas += Decimal(holdout_offsets.get(family, 0))
+                rows.append(
+                    BlockCalibrationRow(
+                        row_id=f"{family}-{split}-{count}",
+                        workload_family=family,
+                        split=split,
+                        prover_gas=prover_gas,
+                        raw_gas_by_key=raw_gas,
+                        feature_counts=features,
+                        workload_count=count,
+                    )
+                )
+
+    for family_index, family in enumerate(FEATURES):
+        for split, counts in (("fit", fit_counts), ("holdout", (holdout_count,))):
+            for count in counts:
+                features = {key: 0 for key in FEATURES}
+                features[family] = count
+                prover_gas = Decimal(count) * fixed_values[family_index]
+                if split == "holdout":
+                    prover_gas += Decimal(holdout_offsets.get(family, 0))
+                rows.append(
+                    BlockCalibrationRow(
+                        row_id=f"{family}-{split}-{count}",
+                        workload_family=family,
+                        split=split,
+                        prover_gas=prover_gas,
+                        raw_gas_by_key={key: 0 for key in (*ANCHORS, "DERIVED")},
+                        feature_counts=features,
+                        workload_count=None,
+                    )
+                )
     return rows
 
 
 class CalibrationModelTests(unittest.TestCase):
-    def test_block_fit_recovers_rank_eight_parameters_and_multipliers(self):
+    def test_block_fit_recovers_staged_transfer_parameters_and_multipliers(self):
         model = synthetic_affine_model()
-        expected_anchors = dict(zip(ANCHORS, map(Decimal, ("2", "3", "4", "5"))))
-        expected_fixed = dict(zip(FEATURES, map(Decimal, ("6", "7", "8", "9"))))
-
-        result = fit_block_calibration(model, synthetic_block_rows(), FEATURES)
-
-        for key, expected in (*expected_anchors.items(), *expected_fixed.items()):
-            actual = result.anchors.get(key, result.fixed_costs.get(key))
-            self.assertLessEqual(abs(actual - expected), Decimal("1e-60"))
-        self.assertEqual(result.opcode_multipliers["DERIVED"], Decimal("5"))
-        self.assertEqual(result.exact_rank, 8)
-        self.assertEqual(result.status, "accepted")
-
-    def test_block_fit_column_scaling_recovers_ill_scaled_full_rank_matrix(self):
-        scales = (1, 10**8, 10**16, 10**24, 10**32, 10**40, 10**48, 10**56)
+        expected_anchors = dict(zip(ANCHORS, map(Decimal, ("10", "12", "10", "12"))))
+        expected_fixed = dict(
+            zip(FEATURES, map(Decimal, ("6000", "7000", "8000", "9000")))
+        )
 
         result = fit_block_calibration(
-            synthetic_affine_model(),
-            synthetic_block_rows(column_scales=scales),
-            FEATURES,
+            model, synthetic_block_rows(), FEATURES, ANCHOR_Q
         )
 
-        expected = tuple(map(Decimal, ("2", "3", "4", "5", "6", "7", "8", "9")))
-        actual = tuple(result.anchors[key] for key in ANCHORS) + tuple(
-            result.fixed_costs[key] for key in FEATURES
+        self.assertLessEqual(
+            abs(result.transfer_params["body_scale"] - Decimal("2")),
+            Decimal("1e-60"),
         )
-        self.assertTrue(all(abs(left - right) <= Decimal("1e-50") for left, right in zip(actual, expected)))
-        with localcontext() as expected_context:
-            expected_context.prec = 80
-            expected_scale = Decimal(10**56) * Decimal(2).sqrt()
-        self.assertEqual(result.column_scales[-1], expected_scale)
+        self.assertLessEqual(
+            abs(
+                result.transfer_params["common_opcode_overhead_per_operation"]
+                - Decimal("6")
+            ),
+            Decimal("1e-60"),
+        )
+        for key, expected in (*expected_anchors.items(), *expected_fixed.items()):
+            actual = result.reconstructed_anchors.get(key, result.fixed_costs.get(key))
+            self.assertLessEqual(abs(actual - expected), Decimal("1e-60"))
+        self.assertEqual(result.opcode_multipliers["DERIVED"], Decimal("13"))
+        self.assertEqual(len(result.opcode_multipliers), 102)
+        self.assertTrue(all(value > 0 for value in result.opcode_multipliers.values()))
+        self.assertEqual(result.transfer_exact_rank, 2)
+        self.assertEqual(result.fixed_exact_rank, 4)
+        self.assertEqual(len(result.fixed_exact_design_matrix), 40)
+        self.assertEqual(
+            result.transfer_exact_design_matrix[0],
+            (Fraction(7), Fraction(1)),
+        )
+        self.assertTrue(
+            all(
+                isinstance(value, Fraction)
+                for row in result.transfer_exact_design_matrix
+                for value in row
+            )
+        )
+        self.assertEqual(set(result.family_slope_evidence), set(OPCODE_FAMILIES))
+        self.assertEqual(set(result.opcode_holdout_evidence), set(OPCODE_FAMILIES))
+        self.assertEqual(
+            set(result.transfer_leave_one_family_out), set(OPCODE_FAMILIES)
+        )
+        self.assertTrue(
+            all(
+                row["slope_ape"] <= Decimal("1e-60")
+                for row in result.family_slope_evidence.values()
+            )
+        )
+        self.assertEqual(
+            result.parameter_order,
+            ("body_scale", "common_opcode_overhead_per_operation", *FEATURES),
+        )
+        self.assertEqual(result.status, "accepted")
+
+    def test_block_fit_subtracts_mu_zero_family_slope_before_transfer(self):
+        result = fit_block_calibration(
+            synthetic_affine_model(),
+            synthetic_block_rows(derived_units_per_count=3),
+            FEATURES,
+            ANCHOR_Q,
+        )
+
+        self.assertLessEqual(
+            abs(result.transfer_params["body_scale"] - Decimal("2")),
+            Decimal("1e-60"),
+        )
+        self.assertLessEqual(
+            abs(
+                result.transfer_params["common_opcode_overhead_per_operation"]
+                - Decimal("6")
+            ),
+            Decimal("1e-60"),
+        )
+        self.assertEqual(
+            result.family_slope_evidence["pop_family"]["mu_zero_slope"],
+            Decimal("15"),
+        )
 
     def test_block_fit_uses_isolated_precision_without_mutating_caller_context(self):
         with localcontext() as hostile:
@@ -131,55 +231,160 @@ class CalibrationModelTests(unittest.TestCase):
             hostile.traps[Inexact] = True
 
             result = fit_block_calibration(
-                synthetic_affine_model(), synthetic_block_rows(), FEATURES
+                synthetic_affine_model(), synthetic_block_rows(), FEATURES, ANCHOR_Q
             )
 
             self.assertLessEqual(
-                abs(result.anchors["A0"] - Decimal("2")), Decimal("1e-60")
+                abs(result.transfer_params["body_scale"] - Decimal("2")),
+                Decimal("1e-60"),
             )
             self.assertEqual(hostile.prec, 7)
             self.assertEqual(hostile.rounding, ROUND_DOWN)
             self.assertTrue(hostile.traps[Inexact])
 
-    def test_block_fit_rejects_rank_seven(self):
-        rows = [
-            row
-            for row in synthetic_block_rows()
-            if not row.row_id.endswith("parameter-7")
-        ]
-        with self.assertRaisesRegex(ValueError, "rank.*eight"):
-            fit_block_calibration(synthetic_affine_model(), rows, FEATURES)
+    def test_block_fit_rejects_transfer_rank_one_and_fixed_rank_three(self):
+        with self.assertRaisesRegex(ValueError, "transfer.*rank.*two"):
+            fit_block_calibration(
+                synthetic_affine_model(),
+                synthetic_block_rows(),
+                FEATURES,
+                {key: Decimal("7") for key in ANCHORS},
+            )
+
+        rows = synthetic_block_rows()
+        rank_three = []
+        for row in rows:
+            features = dict(row.feature_counts)
+            features[FEATURES[-1]] = 0
+            if row.workload_family == FEATURES[-1]:
+                features[FEATURES[0]] = row.feature_counts[FEATURES[-1]]
+                prover_gas = Decimal(features[FEATURES[0]]) * Decimal("6000")
+            else:
+                prover_gas = row.prover_gas
+            rank_three.append(
+                BlockCalibrationRow(
+                    **{
+                        **row.__dict__,
+                        "feature_counts": features,
+                        "prover_gas": prover_gas,
+                    }
+                )
+            )
+        with self.assertRaisesRegex(ValueError, "fixed.*rank.*four"):
+            fit_block_calibration(
+                synthetic_affine_model(), rank_three, FEATURES, ANCHOR_Q
+            )
 
     def test_block_fit_rejects_negative_reconstructed_multiplier(self):
         with self.assertRaisesRegex(ValueError, "opcode multiplier must be positive"):
             fit_block_calibration(
-                synthetic_affine_model(derived_zero=Decimal("-1")),
+                synthetic_affine_model(derived_zero=Decimal("-20")),
                 synthetic_block_rows(),
                 FEATURES,
+                ANCHOR_Q,
             )
 
-    def test_block_fit_rejects_fit_mape_and_max_ape_gates(self):
-        rows = synthetic_block_rows()
-        rows[0] = BlockCalibrationRow(
-            **{**rows[0].__dict__, "prover_gas": Decimal("20")}
+    def test_block_fit_rejects_invalid_anchor_q_and_transfer_parameters(self):
+        invalid_q_cases = (
+            ({key: value for key, value in ANCHOR_Q.items() if key != ANCHORS[-1]}, "exactly"),
+            ({**ANCHOR_Q, "extra": Decimal("1")}, "exactly"),
+            ({**ANCHOR_Q, ANCHORS[0]: Decimal("-1")}, "positive finite"),
+            ({**ANCHOR_Q, ANCHORS[0]: Decimal("NaN")}, "positive finite"),
         )
-        with self.assertRaisesRegex(ValueError, "fit MAPE"):
-            fit_block_calibration(synthetic_affine_model(), rows, FEATURES)
+        for anchor_q, message in invalid_q_cases:
+            with self.subTest(anchor_q=anchor_q), self.assertRaisesRegex(
+                ValueError, message
+            ):
+                fit_block_calibration(
+                    synthetic_affine_model(), synthetic_block_rows(), FEATURES, anchor_q
+                )
+
+        with self.assertRaisesRegex(ValueError, "body_scale.*positive"):
+            fit_block_calibration(
+                synthetic_affine_model(),
+                synthetic_block_rows(
+                    body_scale=Decimal("-1"),
+                    common_opcode_overhead_per_operation=Decimal("20"),
+                ),
+                FEATURES,
+                ANCHOR_Q,
+            )
+        with self.assertRaisesRegex(ValueError, "common_opcode_overhead.*nonnegative"):
+            fit_block_calibration(
+                synthetic_affine_model(),
+                synthetic_block_rows(
+                    common_opcode_overhead_per_operation=Decimal("-1")
+                ),
+                FEATURES,
+                ANCHOR_Q,
+            )
+
+        zero_common = fit_block_calibration(
+            synthetic_affine_model(),
+            synthetic_block_rows(common_opcode_overhead_per_operation=Decimal("0")),
+            FEATURES,
+            ANCHOR_Q,
+        )
+        self.assertEqual(
+            zero_common.transfer_params["common_opcode_overhead_per_operation"],
+            Decimal("0"),
+        )
+
+    def test_block_fit_rejects_invalid_workload_counts(self):
+        rows = synthetic_block_rows()
+        opcode_index = next(
+            index for index, row in enumerate(rows) if row.workload_family in OPCODE_FAMILIES
+        )
+        rows[opcode_index] = BlockCalibrationRow(
+            **{**rows[opcode_index].__dict__, "workload_count": None}
+        )
+        with self.assertRaisesRegex(ValueError, "opcode family.*positive workload_count"):
+            fit_block_calibration(synthetic_affine_model(), rows, FEATURES, ANCHOR_Q)
 
         rows = synthetic_block_rows()
-        rows[0] = BlockCalibrationRow(
-            **{**rows[0].__dict__, "prover_gas": Decimal("2.5")}
+        base_index = next(
+            index for index, row in enumerate(rows) if row.workload_family in FEATURES
         )
-        with self.assertRaisesRegex(ValueError, "fit maximum APE"):
-            fit_block_calibration(synthetic_affine_model(), rows, FEATURES)
+        rows[base_index] = BlockCalibrationRow(
+            **{**rows[base_index].__dict__, "workload_count": 1}
+        )
+        with self.assertRaisesRegex(ValueError, "base family.*workload_count.*None"):
+            fit_block_calibration(synthetic_affine_model(), rows, FEATURES, ANCHOR_Q)
+
+        rows = synthetic_block_rows()
+        opcode_index = next(
+            index for index, row in enumerate(rows) if row.workload_family == "pop_family"
+        )
+        changed_features = dict(rows[opcode_index].feature_counts)
+        changed_features[FEATURES[0]] += 1
+        rows[opcode_index] = BlockCalibrationRow(
+            **{**rows[opcode_index].__dict__, "feature_counts": changed_features}
+        )
+        with self.assertRaisesRegex(ValueError, "fixed/base features must remain constant"):
+            fit_block_calibration(synthetic_affine_model(), rows, FEATURES, ANCHOR_Q)
+
+    def test_block_fit_rejects_family_slope_error(self):
+        rows = synthetic_block_rows(family_slope_offsets={"pop_family": 10})
+        with self.assertRaisesRegex(ValueError, "family slope APE"):
+            fit_block_calibration(synthetic_affine_model(), rows, FEATURES, ANCHOR_Q)
+
+    def test_block_fit_rejects_opcode_holdout_delta_signal_error(self):
+        rows = synthetic_block_rows(holdout_offsets={"pop_family": 1000})
+        with self.assertRaisesRegex(ValueError, "opcode holdout delta-signal APE"):
+            fit_block_calibration(synthetic_affine_model(), rows, FEATURES, ANCHOR_Q)
+
+    def test_block_fit_rejects_fit_mape_and_max_ape_gates(self):
+        rows = synthetic_block_rows(family_startups={"pop_family": 3000000})
+        with self.assertRaisesRegex(ValueError, "fit (MAPE|maximum APE)"):
+            fit_block_calibration(synthetic_affine_model(), rows, FEATURES, ANCHOR_Q)
 
     def test_block_fit_rejects_holdout_max_ape_gate(self):
         rows = synthetic_block_rows()
         rows[-1] = BlockCalibrationRow(
-            **{**rows[-1].__dict__, "prover_gas": Decimal("100")}
+            **{**rows[-1].__dict__, "prover_gas": rows[-1].prover_gas * 2}
         )
         with self.assertRaisesRegex(ValueError, "holdout maximum APE"):
-            fit_block_calibration(synthetic_affine_model(), rows, FEATURES)
+            fit_block_calibration(synthetic_affine_model(), rows, FEATURES, ANCHOR_Q)
 
     def test_block_fit_rejects_nonpositive_or_nonfinite_actuals(self):
         for invalid in (Decimal("0"), Decimal("-1"), Decimal("NaN")):
@@ -190,15 +395,48 @@ class CalibrationModelTests(unittest.TestCase):
             with self.subTest(invalid=invalid), self.assertRaisesRegex(
                 ValueError, "positive finite"
             ):
-                fit_block_calibration(synthetic_affine_model(), rows, FEATURES)
+                fit_block_calibration(
+                    synthetic_affine_model(), rows, FEATURES, ANCHOR_Q
+                )
 
-    def test_block_fit_rejects_leave_one_family_out_drift(self):
-        rows = synthetic_block_rows(
-            family_multipliers=(Decimal("1"), Decimal("1.12")),
-            derived_units=100,
+    def test_block_fit_rejects_transfer_leave_one_family_out_slope_error(self):
+        rows = synthetic_block_rows(family_slope_offsets={"pop_family": 3})
+        with self.assertRaisesRegex(ValueError, "leave-one-family-out.*slope APE"):
+            fit_block_calibration(synthetic_affine_model(), rows, FEATURES, ANCHOR_Q)
+
+    def test_staged_fit_avoids_joint_startup_compensation_with_negative_common(self):
+        startups = {
+            "pop_family": 500000,
+            "push_family": -500000,
+            "dup_family": -500000,
+            "swap_family": 500000,
+        }
+        rows = synthetic_block_rows(family_startups=startups)
+        fit_rows = [row for row in rows if row.split == "fit"]
+        joint_matrix, offsets, actuals = calibration_model._block_design(
+            synthetic_affine_model(), fit_rows, FEATURES, ANCHOR_Q
         )
-        with self.assertRaisesRegex(ValueError, "leave-one-family-out"):
-            fit_block_calibration(synthetic_affine_model(), rows, FEATURES)
+        joint, _scales, _residual = calibration_model._scaled_decimal_least_squares(
+            joint_matrix,
+            [actual - offset for actual, offset in zip(actuals, offsets)],
+        )
+        self.assertLess(joint[1], 0)
+
+        result = fit_block_calibration(
+            synthetic_affine_model(), rows, FEATURES, ANCHOR_Q
+        )
+
+        self.assertLessEqual(
+            abs(result.transfer_params["body_scale"] - Decimal("2")),
+            Decimal("1e-60"),
+        )
+        self.assertLessEqual(
+            abs(
+                result.transfer_params["common_opcode_overhead_per_operation"]
+                - Decimal("6")
+            ),
+            Decimal("1e-60"),
+        )
 
     def test_dynamic_holdouts_return_evidence_without_refitting(self):
         model = synthetic_affine_model()
@@ -207,12 +445,12 @@ class CalibrationModelTests(unittest.TestCase):
         )
         observations = tuple(
             DynamicRelationObservation(
-                dynamic_key="A0",
+                dynamic_key=ANCHORS[0],
                 scenario_id=scenario,
                 split=split,
                 equation=RelationEquation(
                     scenario,
-                    {"A0": Fraction(raw), "A1": Fraction(-1)},
+                    {ANCHORS[0]: Fraction(raw), ANCHORS[1]: Fraction(-1)},
                     Decimal(raw * 2 - 3),
                 ),
             )
@@ -224,13 +462,16 @@ class CalibrationModelTests(unittest.TestCase):
         )
 
         evidence = validate_dynamic_holdouts(
-            model, multipliers, observations, ("A0",)
+            model, multipliers, observations, (ANCHORS[0],)
         )
 
-        self.assertEqual(evidence["A0"]["status"], "accepted")
-        self.assertEqual(multipliers["A0"], Decimal("2"))
+        self.assertEqual(evidence[ANCHORS[0]]["status"], "accepted")
+        self.assertEqual(multipliers[ANCHORS[0]], Decimal("2"))
         self.assertEqual(
-            [row["implied_multiplier"] for row in evidence["A0"]["observations"]],
+            [
+                row["implied_multiplier"]
+                for row in evidence[ANCHORS[0]]["observations"]
+            ],
             [Decimal("2"), Decimal("2"), Decimal("2")],
         )
 
@@ -243,12 +484,12 @@ class CalibrationModelTests(unittest.TestCase):
         def observations(slopes=(Decimal("-1"), Decimal("1"), Decimal("5"))):
             return tuple(
                 DynamicRelationObservation(
-                    dynamic_key="A0",
+                    dynamic_key=ANCHORS[0],
                     scenario_id=scenario,
                     split=split,
                     equation=RelationEquation(
                         scenario,
-                        {"A0": Fraction(raw), "A1": Fraction(-1)},
+                        {ANCHORS[0]: Fraction(raw), ANCHORS[1]: Fraction(-1)},
                         slope,
                     ),
                 )
@@ -264,12 +505,12 @@ class CalibrationModelTests(unittest.TestCase):
 
         inconsistent = tuple(
             DynamicRelationObservation(
-                dynamic_key="A0",
+                dynamic_key=ANCHORS[0],
                 scenario_id=scenario,
                 split=split,
                 equation=RelationEquation(
                     scenario,
-                    {"A0": Fraction(raw), "A1": Fraction(-100)},
+                    {ANCHORS[0]: Fraction(raw), ANCHORS[1]: Fraction(-100)},
                     slope,
                 ),
             )
@@ -290,7 +531,7 @@ class CalibrationModelTests(unittest.TestCase):
         )
         for rows, message in cases:
             with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
-                validate_dynamic_holdouts(model, multipliers, rows, ("A0",))
+                validate_dynamic_holdouts(model, multipliers, rows, (ANCHORS[0],))
 
     def test_exact_rank_and_affine_reconstruction(self):
         equations = (

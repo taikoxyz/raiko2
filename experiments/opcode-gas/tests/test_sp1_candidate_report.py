@@ -14,6 +14,7 @@ sys.path.insert(0, str(ROOT / "experiments" / "opcode-gas"))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 import opcode_gas
+from calibration_model import BlockCalibrationResult
 from test_manifest import CONTROLLED_SCHEDULE_KEYS, controlled_manifest_data
 from test_manifest import fixture_schedule
 
@@ -56,6 +57,151 @@ def block_affine_model(manifest):
             for key in opcode_keys
         },
     )
+
+
+TEST_ANCHOR_BODY_COSTS = {
+    "opcode:0x50": Decimal("7"),
+    "opcode:0x5f": Decimal("9"),
+    "opcode:0x80": Decimal("12"),
+    "opcode:0x90": Decimal("15"),
+}
+
+
+def anchor_probe_rows(body_costs=None, instruction_costs=None, elf_sha256="a" * 64):
+    body_costs = body_costs or TEST_ANCHOR_BODY_COSTS
+    instruction_costs = instruction_costs or {
+        key: value * 2 for key, value in body_costs.items()
+    }
+    rows = []
+    counts = [
+        *opcode_gas.ANCHOR_PROBE_FIT_COUNTS,
+        opcode_gas.ANCHOR_PROBE_CHECKPOINT_COUNT,
+    ]
+    for key, name, opcode, raw_gas in opcode_gas.ANCHOR_PROBE_ANCHORS:
+        for count in counts:
+            for lane in ("target", "control"):
+                for repeat_index in range(opcode_gas.ANCHOR_PROBE_REPEATS):
+                    fixture_sha256 = hashlib.sha256(
+                        f"{key}:{count}:{lane}".encode()
+                    ).hexdigest()
+                    guest_input_sha256 = "0x" + hashlib.sha256(
+                        f"guest:{key}:{count}:{lane}".encode()
+                    ).hexdigest()
+                    common = Decimal(20_000_000 + 2 * count)
+                    gas_delta = Decimal(100) + body_costs[key] * count
+                    instruction_delta = Decimal(100) + instruction_costs[key] * count
+                    row = {
+                        "purpose": opcode_gas.ANCHOR_PROBE_PURPOSE,
+                        "anchor_key": key,
+                        "anchor_name": name,
+                        "opcode": opcode,
+                        "target_raw_gas": raw_gas,
+                        "target_count": count,
+                        "lane": lane,
+                        "repeat_index": repeat_index,
+                        "prover_gas": int(common + (gas_delta if lane == "target" else 0)),
+                        "total_instruction_count": int(
+                            common + (instruction_delta if lane == "target" else 0)
+                        ),
+                        "total_syscall_count": 3,
+                        "exit_code": 0,
+                        "public_values": "0x"
+                        + hashlib.sha256(
+                            f"public:{key}:{count}:{lane}".encode()
+                        ).hexdigest(),
+                        "guest_input_sha256": guest_input_sha256,
+                        "guest_input_bincode_length": 64,
+                        "elf_sha256": elf_sha256,
+                        "anchor_probe_manifest_sha256": "b" * 64,
+                        "fixture_sha256": fixture_sha256,
+                        "sp1_execution_engine": "gas-estimator",
+                        "sp1_gas_trace_chunk_threshold": opcode_gas.SP1_GAS_TRACE_CHUNK_THRESHOLD,
+                        "sp1_gas_trace_chunk_slots": opcode_gas.SP1_GAS_TRACE_CHUNK_SLOTS,
+                        "guest_launcher_sha256": "f" * 64,
+                        "run_provenance": {
+                            "calibration_id": "b" * 24,
+                            "calibration_identity_sha256": "b" * 64,
+                            "implementation_revision": "a" * 40,
+                            "sp1_sdk_version": "test-sdk",
+                        },
+                        "anchor_pair_id": opcode_gas._anchor_probe_pair_id(
+                            key, count, elf_sha256
+                        ),
+                        "anchor_sample_id": opcode_gas._anchor_probe_sample_id(
+                            anchor_key=key,
+                            target_count=count,
+                            lane=lane,
+                            elf_sha256=elf_sha256,
+                            fixture_sha256=fixture_sha256,
+                        ),
+                    }
+                    row["anchor_execution_row_id"] = (
+                        opcode_gas._anchor_probe_execution_row_id(row)
+                    )
+                    rows.append(row)
+    return rows
+
+
+def anchor_probe_evidence(body_costs=None, instruction_costs=None, elf_sha256="a" * 64):
+    rows = anchor_probe_rows(body_costs, instruction_costs, elf_sha256)
+    return rows, opcode_gas.fit_anchor_probe_rows(rows)
+
+
+def anchor_probe_artifact(body_costs=None, instruction_costs=None, elf_sha256="a" * 64):
+    return anchor_probe_evidence(body_costs, instruction_costs, elf_sha256)[1]
+
+
+def anchor_probe_execution_identity(artifact):
+    return {
+        **artifact["run_provenance"],
+        "guest_launcher_sha256": artifact["guest_launcher_sha256"],
+        "guest_artifacts": {
+            "crates/guests/elf/sp1_opcode_lab.elf": artifact["elf_sha256"]
+        }
+    }
+
+
+def persist_anchor_probe_evidence(run, elf_path, body_costs=None, instruction_costs=None):
+    fixtures_dir = run / "generated" / "anchor-probe"
+    execution_identity = opcode_gas.json.loads(
+        (run / "experiment.json").read_text()
+    )["calibration_identity"]
+    launcher = run.parent / "target" / "release" / "guest-launcher"
+    launcher.parent.mkdir(parents=True, exist_ok=True)
+    launcher.write_bytes(b"test guest launcher")
+    manifest = opcode_gas.generate_anchor_probe_fixtures(
+        elf_path,
+        fixtures_dir,
+        guest_launcher=launcher,
+        run_provenance=opcode_gas._anchor_probe_run_provenance(
+            run, execution_identity
+        ),
+    )
+    rows = anchor_probe_rows(
+        body_costs,
+        instruction_costs,
+        elf_sha256=manifest["elf_sha256"],
+    )
+    fixtures = {
+        (row["anchor_key"], row["target_count"], row["lane"]): row
+        for row in manifest["fixtures"]
+    }
+    for row in rows:
+        fixture = fixtures[(row["anchor_key"], row["target_count"], row["lane"])]
+        for field in opcode_gas._ANCHOR_PROBE_FIXTURE_FIELDS:
+            row[field] = fixture[field]
+        row["anchor_probe_manifest_sha256"] = manifest["manifest_sha256"]
+        row["guest_launcher_sha256"] = manifest["guest_launcher_sha256"]
+        row["run_provenance"] = manifest["run_provenance"]
+        row["anchor_execution_row_id"] = opcode_gas._anchor_probe_execution_row_id(row)
+    artifact = opcode_gas.fit_anchor_probe_rows(rows)
+    raw_dir = run / "raw"
+    raw_dir.mkdir(exist_ok=True)
+    (raw_dir / "anchor-probe.jsonl").write_bytes(
+        b"".join(opcode_gas.canonical_json(row) + b"\n" for row in rows)
+    )
+    (run / "anchor-probe-fit.json").write_text(opcode_gas.json.dumps(artifact) + "\n")
+    return rows, artifact
 
 
 def formal_relation_rows(manifest, *, slope_overrides=None):
@@ -413,7 +559,7 @@ def precompile_execution_rows(manifest=None, *, instruction_multiplier=2):
     return rows
 
 
-def candidate_input_artifacts(manifest, controlled_rows):
+def candidate_input_artifacts(manifest, controlled_rows, anchor_probe=None):
     opcode_keys = [
         key.id
         for key in manifest.measurement_keys
@@ -448,6 +594,7 @@ def candidate_input_artifacts(manifest, controlled_rows):
         )
         for key, value in multipliers.items()
     }
+    anchor_probe = anchor_probe or anchor_probe_artifact()
     block = {
         "schema_version": 1,
         "purpose": "block_calibration",
@@ -455,27 +602,26 @@ def candidate_input_artifacts(manifest, controlled_rows):
         "provenance": copy.deepcopy(relation["provenance"]),
         "relation_artifact_sha256": relation["artifact_sha256"],
         "relation_raw_rows_sha256": relation["raw_rows_sha256"],
+        "anchor_probe_primary_sha256": anchor_probe["primary_artifact_sha256"],
+        "anchor_body_cost_metric": "prover_gas",
+        "anchor_body_costs": {
+            key: opcode_gas._decimal_text(value)
+            for key, value in TEST_ANCHOR_BODY_COSTS.items()
+        },
         "raw_block_rows_sha256": opcode_gas.sha256_bytes(
             opcode_gas.canonical_json([{}])
         ),
-        "parameter_order": [*opcode_gas.OPCODE_RELATION_ANCHORS, *opcode_gas.Q_FORMULA],
-        "formulas": {
-            "fit": "p_hat = x * mu_zero + [x * B, q] * [theta, beta]",
-            "opcode": "mu = mu_zero + B * theta",
-            "ape": "abs(predicted_prover_gas - actual_prover_gas) / actual_prover_gas",
+        "parameter_order": list(opcode_gas.BLOCK_CALIBRATION_PARAMETER_ORDER),
+        "formulas": dict(opcode_gas.BLOCK_CALIBRATION_FORMULAS),
+        "gates": dict(opcode_gas.BLOCK_CALIBRATION_GATES),
+        "transfer_params": {
+            "body_scale": "1",
+            "common_opcode_overhead_per_operation": "1",
         },
-        "gates": {
-            "exact_fit_rank": 8,
-            "positive_parameters": True,
-            "positive_opcode_multipliers": True,
-            "fit_mape_max": "0.05",
-            "fit_max_ape_max": "0.10",
-            "holdout_max_ape_max": "0.10",
-            "dynamic_relation_ape_max": "0.10",
-            "dynamic_implied_multiplier_spread_max": "0.05",
-            "leave_one_family_out_drift_max": "0.05",
+        "reconstructed_anchors": {
+            key: str(index + 10)
+            for index, key in enumerate(opcode_gas.OPCODE_RELATION_ANCHORS)
         },
-        "anchors": {key: str(index + 10) for index, key in enumerate(opcode_gas.OPCODE_RELATION_ANCHORS)},
         "fixed_costs": {key: "100" for key in opcode_gas.Q_FORMULA},
         "opcode_multipliers": multipliers,
         "normalization_reference_key": manifest.normalization_reference_key,
@@ -483,12 +629,28 @@ def candidate_input_artifacts(manifest, controlled_rows):
         "fit_mape": "0",
         "fit_max_ape": "0",
         "holdout_max_ape": "0",
-        "exact_fit_matrix": [
-            [str(int(column == row)) for column in range(8)] for row in range(8)
+        "transfer_exact_fit_matrix": [["1", "0"], ["0", "1"]],
+        "transfer_exact_fit_rank": 2,
+        "transfer_column_scales": ["1", "1"],
+        "transfer_solver_residual": "0",
+        "fixed_exact_fit_matrix": [
+            [str(int(column == row)) for column in range(4)] for row in range(4)
         ],
-        "exact_fit_rank": 8,
-        "column_scales": {},
-        "solver_residual": "0",
+        "fixed_exact_fit_rank": 4,
+        "fixed_column_scales": ["1", "1", "1", "1"],
+        "fixed_solver_residual": "0",
+        "family_slope_evidence": {
+            family: {"slope_ape": "0"}
+            for family in opcode_gas.BLOCK_CALIBRATION_FAMILIES[:4]
+        },
+        "opcode_holdout_evidence": {
+            family: {"status": "accepted", "delta_signal_ape": "0"}
+            for family in opcode_gas.BLOCK_CALIBRATION_FAMILIES[:4]
+        },
+        "transfer_leave_one_family_out": {
+            family: {"omitted_slope_ape": "0"}
+            for family in opcode_gas.BLOCK_CALIBRATION_FAMILIES[:4]
+        },
         "predictions": {
             "fit-row": {
                 "split": "fit",
@@ -496,9 +658,6 @@ def candidate_input_artifacts(manifest, controlled_rows):
                 "predicted_prover_gas": "1",
                 "ape": "0",
             }
-        },
-        "leave_one_family_out": {
-            "family": {key: "0" for key in [*opcode_gas.OPCODE_RELATION_ANCHORS, *opcode_gas.Q_FORMULA]}
         },
         "dynamic_holdouts": {
             key: {"status": "accepted", "consistency": "0", "observations": []}
@@ -515,6 +674,7 @@ def candidate_input_artifacts(manifest, controlled_rows):
     }
     provenance = {
         "implementation_revision": "a" * 40,
+        "anchor_probe_sha256": anchor_probe["primary_artifact_sha256"],
         "opcode_relations_sha256": relation["artifact_sha256"],
         "block_calibration_rows_sha256": block["raw_block_rows_sha256"],
         "block_calibration_sha256": block["artifact_sha256"],
@@ -553,7 +713,11 @@ def full_candidate_inputs():
 
 
 def production_candidate_source_evidence(
-    manifest, *, relation_instruction_delta=0, block_instruction_delta=0
+    manifest,
+    *,
+    relation_instruction_delta=0,
+    anchor_instruction_delta=0,
+    block_instruction_delta=0,
 ):
     opcode_keys = tuple(
         sorted(key.id for key in opcode_gas._pure_opcode_measurement_keys(manifest))
@@ -580,7 +744,25 @@ def production_candidate_source_evidence(
     affine_model = opcode_gas._affine_model_from_validated_artifact(
         manifest, relation
     )
-    preflight = opcode_gas.preflight_block_calibration_rows(manifest, affine_model)
+    anchor_raw_gas = {
+        key: raw_gas
+        for key, _name, _opcode, raw_gas in opcode_gas.ANCHOR_PROBE_ANCHORS
+    }
+    common_overhead = Decimal("100")
+    body_costs = {
+        key: multipliers[key] * anchor_raw_gas[key] - common_overhead
+        for key in opcode_gas.OPCODE_RELATION_ANCHORS
+    }
+    anchor_rows, anchor_probe = anchor_probe_evidence(
+        body_costs,
+        {
+            key: value * 2 + anchor_instruction_delta
+            for key, value in body_costs.items()
+        },
+    )
+    preflight = opcode_gas.preflight_block_calibration_rows(
+        manifest, affine_model, body_costs
+    )
     fixed_costs = {
         key: 2_000_000 + index * 100_000
         for index, key in enumerate(opcode_gas.Q_FORMULA)
@@ -619,7 +801,8 @@ def production_candidate_source_evidence(
                     "calibration_id": calibration_id,
                     "relation_artifact_sha256": relation["artifact_sha256"],
                     "relation_raw_rows_sha256": relation["raw_rows_sha256"],
-                    "preflight_fit_rank": preflight["fit_rank"],
+                    "preflight_transfer_rank": preflight["transfer_fit_rank"],
+                    "preflight_fixed_rank": preflight["fixed_fit_rank"],
                     "prover_gas": int(prover_gas),
                     "total_instruction_count": int(prover_gas) * 2
                     + block_instruction_delta,
@@ -654,17 +837,21 @@ def production_candidate_source_evidence(
                 }
             )
     block = opcode_gas.fit_block_calibration_artifact(
-        manifest, affine_model, relation, block_rows
+        manifest, affine_model, relation, anchor_probe, anchor_rows, block_rows
     )
-    return relation_rows, relation, block_rows, block
+    return relation_rows, relation, anchor_rows, anchor_probe, block_rows, block
 
 
 def persist_execution_identity(root, manifest, revision="a" * 40):
-    guest_artifact = root / "sp1-test.elf"
+    guest_artifact = root / "crates" / "guests" / "elf" / "sp1_opcode_lab.elf"
+    guest_artifact.parent.mkdir(parents=True, exist_ok=True)
     guest_artifact.write_bytes(b"test SP1 guest artifact")
     guest_artifacts = {
-        guest_artifact.name: opcode_gas.sha256_file(guest_artifact)
+        "crates/guests/elf/sp1_opcode_lab.elf": opcode_gas.sha256_file(guest_artifact)
     }
+    guest_launcher = root / "target" / "release" / "guest-launcher"
+    guest_launcher.parent.mkdir(parents=True, exist_ok=True)
+    guest_launcher.write_bytes(b"test guest launcher")
     identity = {
         "implementation_revision": revision,
         "alethia_reth_revision": "d" * 40,
@@ -677,6 +864,7 @@ def persist_execution_identity(root, manifest, revision="a" * 40):
         "guest_artifacts_sha256": opcode_gas.sha256_bytes(
             opcode_gas.canonical_json(guest_artifacts)
         ),
+        "guest_launcher_sha256": opcode_gas.sha256_file(guest_launcher),
         "normalization_reference_key": "opcode:0x01",
         "sp1_execution_parameters": opcode_gas.sp1_execution_parameters(),
         "primary_metric": "proverGas",
@@ -757,12 +945,15 @@ def persist_completed_controlled_run(root, manifest, rows, overhead, revision="a
         )
         + "\n"
     )
+    _probe_rows, probe = persist_anchor_probe_evidence(
+        run,
+        run.parent / "crates" / "guests" / "elf" / "sp1_opcode_lab.elf",
+    )
     relation, block, _controlled_fit, _provenance = candidate_input_artifacts(
-        manifest, fitted_rows
+        manifest, fitted_rows, anchor_probe=probe
     )
     (run / "opcode-relations.json").write_text(opcode_gas.json.dumps(relation) + "\n")
     (run / "block-calibration.json").write_text(opcode_gas.json.dumps(block) + "\n")
-    (run / "raw").mkdir()
     (run / "raw" / "formal-relations.jsonl").write_text("{}\n")
     (run / "block-calibration-rows.jsonl").write_text("{}\n")
     bridge = {
@@ -2148,6 +2339,7 @@ class CandidateConstructionTests(unittest.TestCase):
                 rows = opcode_gas.run_block_calibration_rows(
                     manifest=manifest,
                     affine_model=block_affine_model(manifest),
+                    anchor_body_costs=TEST_ANCHOR_BODY_COSTS,
                     guest_launcher=pathlib.Path("guest-launcher"),
                     calibration_run_id="calibration",
                     relation_artifact_sha256="a" * 64,
@@ -2644,6 +2836,7 @@ class CandidateConstructionTests(unittest.TestCase):
                 "--calibration-run", "run",
                 "--controlled-manifest", "manifest.toml",
                 "--relations", "run/opcode-relations.json",
+                "--anchor-probe", "run/anchor-probe-fit.json",
                 "--out", "run/block-calibration-rows.jsonl",
             ],
             "run-controlled": [
@@ -2662,6 +2855,7 @@ class CandidateConstructionTests(unittest.TestCase):
                 "--run", "run",
                 "--controlled-manifest", "manifest.toml",
                 "--relations", "run/opcode-relations.json",
+                "--anchor-probe", "run/anchor-probe-fit.json",
                 "--block-calibration", "run/block-calibration.json",
                 "--controlled-fit", "run/controlled-fit.json",
                 "--provenance", "provenance.json",
@@ -2687,7 +2881,7 @@ class CandidateConstructionTests(unittest.TestCase):
         self.assertEqual(block.repeats, 3)
 
     def test_fit_block_calibration_serializes_canonical_evidence(self):
-        anchors = ("A0", "A1", "A2", "A3")
+        anchors = opcode_gas.OPCODE_RELATION_ANCHORS
         features = tuple(opcode_gas.Q_FORMULA)
         opcode_keys = (*anchors, "DERIVED")
         affine_model = opcode_gas.AffineOpcodeModel(
@@ -2704,17 +2898,24 @@ class CandidateConstructionTests(unittest.TestCase):
                 for key in opcode_keys
             },
         )
-        parameters = tuple(map(Decimal, ("2", "3", "4", "5", "6", "7", "8", "9")))
+        body_scale = Decimal("2")
+        common_overhead = Decimal("6")
+        fixed_values = tuple(map(Decimal, ("6", "7", "8", "9")))
+        parameters = (body_scale, common_overhead, *fixed_values)
+        raw_gas = {key: raw for key, _name, _opcode, raw in opcode_gas.ANCHOR_PROBE_ANCHORS}
         specs = []
         raw_rows = []
         for family_index in range(2):
             for parameter_index, parameter in enumerate(parameters):
                 raw = {key: 0 for key in opcode_keys}
                 q = {key: 0 for key in features}
-                if parameter_index < 4:
-                    raw[anchors[parameter_index]] = 1
+                if parameter_index < 2:
+                    anchor = anchors[parameter_index]
+                    raw[anchor] = raw_gas[anchor]
+                    parameter = body_scale * TEST_ANCHOR_BODY_COSTS[anchor] + common_overhead
                 else:
-                    q[features[parameter_index - 4]] = 1
+                    q[features[parameter_index - 2]] = 1
+                    parameter = fixed_values[parameter_index - 2]
                 row_id = f"family-{family_index}-parameter-{parameter_index}"
                 program = (
                     types.SimpleNamespace(
@@ -2751,7 +2952,8 @@ class CandidateConstructionTests(unittest.TestCase):
                             "calibration_id": "b" * 24,
                             "relation_artifact_sha256": "a" * 64,
                             "relation_raw_rows_sha256": "c" * 64,
-                            "preflight_fit_rank": 8,
+                            "preflight_transfer_rank": 2,
+                            "preflight_fixed_rank": 4,
                             "backend_input_sha256": "d" * 64,
                             "guest_input_sha256": "0x" + "d" * 64,
                             "execution_row_id": opcode_gas.controlled_execution_row_id(
@@ -2783,7 +2985,7 @@ class CandidateConstructionTests(unittest.TestCase):
                             "actual_final_state_root": spec.expected_final_state_root,
                         }
                     )
-        holdout_raw = {**{key: 1 for key in anchors}, "DERIVED": 0}
+        holdout_raw = {**raw_gas, "DERIVED": 0}
         holdout_q = {key: 1 for key in features}
         holdout_spec = types.SimpleNamespace(
             row_id="holdout",
@@ -2810,7 +3012,8 @@ class CandidateConstructionTests(unittest.TestCase):
                     "calibration_id": "b" * 24,
                     "relation_artifact_sha256": "a" * 64,
                     "relation_raw_rows_sha256": "c" * 64,
-                    "preflight_fit_rank": 8,
+                    "preflight_transfer_rank": 2,
+                    "preflight_fixed_rank": 4,
                     "backend_input_sha256": "d" * 64,
                     "guest_input_sha256": "0x" + "d" * 64,
                     "execution_row_id": opcode_gas.controlled_execution_row_id(
@@ -2835,7 +3038,14 @@ class CandidateConstructionTests(unittest.TestCase):
                     "total_syscall_count": 10,
                     "public_values": "0x01",
                     "host_public_output": "0x01",
-                    "prover_gas": int(sum(parameters)),
+                    "prover_gas": int(
+                        sum(
+                            body_scale * TEST_ANCHOR_BODY_COSTS[key]
+                            + common_overhead
+                            for key in anchors
+                        )
+                        + sum(fixed_values)
+                    ),
                     "actual_raw_gas_by_key": holdout_raw,
                     "actual_features": holdout_q,
                     "actual_diagnostics": holdout_spec.expected_diagnostics,
@@ -2853,12 +3063,12 @@ class CandidateConstructionTests(unittest.TestCase):
                     "relation_id": scenario_id,
                     "scenario_id": scenario_id,
                     "split": split,
-                    "dynamic_key": "A0",
+                    "dynamic_key": anchors[0],
                     "signed_raw_gas_by_key": {
-                        "A0": str(raw_units),
-                        "A1": "-1",
+                        anchors[0]: str(raw_units),
+                        anchors[1]: "-1",
                     },
-                    "slope_p": str(raw_units * 2 - 3),
+                    "slope_p": str(raw_units * 10 - 12),
                 }
             )
         relation_artifact = {
@@ -2917,7 +3127,8 @@ class CandidateConstructionTests(unittest.TestCase):
                         "calibration_id": "b" * 24,
                         "relation_artifact_sha256": "a" * 64,
                         "relation_raw_rows_sha256": "c" * 64,
-                        "preflight_fit_rank": 8,
+                        "preflight_transfer_rank": 2,
+                        "preflight_fixed_rank": 4,
                         "backend_input_sha256": "d" * 64,
                         "guest_input_sha256": "0x" + "d" * 64,
                         "execution_row_id": opcode_gas.controlled_execution_row_id(
@@ -2953,19 +3164,83 @@ class CandidateConstructionTests(unittest.TestCase):
         manifest = types.SimpleNamespace(
             block_calibration_rows=tuple(specs),
             static_count_control_rows=tuple(static_count_controls),
-            dynamic_raw_gas_keys=("A0",),
-            normalization_reference_key="A0",
+            dynamic_raw_gas_keys=(anchors[0],),
+            normalization_reference_key=anchors[0],
         )
 
-        artifact = opcode_gas.fit_block_calibration_artifact(
-            manifest, affine_model, relation_artifact, raw_rows
+        probe_rows, probe = anchor_probe_evidence()
+        staged_result = BlockCalibrationResult(
+            transfer_params={
+                "body_scale": body_scale,
+                "common_opcode_overhead_per_operation": common_overhead,
+            },
+            reconstructed_anchors={
+                anchors[0]: Decimal("10"),
+                anchors[1]: Decimal("12"),
+                anchors[2]: Decimal("10"),
+                anchors[3]: Decimal("12"),
+            },
+            fixed_costs=dict(zip(features, fixed_values)),
+            opcode_multipliers={
+                anchors[0]: Decimal("10"),
+                anchors[1]: Decimal("12"),
+                anchors[2]: Decimal("10"),
+                anchors[3]: Decimal("12"),
+                "DERIVED": Decimal("5"),
+            },
+            fit_mape=Decimal(0),
+            fit_max_ape=Decimal(0),
+            holdout_max_ape=Decimal(0),
+            status="accepted",
+            parameter_order=(*opcode_gas.BLOCK_CALIBRATION_TRANSFER_PARAMETERS, *features),
+            transfer_exact_design_matrix=(
+                (opcode_gas.Fraction(1), opcode_gas.Fraction(0)),
+                (opcode_gas.Fraction(0), opcode_gas.Fraction(1)),
+            ),
+            transfer_exact_rank=2,
+            transfer_column_scales=(Decimal(1), Decimal(1)),
+            transfer_solver_residual=Decimal(0),
+            fixed_exact_design_matrix=tuple(
+                tuple(opcode_gas.Fraction(int(column == row)) for column in range(4))
+                for row in range(4)
+            ),
+            fixed_exact_rank=4,
+            fixed_column_scales=(Decimal(1),) * 4,
+            fixed_solver_residual=Decimal(0),
+            family_slope_evidence={
+                family: {"slope_ape": Decimal(0)}
+                for family in opcode_gas.BLOCK_CALIBRATION_FAMILIES[:4]
+            },
+            opcode_holdout_evidence={
+                family: {"status": "accepted", "delta_signal_ape": Decimal(0)}
+                for family in opcode_gas.BLOCK_CALIBRATION_FAMILIES[:4]
+            },
+            transfer_leave_one_family_out={
+                family: {"omitted_slope_ape": Decimal(0)}
+                for family in opcode_gas.BLOCK_CALIBRATION_FAMILIES[:4]
+            },
+            predictions={},
         )
+        with mock.patch.object(
+            opcode_gas, "fit_block_calibration", return_value=staged_result
+        ):
+            artifact = opcode_gas.fit_block_calibration_artifact(
+                manifest, affine_model, relation_artifact, probe, probe_rows, raw_rows
+            )
 
         self.assertEqual(artifact["status"], "accepted")
-        self.assertEqual(artifact["parameter_order"], [*anchors, *features])
-        self.assertEqual(artifact["exact_fit_rank"], 8)
-        self.assertEqual(artifact["opcode_multipliers_add_normalized"]["A0"], "1")
-        self.assertEqual(len(artifact["dynamic_holdouts"]["A0"]["observations"]), 3)
+        self.assertEqual(
+            artifact["parameter_order"],
+            [*opcode_gas.BLOCK_CALIBRATION_TRANSFER_PARAMETERS, *features],
+        )
+        self.assertEqual(artifact["transfer_exact_fit_rank"], 2)
+        self.assertEqual(artifact["fixed_exact_fit_rank"], 4)
+        self.assertEqual(
+            artifact["opcode_multipliers_add_normalized"][anchors[0]], "1"
+        )
+        self.assertEqual(
+            len(artifact["dynamic_holdouts"][anchors[0]]["observations"]), 3
+        )
         self.assertEqual(
             artifact["raw_block_rows_sha256"],
             opcode_gas.sha256_bytes(opcode_gas.canonical_json(raw_rows)),
@@ -2983,7 +3258,7 @@ class CandidateConstructionTests(unittest.TestCase):
         tampered_rows[0]["execution_row_id"] = "f" * 64
         with self.assertRaisesRegex(ValueError, "execution row identity"):
             opcode_gas.fit_block_calibration_artifact(
-                manifest, affine_model, relation_artifact, tampered_rows
+                manifest, affine_model, relation_artifact, probe, probe_rows, tampered_rows
             )
 
         def assert_bool_mutation_rejected(label, mutate):
@@ -2992,7 +3267,7 @@ class CandidateConstructionTests(unittest.TestCase):
                 mutate(mutated)
                 with self.assertRaises(ValueError):
                     opcode_gas.fit_block_calibration_artifact(
-                        manifest, affine_model, relation_artifact, mutated
+                        manifest, affine_model, relation_artifact, probe, probe_rows, mutated
                     )
 
         first_row_id = "family-0-parameter-0"
@@ -3009,8 +3284,16 @@ class CandidateConstructionTests(unittest.TestCase):
             lambda rows: first_repeats(rows)[0].__setitem__("exit_code", False),
         )
         assert_bool_mutation_rejected(
-            "preflight_fit_rank",
-            lambda rows: first_repeats(rows)[0].__setitem__("preflight_fit_rank", True),
+            "preflight_transfer_rank",
+            lambda rows: first_repeats(rows)[0].__setitem__(
+                "preflight_transfer_rank", True
+            ),
+        )
+        assert_bool_mutation_rejected(
+            "preflight_fixed_rank",
+            lambda rows: first_repeats(rows)[0].__setitem__(
+                "preflight_fixed_rank", True
+            ),
         )
         assert_bool_mutation_rejected(
             "block_count",
@@ -3096,7 +3379,7 @@ class CandidateConstructionTests(unittest.TestCase):
                     repeat["prover_gas"] = value
                 with self.assertRaises(ValueError):
                     opcode_gas.fit_block_calibration_artifact(
-                        manifest, affine_model, relation_artifact, mutated
+                        manifest, affine_model, relation_artifact, probe, probe_rows, mutated
                     )
 
         for field in (
@@ -3113,7 +3396,7 @@ class CandidateConstructionTests(unittest.TestCase):
                 del truncated[0][field]
                 with self.assertRaisesRegex(ValueError, "schema"):
                     opcode_gas.fit_block_calibration_artifact(
-                        manifest, affine_model, relation_artifact, truncated
+                        manifest, affine_model, relation_artifact, probe, probe_rows, truncated
                     )
 
         alterations = {
@@ -3131,7 +3414,7 @@ class CandidateConstructionTests(unittest.TestCase):
                 altered[0][field] = value
                 with self.assertRaises(ValueError):
                     opcode_gas.fit_block_calibration_artifact(
-                        manifest, affine_model, relation_artifact, altered
+                        manifest, affine_model, relation_artifact, probe, probe_rows, altered
                     )
 
     def test_task5_fit_block_calibration_cli_is_executable(self):
@@ -3139,6 +3422,7 @@ class CandidateConstructionTests(unittest.TestCase):
             [
                 "fit-block-calibration",
                 "--relations", "run/opcode-relations.json",
+                "--anchor-probe", "run/anchor-probe-fit.json",
                 "--runs", "run/block-calibration-rows.jsonl",
                 "--controlled-manifest", "manifest.toml",
                 "--out", "run/block-calibration.json",
@@ -3203,6 +3487,7 @@ class CandidateConstructionTests(unittest.TestCase):
                         controlled_manifest=manifest_path,
                         controlled_fit=fit_path,
                         relations=run / "opcode-relations.json",
+                        anchor_probe=run / "anchor-probe-fit.json",
                         block_calibration=run / "block-calibration.json",
                         provenance=provenance_path,
                     )
@@ -3377,6 +3662,7 @@ class CandidateConstructionTests(unittest.TestCase):
                 "controlled_manifest": root / "manifest.toml",
                 "controlled_fit": run / "controlled-fit.json",
                 "relations": run / "opcode-relations.json",
+                "anchor_probe": run / "anchor-probe-fit.json",
                 "block_calibration": run / "block-calibration.json",
                 "provenance": run / "provenance.json",
                 **overrides,
@@ -4026,20 +4312,25 @@ class CandidateConstructionTests(unittest.TestCase):
         )
 
     def _assert_secondary_source_change_is_candidate_independent(
-        self, *, relation_instruction_delta=0, block_instruction_delta=0
+        self,
+        *,
+        relation_instruction_delta=0,
+        anchor_instruction_delta=0,
+        block_instruction_delta=0,
     ):
         manifest = formal_relation_manifest()
         base = production_candidate_source_evidence(manifest)
         changed = production_candidate_source_evidence(
             manifest,
             relation_instruction_delta=relation_instruction_delta,
+            anchor_instruction_delta=anchor_instruction_delta,
             block_instruction_delta=block_instruction_delta,
         )
         base_projection = opcode_gas.primary_candidate_source_projection(
-            manifest, base[1], base[0], base[3], base[2]
+            manifest, base[1], base[0], base[5], base[4]
         )
         changed_projection = opcode_gas.primary_candidate_source_projection(
-            manifest, changed[1], changed[0], changed[3], changed[2]
+            manifest, changed[1], changed[0], changed[5], changed[4]
         )
         self.assertEqual(base_projection, changed_projection)
 
@@ -4048,21 +4339,28 @@ class CandidateConstructionTests(unittest.TestCase):
         )
 
         def candidate(evidence):
-            relation_rows, relation, block_rows, block = evidence
+            relation_rows, relation, anchor_rows, anchor_probe, block_rows, block = evidence
             with tempfile.TemporaryDirectory() as tmp:
-                return opcode_gas.seal_candidate_directory(
-                    pathlib.Path(tmp),
-                    manifest,
-                    relation,
-                    block,
-                    controlled_fit,
-                    provenance,
-                    relation_rows=relation_rows,
-                    block_rows=block_rows,
-                    expected_relation_provenance=formal_relation_provenance(
-                        relation_rows
-                    ),
-                )
+                with mock.patch.object(
+                    opcode_gas,
+                    "validate_calibration_execution_identity",
+                    return_value=anchor_probe_execution_identity(anchor_probe),
+                ):
+                    return opcode_gas.seal_candidate_directory(
+                        pathlib.Path(tmp),
+                        manifest,
+                        relation,
+                        anchor_probe,
+                        anchor_rows,
+                        block,
+                        controlled_fit,
+                        provenance,
+                        relation_rows=relation_rows,
+                        block_rows=block_rows,
+                        expected_relation_provenance=formal_relation_provenance(
+                            relation_rows
+                        ),
+                    )
 
         base_candidate = candidate(base)
         changed_candidate = candidate(changed)
@@ -4072,10 +4370,17 @@ class CandidateConstructionTests(unittest.TestCase):
 
         controlled_rows = precompile_execution_rows(manifest)
         sample_artifacts = []
-        for relation_rows, _relation, block_rows, primary_block in (base, changed):
+        for relation_rows, _relation, anchor_rows, anchor_probe, block_rows, primary_block in (
+            base,
+            changed,
+        ):
             _instruction_relation, instruction_block, _rows, _block_rows = (
                 opcode_gas.fit_instruction_space_artifacts(
-                    manifest, relation_rows, block_rows
+                    manifest,
+                    relation_rows,
+                    block_rows,
+                    anchor_probe,
+                    anchor_rows,
                 )
             )
             sample_artifacts.append(
@@ -4105,6 +4410,11 @@ class CandidateConstructionTests(unittest.TestCase):
     def test_block_instruction_only_evidence_is_outside_candidate_identity(self):
         self._assert_secondary_source_change_is_candidate_independent(
             block_instruction_delta=17
+        )
+
+    def test_anchor_instruction_only_evidence_is_outside_candidate_identity(self):
+        self._assert_secondary_source_change_is_candidate_independent(
+            anchor_instruction_delta=23
         )
 
     def test_controlled_decision_replays_primary_fit_from_declared_raw(self):
@@ -4480,14 +4790,18 @@ class CandidateConstructionTests(unittest.TestCase):
                 }
             )
         )
+        probe_rows, probe = anchor_probe_evidence()
         with self.assertRaisesRegex(ValueError, "equation|raw-gas|algebra"):
             opcode_gas.replay_candidate_source_evidence(
                 manifest,
                 malformed_relation,
                 relation_rows,
+                probe,
+                probe_rows,
                 {},
                 [],
                 formal_relation_provenance(relation_rows),
+                anchor_probe_execution_identity(probe),
             )
 
         small_manifest = controlled_manifest()
@@ -4496,9 +4810,9 @@ class CandidateConstructionTests(unittest.TestCase):
             [accepted_case("identity", "precompile:0x04", "raw_gas_slope", 7200, 18)],
         )
         for field, replacement in (
-            ("exact_fit_matrix", []),
+            ("transfer_exact_fit_matrix", []),
             ("predictions", {}),
-            ("leave_one_family_out", {}),
+            ("family_slope_evidence", {}),
         ):
             malformed_block = copy.deepcopy(block)
             malformed_block[field] = replacement
@@ -4522,14 +4836,17 @@ class CandidateConstructionTests(unittest.TestCase):
                     small_manifest,
                     relation,
                     [],
+                    probe,
+                    probe_rows,
                     malformed_block,
                     [],
                     {},
+                    anchor_probe_execution_identity(probe),
                 )
 
     def test_candidate_source_replay_rejects_typed_relation_artifact_schema(self):
         manifest = formal_relation_manifest()
-        relation_rows, relation, block_rows, _block = (
+        relation_rows, relation, anchor_rows, anchor_probe, block_rows, _block = (
             production_candidate_source_evidence(manifest)
         )
         aliased_relation = copy.deepcopy(relation)
@@ -4554,6 +4871,8 @@ class CandidateConstructionTests(unittest.TestCase):
                 manifest, aliased_relation
             ),
             aliased_relation,
+            anchor_probe,
+            anchor_rows,
             rebound_rows,
         )
         with self.assertRaisesRegex(ValueError, "schema"):
@@ -4561,14 +4880,17 @@ class CandidateConstructionTests(unittest.TestCase):
                 manifest,
                 aliased_relation,
                 relation_rows,
+                anchor_probe,
+                anchor_rows,
                 rebound_block,
                 rebound_rows,
                 formal_relation_provenance(relation_rows),
+                anchor_probe_execution_identity(anchor_probe),
             )
 
     def test_candidate_source_replay_rejects_boolean_relation_exit_code(self):
         manifest = formal_relation_manifest()
-        relation_rows, relation, block_rows, _block = (
+        relation_rows, relation, anchor_rows, anchor_probe, block_rows, _block = (
             production_candidate_source_evidence(manifest)
         )
         changed_identity = (
@@ -4610,6 +4932,8 @@ class CandidateConstructionTests(unittest.TestCase):
                 manifest, aliased_relation
             ),
             aliased_relation,
+            anchor_probe,
+            anchor_rows,
             rebound_rows,
         )
         with self.assertRaisesRegex(ValueError, "exit code|exact integer"):
@@ -4617,14 +4941,17 @@ class CandidateConstructionTests(unittest.TestCase):
                 manifest,
                 aliased_relation,
                 aliased_rows,
+                anchor_probe,
+                anchor_rows,
                 rebound_block,
                 rebound_rows,
                 formal_relation_provenance(aliased_rows),
+                anchor_probe_execution_identity(anchor_probe),
             )
 
     def test_direct_seal_rejects_self_hashed_malformed_sources(self):
         manifest = formal_relation_manifest()
-        relation_rows, relation, block_rows, block = (
+        relation_rows, relation, anchor_rows, anchor_probe, block_rows, block = (
             production_candidate_source_evidence(manifest)
         )
         _manifest, _relation, _block, controlled_fit, provenance = (
@@ -4642,9 +4969,9 @@ class CandidateConstructionTests(unittest.TestCase):
             )
         )
         malformed_block = copy.deepcopy(block)
-        malformed_block["exact_fit_matrix"] = []
+        malformed_block["transfer_exact_fit_matrix"] = []
         malformed_block["predictions"] = {}
-        malformed_block["leave_one_family_out"] = {}
+        malformed_block["family_slope_evidence"] = {}
         malformed_block["artifact_sha256"] = opcode_gas.sha256_bytes(
             opcode_gas.canonical_json(
                 {
@@ -4654,6 +4981,7 @@ class CandidateConstructionTests(unittest.TestCase):
                 }
             )
         )
+        anchor_rows, anchor_probe = anchor_probe_evidence()
         with tempfile.TemporaryDirectory() as tmp:
             for bad_relation, bad_block in (
                 (malformed_relation, block),
@@ -4662,12 +4990,18 @@ class CandidateConstructionTests(unittest.TestCase):
                 source = (
                     "relation" if bad_relation is malformed_relation else "block"
                 )
-                with self.subTest(source=source):
+                with self.subTest(source=source), mock.patch.object(
+                    opcode_gas,
+                    "validate_calibration_execution_identity",
+                    return_value=anchor_probe_execution_identity(anchor_probe),
+                ):
                     with self.assertRaises(ValueError):
                         opcode_gas.seal_candidate_directory(
                             pathlib.Path(tmp),
                             manifest,
                             bad_relation,
+                            anchor_probe,
+                            anchor_rows,
                             bad_block,
                             controlled_fit,
                             provenance,
@@ -4677,6 +5011,29 @@ class CandidateConstructionTests(unittest.TestCase):
                                 relation_rows
                             ),
                         )
+
+    def test_candidate_replay_rejects_probe_from_a_different_opcode_lab_elf(self):
+        manifest = formal_relation_manifest()
+        relation_rows, relation, anchor_rows, anchor_probe, block_rows, block = (
+            production_candidate_source_evidence(manifest)
+        )
+        wrong_identity = anchor_probe_execution_identity(anchor_probe)
+        wrong_identity["guest_artifacts"] = {
+            "crates/guests/elf/sp1_opcode_lab.elf": "f" * 64
+        }
+
+        with self.assertRaisesRegex(ValueError, "frozen calibration identity"):
+            opcode_gas.replay_candidate_source_evidence(
+                manifest,
+                relation,
+                relation_rows,
+                anchor_probe,
+                anchor_rows,
+                block,
+                block_rows,
+                formal_relation_provenance(relation_rows),
+                wrong_identity,
+            )
 
     def test_bridge_exact_median_states_and_independent_digest(self):
         samples = {
@@ -4759,13 +5116,20 @@ class IdentityAndValidationTests(unittest.TestCase):
             anchor_keys=opcode_gas.OPCODE_RELATION_ANCHORS,
         )
 
-        result = opcode_gas.preflight_block_calibration_rows(manifest, model)
+        result = opcode_gas.preflight_block_calibration_rows(
+            manifest, model, TEST_ANCHOR_BODY_COSTS
+        )
         self.assertEqual(result["fit_row_count"], 40)
         self.assertEqual(result["holdout_row_count"], 8)
-        self.assertEqual(result["fit_rank"], 8)
+        self.assertEqual(result["transfer_fit_rank"], 2)
+        self.assertEqual(result["fixed_fit_rank"], 4)
         self.assertEqual(
-            result["leave_one_family_out_ranks"],
-            {family: 8 for family in opcode_gas.BLOCK_CALIBRATION_FAMILIES},
+            result["transfer_leave_one_family_out_ranks"],
+            {family: 2 for family in opcode_gas.BLOCK_CALIBRATION_FAMILIES[:4]},
+        )
+        self.assertEqual(
+            result["fixed_leave_one_family_out_ranks"],
+            {family: 4 for family in opcode_gas.BLOCK_CALIBRATION_FAMILIES},
         )
         self.assertEqual(
             set(result["holdout_families"]),
@@ -4786,7 +5150,9 @@ class IdentityAndValidationTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "40 fit rows"):
             opcode_gas.preflight_block_calibration_rows(
-                replace(manifest, block_calibration_rows=fit_rows[:-1]), model
+                replace(manifest, block_calibration_rows=fit_rows[:-1]),
+                model,
+                TEST_ANCHOR_BODY_COSTS,
             )
 
         dynamic = replace(
@@ -4803,6 +5169,7 @@ class IdentityAndValidationTests(unittest.TestCase):
                     block_calibration_rows=(dynamic, *manifest.block_calibration_rows[1:]),
                 ),
                 model,
+                TEST_ANCHOR_BODY_COSTS,
             )
 
         precompile = replace(
@@ -4816,6 +5183,7 @@ class IdentityAndValidationTests(unittest.TestCase):
                     block_calibration_rows=(precompile, *manifest.block_calibration_rows[1:]),
                 ),
                 model,
+                TEST_ANCHOR_BODY_COSTS,
             )
 
         rounded_basis = {
@@ -4834,6 +5202,7 @@ class IdentityAndValidationTests(unittest.TestCase):
                     anchor_keys=model.anchor_keys,
                     anchor_basis=rounded_basis,
                 ),
+                TEST_ANCHOR_BODY_COSTS,
             )
 
         missing_family = replace(
@@ -4850,6 +5219,7 @@ class IdentityAndValidationTests(unittest.TestCase):
                     ),
                 ),
                 model,
+                TEST_ANCHOR_BODY_COSTS,
             )
 
     def test_controlled_workload_and_execution_identity_boundaries(self):
@@ -5079,22 +5449,34 @@ class IdentityAndValidationTests(unittest.TestCase):
             manifest,
             [accepted_case("identity", "precompile:0x04", "raw_gas_slope", 7200, 18)],
         )
+        anchor_rows, anchor_probe = anchor_probe_evidence()
         with tempfile.TemporaryDirectory() as tmp:
             run = pathlib.Path(tmp)
             (run / "proposal-results.json").write_text("{}")
             with self.assertRaisesRegex(ValueError, "proposal result"):
                 opcode_gas.seal_candidate_directory(
-                    run, manifest, relation, block, controlled_fit, provenance
+                    run,
+                    manifest,
+                    relation,
+                    anchor_probe,
+                    anchor_rows,
+                    block,
+                    controlled_fit,
+                    provenance,
                 )
 
     def test_candidate_seal_transitively_verifies_components_and_tampering(self):
         manifest, relation, block, controlled_fit, provenance = full_candidate_inputs()
+        anchor_rows, anchor_probe = anchor_probe_evidence()
         with tempfile.TemporaryDirectory() as tmp:
             run = pathlib.Path(tmp)
             (run / "raw").mkdir()
             (run / "raw" / "formal-relations.jsonl").write_text("")
             (run / "block-calibration-rows.jsonl").write_text("")
             (run / "opcode-relations.json").write_text(opcode_gas.json.dumps(relation))
+            (run / "anchor-probe-fit.json").write_text(
+                opcode_gas.json.dumps(anchor_probe)
+            )
             (run / "block-calibration.json").write_text(opcode_gas.json.dumps(block))
             projection = opcode_gas.primary_candidate_source_projection(
                 manifest, relation, [], block, []
@@ -5139,12 +5521,20 @@ class IdentityAndValidationTests(unittest.TestCase):
                     "replay_candidate_source_evidence",
                     return_value=projection,
                 ), mock.patch.object(
+                    opcode_gas,
+                    "load_validated_anchor_probe_run",
+                    return_value=(TEST_ANCHOR_BODY_COSTS, anchor_rows),
+                ), mock.patch.object(
                     opcode_gas, "current_uzen_schedule", return_value=fixture_schedule()
                 ):
                     return opcode_gas.verify_candidate_directory(run)
 
             with mock.patch.object(
                 opcode_gas, "validate_opcode_relations_artifact"
+            ), mock.patch.object(
+                opcode_gas,
+                "validate_calibration_execution_identity",
+                return_value=anchor_probe_execution_identity(anchor_probe),
             ), mock.patch.object(
                 opcode_gas, "_affine_model_from_validated_artifact", return_value=object()
             ), mock.patch.object(
@@ -5154,6 +5544,8 @@ class IdentityAndValidationTests(unittest.TestCase):
                     run,
                     manifest,
                     relation,
+                    anchor_probe,
+                    anchor_rows,
                     block,
                     controlled_fit,
                     provenance,

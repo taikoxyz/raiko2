@@ -139,11 +139,91 @@ independent `--sp1-execution-engine gas-estimator` option selects the fast imple
 mistake the word `execute` in the mode for use of the standard executor, and do not require the
 standard engine merely to obtain an `ExecutionReport` or public values; the estimator returns both.
 
+### Fixed Startup Was Mistaken For An Anchor Slope
+
+The dedicated opcode-lab guest has substantial fixed startup, but subtracting one fixed baseline is
+not enough when bytecode, serialized input/deserialization, or helper work grows with the requested
+count. Those old variable-bytecode sweeps remain confounded even if a regression has a free
+intercept.
+
+The four-anchor diagnostic instead keeps bytecode and serialized bincode length fixed and changes
+only the fixed-width `target_count`. Target and control execute the same per-iteration scaffold and
+one indirect step call. Lane/opcode selection occurs outside the loop; the control function is a
+no-op, while target calls one actual REVM `Stack` primitive for POP, PUSH0, DUP1, or SWAP1. Both
+lanes use the same compiler barrier and observation mix without inspecting stack length or contents.
+The lane is decoded only inside the dedicated opcode-lab binary from an exact case/opcode/envelope
+and the equal-length `anchor_target_` or `anchor_control` scenario. Do not add probe state or code to
+shared primitives or the shared guest library: even an unrelated shared-code change can move guest
+program layout and alter proposal, precompile, or REVM proverGas/VKs.
+
+Fit `delta(n) = P_target(n) - P_control(n)` with a free intercept. This removes common fixed startup
+from the slope and is equivalent, for slope purposes, to
+`[P_target(n)-P_target(0)] - [P_control(n)-P_control(0)]`. Do not require `delta(0) == 0`; gate its
+residual against the fitted intercept instead. Freeze large fit counts and a larger checkpoint so a
+positive target signal dominates startup without allowing checkpoint data to choose the inputs.
+Gate that checkpoint on marginal signal:
+`predicted = slope * checkpoint_count` and
+`observed = delta(checkpoint_count) - fitted_intercept`. Dividing by total proverGas would let fixed
+startup make a nonlinear slope appear accurate.
+
+This result is a synthetic ratio prior only. It does not run a full EVM transaction or opcode
+dispatch, is not production opcode-cost truth, cannot become a candidate table, and cannot bypass
+the real-REVM relation system or production controlled-block validation.
+
+The first real four-anchor probe produced positive, nearly linear per-operation slopes for every
+anchor, but its raw-gas-normalized ratios could not be transferred with one global scale. The
+unconstrained best scale kept the four controlled family-slope errors below about 6.4%, yet
+reconstructed `JUMPDEST` as negative. Raising the scale enough to make all 102 multipliers positive
+increased controlled-family errors to roughly 8.8%--24.5%. This is expected: target/control removes
+fixed guest startup, while direct `Stack` primitive calls omit the production interpreter's
+repeated dispatch/wrapper work.
+
+Use two production-fitted transfer terms instead:
+
+```text
+production_anchor_i =
+  (body_scale * synthetic_body_cost_i + common_opcode_overhead_per_operation) / raw_gas_i
+```
+
+Do not estimate these two transfer terms jointly with block startup/base coefficients. On the
+existing cohort, that joint solve let the roughly 159M fixed startup dominate the much smaller
+opcode variation and produced `body_scale ~= 16.36` with a negative common term near `-516`.
+Instead, first regress each of the four opcode families against its frozen repeat count. Startup and
+all fixed/base features are constant within a family and disappear from those slopes. Fit the two
+transfer terms from the resulting four production slopes, freeze the opcode table, and only then
+fit the four fixed/base coefficients from block residuals.
+
+On the existing diagnostic controlled-block cohort, that staged fit over only the declared fit rows
+gave `body_scale ~= 1.13267` and common overhead `~= 12.97488` proverGas per executed opcode. All 102
+reconstructed multipliers remained positive; four anchor-family slope errors were about
+`0.07%`, `3.24%`, `1.83%`, and `3.61%`. These numbers validate the model shape only. They are not a
+sealed candidate because the cohort predates the final implementation/provenance identity.
+
+Do not confuse the common per-opcode term with ELF startup or block base cost. Startup is fixed per
+guest execution and is removed from the synthetic slope; the common term repeats once per modeled
+production opcode. Proposal startup, block base, transaction base, and native transfer remain four
+separate controlled-block features.
+
+Also keep serde's positional bincode behavior in mind. `skip_serializing_if` is safe for
+self-describing JSON but must not be applied to optional fields in the positional
+`OpcodeLabInput`: omitting a middle `None` shifts later fields and made the guest decode an invalid
+prover hint (exit code 3). Serialize every optional slot and use `#[serde(default)]` only; retain a
+bincode round-trip regression for both ordinary and probe inputs.
+
+Finally, process success is not guest success. The SP1 launcher can return normally while a stale
+guest reports a nonzero exit code and empty public values. Opcode-lab single and batch assembly must
+bind canonical bincode input identity, require guest exit code zero, and compare any controlled
+trace identity instead of silently overwriting it. Reject the whole run before publishing accepted
+raw rows when any of these checks fails.
+
 ### Old Calibration Artifacts Were Reused After Implementation Changed
 
 Calibration identity binds the implementation revision, controlled manifest, Alethia revision, SP1
-version, guest artifacts, and execution parameters. Continuing an old directory after any bound
-input changes mixes incompatible cohorts even when the filenames still look correct.
+version, guest artifacts, exact guest-launcher binary, and execution parameters. The launcher is
+host code and can change gas-estimator behavior without changing the guest ELF, so its SHA-256 must
+be part of the calibration identity rather than only a self-reported raw-row field. Continuing an
+old directory after any bound input changes mixes incompatible cohorts even when the filenames
+still look correct.
 
 Preserve the old directory. At a clean new revision, run `prepare-calibration` again and use its new
 content-addressed ID for all generation and execution. Do not edit or overwrite an old run to make it

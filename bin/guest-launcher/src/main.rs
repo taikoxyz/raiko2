@@ -26,6 +26,7 @@ use raiko2_prover::sp1::{
     Sp1NetworkMode, Sp1Prover,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 use sp1_core_executor::{
     DEFAULT_GAS_TRACE_CHUNK_SLOTS, DEFAULT_MEMORY_LIMIT, DEFAULT_TRACE_CHUNK_SLOTS,
     ELEMENT_THRESHOLD, GAS_TRACE_CHUNK_THRESHOLD, GasEstimatingVMEnum, HEIGHT_THRESHOLD,
@@ -594,6 +595,28 @@ fn apply_execution_metadata(report: &mut BenchReport, execution_report: &Executi
     apply_sp1_metadata(report, &metadata);
 }
 
+fn install_opcode_lab_input_identity(
+    report: &mut BenchReport,
+    input: &OpcodeLabInput,
+) -> Result<()> {
+    let (sha256, bincode_length) = opcode_lab_input_identity(input)?;
+    report.guest_input_sha256 = Some(sha256);
+    report.guest_input_bincode_length = Some(bincode_length);
+    Ok(())
+}
+
+fn finalize_opcode_lab_execution_report(
+    report: &mut BenchReport,
+    execution_report: &ExecutionReport,
+) -> Result<()> {
+    apply_execution_metadata(report, execution_report);
+    match report.exit_code {
+        Some(0) => Ok(()),
+        Some(code) => bail!("opcode-lab guest exited with code {code}"),
+        None => bail!("opcode-lab guest exit code is missing"),
+    }
+}
+
 fn apply_sp1_metadata(report: &mut BenchReport, metadata: &Sp1ExecutionMetadata) {
     report.public_values = metadata.public_values.clone();
     report.exit_code = Some(metadata.exit_code);
@@ -831,6 +854,7 @@ async fn run_opcode_lab(args: Args) -> Result<()> {
     record_memory_snapshot(&mut report, labels.start);
 
     let input = read_opcode_lab_input(&input_path)?;
+    install_opcode_lab_input_identity(&mut report, &input)?;
     apply_controlled_opcode_trace(&mut report, args.stage, &input)?;
     record_memory_snapshot(&mut report, labels.after_read_input);
     let mut stdin = SP1Stdin::new();
@@ -851,7 +875,7 @@ async fn run_opcode_lab(args: Args) -> Result<()> {
     record_memory_snapshot(&mut report, labels.after_execute_run);
     report.wall_time_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
     report.public_values = public_values.raw();
-    apply_execution_metadata(&mut report, &execution_report);
+    finalize_opcode_lab_execution_report(&mut report, &execution_report)?;
     record_memory_snapshot(&mut report, labels.after_apply_execution_metadata);
 
     println!("public_values: {}", report.public_values);
@@ -909,10 +933,12 @@ async fn run_opcode_lab_batch(args: Args) -> Result<()> {
         apply_sp1_execution_engine_metadata(&mut report, args.sp1_execution_engine);
         report.public_values = run.public_values;
         report.wall_time_ms = run.wall_time_ms;
+        report.guest_input_sha256 = run.guest_input_sha256;
+        report.guest_input_bincode_length = run.guest_input_bincode_length;
         if let Some(trace) = run.controlled_trace {
-            install_controlled_trace(&mut report, trace);
+            install_controlled_trace(&mut report, trace)?;
         }
-        apply_execution_metadata(&mut report, &run.execution_report);
+        finalize_opcode_lab_execution_report(&mut report, &run.execution_report)?;
         println!(
             "input: {} public_values: {}",
             report.input, report.public_values
@@ -1021,7 +1047,7 @@ async fn run_precompile_lab_batch(args: Args) -> Result<()> {
         report.public_values = run.public_values;
         report.wall_time_ms = run.wall_time_ms;
         if let Some(trace) = run.controlled_trace {
-            install_controlled_trace(&mut report, trace);
+            install_controlled_trace(&mut report, trace)?;
         }
         apply_execution_metadata(&mut report, &run.execution_report);
         println!(
@@ -1373,10 +1399,23 @@ struct OpcodeLabExecution {
     public_values: String,
     wall_time_ms: u64,
     execution_report: ExecutionReport,
+    guest_input_sha256: Option<String>,
+    guest_input_bincode_length: Option<usize>,
     controlled_trace: Option<controlled_workload::ControlledTrace>,
 }
 
-fn install_controlled_trace(report: &mut BenchReport, trace: controlled_workload::ControlledTrace) {
+fn opcode_lab_input_identity(input: &OpcodeLabInput) -> Result<(String, usize)> {
+    let encoded = bincode::serialize(input).context("serialize canonical opcode-lab input")?;
+    Ok((
+        format!("0x{}", hex::encode(Sha256::digest(&encoded))),
+        encoded.len(),
+    ))
+}
+
+fn install_controlled_trace(
+    report: &mut BenchReport,
+    trace: controlled_workload::ControlledTrace,
+) -> Result<()> {
     let (backend_input_sha256, backend_input_len) = match &trace {
         controlled_workload::ControlledTrace::RevmOpcode(trace) => {
             (&trace.backend_input_sha256, trace.backend_input_len)
@@ -1385,9 +1424,21 @@ fn install_controlled_trace(report: &mut BenchReport, trace: controlled_workload
             (&trace.backend_input_sha256, trace.backend_input_len)
         }
     };
-    report.guest_input_sha256 = Some(format!("0x{backend_input_sha256}"));
+    let trace_sha256 = format!("0x{backend_input_sha256}");
+    if report
+        .guest_input_sha256
+        .as_ref()
+        .is_some_and(|value| value != &trace_sha256)
+        || report
+            .guest_input_bincode_length
+            .is_some_and(|value| value != backend_input_len)
+    {
+        bail!("controlled trace input identity differs from canonical guest input");
+    }
+    report.guest_input_sha256 = Some(trace_sha256);
     report.guest_input_bincode_length = Some(backend_input_len);
     report.controlled_trace = Some(trace);
+    Ok(())
 }
 
 fn apply_controlled_opcode_trace(
@@ -1401,7 +1452,7 @@ fn apply_controlled_opcode_trace(
             controlled_workload::ControlledTrace::RevmOpcode(
                 controlled_workload::trace_revm_opcode_workload(input)?,
             ),
-        );
+        )?;
     }
     Ok(())
 }
@@ -1415,8 +1466,7 @@ fn apply_controlled_precompile_trace(
         controlled_workload::ControlledTrace::Precompile(
             controlled_workload::trace_precompile_workload(input)?,
         ),
-    );
-    Ok(())
+    )
 }
 
 struct Risc0ProposalExecution {
@@ -1652,6 +1702,7 @@ fn execute_opcode_lab_batch_gas_estimator(
     let program = parse_sp1_program(elf)?;
     let mut outputs = Vec::with_capacity(inputs.len());
     for (input_path, input) in inputs {
+        let (guest_input_sha256, guest_input_bincode_length) = opcode_lab_input_identity(&input)?;
         let controlled_trace = if stage == Stage::RevmOpcodeLab {
             Some(controlled_workload::ControlledTrace::RevmOpcode(
                 controlled_workload::trace_revm_opcode_workload(&input)?,
@@ -1667,6 +1718,8 @@ fn execute_opcode_lab_batch_gas_estimator(
             public_values: public_values.raw(),
             wall_time_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
             execution_report,
+            guest_input_sha256: Some(guest_input_sha256),
+            guest_input_bincode_length: Some(guest_input_bincode_length),
             controlled_trace,
         });
     }
@@ -1684,6 +1737,7 @@ where
 {
     let mut outputs = Vec::with_capacity(inputs.len());
     for (input_path, input) in inputs {
+        let (guest_input_sha256, guest_input_bincode_length) = opcode_lab_input_identity(&input)?;
         let controlled_trace = if stage == Stage::RevmOpcodeLab {
             Some(controlled_workload::ControlledTrace::RevmOpcode(
                 controlled_workload::trace_revm_opcode_workload(&input)?,
@@ -1700,6 +1754,8 @@ where
             public_values: public_values.raw(),
             wall_time_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
             execution_report,
+            guest_input_sha256: Some(guest_input_sha256),
+            guest_input_bincode_length: Some(guest_input_bincode_length),
             controlled_trace,
         });
     }
@@ -1750,6 +1806,8 @@ where
             public_values: public_values.raw(),
             wall_time_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
             execution_report,
+            guest_input_sha256: None,
+            guest_input_bincode_length: None,
             controlled_trace,
         });
     }
@@ -1929,10 +1987,11 @@ mod tests {
         Args, BenchReport, ProofType, Risc0ProposalExecution, Sp1ExecutionEngine, Stage,
         apply_controlled_opcode_trace, apply_controlled_precompile_trace,
         apply_risc0_execution_metadata, apply_sp1_metadata, canonical_sp1_core_opts,
-        canonicalize_sp1_core_opts, execute_opcode_lab_gas_estimator_with_opts, parse_sp1_program,
+        canonicalize_sp1_core_opts, execute_opcode_lab_gas_estimator_with_opts,
+        finalize_opcode_lab_execution_report, install_opcode_lab_input_identity, parse_sp1_program,
         read_input, read_opcode_lab_input, read_opcode_lab_input_list, risc0_padded_cycles,
     };
-    use alloy_primitives::{Address, B256};
+    use alloy_primitives::{Address, B256, hex};
     use clap::Parser as _;
     use raiko2_primitives::{
         OpcodeLabInput, PrecompileLabInput, PrecompileLabLane, ProofType as RaikoProofType,
@@ -1940,6 +1999,7 @@ mod tests {
     };
     use raiko2_primitives_shasta::{GuestInput, build_proof_carry_data_from_witness_spec};
     use raiko2_prover::sp1::Sp1ExecutionMetadata;
+    use sp1_sdk::ExecutionReport;
     use std::fs;
 
     #[test]
@@ -2098,6 +2158,47 @@ mod tests {
         assert_eq!(estimator["sp1_execution_engine"], "gas-estimator");
         assert_eq!(estimator["sp1_gas_trace_chunk_threshold"], 134_217_728);
         assert_eq!(estimator["sp1_gas_trace_chunk_slots"], 2);
+    }
+
+    #[test]
+    fn opcode_lab_report_binds_canonical_bincode_input_identity() {
+        use sha2::{Digest as _, Sha256};
+
+        let input = OpcodeLabInput {
+            case: "synthetic_anchor_probe_pop".into(),
+            scenario: "anchor_target_".into(),
+            opcode: 0x50,
+            target_count: 1024,
+            target_raw_gas: 2,
+            tx_gas_limit: Some(100_000),
+            bytecode: vec![0x00],
+            generator_max_count: Some(131_072),
+            fixed_bytecode_len: Some(1),
+        };
+        let encoded = bincode::serialize(&input).unwrap();
+        let expected_hash = format!("0x{}", hex::encode(Sha256::digest(&encoded)));
+        let mut report = BenchReport::new("opcode-lab", "execute", "core", "input.json".into());
+
+        install_opcode_lab_input_identity(&mut report, &input).unwrap();
+
+        assert_eq!(
+            report.guest_input_sha256.as_deref(),
+            Some(expected_hash.as_str())
+        );
+        assert_eq!(report.guest_input_bincode_length, Some(encoded.len()));
+    }
+
+    #[test]
+    fn opcode_lab_report_rejects_nonzero_guest_exit() {
+        let mut execution = ExecutionReport::default();
+        execution.exit_code = 3;
+        let mut report = BenchReport::new("opcode-lab", "execute", "core", "input.json".into());
+
+        let error = finalize_opcode_lab_execution_report(&mut report, &execution)
+            .expect_err("nonzero guest exit must fail closed");
+
+        assert!(error.to_string().contains("guest exited with code 3"));
+        assert_eq!(report.exit_code, Some(3));
     }
 
     #[test]
@@ -2425,6 +2526,30 @@ mod tests {
             serialized["guest_input_bincode_length"],
             trace["backend_input_len"]
         );
+    }
+
+    #[test]
+    fn revm_opcode_trace_rejects_a_conflicting_canonical_input_identity() {
+        let input = OpcodeLabInput {
+            case: "add".into(),
+            scenario: "arithmetic".into(),
+            opcode: 0x01,
+            target_count: 1,
+            target_raw_gas: 3,
+            tx_gas_limit: Some(1_000_024),
+            bytecode: vec![0x60, 0x01, 0x60, 0x02, 0x01, 0x00],
+            generator_max_count: Some(8),
+            fixed_bytecode_len: Some(6),
+        };
+        let mut report =
+            BenchReport::new("revm-opcode-lab", "execute", "core", "input.json".into());
+        install_opcode_lab_input_identity(&mut report, &input).unwrap();
+        report.guest_input_sha256 = Some(format!("0x{}", "00".repeat(32)));
+
+        let error = apply_controlled_opcode_trace(&mut report, Stage::RevmOpcodeLab, &input)
+            .expect_err("conflicting canonical and trace identities must fail closed");
+
+        assert!(error.to_string().contains("input identity differs"));
     }
 
     #[test]

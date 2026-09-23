@@ -86,6 +86,30 @@ FORMAL_RELATION_PROVENANCE_FIELDS = (
     "controlled_manifest_rows_sha256",
 )
 
+ANCHOR_PROBE_PURPOSE = "synthetic_opcode_anchor_prior"
+ANCHOR_PROBE_SCENARIOS = {
+    "target": "anchor_target_",
+    "control": "anchor_control",
+}
+ANCHOR_PROBE_FIT_COUNTS = (0, 1024, 4096, 16384, 65536)
+ANCHOR_PROBE_CHECKPOINT_COUNT = 131072
+ANCHOR_PROBE_REPEATS = 3
+ANCHOR_PROBE_ANCHORS = (
+    ("opcode:0x50", "pop", 0x50, 2),
+    ("opcode:0x5f", "push0", 0x5F, 2),
+    ("opcode:0x80", "dup1", 0x80, 3),
+    ("opcode:0x90", "swap1", 0x90, 3),
+)
+ANCHOR_PROBE_QUALITY_GATES = MappingProxyType(
+    {
+        "r2_min": Decimal("0.99"),
+        "relative_slope_stderr_max": Decimal("0.05"),
+        "residual_signal_max": Decimal("0.02"),
+        "count0_intercept_residual_max": Decimal("0.02"),
+        "checkpoint_ape_max": Decimal("0.10"),
+    }
+)
+
 
 class FormalRelationQualityError(ValueError):
     """A relation-only fit failure that may advance to the next frozen bound."""
@@ -4567,22 +4591,40 @@ GENERATED_EXPERIMENT_PREFIXES = (
     "experiments/opcode-gas/runs/", "experiments/opcode-gas/validations/",
 )
 Q_FORMULA = ["proposal_startup", "block_base", "tx_base", "native_value_transfer"]
-BLOCK_CALIBRATION_PARAMETER_ORDER = [*OPCODE_RELATION_ANCHORS, *Q_FORMULA]
+BLOCK_CALIBRATION_TRANSFER_PARAMETERS = [
+    "body_scale",
+    "common_opcode_overhead_per_operation",
+]
+BLOCK_CALIBRATION_PARAMETER_ORDER = [*BLOCK_CALIBRATION_TRANSFER_PARAMETERS, *Q_FORMULA]
 BLOCK_CALIBRATION_FORMULAS = {
-    "fit": "p_hat = x * mu_zero + [x * B, q] * [theta, beta]",
+    "transfer_fit": (
+        "slope_count(p) = slope_count(x * mu_zero) + slope_count(x * B * C) * "
+        "[body_scale, common_opcode_overhead_per_operation]"
+    ),
+    "anchor": (
+        "theta_i = (body_scale * synthetic_body_cost_i + "
+        "common_opcode_overhead_per_operation) / raw_gas_i"
+    ),
     "opcode": "mu = mu_zero + B * theta",
+    "fixed_fit": "beta = least_squares(q, p - x * mu)",
+    "prediction": "p_hat = x * mu + q * beta",
     "ape": "abs(predicted_prover_gas - actual_prover_gas) / actual_prover_gas",
 }
 BLOCK_CALIBRATION_GATES = {
-    "exact_fit_rank": 8,
-    "positive_parameters": True,
+    "transfer_exact_rank": 2,
+    "fixed_exact_rank": 4,
+    "positive_body_scale": True,
+    "nonnegative_common_opcode_overhead": True,
+    "positive_fixed_costs": True,
     "positive_opcode_multipliers": True,
+    "family_slope_ape_max": "0.10",
+    "opcode_holdout_delta_signal_ape_max": "0.10",
+    "transfer_leave_one_family_out_omitted_slope_ape_max": "0.10",
     "fit_mape_max": "0.05",
     "fit_max_ape_max": "0.10",
     "holdout_max_ape_max": "0.10",
     "dynamic_relation_ape_max": "0.10",
     "dynamic_implied_multiplier_spread_max": "0.05",
-    "leave_one_family_out_drift_max": "0.05",
 }
 OUT_OF_FIT_CHECKPOINTS = {"4": 8, "16": 32, "64": 128, "256": 512, "1024": 2048}
 CONTROLLED_PREFIXES = (
@@ -6516,6 +6558,7 @@ def validate_opcode_relations_artifact(
 def preflight_block_calibration_rows(
     manifest: Manifest,
     affine_model: AffineOpcodeModel,
+    anchor_body_costs: Mapping[str, Decimal],
 ) -> dict[str, Any]:
     rows = manifest.block_calibration_rows
     fit_rows = [row for row in rows if row.split == "fit"]
@@ -6534,8 +6577,17 @@ def preflight_block_calibration_rows(
             raise ValueError(f"block calibration family {family} does not have one holdout row")
     if tuple(affine_model.anchor_keys) != OPCODE_RELATION_ANCHORS:
         raise ValueError("block calibration affine model has wrong natural anchors")
+    if set(anchor_body_costs) != set(OPCODE_RELATION_ANCHORS) or any(
+        not isinstance(value, Decimal) or not value.is_finite() or value <= 0
+        for value in anchor_body_costs.values()
+    ):
+        raise ValueError("block calibration anchor body costs are invalid")
+    anchor_raw_gas = {key: raw_gas for key, _name, _opcode, raw_gas in ANCHOR_PROBE_ANCHORS}
     opcode_keys = set(affine_model.opcode_keys)
-    matrix = []
+    transfer_columns: dict[str, list[tuple[int, Fraction, Fraction]]] = {
+        family: [] for family in BLOCK_CALIBRATION_FAMILIES[:4]
+    }
+    fixed_matrix = []
     for row in rows:
         raw = row.expected_raw_gas_by_key
         if any(key.startswith("precompile:") or ":spawned" in key for key in raw):
@@ -6554,6 +6606,16 @@ def preflight_block_calibration_rows(
                     raise ValueError("block calibration rejects rounded basis coefficients")
                 value += Fraction(units) * coefficient
             projected.append(value)
+        body_scale_column = sum(
+            projected[index]
+            * Fraction(anchor_body_costs[anchor])
+            / anchor_raw_gas[anchor]
+            for index, anchor in enumerate(affine_model.anchor_keys)
+        )
+        common_overhead_column = sum(
+            projected[index] / anchor_raw_gas[anchor]
+            for index, anchor in enumerate(affine_model.anchor_keys)
+        )
         q = []
         for key in Q_FORMULA:
             units = row.expected_features[key]
@@ -6561,29 +6623,122 @@ def preflight_block_calibration_rows(
                 raise ValueError("block calibration fixed/base feature is not exact")
             q.append(Fraction(units))
         if row.split == "fit":
-            matrix.append([*projected, *q])
-    rank = exact_rank(matrix)
-    if rank != 8:
-        raise ValueError(f"block calibration exact [xB,q] fit matrix rank must be eight, got {rank}")
-    leave_one_family_out_ranks = {
+            fixed_matrix.append(q)
+            if row.workload_family in transfer_columns:
+                count = row.program.count
+                if row.program.kind != "opcode_loop" or type(count) is not int or count <= 0:
+                    raise ValueError(
+                        "block calibration opcode family has no positive workload count"
+                    )
+                transfer_columns[row.workload_family].append(
+                    (count, body_scale_column, common_overhead_column)
+                )
+        elif row.workload_family in transfer_columns and (
+            row.program.kind != "opcode_loop"
+            or type(row.program.count) is not int
+            or row.program.count <= 0
+        ):
+            raise ValueError("block calibration opcode holdout has no positive workload count")
+
+    def exact_slope(points: list[tuple[int, Fraction]]) -> Fraction:
+        if len(points) < 2:
+            raise ValueError("block calibration family requires at least two fit counts")
+        count = Fraction(len(points))
+        mean_x = sum((Fraction(x) for x, _ in points), Fraction()) / count
+        mean_y = sum((y for _, y in points), Fraction()) / count
+        denominator = sum(
+            ((Fraction(x) - mean_x) ** 2 for x, _ in points), Fraction()
+        )
+        if denominator == 0:
+            raise ValueError("block calibration family fit counts have zero variance")
+        return sum(
+            (
+                (Fraction(x) - mean_x) * (value - mean_y)
+                for x, value in points
+            ),
+            Fraction(),
+        ) / denominator
+
+    transfer_matrix = []
+    for family in BLOCK_CALIBRATION_FAMILIES[:4]:
+        points = transfer_columns[family]
+        family_rows = [row for row in rows if row.workload_family == family]
+        if len(
+            {
+                tuple(row.expected_features[key] for key in Q_FORMULA)
+                for row in family_rows
+            }
+        ) != 1:
+            raise ValueError(
+                f"block calibration opcode family {family} fixed/base features vary"
+            )
+        fit_counts = [count for count, _body, _common in points]
+        holdout_count = next(
+            row.program.count for row in family_rows if row.split == "holdout"
+        )
+        if type(holdout_count) is not int or holdout_count <= max(fit_counts):
+            raise ValueError(
+                f"block calibration opcode family {family} holdout count is not larger"
+            )
+        transfer_matrix.append(
+            [
+                exact_slope([(count, body) for count, body, _common in points]),
+                exact_slope([(count, common) for count, _body, common in points]),
+            ]
+        )
+    transfer_rank = exact_rank(transfer_matrix)
+    if transfer_rank != 2:
+        raise ValueError(
+            "block calibration exact family-slope transfer matrix rank must be two, "
+            f"got {transfer_rank}"
+        )
+    fixed_rank = exact_rank(fixed_matrix)
+    if fixed_rank != 4:
+        raise ValueError(
+            "block calibration exact fixed/base matrix rank must be four, "
+            f"got {fixed_rank}"
+        )
+    transfer_leave_one_family_out_ranks = {
         family: exact_rank(
             [
-                row
-                for row, spec in zip(matrix, fit_rows)
+                matrix_row
+                for matrix_row, matrix_family in zip(
+                    transfer_matrix, BLOCK_CALIBRATION_FAMILIES[:4]
+                )
+                if matrix_family != family
+            ]
+        )
+        for family in BLOCK_CALIBRATION_FAMILIES[:4]
+    }
+    failed_transfer_lofo = {
+        family: rank
+        for family, rank in transfer_leave_one_family_out_ranks.items()
+        if rank != 2
+    }
+    if failed_transfer_lofo:
+        raise ValueError(
+            "block calibration transfer leave-one-family-out rank differs from two: "
+            f"{failed_transfer_lofo}"
+        )
+    fixed_leave_one_family_out_ranks = {
+        family: exact_rank(
+            [
+                matrix_row
+                for matrix_row, spec in zip(fixed_matrix, fit_rows)
                 if spec.workload_family != family
             ]
         )
         for family in BLOCK_CALIBRATION_FAMILIES
     }
-    failed_lofo = {
+    failed_fixed_lofo = {
         family: rank
-        for family, rank in leave_one_family_out_ranks.items()
-        if rank != 8
+        for family, rank in fixed_leave_one_family_out_ranks.items()
+        if rank != 4
     }
-    if failed_lofo:
+    if failed_fixed_lofo:
         raise ValueError(
-            "block calibration leave-one-family-out exact rank differs from eight: "
-            f"{failed_lofo}"
+            "block calibration fixed/base leave-one-family-out rank differs from four: "
+            f"{failed_fixed_lofo}"
         )
     holdout_families = sorted(row.workload_family for row in holdout_rows)
     if set(holdout_families) != expected_families:
@@ -6591,10 +6746,17 @@ def preflight_block_calibration_rows(
     return {
         "fit_row_count": len(fit_rows),
         "holdout_row_count": len(holdout_rows),
-        "fit_rank": rank,
-        "leave_one_family_out_ranks": leave_one_family_out_ranks,
+        "transfer_fit_rank": transfer_rank,
+        "fixed_fit_rank": fixed_rank,
+        "transfer_leave_one_family_out_ranks": transfer_leave_one_family_out_ranks,
+        "fixed_leave_one_family_out_ranks": fixed_leave_one_family_out_ranks,
         "holdout_families": holdout_families,
-        "fit_matrix": [[_fraction_text(value) for value in row] for row in matrix],
+        "transfer_fit_matrix": [
+            [_fraction_text(value) for value in row] for row in transfer_matrix
+        ],
+        "fixed_fit_matrix": [
+            [_fraction_text(value) for value in row] for row in fixed_matrix
+        ],
     }
 
 
@@ -7041,13 +7203,29 @@ def replay_candidate_source_evidence(
     manifest: Manifest,
     relation_artifact: Mapping[str, Any],
     relation_rows: Iterable[Mapping[str, Any]],
+    anchor_probe_artifact: Mapping[str, Any],
+    anchor_probe_rows: Iterable[Mapping[str, Any]],
     block_artifact: Mapping[str, Any],
     block_rows: Iterable[Mapping[str, Any]],
     expected_relation_provenance: Mapping[str, Any],
+    expected_execution_identity: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Validate complete evidence, then return its primary-only candidate projection."""
     relation_rows = list(relation_rows)
+    anchor_probe_rows = list(anchor_probe_rows)
     block_rows = list(block_rows)
+    bound_execution_identity = {
+        **expected_execution_identity,
+        "calibration_id": expected_relation_provenance.get("calibration_id"),
+        "calibration_identity_sha256": expected_relation_provenance.get(
+            "calibration_identity_sha256"
+        ),
+    }
+    validated_anchor_probe_for_execution_identity(
+        anchor_probe_artifact,
+        anchor_probe_rows,
+        bound_execution_identity,
+    )
     validate_opcode_relations_artifact(
         manifest,
         relation_artifact,
@@ -7058,6 +7236,8 @@ def replay_candidate_source_evidence(
         manifest,
         _affine_model_from_validated_artifact(manifest, relation_artifact),
         relation_artifact,
+        anchor_probe_artifact,
+        anchor_probe_rows,
         block_rows,
     )
     if not _exact_json_equal(block_artifact, replayed_block):
@@ -7136,13 +7316,27 @@ def _candidate_source_measurements(
     gates = block_artifact.get("gates")
     if not _exact_json_equal(gates, BLOCK_CALIBRATION_GATES):
         raise ValueError("block calibration gates differ from the frozen contract")
-    if block_artifact.get("exact_fit_rank") != 8:
-        raise ValueError("block calibration rank evidence is not exact rank eight")
+    if (
+        block_artifact.get("transfer_exact_fit_rank") != 2
+        or block_artifact.get("fixed_exact_fit_rank") != 4
+    ):
+        raise ValueError("block calibration staged rank evidence differs")
+    expected_opcode_families = set(BLOCK_CALIBRATION_FAMILIES[:4])
+    for field in (
+        "family_slope_evidence",
+        "opcode_holdout_evidence",
+        "transfer_leave_one_family_out",
+    ):
+        evidence = block_artifact.get(field)
+        if not isinstance(evidence, Mapping) or set(evidence) != expected_opcode_families:
+            raise ValueError(f"block calibration {field} is incomplete")
 
     opcode_multipliers = block_artifact.get("opcode_multipliers")
     normalized_multipliers = block_artifact.get("opcode_multipliers_add_normalized")
     fixed_costs = block_artifact.get("fixed_costs")
-    anchors = block_artifact.get("anchors")
+    anchors = block_artifact.get("reconstructed_anchors")
+    transfer_params = block_artifact.get("transfer_params")
+    anchor_body_costs = block_artifact.get("anchor_body_costs")
     expected_opcode_keys = {key.id for key in _pure_opcode_measurement_keys(manifest)}
     if (
         not isinstance(opcode_multipliers, Mapping)
@@ -7153,6 +7347,12 @@ def _candidate_source_measurements(
         or set(fixed_costs) != set(Q_FORMULA)
         or not isinstance(anchors, Mapping)
         or set(anchors) != set(OPCODE_RELATION_ANCHORS)
+        or not isinstance(transfer_params, Mapping)
+        or set(transfer_params) != set(BLOCK_CALIBRATION_TRANSFER_PARAMETERS)
+        or not isinstance(anchor_body_costs, Mapping)
+        or set(anchor_body_costs) != set(OPCODE_RELATION_ANCHORS)
+        or block_artifact.get("anchor_body_cost_metric") != "prover_gas"
+        or not _is_sha256(block_artifact.get("anchor_probe_primary_sha256"))
     ):
         raise ValueError("block calibration cost table differs from the manifest")
     for label, values in (
@@ -7160,6 +7360,7 @@ def _candidate_source_measurements(
         ("normalized opcode multiplier", normalized_multipliers),
         ("fixed/base value", fixed_costs),
         ("anchor value", anchors),
+        ("anchor body cost", anchor_body_costs),
     ):
         for key, raw_value in values.items():
             value = _decimal(raw_value, label=f"{label} {key}")
@@ -7169,6 +7370,25 @@ def _candidate_source_measurements(
                 or value <= 0
             ):
                 raise ValueError(f"{label} must be positive: {key}")
+    body_scale = _decimal(
+        transfer_params.get("body_scale"), label="block calibration body scale"
+    )
+    common_overhead = _decimal(
+        transfer_params.get("common_opcode_overhead_per_operation"),
+        label="block calibration common opcode overhead",
+    )
+    if (
+        not isinstance(transfer_params.get("body_scale"), str)
+        or _decimal_text(body_scale) != transfer_params["body_scale"]
+        or body_scale <= 0
+        or not isinstance(
+            transfer_params.get("common_opcode_overhead_per_operation"), str
+        )
+        or _decimal_text(common_overhead)
+        != transfer_params["common_opcode_overhead_per_operation"]
+        or common_overhead < 0
+    ):
+        raise ValueError("block calibration transfer parameters are invalid")
     if block_artifact.get("normalization_reference_key") != manifest.normalization_reference_key:
         raise ValueError("block calibration normalization reference differs")
     dynamic = block_artifact.get("dynamic_holdouts")
@@ -7249,6 +7469,7 @@ def build_candidate_components(
     schedule: UnzenSchedule | None = None,
 ) -> dict[str, Any]:
     required_hashes = {
+        "anchor_probe_sha256",
         "opcode_relations_sha256",
         "formal_relation_decisions_sha256",
         "block_calibration_rows_sha256",
@@ -7263,6 +7484,8 @@ def build_candidate_components(
     )
     if provenance["opcode_relations_sha256"] != relation_artifact["artifact_sha256"]:
         raise ValueError("candidate relation digest differs from its provenance")
+    if provenance["anchor_probe_sha256"] != block_artifact["anchor_probe_primary_sha256"]:
+        raise ValueError("candidate anchor probe digest differs from block calibration")
     if provenance["block_calibration_rows_sha256"] != block_artifact["raw_block_rows_sha256"]:
         raise ValueError("candidate block rows digest differs from its provenance")
     if provenance["block_calibration_sha256"] != block_artifact["artifact_sha256"]:
@@ -7296,11 +7519,20 @@ def build_candidate_components(
             key: block_artifact[key]
             for key in (
                 "artifact_sha256",
+                "anchor_probe_primary_sha256",
+                "anchor_body_cost_metric",
+                "anchor_body_costs",
                 "raw_block_rows_sha256",
                 "parameter_order",
+                "transfer_params",
+                "reconstructed_anchors",
                 "formulas",
                 "gates",
-                "exact_fit_rank",
+                "transfer_exact_fit_rank",
+                "fixed_exact_fit_rank",
+                "family_slope_evidence",
+                "opcode_holdout_evidence",
+                "transfer_leave_one_family_out",
                 "dynamic_holdouts",
             )
         },
@@ -7370,7 +7602,10 @@ def build_candidate_components(
         "relation_quality_gates": relation_artifact["quality_gates"],
         "block_quality_gates": block_artifact["gates"],
         "block_parameter_order": block_artifact["parameter_order"],
-        "block_exact_fit_rank": block_artifact["exact_fit_rank"],
+        "block_transfer_exact_fit_rank": block_artifact[
+            "transfer_exact_fit_rank"
+        ],
+        "block_fixed_exact_fit_rank": block_artifact["fixed_exact_fit_rank"],
         "block_formulas": block_artifact["formulas"],
         "dynamic_holdouts": block_artifact["dynamic_holdouts"],
         "out_of_fit_checkpoint_mapping": OUT_OF_FIT_CHECKPOINTS,
@@ -7564,6 +7799,8 @@ def fit_instruction_space_artifacts(
     manifest: Manifest,
     relation_rows: Iterable[Mapping[str, Any]],
     block_rows: Iterable[Mapping[str, Any]],
+    anchor_probe_artifact: Mapping[str, Any],
+    anchor_probe_rows: Iterable[Mapping[str, Any]],
 ) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
     """Replay formal relation/block fitting with instruction count as diagnostic response."""
     instruction_relation_rows = [
@@ -7586,7 +7823,10 @@ def fit_instruction_space_artifacts(
         manifest,
         _affine_model_from_validated_artifact(manifest, instruction_relation),
         instruction_relation,
+        anchor_probe_artifact,
+        anchor_probe_rows,
         instruction_block_rows,
+        response_metric="sp1_instruction_count",
     )
     return (
         instruction_relation,
@@ -7946,6 +8186,8 @@ def seal_candidate_directory(
     run: pathlib.Path,
     manifest: Manifest,
     relation_artifact: Mapping[str, Any],
+    anchor_probe_artifact: Mapping[str, Any],
+    anchor_probe_rows: Iterable[Mapping[str, Any]],
     block_artifact: Mapping[str, Any],
     controlled_fit: Mapping[str, Any],
     provenance: Mapping[str, Any],
@@ -7964,18 +8206,23 @@ def seal_candidate_directory(
         or expected_relation_provenance is None
     ):
         raise ValueError("candidate sealing requires complete replayable source evidence")
+    execution_identity = validate_calibration_execution_identity(run)
     source_projection = replay_candidate_source_evidence(
         manifest,
         relation_artifact,
         relation_rows,
+        anchor_probe_artifact,
+        anchor_probe_rows,
         block_artifact,
         block_rows,
         expected_relation_provenance,
+        execution_identity,
     )
     relation_artifact = source_projection["relation_artifact"]
     block_artifact = source_projection["block_artifact"]
     provenance = {
         **provenance,
+        "anchor_probe_sha256": anchor_probe_artifact["primary_artifact_sha256"],
         "opcode_relations_sha256": relation_artifact["artifact_sha256"],
         "block_calibration_rows_sha256": block_artifact[
             "raw_block_rows_sha256"
@@ -8131,6 +8378,7 @@ def verify_candidate_directory(run: pathlib.Path) -> dict[str, Any]:
         payloads[relative] = payload
     source_hashes = manifest.get("source_artifacts")
     expected_source_keys = {
+        "anchor_probe_sha256",
         "opcode_relations_sha256",
         "formal_relation_decisions_sha256",
         "block_calibration_rows_sha256",
@@ -8171,14 +8419,25 @@ def verify_candidate_directory(run: pathlib.Path) -> dict[str, Any]:
         or set(block)
         != {
             "artifact_sha256",
+            "anchor_probe_primary_sha256",
+            "anchor_body_cost_metric",
+            "anchor_body_costs",
             "raw_block_rows_sha256",
             "parameter_order",
+            "transfer_params",
+            "reconstructed_anchors",
             "formulas",
             "gates",
-            "exact_fit_rank",
+            "transfer_exact_fit_rank",
+            "fixed_exact_fit_rank",
+            "family_slope_evidence",
+            "opcode_holdout_evidence",
+            "transfer_leave_one_family_out",
             "dynamic_holdouts",
         }
         or block.get("artifact_sha256") != source_hashes["block_calibration_sha256"]
+        or block.get("anchor_probe_primary_sha256")
+        != source_hashes["anchor_probe_sha256"]
         or block.get("raw_block_rows_sha256")
         != source_hashes["block_calibration_rows_sha256"]
         or block.get("parameter_order") != BLOCK_CALIBRATION_PARAMETER_ORDER
@@ -8187,8 +8446,10 @@ def verify_candidate_directory(run: pathlib.Path) -> dict[str, Any]:
         or block.get("formulas") != manifest.get("block_formulas")
         or block.get("gates") != BLOCK_CALIBRATION_GATES
         or block.get("gates") != manifest.get("block_quality_gates")
-        or block.get("exact_fit_rank") != 8
-        or manifest.get("block_exact_fit_rank") != 8
+        or block.get("transfer_exact_fit_rank") != 2
+        or manifest.get("block_transfer_exact_fit_rank") != 2
+        or block.get("fixed_exact_fit_rank") != 4
+        or manifest.get("block_fixed_exact_fit_rank") != 4
         or block.get("dynamic_holdouts") != manifest.get("dynamic_holdouts")
     ):
         raise ValueError("candidate reconstructed source evidence differs from root")
@@ -8301,14 +8562,21 @@ def verify_candidate_directory(run: pathlib.Path) -> dict[str, Any]:
     relation_rows = formal["rows"]
     block_rows = list(iter_jsonl(run / "block-calibration-rows.jsonl"))
     relation_artifact = json.loads((run / "opcode-relations.json").read_text())
+    anchor_probe_artifact = json.loads((run / "anchor-probe-fit.json").read_text())
+    _anchor_body_costs, anchor_probe_rows = load_validated_anchor_probe_run(
+        run, anchor_probe_artifact, identity
+    )
     block_artifact = json.loads((run / "block-calibration.json").read_text())
     source_projection = replay_candidate_source_evidence(
         manifest_spec,
         relation_artifact,
         relation_rows,
+        anchor_probe_artifact,
+        anchor_probe_rows,
         block_artifact,
         block_rows,
         expected_relation_provenance,
+        identity,
     )
     replayed_provenance = _sealed_candidate_provenance(controlled)
     replayed_provenance.update(
@@ -8316,6 +8584,7 @@ def verify_candidate_directory(run: pathlib.Path) -> dict[str, Any]:
             "formal_relation_decisions_sha256": formal[
                 "formal_relation_decisions_sha256"
             ],
+            "anchor_probe_sha256": anchor_probe_artifact["primary_artifact_sha256"],
             "opcode_relations_sha256": source_projection["relation_artifact"][
                 "artifact_sha256"
             ],
@@ -8457,11 +8726,17 @@ def _replay_bridge_sample_artifact(
     relation_rows = formal["rows"]
     block_rows = list(iter_jsonl(run / "block-calibration-rows.jsonl"))
     block_artifact = json.loads((run / "block-calibration.json").read_text())
+    anchor_probe_artifact = json.loads((run / "anchor-probe-fit.json").read_text())
+    _anchor_body_costs, anchor_probe_rows = load_validated_anchor_probe_run(
+        run, anchor_probe_artifact, identity
+    )
     return _controlled_sample_artifact(
         manifest,
         artifacts,
         candidate_sha256,
         block_artifact,
+        anchor_probe_artifact,
+        anchor_probe_rows,
         relation_rows,
         block_rows,
         formal["formal_relation_decisions_sha256"],
@@ -8852,6 +9127,7 @@ EXPERIMENT_IDENTITY_DUPLICATE_FIELDS = (
     "controlled_manifest_sha256",
     "guest_artifacts",
     "guest_artifacts_sha256",
+    "guest_launcher_sha256",
     "rust_version",
     "sp1_sdk_version",
     "normalization_reference_key",
@@ -8889,6 +9165,7 @@ def experiment_provenance_declaration(
         or not _is_git_revision(revision)
         or not _is_sha256(manifest_sha256)
         or not _is_sha256(rows_sha256)
+        or not _is_sha256(identity.get("guest_launcher_sha256"))
     ):
         raise ValueError("experiment has invalid controlled calibration provenance")
     if experiment.get("controlled_manifest_sha256") != manifest_sha256:
@@ -8902,6 +9179,7 @@ def experiment_provenance_declaration(
         "calibration_identity_sha256": sha256_bytes(canonical_json(identity)),
         "controlled_manifest_sha256": manifest_sha256,
         "controlled_manifest_rows_sha256": rows_sha256,
+        "guest_launcher_sha256": identity["guest_launcher_sha256"],
     }
 
 
@@ -8946,10 +9224,23 @@ def validate_calibration_execution_identity(
     return identity
 
 
+def validate_calibration_guest_launcher(
+    execution_identity: Mapping[str, Any], guest_launcher: pathlib.Path
+) -> str:
+    """Bind a host gas-estimator executable to the durable calibration identity."""
+    expected = execution_identity.get("guest_launcher_sha256")
+    if not _is_sha256(expected):
+        raise ValueError("calibration identity has no frozen guest-launcher digest")
+    if not guest_launcher.is_file() or sha256_file(guest_launcher) != expected:
+        raise ValueError("guest-launcher differs from the frozen calibration identity")
+    return str(expected)
+
+
 def prepare_calibration(
     output_root: pathlib.Path,
     controlled_manifest: pathlib.Path,
     *,
+    guest_launcher: pathlib.Path,
     implementation_revision: str | None = None,
     complete_schedule_hash: str | None = None,
 ) -> dict[str, Any]:
@@ -8981,6 +9272,9 @@ def prepare_calibration(
         if path.is_file() and (path.name.endswith(".elf") or path.name.endswith(".vk.bin"))
     }
     guest_artifacts_sha256 = sha256_bytes(canonical_json(guest_artifacts))
+    if not guest_launcher.is_file():
+        raise ValueError("guest-launcher does not exist")
+    guest_launcher_sha256 = sha256_file(guest_launcher)
     rust_version = _rust_version()
     sp1_sdk_version = _locked_package_version("sp1-sdk")
     execution_parameters = sp1_execution_parameters()
@@ -9006,6 +9300,7 @@ def prepare_calibration(
         "complete_schedule_sha256": complete_schedule_hash,
         "guest_artifacts": guest_artifacts,
         "guest_artifacts_sha256": guest_artifacts_sha256,
+        "guest_launcher_sha256": guest_launcher_sha256,
         "normalization_reference_key": normalization,
         "sp1_execution_parameters": execution_parameters,
         "primary_metric": "proverGas",
@@ -9038,6 +9333,7 @@ def prepare_calibration(
         "controlled_manifest_sha256": controlled_hash,
         "guest_artifacts": guest_artifacts,
         "guest_artifacts_sha256": guest_artifacts_sha256,
+        "guest_launcher_sha256": guest_launcher_sha256,
         "rust_version": rust_version,
         "sp1_sdk_version": sp1_sdk_version,
         "normalization_reference_key": normalization,
@@ -9258,6 +9554,1067 @@ def _network_values(values: list[str]) -> dict[str, str]:
     return result
 
 
+def _anchor_probe_pair_id(anchor_key: str, target_count: int, elf_sha256: str) -> str:
+    return sha256_bytes(
+        canonical_json(
+            {
+                "purpose": ANCHOR_PROBE_PURPOSE,
+                "anchor_key": anchor_key,
+                "target_count": target_count,
+                "elf_sha256": elf_sha256,
+            }
+        )
+    )
+
+
+def _anchor_probe_sample_id(
+    *,
+    anchor_key: str,
+    target_count: int,
+    lane: str,
+    elf_sha256: str,
+    fixture_sha256: str,
+) -> str:
+    return sha256_bytes(
+        canonical_json(
+            {
+                "purpose": ANCHOR_PROBE_PURPOSE,
+                "anchor_key": anchor_key,
+                "target_count": target_count,
+                "lane": lane,
+                "elf_sha256": elf_sha256,
+                "fixture_sha256": fixture_sha256,
+            }
+        )
+    )
+
+
+def _anchor_probe_execution_row_id(row: Mapping[str, Any]) -> str:
+    return sha256_bytes(
+        canonical_json(
+            {
+                "anchor_sample_id": row["anchor_sample_id"],
+                "repeat_index": row["repeat_index"],
+                "guest_input_sha256": row["guest_input_sha256"],
+                "guest_input_bincode_length": row["guest_input_bincode_length"],
+                "sp1_execution_engine": row["sp1_execution_engine"],
+            }
+        )
+    )
+
+
+def generate_anchor_probe_fixtures(
+    elf_path: pathlib.Path,
+    out_dir: pathlib.Path,
+    *,
+    guest_launcher: pathlib.Path | None = None,
+    run_provenance: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    if not elf_path.is_file():
+        raise ValueError("anchor probe ELF does not exist")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    elf_sha256 = sha256_file(elf_path)
+    fixtures: list[dict[str, Any]] = []
+    counts = (*ANCHOR_PROBE_FIT_COUNTS, ANCHOR_PROBE_CHECKPOINT_COUNT)
+    for anchor_key, anchor_name, opcode, raw_gas in ANCHOR_PROBE_ANCHORS:
+        for target_count in counts:
+            pair_id = _anchor_probe_pair_id(anchor_key, target_count, elf_sha256)
+            for lane in ("target", "control"):
+                guest_input = _anchor_probe_guest_input(
+                    anchor_name=anchor_name,
+                    opcode=opcode,
+                    target_count=target_count,
+                    target_raw_gas=raw_gas,
+                    lane=lane,
+                )
+                relative_path = (
+                    pathlib.Path(anchor_name)
+                    / str(target_count)
+                    / lane
+                    / "guest-input.json"
+                )
+                guest_input_path = out_dir / relative_path
+                guest_input_path.parent.mkdir(parents=True, exist_ok=True)
+                guest_input_path.write_bytes(canonical_json(guest_input) + b"\n")
+                fixture_sha256 = sha256_file(guest_input_path)
+                fixtures.append(
+                    {
+                        "purpose": ANCHOR_PROBE_PURPOSE,
+                        "anchor_key": anchor_key,
+                        "anchor_name": anchor_name,
+                        "opcode": opcode,
+                        "target_raw_gas": raw_gas,
+                        "target_count": target_count,
+                        "lane": lane,
+                        "elf_sha256": elf_sha256,
+                        "fixture_sha256": fixture_sha256,
+                        "guest_input_path": relative_path.as_posix(),
+                        "anchor_pair_id": pair_id,
+                        "anchor_sample_id": _anchor_probe_sample_id(
+                            anchor_key=anchor_key,
+                            target_count=target_count,
+                            lane=lane,
+                            elf_sha256=elf_sha256,
+                            fixture_sha256=fixture_sha256,
+                        ),
+                    }
+                )
+    manifest: dict[str, Any] = {
+        "schema_version": 1,
+        "purpose": ANCHOR_PROBE_PURPOSE,
+        "synthetic_prior_only": True,
+        "candidate_eligible": False,
+        "elf_sha256": elf_sha256,
+        "sp1_execution_engine": "gas-estimator",
+        "fit_counts": list(ANCHOR_PROBE_FIT_COUNTS),
+        "checkpoint_count": ANCHOR_PROBE_CHECKPOINT_COUNT,
+        "repeats": ANCHOR_PROBE_REPEATS,
+        "guest_launcher_sha256": (
+            sha256_file(guest_launcher) if guest_launcher is not None else None
+        ),
+        "run_provenance": dict(run_provenance) if run_provenance is not None else None,
+        "fixtures": fixtures,
+    }
+    manifest["manifest_sha256"] = sha256_bytes(canonical_json(manifest))
+    (out_dir / "anchor-probe-manifest.json").write_bytes(canonical_json(manifest) + b"\n")
+    return manifest
+
+
+def _anchor_probe_guest_input(
+    *,
+    anchor_name: str,
+    opcode: int,
+    target_count: int,
+    target_raw_gas: int,
+    lane: str,
+) -> dict[str, Any]:
+    if lane not in ANCHOR_PROBE_SCENARIOS:
+        raise ValueError("anchor probe lane is unsupported")
+    return {
+        "case": f"synthetic_anchor_probe_{anchor_name}",
+        "scenario": ANCHOR_PROBE_SCENARIOS[lane],
+        "opcode": opcode,
+        "target_count": target_count,
+        "target_raw_gas": target_raw_gas,
+        "tx_gas_limit": 100_000,
+        "bytecode": "0x00",
+        "generator_max_count": ANCHOR_PROBE_CHECKPOINT_COUNT,
+        "fixed_bytecode_len": 1,
+    }
+
+
+def _load_anchor_probe_manifest(fixtures_dir: pathlib.Path) -> dict[str, Any]:
+    path = fixtures_dir / "anchor-probe-manifest.json"
+    manifest = json.loads(path.read_text())
+    recorded = manifest.pop("manifest_sha256", None)
+    if not _is_sha256(recorded) or recorded != sha256_bytes(canonical_json(manifest)):
+        raise ValueError("anchor probe manifest digest mismatch")
+    manifest["manifest_sha256"] = recorded
+    if (
+        manifest.get("purpose") != ANCHOR_PROBE_PURPOSE
+        or manifest.get("synthetic_prior_only") is not True
+        or manifest.get("candidate_eligible") is not False
+        or manifest.get("fit_counts") != list(ANCHOR_PROBE_FIT_COUNTS)
+        or manifest.get("checkpoint_count") != ANCHOR_PROBE_CHECKPOINT_COUNT
+        or manifest.get("repeats") != ANCHOR_PROBE_REPEATS
+        or (
+            manifest.get("guest_launcher_sha256") is not None
+            and not _is_sha256(manifest.get("guest_launcher_sha256"))
+        )
+        or (
+            manifest.get("run_provenance") is not None
+            and not isinstance(manifest.get("run_provenance"), Mapping)
+        )
+    ):
+        raise ValueError("anchor probe manifest contract mismatch")
+    return manifest
+
+
+_ANCHOR_PROBE_FIXTURE_FIELDS = (
+    "purpose",
+    "anchor_key",
+    "anchor_name",
+    "opcode",
+    "target_raw_gas",
+    "target_count",
+    "lane",
+    "elf_sha256",
+    "fixture_sha256",
+    "guest_input_path",
+    "anchor_pair_id",
+    "anchor_sample_id",
+)
+
+
+def _validated_anchor_probe_fixture_manifest(
+    fixtures_dir: pathlib.Path,
+    *,
+    expected_elf_sha256: str | None = None,
+) -> tuple[dict[str, Any], dict[tuple[str, int, str], Mapping[str, Any]]]:
+    """Validate the frozen fixture inventory and every referenced input byte-for-byte."""
+    manifest = _load_anchor_probe_manifest(fixtures_dir)
+    if (
+        not _is_sha256(manifest.get("elf_sha256"))
+        or (
+            expected_elf_sha256 is not None
+            and manifest.get("elf_sha256") != expected_elf_sha256
+        )
+        or manifest.get("sp1_execution_engine") != "gas-estimator"
+    ):
+        raise ValueError("anchor probe fixture manifest ELF or engine differs")
+    fixture_rows = manifest.get("fixtures")
+    if not isinstance(fixture_rows, list):
+        raise ValueError("anchor probe fixture manifest is invalid")
+    expected_order = [
+        (anchor_key, count, lane)
+        for anchor_key, _name, _opcode, _raw_gas in ANCHOR_PROBE_ANCHORS
+        for count in (*ANCHOR_PROBE_FIT_COUNTS, ANCHOR_PROBE_CHECKPOINT_COUNT)
+        for lane in ("target", "control")
+    ]
+    actual_order = [
+        (fixture.get("anchor_key"), fixture.get("target_count"), fixture.get("lane"))
+        if isinstance(fixture, Mapping)
+        else None
+        for fixture in fixture_rows
+    ]
+    if actual_order != expected_order:
+        raise ValueError("anchor probe fixture inventory is incomplete or out of order")
+
+    fixtures: dict[tuple[str, int, str], Mapping[str, Any]] = {}
+    anchors = {key: (name, opcode, raw_gas) for key, name, opcode, raw_gas in ANCHOR_PROBE_ANCHORS}
+    for fixture in fixture_rows:
+        anchor_key = str(fixture["anchor_key"])
+        target_count = int(fixture["target_count"])
+        lane = str(fixture["lane"])
+        anchor_name, opcode, raw_gas = anchors[anchor_key]
+        relative = pathlib.Path(str(fixture.get("guest_input_path", "")))
+        expected_relative = (
+            pathlib.Path(anchor_name) / str(target_count) / lane / "guest-input.json"
+        )
+        if (
+            set(fixture) != set(_ANCHOR_PROBE_FIXTURE_FIELDS)
+            or fixture.get("purpose") != ANCHOR_PROBE_PURPOSE
+            or fixture.get("anchor_name") != anchor_name
+            or fixture.get("opcode") != opcode
+            or fixture.get("target_raw_gas") != raw_gas
+            or fixture.get("elf_sha256") != manifest["elf_sha256"]
+            or relative != expected_relative
+            or relative.is_absolute()
+            or ".." in relative.parts
+        ):
+            raise ValueError("anchor probe fixture declaration mismatch")
+        input_path = fixtures_dir / relative
+        if (
+            not input_path.is_file()
+            or sha256_file(input_path) != fixture.get("fixture_sha256")
+        ):
+            raise ValueError("anchor probe fixture digest mismatch")
+        try:
+            actual_input = json.loads(input_path.read_text())
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ValueError("anchor probe fixture is not canonical JSON") from error
+        expected_input = _anchor_probe_guest_input(
+            anchor_name=anchor_name,
+            opcode=opcode,
+            target_count=target_count,
+            target_raw_gas=raw_gas,
+            lane=lane,
+        )
+        if not _exact_json_equal(actual_input, expected_input):
+            raise ValueError("anchor probe fixture declaration mismatch")
+        expected_pair_id = _anchor_probe_pair_id(
+            anchor_key, target_count, str(fixture["elf_sha256"])
+        )
+        expected_sample_id = _anchor_probe_sample_id(
+            anchor_key=anchor_key,
+            target_count=target_count,
+            lane=lane,
+            elf_sha256=str(fixture["elf_sha256"]),
+            fixture_sha256=str(fixture["fixture_sha256"]),
+        )
+        if (
+            fixture.get("anchor_pair_id") != expected_pair_id
+            or fixture.get("anchor_sample_id") != expected_sample_id
+        ):
+            raise ValueError("anchor probe fixture identity mismatch")
+        fixtures[(anchor_key, target_count, lane)] = fixture
+    return manifest, fixtures
+
+
+def run_anchor_probe_fixtures(
+    *,
+    guest_launcher: pathlib.Path,
+    elf_path: pathlib.Path,
+    fixtures_dir: pathlib.Path,
+    out_path: pathlib.Path,
+) -> list[dict[str, Any]]:
+    manifest, fixture_inventory = _validated_anchor_probe_fixture_manifest(
+        fixtures_dir, expected_elf_sha256=sha256_file(elf_path)
+    )
+    launcher_sha256 = sha256_file(guest_launcher)
+    if manifest.get("guest_launcher_sha256") not in {None, launcher_sha256}:
+        raise ValueError("anchor probe guest-launcher digest mismatch")
+    if sha256_file(elf_path) != manifest["elf_sha256"]:
+        raise ValueError("anchor probe ELF digest mismatch")
+    fixture_rows = list(fixture_inventory.values())
+    input_paths: list[pathlib.Path] = []
+    by_input: dict[str, Mapping[str, Any]] = {}
+    for fixture in fixture_rows:
+        relative = pathlib.Path(str(fixture["guest_input_path"]))
+        input_path = fixtures_dir / relative
+        by_input[str(input_path)] = fixture
+        input_paths.extend([input_path] * ANCHOR_PROBE_REPEATS)
+    reports_path = out_path.with_name(f"{out_path.stem}.guest-launcher.jsonl")
+    run_guest_inputs(
+        guest_launcher=guest_launcher,
+        elf_path=elf_path,
+        input_paths=input_paths,
+        reports_jsonl=reports_path,
+        stage="opcode-lab",
+    )
+    reports = list(iter_jsonl(reports_path))
+    if len(reports) != len(input_paths):
+        raise ValueError("anchor probe report count mismatch")
+    rows: list[dict[str, Any]] = []
+    repeat_by_input: dict[str, int] = {}
+    for expected_input, report in zip(input_paths, reports):
+        if report.get("input") != str(expected_input):
+            raise ValueError("anchor probe raw ordering mismatch")
+        input_key = str(expected_input)
+        fixture = by_input[input_key]
+        repeat_index = repeat_by_input.get(input_key, 0)
+        repeat_by_input[input_key] = repeat_index + 1
+        exit_code = report.get("exit_code")
+        if exit_code != 0:
+            raise ValueError(f"anchor probe guest exit code is {exit_code!r}")
+        gas = report.get("gas")
+        instruction_count = report.get("total_instruction_count")
+        syscall_count = report.get("total_syscall_count")
+        guest_sha = report.get("guest_input_sha256")
+        guest_len = report.get("guest_input_bincode_length")
+        if (
+            isinstance(gas, bool)
+            or not isinstance(gas, int)
+            or gas <= 0
+            or isinstance(instruction_count, bool)
+            or not isinstance(instruction_count, int)
+            or instruction_count <= 0
+            or isinstance(syscall_count, bool)
+            or not isinstance(syscall_count, int)
+            or syscall_count < 0
+            or not isinstance(guest_sha, str)
+            or not guest_sha.startswith("0x")
+            or not _is_sha256(guest_sha[2:])
+            or isinstance(guest_len, bool)
+            or not isinstance(guest_len, int)
+            or guest_len <= 0
+            or report.get("sp1_execution_engine") != "gas-estimator"
+            or report.get("sp1_gas_trace_chunk_threshold")
+            != SP1_GAS_TRACE_CHUNK_THRESHOLD
+            or report.get("sp1_gas_trace_chunk_slots") != SP1_GAS_TRACE_CHUNK_SLOTS
+        ):
+            raise ValueError("anchor probe report provenance is invalid")
+        row = {
+            **fixture,
+            "anchor_probe_manifest_sha256": manifest["manifest_sha256"],
+            "repeat_index": repeat_index,
+            "prover_gas": gas,
+            "total_instruction_count": instruction_count,
+            "total_syscall_count": syscall_count,
+            "exit_code": exit_code,
+            "public_values": report.get("public_values"),
+            "guest_input_sha256": guest_sha,
+            "guest_input_bincode_length": guest_len,
+            "sp1_execution_engine": "gas-estimator",
+            "sp1_gas_trace_chunk_threshold": SP1_GAS_TRACE_CHUNK_THRESHOLD,
+            "sp1_gas_trace_chunk_slots": SP1_GAS_TRACE_CHUNK_SLOTS,
+            "guest_launcher_sha256": launcher_sha256,
+            "run_provenance": manifest.get("run_provenance"),
+        }
+        row["anchor_execution_row_id"] = _anchor_probe_execution_row_id(row)
+        rows.append(row)
+    fit_anchor_probe_rows(rows)
+    _atomic_write_bytes(
+        out_path,
+        b"".join(canonical_json(row) + b"\n" for row in rows),
+    )
+    return rows
+
+
+def _anchor_probe_decimal_fit(
+    xs: list[Decimal], ys: list[Decimal]
+) -> dict[str, Decimal]:
+    count = Decimal(len(xs))
+    mean_x = sum(xs) / count
+    mean_y = sum(ys) / count
+    denominator = sum((value - mean_x) ** 2 for value in xs)
+    if denominator == 0:
+        raise ValueError("anchor probe fit counts do not vary")
+    slope = sum(
+        (x_value - mean_x) * (y_value - mean_y)
+        for x_value, y_value in zip(xs, ys)
+    ) / denominator
+    intercept = mean_y - slope * mean_x
+    residuals = [actual - (intercept + slope * x_value) for x_value, actual in zip(xs, ys)]
+    ss_res = sum(value * value for value in residuals)
+    ss_total = sum((actual - mean_y) ** 2 for actual in ys)
+    r2 = Decimal(1) if ss_total == 0 else Decimal(1) - ss_res / ss_total
+    stderr = (ss_res / Decimal(len(xs) - 2) / denominator).sqrt()
+    return {
+        "slope": slope,
+        "intercept": intercept,
+        "r2": r2,
+        "stderr": stderr,
+        "max_residual": max(abs(value) for value in residuals),
+    }
+
+
+def _anchor_probe_metric_fit(deltas: Mapping[int, Decimal]) -> dict[str, Any]:
+    xs = [Decimal(count) for count in ANCHOR_PROBE_FIT_COUNTS]
+    ys = [deltas[count] for count in ANCHOR_PROBE_FIT_COUNTS]
+    fit = _anchor_probe_decimal_fit(xs, ys)
+    signal = abs(fit["slope"]) * Decimal(
+        ANCHOR_PROBE_FIT_COUNTS[-1] - ANCHOR_PROBE_FIT_COUNTS[0]
+    )
+    relative_stderr = (
+        fit["stderr"] / abs(fit["slope"])
+        if fit["slope"] != 0
+        else Decimal("Infinity")
+    )
+    residual_ratio = (
+        fit["max_residual"] / signal if signal > 0 else Decimal("Infinity")
+    )
+    count0_ratio = (
+        abs(deltas[0] - fit["intercept"]) / signal
+        if signal > 0
+        else Decimal("Infinity")
+    )
+    checkpoint_prediction = fit["slope"] * Decimal(ANCHOR_PROBE_CHECKPOINT_COUNT)
+    checkpoint_observed = (
+        deltas[ANCHOR_PROBE_CHECKPOINT_COUNT] - fit["intercept"]
+    )
+    if checkpoint_observed <= 0:
+        checkpoint_ape = Decimal("Infinity")
+    else:
+        checkpoint_ape = abs(checkpoint_observed - checkpoint_prediction) / abs(
+            checkpoint_observed
+        )
+    failures = []
+    gates = ANCHOR_PROBE_QUALITY_GATES
+    if fit["slope"] <= 0 or signal <= 0:
+        failures.append("positive_signal")
+    if fit["r2"] < gates["r2_min"]:
+        failures.append("r2")
+    if relative_stderr > gates["relative_slope_stderr_max"]:
+        failures.append("slope_stderr")
+    if residual_ratio > gates["residual_signal_max"]:
+        failures.append("residual_signal")
+    if count0_ratio > gates["count0_intercept_residual_max"]:
+        failures.append("count0_intercept_residual")
+    if checkpoint_ape > gates["checkpoint_ape_max"]:
+        failures.append("checkpoint_ape")
+    return {
+        **fit,
+        "signal": signal,
+        "relative_stderr": relative_stderr,
+        "residual_ratio": residual_ratio,
+        "count0_ratio": count0_ratio,
+        "checkpoint_prediction": checkpoint_prediction,
+        "checkpoint_observed": checkpoint_observed,
+        "checkpoint_ape": checkpoint_ape,
+        "failures": failures,
+    }
+
+
+def _anchor_probe_primary_raw_projection(
+    rows: Iterable[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Remove non-gating instruction/syscall diagnostics from probe observations."""
+    return _primary_evidence_projection(list(rows))
+
+
+def _anchor_probe_primary_projection(artifact: Mapping[str, Any]) -> dict[str, Any]:
+    """Project a full probe fit onto the evidence allowed to affect the candidate."""
+    projected = _primary_evidence_projection(artifact)
+    for field in (
+        "artifact_sha256",
+        "primary_artifact_sha256",
+        "raw_rows_sha256",
+        "primary_raw_rows_sha256",
+    ):
+        projected.pop(field, None)
+    projected["raw_rows_sha256"] = artifact.get("primary_raw_rows_sha256")
+    return projected
+
+
+@_isolated_decimal_context
+def fit_anchor_probe_rows(rows: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+    rows = list(rows)
+    anchors_by_key = {anchor[0]: anchor for anchor in ANCHOR_PROBE_ANCHORS}
+    expected_order = [
+        (anchor_key, target_count, lane, repeat_index)
+        for anchor_key, _name, _opcode, _raw_gas in ANCHOR_PROBE_ANCHORS
+        for target_count in (*ANCHOR_PROBE_FIT_COUNTS, ANCHOR_PROBE_CHECKPOINT_COUNT)
+        for lane in ("target", "control")
+        for repeat_index in range(ANCHOR_PROBE_REPEATS)
+    ]
+    actual_order = [
+        (
+            row.get("anchor_key"),
+            row.get("target_count"),
+            row.get("lane"),
+            row.get("repeat_index"),
+        )
+        for row in rows
+    ]
+    if actual_order != expected_order:
+        raise ValueError("anchor probe raw rows are incomplete or out of canonical order")
+    elf_hashes = {row.get("elf_sha256") for row in rows}
+    if len(elf_hashes) != 1 or not _is_sha256(next(iter(elf_hashes), None)):
+        raise ValueError("anchor probe ELF provenance is invalid")
+    manifest_hashes = {row.get("anchor_probe_manifest_sha256") for row in rows}
+    if len(manifest_hashes) != 1 or not _is_sha256(next(iter(manifest_hashes), None)):
+        raise ValueError("anchor probe manifest provenance is invalid")
+    launcher_hashes = {row.get("guest_launcher_sha256") for row in rows}
+    run_provenance_values = {
+        canonical_json(row.get("run_provenance")) for row in rows
+    }
+    if (
+        len(launcher_hashes) != 1
+        or not _is_sha256(next(iter(launcher_hashes), None))
+        or len(run_provenance_values) != 1
+    ):
+        raise ValueError("anchor probe host execution provenance is invalid")
+    run_provenance = rows[0].get("run_provenance") if rows else None
+    if (
+        not isinstance(run_provenance, Mapping)
+        or set(run_provenance)
+        != {
+            "calibration_id",
+            "calibration_identity_sha256",
+            "implementation_revision",
+            "sp1_sdk_version",
+        }
+        or not isinstance(run_provenance.get("calibration_id"), str)
+        or len(run_provenance["calibration_id"]) != 24
+        or not _is_sha256(run_provenance.get("calibration_identity_sha256"))
+        or not isinstance(run_provenance.get("implementation_revision"), str)
+        or len(run_provenance["implementation_revision"]) != 40
+        or not isinstance(run_provenance.get("sp1_sdk_version"), str)
+        or not run_provenance["sp1_sdk_version"]
+    ):
+        raise ValueError("anchor probe calibration provenance is invalid")
+
+    grouped: dict[tuple[str, int, str], list[Mapping[str, Any]]] = {}
+    for row in rows:
+        anchor_key = str(row.get("anchor_key"))
+        expected = anchors_by_key.get(anchor_key)
+        if expected is None:
+            raise ValueError("anchor probe anchor is unsupported")
+        _key, anchor_name, opcode, raw_gas = expected
+        if (
+            row.get("purpose") != ANCHOR_PROBE_PURPOSE
+            or row.get("anchor_name") != anchor_name
+            or row.get("opcode") != opcode
+            or row.get("target_raw_gas") != raw_gas
+            or row.get("sp1_execution_engine") != "gas-estimator"
+            or row.get("sp1_gas_trace_chunk_threshold")
+            != SP1_GAS_TRACE_CHUNK_THRESHOLD
+            or row.get("sp1_gas_trace_chunk_slots") != SP1_GAS_TRACE_CHUNK_SLOTS
+            or row.get("exit_code") != 0
+        ):
+            if row.get("exit_code") != 0:
+                raise ValueError("anchor probe guest exit code is nonzero")
+            raise ValueError("anchor probe row declaration mismatch")
+        grouped.setdefault(
+            (anchor_key, int(row["target_count"]), str(row["lane"])), []
+        ).append(row)
+
+    gas_by_point: dict[tuple[str, int, str], Decimal] = {}
+    instruction_by_point: dict[tuple[str, int, str], Decimal] = {}
+    for point, repeats in grouped.items():
+        fields = (
+            "prover_gas",
+            "total_instruction_count",
+            "total_syscall_count",
+            "public_values",
+            "guest_input_sha256",
+            "guest_input_bincode_length",
+            "fixture_sha256",
+            "anchor_pair_id",
+            "anchor_sample_id",
+        )
+        if any(len({canonical_json(row.get(field)) for row in repeats}) != 1 for field in fields):
+            raise ValueError("anchor probe repeats are not exact deterministic")
+        gas = repeats[0].get("prover_gas")
+        instruction_count = repeats[0].get("total_instruction_count")
+        syscall_count = repeats[0].get("total_syscall_count")
+        if (
+            isinstance(gas, bool)
+            or not isinstance(gas, int)
+            or gas <= 0
+            or isinstance(instruction_count, bool)
+            or not isinstance(instruction_count, int)
+            or instruction_count <= 0
+            or isinstance(syscall_count, bool)
+            or not isinstance(syscall_count, int)
+            or syscall_count < 0
+        ):
+            raise ValueError("anchor probe execution metric is invalid")
+        fixture = repeats[0]
+        public_values = fixture.get("public_values")
+        guest_input_sha256 = fixture.get("guest_input_sha256")
+        guest_input_bincode_length = fixture.get("guest_input_bincode_length")
+        if (
+            not isinstance(public_values, str)
+            or not public_values.startswith("0x")
+            or not _is_sha256(public_values[2:])
+            or not isinstance(guest_input_sha256, str)
+            or not guest_input_sha256.startswith("0x")
+            or not _is_sha256(guest_input_sha256[2:])
+            or isinstance(guest_input_bincode_length, bool)
+            or not isinstance(guest_input_bincode_length, int)
+            or guest_input_bincode_length <= 0
+            or not _is_sha256(fixture.get("fixture_sha256"))
+        ):
+            raise ValueError("anchor probe canonical input or public output identity is invalid")
+        expected_pair_id = _anchor_probe_pair_id(
+            point[0], point[1], str(fixture["elf_sha256"])
+        )
+        expected_sample_id = _anchor_probe_sample_id(
+            anchor_key=point[0],
+            target_count=point[1],
+            lane=point[2],
+            elf_sha256=str(fixture["elf_sha256"]),
+            fixture_sha256=str(fixture["fixture_sha256"]),
+        )
+        if (
+            fixture.get("anchor_pair_id") != expected_pair_id
+            or fixture.get("anchor_sample_id") != expected_sample_id
+        ):
+            raise ValueError("anchor probe row identity mismatch")
+        for repeat in repeats:
+            if repeat.get("anchor_execution_row_id") != _anchor_probe_execution_row_id(repeat):
+                raise ValueError("anchor probe execution identity mismatch")
+        gas_by_point[point] = Decimal(gas)
+        instruction_by_point[point] = Decimal(instruction_count)
+
+    results: list[dict[str, Any]] = []
+    for anchor_key, anchor_name, opcode, raw_gas in ANCHOR_PROBE_ANCHORS:
+        lengths = {
+            row.get("guest_input_bincode_length")
+            for row in rows
+            if row.get("anchor_key") == anchor_key
+        }
+        if len(lengths) != 1 or type(next(iter(lengths))) is not int:
+            raise ValueError("anchor probe canonical bincode length changed")
+        sample_hashes = {
+            row.get("guest_input_sha256")
+            for row in rows
+            if row.get("anchor_key") == anchor_key and row.get("repeat_index") == 0
+        }
+        if len(sample_hashes) != 2 * (
+            len(ANCHOR_PROBE_FIT_COUNTS) + 1
+        ):
+            raise ValueError("anchor probe canonical input identities collide")
+        deltas = {
+            count: gas_by_point[(anchor_key, count, "target")]
+            - gas_by_point[(anchor_key, count, "control")]
+            for count in (*ANCHOR_PROBE_FIT_COUNTS, ANCHOR_PROBE_CHECKPOINT_COUNT)
+        }
+        instruction_deltas = {
+            count: instruction_by_point[(anchor_key, count, "target")]
+            - instruction_by_point[(anchor_key, count, "control")]
+            for count in (*ANCHOR_PROBE_FIT_COUNTS, ANCHOR_PROBE_CHECKPOINT_COUNT)
+        }
+        fit = _anchor_probe_metric_fit(deltas)
+        instruction_fit = _anchor_probe_metric_fit(instruction_deltas)
+        if fit["failures"]:
+            raise ValueError(
+                f"anchor probe {anchor_key} failed quality gates: "
+                + ", ".join(fit["failures"])
+            )
+        instruction_status = (
+            "accepted" if not instruction_fit["failures"] else "unavailable"
+        )
+        results.append(
+            {
+                "anchor_key": anchor_key,
+                "anchor_name": anchor_name,
+                "opcode": f"0x{opcode:02x}",
+                "raw_gas": raw_gas,
+                "prover_gas_per_operation": _decimal_text(fit["slope"]),
+                "prover_gas_per_raw_gas": _decimal_text(fit["slope"] / Decimal(raw_gas)),
+                "instruction_count_per_operation": _decimal_text(
+                    instruction_fit["slope"]
+                ),
+                "fitted_intercept_p": _decimal_text(fit["intercept"]),
+                "total_fit_signal_p": _decimal_text(fit["signal"]),
+                "r2": _decimal_text(fit["r2"]),
+                "slope_stderr_p": _decimal_text(fit["stderr"]),
+                "relative_slope_stderr": _decimal_text(fit["relative_stderr"]),
+                "max_residual_signal_ratio": _decimal_text(fit["residual_ratio"]),
+                "count0_delta_p": _decimal_text(deltas[0]),
+                "count0_intercept_residual_ratio": _decimal_text(fit["count0_ratio"]),
+                "checkpoint_count": ANCHOR_PROBE_CHECKPOINT_COUNT,
+                "checkpoint_observed_delta_p": _decimal_text(fit["checkpoint_observed"]),
+                "checkpoint_predicted_delta_p": _decimal_text(fit["checkpoint_prediction"]),
+                "checkpoint_ape": _decimal_text(fit["checkpoint_ape"]),
+                "instruction_fit": {
+                    "status": instruction_status,
+                    "failures": list(instruction_fit["failures"]),
+                    "fitted_intercept": _decimal_text(instruction_fit["intercept"]),
+                    "total_fit_signal": _decimal_text(instruction_fit["signal"]),
+                    "r2": _decimal_text(instruction_fit["r2"]),
+                    "relative_slope_stderr": _decimal_text(
+                        instruction_fit["relative_stderr"]
+                    ),
+                    "max_residual_signal_ratio": _decimal_text(
+                        instruction_fit["residual_ratio"]
+                    ),
+                    "count0_intercept_residual_ratio": _decimal_text(
+                        instruction_fit["count0_ratio"]
+                    ),
+                    "checkpoint_ape": _decimal_text(instruction_fit["checkpoint_ape"]),
+                },
+                "accepted": True,
+            }
+        )
+    payload: dict[str, Any] = {
+        "schema_version": 2,
+        "purpose": ANCHOR_PROBE_PURPOSE,
+        "synthetic_prior_only": True,
+        "candidate_eligible": False,
+        "elf_sha256": next(iter(elf_hashes)),
+        "anchor_probe_manifest_sha256": next(iter(manifest_hashes)),
+        "guest_launcher_sha256": next(iter(launcher_hashes)),
+        "run_provenance": dict(run_provenance),
+        "sp1_execution_engine": "gas-estimator",
+        "sp1_gas_trace_chunk_threshold": SP1_GAS_TRACE_CHUNK_THRESHOLD,
+        "sp1_gas_trace_chunk_slots": SP1_GAS_TRACE_CHUNK_SLOTS,
+        "fit_counts": list(ANCHOR_PROBE_FIT_COUNTS),
+        "checkpoint_count": ANCHOR_PROBE_CHECKPOINT_COUNT,
+        "repeats": ANCHOR_PROBE_REPEATS,
+        "quality_gates": {
+            key: _decimal_text(value) for key, value in ANCHOR_PROBE_QUALITY_GATES.items()
+        },
+        "raw_rows_sha256": sha256_bytes(canonical_json(rows)),
+        "primary_raw_rows_sha256": sha256_bytes(
+            canonical_json(_anchor_probe_primary_raw_projection(rows))
+        ),
+        "anchors": results,
+    }
+    payload["primary_artifact_sha256"] = sha256_bytes(
+        canonical_json(_anchor_probe_primary_projection(payload))
+    )
+    payload["artifact_sha256"] = sha256_bytes(canonical_json(payload))
+    return payload
+
+
+def validated_anchor_probe_costs(
+    artifact: Mapping[str, Any],
+    raw_rows: Iterable[Mapping[str, Any]],
+    *,
+    metric: str = "prover_gas",
+) -> dict[str, Decimal]:
+    """Replay a sealed synthetic probe and return its ordered body-cost slopes."""
+    raw_rows = list(raw_rows)
+    replayed = fit_anchor_probe_rows(raw_rows)
+    if not _exact_json_equal(artifact, replayed):
+        raise ValueError("anchor probe artifact differs from exact raw-row replay")
+    _validate_content_addressed_artifact(artifact, label="anchor probe")
+    primary_raw_sha256 = sha256_bytes(
+        canonical_json(_anchor_probe_primary_raw_projection(raw_rows))
+    )
+    primary_artifact_sha256 = sha256_bytes(
+        canonical_json(_anchor_probe_primary_projection(artifact))
+    )
+    expected_quality_gates = {
+        key: _decimal_text(value) for key, value in ANCHOR_PROBE_QUALITY_GATES.items()
+    }
+    if (
+        type(artifact.get("schema_version")) is not int
+        or artifact.get("schema_version") != 2
+        or artifact.get("purpose") != ANCHOR_PROBE_PURPOSE
+        or artifact.get("synthetic_prior_only") is not True
+        or artifact.get("candidate_eligible") is not False
+        or artifact.get("sp1_execution_engine") != "gas-estimator"
+        or artifact.get("sp1_gas_trace_chunk_threshold")
+        != SP1_GAS_TRACE_CHUNK_THRESHOLD
+        or artifact.get("sp1_gas_trace_chunk_slots") != SP1_GAS_TRACE_CHUNK_SLOTS
+        or artifact.get("fit_counts") != list(ANCHOR_PROBE_FIT_COUNTS)
+        or artifact.get("checkpoint_count") != ANCHOR_PROBE_CHECKPOINT_COUNT
+        or artifact.get("repeats") != ANCHOR_PROBE_REPEATS
+        or artifact.get("quality_gates") != expected_quality_gates
+        or not _is_sha256(artifact.get("elf_sha256"))
+        or not _is_sha256(artifact.get("anchor_probe_manifest_sha256"))
+        or not _is_sha256(artifact.get("guest_launcher_sha256"))
+        or not isinstance(artifact.get("run_provenance"), Mapping)
+        or not _is_sha256(artifact.get("raw_rows_sha256"))
+        or artifact.get("primary_raw_rows_sha256") != primary_raw_sha256
+        or artifact.get("primary_artifact_sha256") != primary_artifact_sha256
+    ):
+        raise ValueError("anchor probe artifact contract mismatch")
+    field = {
+        "prover_gas": "prover_gas_per_operation",
+        "sp1_instruction_count": "instruction_count_per_operation",
+    }.get(metric)
+    if field is None:
+        raise ValueError("anchor probe metric is unsupported")
+    rows = artifact.get("anchors")
+    if not isinstance(rows, list) or len(rows) != len(ANCHOR_PROBE_ANCHORS):
+        raise ValueError("anchor probe artifact has wrong anchor inventory")
+    costs: dict[str, Decimal] = {}
+    for row, expected in zip(rows, ANCHOR_PROBE_ANCHORS):
+        anchor_key, anchor_name, opcode, raw_gas = expected
+        if (
+            not isinstance(row, Mapping)
+            or row.get("anchor_key") != anchor_key
+            or row.get("anchor_name") != anchor_name
+            or row.get("opcode") != f"0x{opcode:02x}"
+            or row.get("raw_gas") != raw_gas
+            or row.get("accepted") is not True
+        ):
+            raise ValueError("anchor probe artifact anchor declaration mismatch")
+        if metric == "sp1_instruction_count":
+            instruction_fit = row.get("instruction_fit")
+            if (
+                not isinstance(instruction_fit, Mapping)
+                or instruction_fit.get("status") != "accepted"
+                or instruction_fit.get("failures") != []
+            ):
+                raise ValueError("anchor probe instruction diagnostic is unavailable")
+        raw_value = row.get(field)
+        value = _decimal(raw_value, label=f"anchor probe {metric} slope")
+        if (
+            not isinstance(raw_value, str)
+            or _decimal_text(value) != raw_value
+            or value <= 0
+        ):
+            raise ValueError("anchor probe body-cost slope must be positive and canonical")
+        costs[anchor_key] = value
+    return costs
+
+
+def validated_anchor_probe_for_execution_identity(
+    artifact: Mapping[str, Any],
+    raw_rows: Iterable[Mapping[str, Any]],
+    execution_identity: Mapping[str, Any],
+    *,
+    metric: str = "prover_gas",
+) -> dict[str, Decimal]:
+    """Validate a probe and bind it to the opcode-lab ELF frozen by this run."""
+    costs = validated_anchor_probe_costs(artifact, raw_rows, metric=metric)
+    guest_artifacts = execution_identity.get("guest_artifacts")
+    expected_elf = (
+        guest_artifacts.get("crates/guests/elf/sp1_opcode_lab.elf")
+        if isinstance(guest_artifacts, Mapping)
+        else None
+    )
+    if not _is_sha256(expected_elf) or artifact.get("elf_sha256") != expected_elf:
+        raise ValueError("anchor probe ELF differs from the frozen calibration identity")
+    expected_launcher = execution_identity.get("guest_launcher_sha256")
+    if (
+        not _is_sha256(expected_launcher)
+        or artifact.get("guest_launcher_sha256") != expected_launcher
+    ):
+        raise ValueError(
+            "anchor probe guest-launcher differs from the frozen calibration identity"
+        )
+    expected_provenance = {
+        "calibration_id": execution_identity.get("calibration_id"),
+        "calibration_identity_sha256": execution_identity.get(
+            "calibration_identity_sha256"
+        ),
+        "implementation_revision": execution_identity.get("implementation_revision"),
+        "sp1_sdk_version": execution_identity.get("sp1_sdk_version"),
+    }
+    actual_provenance = artifact.get("run_provenance")
+    if not isinstance(actual_provenance, Mapping):
+        raise ValueError("anchor probe has no calibration provenance")
+    for field, expected in expected_provenance.items():
+        if expected is not None and actual_provenance.get(field) != expected:
+            raise ValueError("anchor probe differs from the frozen calibration provenance")
+    return costs
+
+
+def _validate_anchor_probe_rows_against_fixtures(
+    artifact: Mapping[str, Any],
+    raw_rows: Iterable[Mapping[str, Any]],
+    manifest: Mapping[str, Any],
+    fixture_inventory: Mapping[tuple[str, int, str], Mapping[str, Any]],
+) -> None:
+    if artifact.get("anchor_probe_manifest_sha256") != manifest.get("manifest_sha256"):
+        raise ValueError("anchor probe artifact differs from the frozen fixture manifest")
+    if (
+        artifact.get("guest_launcher_sha256")
+        != manifest.get("guest_launcher_sha256")
+        or artifact.get("run_provenance") != manifest.get("run_provenance")
+    ):
+        raise ValueError("anchor probe host provenance differs from the frozen fixture manifest")
+    for row in raw_rows:
+        key = (str(row.get("anchor_key")), int(row.get("target_count", -1)), str(row.get("lane")))
+        fixture = fixture_inventory.get(key)
+        if fixture is None or any(
+            row.get(field) != fixture.get(field)
+            for field in _ANCHOR_PROBE_FIXTURE_FIELDS
+        ):
+            raise ValueError("anchor probe raw row differs from its frozen fixture")
+
+
+def load_validated_anchor_probe_run(
+    calibration_run: pathlib.Path,
+    artifact: Mapping[str, Any],
+    execution_identity: Mapping[str, Any],
+    *,
+    metric: str = "prover_gas",
+) -> tuple[dict[str, Decimal], list[dict[str, Any]]]:
+    """Load and replay the canonical fixture, raw-row, and fit chain for one run."""
+    raw_path = calibration_run / "raw" / "anchor-probe.jsonl"
+    fixtures_dir = calibration_run / "generated" / "anchor-probe"
+    if not raw_path.is_file() or not fixtures_dir.is_dir():
+        raise ValueError("calibration run is missing canonical anchor probe evidence")
+    guest_artifacts = execution_identity.get("guest_artifacts")
+    expected_elf = (
+        guest_artifacts.get("crates/guests/elf/sp1_opcode_lab.elf")
+        if isinstance(guest_artifacts, Mapping)
+        else None
+    )
+    if not _is_sha256(expected_elf):
+        raise ValueError("calibration identity has no frozen opcode-lab ELF")
+    manifest, fixture_inventory = _validated_anchor_probe_fixture_manifest(
+        fixtures_dir, expected_elf_sha256=str(expected_elf)
+    )
+    raw_rows = list(iter_jsonl(raw_path))
+    _validate_anchor_probe_rows_against_fixtures(
+        artifact, raw_rows, manifest, fixture_inventory
+    )
+    bound_execution_identity = {
+        **execution_identity,
+        "calibration_id": calibration_run.name,
+        "calibration_identity_sha256": sha256_bytes(
+            canonical_json(execution_identity)
+        ),
+    }
+    costs = validated_anchor_probe_for_execution_identity(
+        artifact, raw_rows, bound_execution_identity, metric=metric
+    )
+    return costs, raw_rows
+
+
+def _anchor_probe_run_provenance(
+    calibration_run: pathlib.Path, execution_identity: Mapping[str, Any]
+) -> dict[str, Any]:
+    return {
+        "calibration_id": calibration_run.name,
+        "calibration_identity_sha256": sha256_bytes(
+            canonical_json(execution_identity)
+        ),
+        "implementation_revision": execution_identity["implementation_revision"],
+        "sp1_sdk_version": execution_identity["sp1_sdk_version"],
+    }
+
+
+def cmd_generate_anchor_probe(args: argparse.Namespace) -> None:
+    calibration_run = _resolve_repo_path(
+        args.calibration_run, field_name="calibration_run"
+    )
+    execution_identity = validate_calibration_execution_identity(calibration_run)
+    output = _canonical_run_artifact(
+        calibration_run,
+        _resolve_repo_path(args.out, field_name="anchor_probe_fixtures"),
+        "generated/anchor-probe",
+    )
+    elf = _resolve_repo_path(args.elf, field_name="anchor_probe_elf")
+    launcher = _resolve_repo_path(
+        args.guest_launcher, field_name="guest_launcher"
+    )
+    validate_calibration_guest_launcher(execution_identity, launcher)
+    expected_elf = execution_identity["guest_artifacts"].get(
+        "crates/guests/elf/sp1_opcode_lab.elf"
+    )
+    if sha256_file(elf) != expected_elf:
+        raise ValueError("anchor probe ELF differs from the frozen calibration identity")
+    manifest = generate_anchor_probe_fixtures(
+        elf,
+        output,
+        guest_launcher=launcher,
+        run_provenance=_anchor_probe_run_provenance(
+            calibration_run, execution_identity
+        ),
+    )
+    print(f"generated {len(manifest['fixtures'])} synthetic anchor probe fixture(s)")
+
+
+def cmd_run_anchor_probe(args: argparse.Namespace) -> None:
+    calibration_run = _resolve_repo_path(
+        args.calibration_run, field_name="calibration_run"
+    )
+    execution_identity = validate_calibration_execution_identity(calibration_run)
+    fixtures = _canonical_run_artifact(
+        calibration_run,
+        _resolve_repo_path(args.fixtures, field_name="anchor_probe_fixtures"),
+        "generated/anchor-probe",
+    )
+    output = _canonical_run_artifact(
+        calibration_run,
+        _resolve_repo_path(args.out, field_name="anchor_probe_raw_rows"),
+        "raw/anchor-probe.jsonl",
+    )
+    manifest = _load_anchor_probe_manifest(fixtures)
+    if manifest.get("run_provenance") != _anchor_probe_run_provenance(
+        calibration_run, execution_identity
+    ):
+        raise ValueError("anchor probe fixture provenance differs from calibration run")
+    launcher = _resolve_repo_path(
+        args.guest_launcher, field_name="guest_launcher"
+    )
+    validate_calibration_guest_launcher(execution_identity, launcher)
+    rows = run_anchor_probe_fixtures(
+        guest_launcher=launcher,
+        elf_path=_resolve_repo_path(args.elf, field_name="anchor_probe_elf"),
+        fixtures_dir=fixtures,
+        out_path=output,
+    )
+    print(f"ran {len(rows)} synthetic anchor probe execution(s)")
+
+
+def cmd_fit_anchor_probe(args: argparse.Namespace) -> None:
+    calibration_run = _resolve_repo_path(
+        args.calibration_run, field_name="calibration_run"
+    )
+    execution_identity = validate_calibration_execution_identity(calibration_run)
+    runs = _canonical_run_artifact(
+        calibration_run,
+        _resolve_repo_path(args.runs, field_name="anchor_probe_raw_rows"),
+        "raw/anchor-probe.jsonl",
+    )
+    output = _canonical_run_artifact(
+        calibration_run,
+        _resolve_repo_path(args.out, field_name="anchor_probe"),
+        "anchor-probe-fit.json",
+    )
+    raw_rows = list(iter_jsonl(runs))
+    artifact = fit_anchor_probe_rows(raw_rows)
+    validated_anchor_probe_for_execution_identity(
+        artifact,
+        raw_rows,
+        {
+            **execution_identity,
+            **_anchor_probe_run_provenance(calibration_run, execution_identity),
+        },
+    )
+    fixtures_dir = calibration_run / "generated" / "anchor-probe"
+    manifest, fixture_inventory = _validated_anchor_probe_fixture_manifest(
+        fixtures_dir, expected_elf_sha256=str(artifact["elf_sha256"])
+    )
+    _validate_anchor_probe_rows_against_fixtures(
+        artifact, raw_rows, manifest, fixture_inventory
+    )
+    _atomic_write_bytes(output, canonical_json(artifact) + b"\n")
+    print(f"fit {len(artifact['anchors'])} synthetic anchor prior(s)")
+
+
 def cmd_prepare_corpus(args: argparse.Namespace) -> None:
     manifest = prepare_corpus(
         corpus_root=_resolve_repo_path(args.corpus_root, field_name="corpus_root"),
@@ -9306,6 +10663,9 @@ def cmd_prepare_calibration(args: argparse.Namespace) -> None:
     experiment = prepare_calibration(
         output_root,
         _resolve_repo_path(args.controlled_manifest, field_name="controlled_manifest"),
+        guest_launcher=_resolve_repo_path(
+            args.guest_launcher, field_name="guest_launcher"
+        ),
         implementation_revision=args.implementation_revision,
     )
     if args.run_path_file is not None:
@@ -9834,6 +11194,7 @@ def run_block_calibration_rows(
     *,
     manifest: Manifest,
     affine_model: AffineOpcodeModel,
+    anchor_body_costs: Mapping[str, Decimal],
     guest_launcher: pathlib.Path,
     calibration_run_id: str,
     relation_artifact_sha256: str,
@@ -9841,7 +11202,9 @@ def run_block_calibration_rows(
     out: pathlib.Path,
     repeats: int = 3,
 ) -> list[dict[str, Any]]:
-    preflight = preflight_block_calibration_rows(manifest, affine_model)
+    preflight = preflight_block_calibration_rows(
+        manifest, affine_model, anchor_body_costs
+    )
     if repeats != 3:
         raise ValueError("block calibration requires exactly three SP1 repeats")
     if (
@@ -9954,7 +11317,8 @@ def run_block_calibration_rows(
                     "calibration_id": calibration_run_id,
                     "relation_artifact_sha256": relation_artifact_sha256,
                     "relation_raw_rows_sha256": relation_raw_rows_sha256,
-                    "preflight_fit_rank": preflight["fit_rank"],
+                    "preflight_transfer_rank": preflight["transfer_fit_rank"],
+                    "preflight_fixed_rank": preflight["fixed_fit_rank"],
                 }
                 if controlled.get("status") != "accepted":
                     normalized.update(
@@ -10086,7 +11450,8 @@ def run_block_calibration_rows(
                     "calibration_id": calibration_run_id,
                     "relation_artifact_sha256": relation_artifact_sha256,
                     "relation_raw_rows_sha256": relation_raw_rows_sha256,
-                    "preflight_fit_rank": preflight["fit_rank"],
+                    "preflight_transfer_rank": preflight["transfer_fit_rank"],
+                    "preflight_fixed_rank": preflight["fixed_fit_rank"],
                 }
                 if purpose == "static_count_control":
                     output_rows.extend(repeat_rows)
@@ -10128,10 +11493,23 @@ def cmd_run_block_calibration(args: argparse.Namespace) -> None:
     )
     if not _exact_json_equal(execution_identity, frozen_identity):
         raise ValueError("block calibration identity changed during validation")
+    guest_launcher = _resolve_repo_path(
+        args.guest_launcher, field_name="guest_launcher"
+    )
+    validate_calibration_guest_launcher(execution_identity, guest_launcher)
     relations_path = _canonical_run_artifact(
         calibration_run,
         _resolve_repo_path(args.relations, field_name="opcode_relations"),
         "opcode-relations.json",
+    )
+    anchor_probe_path = _canonical_run_artifact(
+        calibration_run,
+        _resolve_repo_path(args.anchor_probe, field_name="anchor_probe"),
+        "anchor-probe-fit.json",
+    )
+    anchor_probe_artifact = json.loads(anchor_probe_path.read_text())
+    anchor_body_costs, _anchor_probe_rows = load_validated_anchor_probe_run(
+        calibration_run, anchor_probe_artifact, execution_identity
     )
     artifact = json.loads(relations_path.read_text())
     expected_provenance = {
@@ -10161,7 +11539,8 @@ def cmd_run_block_calibration(args: argparse.Namespace) -> None:
     rows = run_block_calibration_rows(
         manifest=manifest,
         affine_model=affine_model,
-        guest_launcher=_resolve_repo_path(args.guest_launcher, field_name="guest_launcher"),
+        anchor_body_costs=anchor_body_costs,
+        guest_launcher=guest_launcher,
         calibration_run_id=calibration_run.name,
         relation_artifact_sha256=artifact["artifact_sha256"],
         relation_raw_rows_sha256=artifact["raw_rows_sha256"],
@@ -10189,7 +11568,8 @@ _ACCEPTED_BLOCK_CALIBRATION_ROW_FIELDS = {
     "calibration_id",
     "relation_artifact_sha256",
     "relation_raw_rows_sha256",
-    "preflight_fit_rank",
+    "preflight_transfer_rank",
+    "preflight_fixed_rank",
     "prover_gas",
     "total_instruction_count",
     "total_syscall_count",
@@ -10308,7 +11688,8 @@ def _validated_block_calibration_rows(
                 "calibration_id": calibration_id,
                 "relation_artifact_sha256": relation_sha256,
                 "relation_raw_rows_sha256": relation_raw_sha256,
-                "preflight_fit_rank": 8,
+                "preflight_transfer_rank": 2,
+                "preflight_fixed_rank": 4,
                 "workload_family": spec.workload_family,
                 "split": spec.split,
                 "reported_row_id": row_id,
@@ -10410,7 +11791,8 @@ def _validated_block_calibration_rows(
     integer_fields = (
         "schema_version",
         "repeat_index",
-        "preflight_fit_rank",
+        "preflight_transfer_rank",
+        "preflight_fixed_rank",
         "block_count",
         "transaction_count",
         "prover_gas",
@@ -10441,7 +11823,8 @@ def _validated_block_calibration_rows(
             "calibration_id": calibration_id,
             "relation_artifact_sha256": relation_sha256,
             "relation_raw_rows_sha256": relation_raw_sha256,
-            "preflight_fit_rank": 8,
+            "preflight_transfer_rank": 2,
+            "preflight_fixed_rank": 4,
             "workload_family": spec.workload_family,
             "split": spec.split,
             "reported_row_id": row_id,
@@ -10546,6 +11929,11 @@ def _validated_block_calibration_rows(
                 prover_gas=_decimal(first.get("prover_gas"), label="block prover gas"),
                 raw_gas_by_key=dict(spec.expected_raw_gas_by_key),
                 feature_counts=dict(spec.expected_features),
+                workload_count=(
+                    spec.program.count
+                    if spec.workload_family in BLOCK_CALIBRATION_FAMILIES[:4]
+                    else None
+                ),
             )
         )
     if len(raw_rows) != 3 * len(expected):
@@ -10600,11 +11988,20 @@ def fit_block_calibration_artifact(
     manifest: Manifest,
     affine_model: AffineOpcodeModel,
     relation_artifact: Mapping[str, Any],
+    anchor_probe_artifact: Mapping[str, Any],
+    anchor_probe_rows: Iterable[Mapping[str, Any]],
     raw_rows: list[Mapping[str, Any]],
+    *,
+    response_metric: str = "prover_gas",
 ) -> dict[str, Any]:
     """Fit and serialize the canonical controlled block calibration artifact."""
     rows = _validated_block_calibration_rows(manifest, relation_artifact, raw_rows)
-    result = fit_block_calibration(affine_model, rows, tuple(Q_FORMULA))
+    anchor_body_costs = validated_anchor_probe_costs(
+        anchor_probe_artifact, anchor_probe_rows, metric=response_metric
+    )
+    result = fit_block_calibration(
+        affine_model, rows, tuple(Q_FORMULA), anchor_body_costs
+    )
     dynamic = validate_dynamic_holdouts(
         affine_model,
         result.opcode_multipliers,
@@ -10627,11 +12024,19 @@ def fit_block_calibration_artifact(
         "provenance": dict(relation_artifact["provenance"]),
         "relation_artifact_sha256": relation_artifact["artifact_sha256"],
         "relation_raw_rows_sha256": relation_artifact["raw_rows_sha256"],
+        "anchor_probe_primary_sha256": anchor_probe_artifact[
+            "primary_artifact_sha256"
+        ],
+        "anchor_body_cost_metric": response_metric,
+        "anchor_body_costs": _serialize_decimal_tree(anchor_body_costs),
         "raw_block_rows_sha256": sha256_bytes(canonical_json(raw_rows)),
         "parameter_order": list(result.parameter_order),
         "formulas": dict(BLOCK_CALIBRATION_FORMULAS),
         "gates": dict(BLOCK_CALIBRATION_GATES),
-        "anchors": _serialize_decimal_tree(result.anchors),
+        "transfer_params": _serialize_decimal_tree(result.transfer_params),
+        "reconstructed_anchors": _serialize_decimal_tree(
+            result.reconstructed_anchors
+        ),
         "fixed_costs": _serialize_decimal_tree(result.fixed_costs),
         "opcode_multipliers": _serialize_decimal_tree(result.opcode_multipliers),
         "normalization_reference_key": normalization_key,
@@ -10641,12 +12046,34 @@ def fit_block_calibration_artifact(
         "fit_mape": _decimal_text(result.fit_mape),
         "fit_max_ape": _decimal_text(result.fit_max_ape),
         "holdout_max_ape": _decimal_text(result.holdout_max_ape),
-        "exact_fit_matrix": _serialize_decimal_tree(result.exact_design_matrix),
-        "exact_fit_rank": result.exact_rank,
-        "column_scales": _serialize_decimal_tree(result.column_scales),
-        "solver_residual": _decimal_text(result.solver_residual),
+        "transfer_exact_fit_matrix": _serialize_decimal_tree(
+            result.transfer_exact_design_matrix
+        ),
+        "transfer_exact_fit_rank": result.transfer_exact_rank,
+        "transfer_column_scales": _serialize_decimal_tree(
+            result.transfer_column_scales
+        ),
+        "transfer_solver_residual": _decimal_text(
+            result.transfer_solver_residual
+        ),
+        "fixed_exact_fit_matrix": _serialize_decimal_tree(
+            result.fixed_exact_design_matrix
+        ),
+        "fixed_exact_fit_rank": result.fixed_exact_rank,
+        "fixed_column_scales": _serialize_decimal_tree(
+            result.fixed_column_scales
+        ),
+        "fixed_solver_residual": _decimal_text(result.fixed_solver_residual),
+        "family_slope_evidence": _serialize_decimal_tree(
+            result.family_slope_evidence
+        ),
+        "opcode_holdout_evidence": _serialize_decimal_tree(
+            result.opcode_holdout_evidence
+        ),
+        "transfer_leave_one_family_out": _serialize_decimal_tree(
+            result.transfer_leave_one_family_out
+        ),
         "predictions": _serialize_decimal_tree(result.predictions),
-        "leave_one_family_out": _serialize_decimal_tree(result.leave_one_family_out),
         "dynamic_holdouts": _serialize_decimal_tree(dynamic),
     }
     artifact["artifact_sha256"] = sha256_bytes(canonical_json(artifact))
@@ -10670,12 +12097,21 @@ def cmd_fit_block_calibration(args: argparse.Namespace) -> None:
         _resolve_repo_path(args.relations, field_name="opcode_relations"),
         "opcode-relations.json",
     )
+    anchor_probe_path = _canonical_run_artifact(
+        calibration_run,
+        _resolve_repo_path(args.anchor_probe, field_name="anchor_probe"),
+        "anchor-probe-fit.json",
+    )
     output = _canonical_run_artifact(
         calibration_run,
         _resolve_repo_path(args.out, field_name="block_calibration"),
         "block-calibration.json",
     )
     relation_artifact = json.loads(relations_path.read_text())
+    anchor_probe_artifact = json.loads(anchor_probe_path.read_text())
+    _anchor_body_costs, anchor_probe_rows = load_validated_anchor_probe_run(
+        calibration_run, anchor_probe_artifact, execution_identity
+    )
     expected_provenance = {
         "calibration_id": calibration_run.name,
         "calibration_identity_sha256": sha256_bytes(canonical_json(execution_identity)),
@@ -10696,6 +12132,8 @@ def cmd_fit_block_calibration(args: argparse.Namespace) -> None:
         manifest,
         _affine_model_from_validated_artifact(manifest, relation_artifact),
         relation_artifact,
+        anchor_probe_artifact,
+        anchor_probe_rows,
         list(iter_jsonl(runs_path)),
     )
     _atomic_write_json(output, artifact)
@@ -11898,11 +13336,14 @@ def _controlled_sample_artifact(
     artifacts: Mapping[str, Any],
     candidate_sha256: str,
     block_artifact: Mapping[str, Any],
+    anchor_probe_artifact: Mapping[str, Any],
+    anchor_probe_rows: Iterable[Mapping[str, Any]],
     relation_rows: Iterable[Mapping[str, Any]],
     block_rows: Iterable[Mapping[str, Any]],
     formal_relation_decisions_sha256: str,
 ) -> dict[str, Any]:
     relation_rows = list(relation_rows)
+    anchor_probe_rows = list(anchor_probe_rows)
     block_rows = list(block_rows)
     diagnostic_error = None
     evidence = {
@@ -11917,7 +13358,13 @@ def _controlled_sample_artifact(
             instruction_block,
             instruction_relation_rows,
             instruction_block_rows,
-        ) = fit_instruction_space_artifacts(manifest, relation_rows, block_rows)
+        ) = fit_instruction_space_artifacts(
+            manifest,
+            relation_rows,
+            block_rows,
+            anchor_probe_artifact,
+            anchor_probe_rows,
+        )
         evidence.update(
             {
                 "instruction_relation_rows_sha256": sha256_bytes(
@@ -12288,6 +13735,11 @@ def cmd_build_candidate(args: argparse.Namespace) -> None:
         _resolve_repo_path(args.relations, field_name="opcode_relations"),
         "opcode-relations.json",
     )
+    anchor_probe_path = _canonical_run_artifact(
+        run,
+        _resolve_repo_path(args.anchor_probe, field_name="anchor_probe"),
+        "anchor-probe-fit.json",
+    )
     block_path = _canonical_run_artifact(
         run,
         _resolve_repo_path(args.block_calibration, field_name="block_calibration"),
@@ -12302,6 +13754,10 @@ def cmd_build_candidate(args: argparse.Namespace) -> None:
     if not block_rows_path.is_file():
         raise ValueError("candidate requires canonical relation and block raw rows")
     relation_artifact = json.loads(relations_path.read_text())
+    anchor_probe_artifact = json.loads(anchor_probe_path.read_text())
+    _anchor_body_costs, anchor_probe_rows = load_validated_anchor_probe_run(
+        run, anchor_probe_artifact, execution_identity
+    )
     expected_relation_provenance = _candidate_relation_provenance(
         run, execution_identity
     )
@@ -12315,9 +13771,12 @@ def cmd_build_candidate(args: argparse.Namespace) -> None:
         manifest,
         relation_artifact,
         relation_rows,
+        anchor_probe_artifact,
+        anchor_probe_rows,
         block_artifact,
         block_rows,
         expected_relation_provenance,
+        execution_identity,
     )
     provenance_path = _canonical_run_artifact(
         run,
@@ -12335,6 +13794,7 @@ def cmd_build_candidate(args: argparse.Namespace) -> None:
             "formal_relation_decisions_sha256": formal_artifacts[
                 "formal_relation_decisions_sha256"
             ],
+            "anchor_probe_sha256": anchor_probe_artifact["primary_artifact_sha256"],
             "opcode_relations_sha256": source_projection["relation_artifact"][
                 "artifact_sha256"
             ],
@@ -12360,6 +13820,8 @@ def cmd_build_candidate(args: argparse.Namespace) -> None:
         artifacts,
         preview["candidate_sha256"],
         block_artifact,
+        anchor_probe_artifact,
+        anchor_probe_rows,
         relation_rows,
         block_rows,
         formal_artifacts["formal_relation_decisions_sha256"],
@@ -12368,6 +13830,8 @@ def cmd_build_candidate(args: argparse.Namespace) -> None:
         run,
         manifest,
         relation_artifact,
+        anchor_probe_artifact,
+        anchor_probe_rows,
         block_artifact,
         fit,
         provenance,
@@ -12425,6 +13889,36 @@ def cmd_build_sp1_bridge(args: argparse.Namespace) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subcommands = parser.add_subparsers(dest="command", required=True)
+
+    anchor_generate = subcommands.add_parser(
+        "generate-anchor-probe",
+        help="generate the fixed-input synthetic opcode anchor prior fixtures",
+    )
+    anchor_generate.add_argument("--calibration-run", type=pathlib.Path, required=True)
+    anchor_generate.add_argument("--guest-launcher", type=pathlib.Path, required=True)
+    anchor_generate.add_argument("--elf", type=pathlib.Path, required=True)
+    anchor_generate.add_argument("--out", type=pathlib.Path, required=True)
+    anchor_generate.set_defaults(func=cmd_generate_anchor_probe)
+
+    anchor_run = subcommands.add_parser(
+        "run-anchor-probe",
+        help="run each synthetic opcode anchor lane three times",
+    )
+    anchor_run.add_argument("--calibration-run", type=pathlib.Path, required=True)
+    anchor_run.add_argument("--guest-launcher", type=pathlib.Path, required=True)
+    anchor_run.add_argument("--elf", type=pathlib.Path, required=True)
+    anchor_run.add_argument("--fixtures", type=pathlib.Path, required=True)
+    anchor_run.add_argument("--out", type=pathlib.Path, required=True)
+    anchor_run.set_defaults(func=cmd_run_anchor_probe)
+
+    anchor_fit = subcommands.add_parser(
+        "fit-anchor-probe",
+        help="fit the synthetic four-anchor ratio prior",
+    )
+    anchor_fit.add_argument("--calibration-run", type=pathlib.Path, required=True)
+    anchor_fit.add_argument("--runs", type=pathlib.Path, required=True)
+    anchor_fit.add_argument("--out", type=pathlib.Path, required=True)
+    anchor_fit.set_defaults(func=cmd_fit_anchor_probe)
 
     generate = subcommands.add_parser("generate", help="generate opcode case metadata")
     generate.add_argument("--manifest", type=pathlib.Path, required=True)
@@ -12553,6 +14047,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_block.add_argument("--calibration-run", type=pathlib.Path, required=True)
     run_block.add_argument("--controlled-manifest", type=pathlib.Path, required=True)
     run_block.add_argument("--relations", type=pathlib.Path, required=True)
+    run_block.add_argument("--anchor-probe", type=pathlib.Path, required=True)
     run_block.add_argument("--out", type=pathlib.Path, required=True)
     run_block.set_defaults(func=cmd_run_block_calibration, repeats=3)
 
@@ -12580,6 +14075,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="fit and seal opcode anchors plus fixed/base costs",
     )
     fit_block.add_argument("--relations", type=pathlib.Path, required=True)
+    fit_block.add_argument("--anchor-probe", type=pathlib.Path, required=True)
     fit_block.add_argument("--runs", type=pathlib.Path, required=True)
     fit_block.add_argument("--controlled-manifest", type=pathlib.Path, required=True)
     fit_block.add_argument("--out", type=pathlib.Path, required=True)
@@ -12591,6 +14087,7 @@ def build_parser() -> argparse.ArgumentParser:
     candidate.add_argument("--run", type=pathlib.Path, required=True)
     candidate.add_argument("--controlled-manifest", type=pathlib.Path, required=True)
     candidate.add_argument("--relations", type=pathlib.Path, required=True)
+    candidate.add_argument("--anchor-probe", type=pathlib.Path, required=True)
     candidate.add_argument("--block-calibration", type=pathlib.Path, required=True)
     candidate.add_argument("--controlled-fit", type=pathlib.Path, required=True)
     candidate.add_argument("--provenance", type=pathlib.Path, required=True)
@@ -12673,6 +14170,7 @@ def build_parser() -> argparse.ArgumentParser:
     calibration = subcommands.add_parser("prepare-calibration", help="freeze controlled calibration provenance")
     calibration.add_argument("--out", type=pathlib.Path, required=True)
     calibration.add_argument("--controlled-manifest", type=pathlib.Path, required=True)
+    calibration.add_argument("--guest-launcher", type=pathlib.Path, required=True)
     calibration.add_argument("--implementation-revision")
     calibration.add_argument("--run-path-file", type=pathlib.Path)
     calibration.set_defaults(func=cmd_prepare_calibration)
@@ -12728,7 +14226,11 @@ def cmd_run(args: argparse.Namespace) -> None:
     ):
         raise ValueError("matched-control run requires the frozen revm opcode-lab ELF")
     calibration_run = _resolve_repo_path(args.calibration_run, field_name="calibration_run")
-    validate_calibration_execution_identity(calibration_run)
+    execution_identity = validate_calibration_execution_identity(calibration_run)
+    guest_launcher = _resolve_repo_path(
+        args.guest_launcher, field_name="guest_launcher"
+    )
+    validate_calibration_guest_launcher(execution_identity, guest_launcher)
     fixtures = _resolve_repo_path(args.fixtures, field_name="fixtures")
     out = _resolve_repo_path(args.out, field_name="runs_output")
     manifest, identity = verify_frozen_controlled_manifest(
@@ -12817,7 +14319,7 @@ def cmd_run(args: argparse.Namespace) -> None:
             elf_path = args.elf if kind == "opcode" else args.precompile_elf
         report_path = out.with_name(f"{out.stem}.{stage}.jsonl")
         run_guest_inputs(
-            guest_launcher=args.guest_launcher,
+            guest_launcher=guest_launcher,
             elf_path=elf_path,
             input_paths=[
                 input_path

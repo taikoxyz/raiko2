@@ -12,6 +12,26 @@ from typing import Any, Iterable, Mapping, Sequence
 _CALIBRATION_DECIMAL_CONTEXT = Context(
     prec=80, rounding=ROUND_HALF_EVEN, traps=[]
 )
+_ANCHOR_RAW_GAS = MappingProxyType(
+    {
+        "opcode:0x50": 2,
+        "opcode:0x5f": 2,
+        "opcode:0x80": 3,
+        "opcode:0x90": 3,
+    }
+)
+_TRANSFER_PARAMETER_KEYS = (
+    "body_scale",
+    "common_opcode_overhead_per_operation",
+)
+_OPCODE_FAMILY_ANCHORS = MappingProxyType(
+    {
+        "pop_family": "opcode:0x50",
+        "push_family": "opcode:0x5f",
+        "dup_family": "opcode:0x80",
+        "swap_family": "opcode:0x90",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -67,11 +87,13 @@ class BlockCalibrationRow:
     prover_gas: Decimal
     raw_gas_by_key: Mapping[str, int]
     feature_counts: Mapping[str, int]
+    workload_count: int | None
 
 
 @dataclass(frozen=True)
 class BlockCalibrationResult:
-    anchors: Mapping[str, Decimal]
+    transfer_params: Mapping[str, Decimal]
+    reconstructed_anchors: Mapping[str, Decimal]
     fixed_costs: Mapping[str, Decimal]
     opcode_multipliers: Mapping[str, Decimal]
     fit_mape: Decimal
@@ -79,12 +101,18 @@ class BlockCalibrationResult:
     holdout_max_ape: Decimal
     status: str
     parameter_order: tuple[str, ...]
-    exact_design_matrix: tuple[tuple[Fraction, ...], ...]
-    exact_rank: int
-    column_scales: tuple[Decimal, ...]
-    solver_residual: Decimal
+    transfer_exact_design_matrix: tuple[tuple[Fraction, ...], ...]
+    transfer_exact_rank: int
+    transfer_column_scales: tuple[Decimal, ...]
+    transfer_solver_residual: Decimal
+    fixed_exact_design_matrix: tuple[tuple[Fraction, ...], ...]
+    fixed_exact_rank: int
+    fixed_column_scales: tuple[Decimal, ...]
+    fixed_solver_residual: Decimal
+    family_slope_evidence: Mapping[str, Mapping[str, Decimal | str]]
+    opcode_holdout_evidence: Mapping[str, Mapping[str, Decimal | int | str]]
+    transfer_leave_one_family_out: Mapping[str, Mapping[str, Decimal]]
     predictions: Mapping[str, Mapping[str, Decimal | str]]
-    leave_one_family_out: Mapping[str, Mapping[str, Decimal]]
 
 
 @dataclass(frozen=True)
@@ -99,76 +127,179 @@ def fit_block_calibration(
     affine_model: AffineOpcodeModel,
     rows: Sequence[BlockCalibrationRow],
     feature_keys: tuple[str, ...],
+    anchor_q: Mapping[str, Decimal],
 ) -> BlockCalibrationResult:
-    """Fit opcode anchors and fixed costs from controlled block rows."""
+    """Fit transfer slopes first, then fixed costs with reconstructed multipliers."""
     _validate_unique(feature_keys, "feature key")
-    if set(feature_keys) & set(affine_model.anchor_keys):
-        raise ValueError("anchor and feature parameter keys must be disjoint")
-    if len(affine_model.anchor_keys) != 4 or len(feature_keys) != 4:
-        raise ValueError("block calibration requires four anchors and four fixed costs")
-    parameter_order = (*affine_model.anchor_keys, *feature_keys)
-    if len(parameter_order) != 8:
-        raise ValueError("block calibration requires exactly eight parameters")
+    if set(feature_keys) & set(_TRANSFER_PARAMETER_KEYS):
+        raise ValueError("transfer and feature parameter keys must be disjoint")
+    if (
+        set(affine_model.anchor_keys) != set(_ANCHOR_RAW_GAS)
+        or len(feature_keys) != 4
+    ):
+        raise ValueError(
+            "block calibration requires four natural anchors and four fixed costs"
+        )
+    if set(anchor_q) != set(affine_model.anchor_keys):
+        raise ValueError("anchor_q must cover affine model anchor keys exactly")
+    for key in affine_model.anchor_keys:
+        value = anchor_q[key]
+        if (
+            not isinstance(value, Decimal)
+            or not value.is_finite()
+            or value <= 0
+        ):
+            raise ValueError(f"anchor_q must be a positive finite Decimal: {key}")
+    parameter_order = (*_TRANSFER_PARAMETER_KEYS, *feature_keys)
+    if len(parameter_order) != 6:
+        raise ValueError("block calibration requires exactly six staged parameters")
     _validate_unique((row.row_id for row in rows), "block calibration row ID")
 
     fit_rows = tuple(row for row in rows if row.split == "fit")
     holdout_rows = tuple(row for row in rows if row.split == "holdout")
-    if not fit_rows:
-        raise ValueError("block calibration requires fit rows")
-    if not holdout_rows:
-        raise ValueError("block calibration requires holdout rows")
-    if len(fit_rows) < len(parameter_order):
-        raise ValueError("block calibration exact fit matrix rank must be eight")
+    if len(fit_rows) != 40:
+        raise ValueError(
+            f"block calibration requires exactly 40 fit rows, got {len(fit_rows)}"
+        )
+    if len(holdout_rows) != 8:
+        raise ValueError(
+            f"block calibration requires exactly 8 holdout rows, got {len(holdout_rows)}"
+        )
     if any(row.split not in {"fit", "holdout"} for row in rows):
         raise ValueError("block calibration row split must be fit or holdout")
+    _validate_block_workload_shape(rows, feature_keys)
 
     with localcontext(_CALIBRATION_DECIMAL_CONTEXT):
-        fit_matrix, fit_offsets, fit_actuals = _block_design(
-            affine_model, fit_rows, feature_keys
+        fit_joint_matrix, fit_offsets, fit_actuals = _block_design(
+            affine_model, fit_rows, feature_keys, anchor_q
         )
-        rank = exact_rank(fit_matrix)
-        if rank != len(parameter_order):
-            raise ValueError(
-                f"block calibration exact fit matrix rank must be eight, got {rank}"
+        _holdout_matrix, _holdout_offsets, _holdout_actuals = _block_design(
+            affine_model, holdout_rows, feature_keys, anchor_q
+        )
+        transfer_matrix = []
+        transfer_targets = []
+        fit_lines: dict[str, tuple[Decimal, Decimal]] = {}
+        family_components: dict[
+            str, tuple[Decimal, Decimal, Fraction, Fraction]
+        ] = {}
+        for family in _OPCODE_FAMILY_ANCHORS:
+            indices = [
+                index
+                for index, row in enumerate(fit_rows)
+                if row.workload_family == family
+            ]
+            counts = [fit_rows[index].workload_count for index in indices]
+            if any(count is None for count in counts):
+                raise ValueError("opcode family requires positive workload_count")
+            exact_counts = [int(count) for count in counts]
+            observed_intercept, observed_slope = _decimal_line_fit(
+                exact_counts, [fit_actuals[index] for index in indices]
             )
-        fit_targets = [
-            actual - offset for actual, offset in zip(fit_actuals, fit_offsets)
-        ]
-        parameters, scales, solver_residual = _scaled_decimal_least_squares(
-            fit_matrix, fit_targets
-        )
-        anchors = dict(
-            zip(
-                affine_model.anchor_keys,
-                parameters[: len(affine_model.anchor_keys)],
+            _offset_intercept, offset_slope = _decimal_line_fit(
+                exact_counts, [fit_offsets[index] for index in indices]
             )
-        )
-        fixed_costs = dict(
-            zip(feature_keys, parameters[len(affine_model.anchor_keys) :])
-        )
-        for key, value in (*anchors.items(), *fixed_costs.items()):
-            if not value.is_finite():
-                raise ValueError(f"fitted parameter must be finite: {key}")
-            if value <= 0:
-                raise ValueError(f"fitted parameter must be positive: {key}")
+            body_slope = _fraction_line_slope(
+                exact_counts, [fit_joint_matrix[index][0] for index in indices]
+            )
+            common_slope = _fraction_line_slope(
+                exact_counts, [fit_joint_matrix[index][1] for index in indices]
+            )
+            transfer_matrix.append([body_slope, common_slope])
+            transfer_targets.append(observed_slope - offset_slope)
+            fit_lines[family] = (observed_intercept, observed_slope)
+            family_components[family] = (
+                observed_slope,
+                offset_slope,
+                body_slope,
+                common_slope,
+            )
 
-        opcode_multipliers = affine_model.reconstruct_multipliers(anchors)
+        transfer_rank = exact_rank(transfer_matrix)
+        if transfer_rank != 2:
+            raise ValueError(
+                "block calibration transfer family slope matrix exact rank must be "
+                f"two, got {transfer_rank}"
+            )
+        transfer_values, transfer_scales, transfer_residual = (
+            _scaled_decimal_least_squares(transfer_matrix, transfer_targets)
+        )
+        transfer_zero_tolerance = max(
+            Decimal(1), *(abs(value) for value in transfer_values)
+        ) * Decimal("1e-60")
+        transfer_values = [
+            Decimal(0) if abs(value) <= transfer_zero_tolerance else value
+            for value in transfer_values
+        ]
+        transfer_residual = _vector_norm(
+            [
+                sum(
+                    (
+                        _decimal_from_fraction(coefficient) * value
+                        for coefficient, value in zip(row, transfer_values)
+                    ),
+                    Decimal(0),
+                )
+                - target
+                for row, target in zip(transfer_matrix, transfer_targets)
+            ]
+        )
+        transfer_params = dict(zip(_TRANSFER_PARAMETER_KEYS, transfer_values))
+        body_scale = transfer_params["body_scale"]
+        common_overhead = transfer_params["common_opcode_overhead_per_operation"]
+        if not body_scale.is_finite() or body_scale <= 0:
+            raise ValueError("fitted body_scale must be positive and finite")
+        if not common_overhead.is_finite() or common_overhead < 0:
+            raise ValueError(
+                "fitted common_opcode_overhead_per_operation must be nonnegative and finite"
+            )
+        reconstructed_anchors = {
+            key: (
+                body_scale * anchor_q[key] + common_overhead
+            )
+            / Decimal(_ANCHOR_RAW_GAS[key])
+            for key in affine_model.anchor_keys
+        }
+        opcode_multipliers = affine_model.reconstruct_multipliers(
+            reconstructed_anchors
+        )
         for key, value in opcode_multipliers.items():
             if not value.is_finite() or value <= 0:
                 raise ValueError(f"opcode multiplier must be positive and finite: {key}")
 
-        fit_predictions, fit_apes = _predict_block_rows(
-            fit_rows, fit_matrix, fit_offsets, parameters, fit_actuals
+        family_slope_evidence = _family_slope_evidence(
+            family_components, body_scale, common_overhead
         )
-        holdout_matrix, holdout_offsets, holdout_actuals = _block_design(
-            affine_model, holdout_rows, feature_keys
+        transfer_lofo = _transfer_leave_one_family_out(
+            family_components, transfer_matrix, transfer_targets
         )
-        holdout_predictions, holdout_apes = _predict_block_rows(
-            holdout_rows,
-            holdout_matrix,
-            holdout_offsets,
-            parameters,
-            holdout_actuals,
+        opcode_holdout_evidence = _opcode_holdout_evidence(
+            holdout_rows, fit_rows, fit_lines
+        )
+
+        fixed_matrix = [row[2:] for row in fit_joint_matrix]
+        fixed_rank = exact_rank(fixed_matrix)
+        if fixed_rank != 4:
+            raise ValueError(
+                "block calibration fixed feature fit matrix exact rank must be "
+                f"four, got {fixed_rank}"
+            )
+        fixed_targets = [
+            actual - _opcode_contribution(row, opcode_multipliers)
+            for row, actual in zip(fit_rows, fit_actuals)
+        ]
+        fixed_values, fixed_scales, fixed_residual = _scaled_decimal_least_squares(
+            fixed_matrix, fixed_targets
+        )
+        fixed_costs = dict(zip(feature_keys, fixed_values))
+        for key, value in fixed_costs.items():
+            if not value.is_finite() or value <= 0:
+                raise ValueError(f"fitted fixed cost must be positive and finite: {key}")
+
+        fit_predictions, fit_apes = _predict_staged_block_rows(
+            fit_rows, opcode_multipliers, feature_keys, fixed_costs
+        )
+        holdout_predictions, holdout_apes = _predict_staged_block_rows(
+            holdout_rows, opcode_multipliers, feature_keys, fixed_costs
         )
         fit_mape = sum(fit_apes, Decimal(0)) / Decimal(len(fit_apes))
         fit_max_ape = max(fit_apes)
@@ -185,16 +316,10 @@ def fit_block_calibration(
                 f"{holdout_max_ape}"
             )
 
-        lofo = _leave_one_family_out(
-            affine_model,
-            fit_rows,
-            feature_keys,
-            parameter_order,
-            parameters,
-        )
         predictions = {**fit_predictions, **holdout_predictions}
         return BlockCalibrationResult(
-            anchors=MappingProxyType(anchors),
+            transfer_params=MappingProxyType(transfer_params),
+            reconstructed_anchors=MappingProxyType(reconstructed_anchors),
             fixed_costs=MappingProxyType(fixed_costs),
             opcode_multipliers=MappingProxyType(opcode_multipliers),
             fit_mape=fit_mape,
@@ -202,15 +327,23 @@ def fit_block_calibration(
             holdout_max_ape=holdout_max_ape,
             status="accepted",
             parameter_order=parameter_order,
-            exact_design_matrix=tuple(tuple(row) for row in fit_matrix),
-            exact_rank=rank,
-            column_scales=tuple(scales),
-            solver_residual=solver_residual,
+            transfer_exact_design_matrix=tuple(
+                tuple(row) for row in transfer_matrix
+            ),
+            transfer_exact_rank=transfer_rank,
+            transfer_column_scales=tuple(transfer_scales),
+            transfer_solver_residual=transfer_residual,
+            fixed_exact_design_matrix=tuple(tuple(row) for row in fixed_matrix),
+            fixed_exact_rank=fixed_rank,
+            fixed_column_scales=tuple(fixed_scales),
+            fixed_solver_residual=fixed_residual,
+            family_slope_evidence=_freeze_nested_mapping(family_slope_evidence),
+            opcode_holdout_evidence=_freeze_nested_mapping(
+                opcode_holdout_evidence
+            ),
+            transfer_leave_one_family_out=_freeze_nested_mapping(transfer_lofo),
             predictions=MappingProxyType(
                 {key: MappingProxyType(value) for key, value in predictions.items()}
-            ),
-            leave_one_family_out=MappingProxyType(
-                {key: MappingProxyType(value) for key, value in lofo.items()}
             ),
         )
 
@@ -266,11 +399,15 @@ def validate_dynamic_holdouts(
                     Decimal(0),
                 )
                 if predicted == 0 or predicted.is_signed() != observed.is_signed():
-                    raise ValueError("dynamic relation predicted sign differs from observed sign")
+                    raise ValueError(
+                        "dynamic relation predicted sign differs from observed sign: "
+                        f"{dynamic_key}/{observation.scenario_id}"
+                    )
                 relation_ape = abs(predicted - observed) / abs(observed)
                 if relation_ape > Decimal("0.10"):
                     raise ValueError(
-                        f"dynamic relation APE exceeds 0.10: {relation_ape}"
+                        "dynamic relation APE exceeds 0.10 for "
+                        f"{dynamic_key}/{observation.scenario_id}: {relation_ape}"
                     )
                 reference = sum(
                     (
@@ -282,7 +419,10 @@ def validate_dynamic_holdouts(
                 )
                 implied = (observed - reference) / _decimal_from_fraction(coefficient)
                 if not implied.is_finite() or implied <= 0:
-                    raise ValueError("dynamic relation implied multiplier must be positive")
+                    raise ValueError(
+                        "dynamic relation implied multiplier must be positive: "
+                        f"{dynamic_key}/{observation.scenario_id}"
+                    )
                 implied_values.append(implied)
                 rows.append(
                     {
@@ -297,8 +437,8 @@ def validate_dynamic_holdouts(
             consistency = max(implied_values) / min(implied_values) - Decimal(1)
             if consistency > Decimal("0.05"):
                 raise ValueError(
-                    "dynamic implied multiplier consistency exceeds 0.05: "
-                    f"{consistency}"
+                    "dynamic implied multiplier consistency exceeds 0.05 for "
+                    f"{dynamic_key}: {consistency}"
                 )
             evidence[dynamic_key] = {
                 "status": "accepted",
@@ -311,10 +451,289 @@ def validate_dynamic_holdouts(
     return evidence
 
 
+def _validate_block_workload_shape(
+    rows: Sequence[BlockCalibrationRow], feature_keys: tuple[str, ...]
+) -> None:
+    opcode_families = set(_OPCODE_FAMILY_ANCHORS)
+    base_families = set(feature_keys)
+    if opcode_families & base_families:
+        raise ValueError("opcode and base workload families must be disjoint")
+    expected = opcode_families | base_families
+    actual = {row.workload_family for row in rows}
+    if actual != expected:
+        raise ValueError(
+            "block calibration workload families differ from the staged model: "
+            f"missing={sorted(expected - actual)!r}, extra={sorted(actual - expected)!r}"
+        )
+    for row in rows:
+        if row.workload_family in opcode_families:
+            if type(row.workload_count) is not int or row.workload_count <= 0:
+                raise ValueError(
+                    "opcode family row requires a positive workload_count"
+                )
+        elif row.workload_count is not None:
+            raise ValueError("base family row workload_count must be None")
+
+    for family in expected:
+        family_fit = [
+            row for row in rows if row.workload_family == family and row.split == "fit"
+        ]
+        family_holdout = [
+            row
+            for row in rows
+            if row.workload_family == family and row.split == "holdout"
+        ]
+        if len(family_fit) != 5 or len(family_holdout) != 1:
+            raise ValueError(
+                f"workload family {family} requires five fit rows and exactly one holdout"
+            )
+        if family in opcode_families:
+            counts = [row.workload_count for row in family_fit]
+            if len(set(counts)) < 2:
+                raise ValueError(
+                    f"opcode family {family} requires at least two distinct fit counts"
+                )
+            if int(family_holdout[0].workload_count) <= max(int(count) for count in counts):
+                raise ValueError(
+                    f"opcode family {family} holdout count must exceed all fit counts"
+                )
+            feature_vectors = {
+                tuple(row.feature_counts[key] for key in feature_keys)
+                for row in (*family_fit, *family_holdout)
+            }
+            if len(feature_vectors) != 1:
+                raise ValueError(
+                    f"opcode family {family} fixed/base features must remain constant"
+                )
+
+
+def _decimal_line_fit(
+    counts: Sequence[int], values: Sequence[Decimal]
+) -> tuple[Decimal, Decimal]:
+    if len(counts) != len(values) or len(counts) < 2:
+        raise ValueError("family line fit requires at least two paired observations")
+    count_values = [Decimal(value) for value in counts]
+    count_mean = sum(count_values, Decimal(0)) / Decimal(len(count_values))
+    value_mean = sum(values, Decimal(0)) / Decimal(len(values))
+    denominator = sum(
+        ((value - count_mean) * (value - count_mean) for value in count_values),
+        Decimal(0),
+    )
+    if denominator == 0:
+        raise ValueError("family line fit workload counts have zero variance")
+    slope = sum(
+        (
+            (count - count_mean) * (value - value_mean)
+            for count, value in zip(count_values, values)
+        ),
+        Decimal(0),
+    ) / denominator
+    return value_mean - slope * count_mean, slope
+
+
+def _fraction_line_slope(
+    counts: Sequence[int], values: Sequence[Fraction]
+) -> Fraction:
+    if len(counts) != len(values) or len(counts) < 2:
+        raise ValueError("family exact slope requires at least two paired observations")
+    count_values = [Fraction(value) for value in counts]
+    count_mean = sum(count_values, Fraction(0)) / len(count_values)
+    value_mean = sum(values, Fraction(0)) / len(values)
+    denominator = sum(
+        ((value - count_mean) * (value - count_mean) for value in count_values),
+        Fraction(0),
+    )
+    if denominator == 0:
+        raise ValueError("family exact slope workload counts have zero variance")
+    return sum(
+        (
+            (count - count_mean) * (value - value_mean)
+            for count, value in zip(count_values, values)
+        ),
+        Fraction(0),
+    ) / denominator
+
+
+def _ape_or_reject_zero_signal(
+    predicted: Decimal, observed: Decimal, *, label: str
+) -> Decimal:
+    if observed == 0:
+        if predicted == 0:
+            return Decimal(0)
+        raise ValueError(f"{label} has zero observed signal but nonzero prediction")
+    return abs(predicted - observed) / abs(observed)
+
+
+def _family_slope_evidence(
+    components: Mapping[str, tuple[Decimal, Decimal, Fraction, Fraction]],
+    body_scale: Decimal,
+    common_overhead: Decimal,
+) -> dict[str, dict[str, Decimal | str]]:
+    evidence: dict[str, dict[str, Decimal | str]] = {}
+    for family, (observed, offset, body, common) in components.items():
+        predicted = (
+            offset
+            + _decimal_from_fraction(body) * body_scale
+            + _decimal_from_fraction(common) * common_overhead
+        )
+        ape = _ape_or_reject_zero_signal(
+            predicted, observed, label=f"family slope {family}"
+        )
+        if ape > Decimal("0.10"):
+            raise ValueError(f"family slope APE exceeds 0.10 for {family}: {ape}")
+        evidence[family] = {
+            "anchor_key": _OPCODE_FAMILY_ANCHORS[family],
+            "observed_full_slope": observed,
+            "mu_zero_slope": offset,
+            "body_column_slope": _decimal_from_fraction(body),
+            "common_column_slope": _decimal_from_fraction(common),
+            "predicted_full_slope": predicted,
+            "slope_ape": ape,
+        }
+    return evidence
+
+
+def _transfer_leave_one_family_out(
+    components: Mapping[str, tuple[Decimal, Decimal, Fraction, Fraction]],
+    matrix: Sequence[Sequence[Fraction]],
+    targets: Sequence[Decimal],
+) -> dict[str, dict[str, Decimal]]:
+    families = tuple(components)
+    evidence: dict[str, dict[str, Decimal]] = {}
+    for omitted_index, family in enumerate(families):
+        reduced_matrix = [
+            row for index, row in enumerate(matrix) if index != omitted_index
+        ]
+        reduced_targets = [
+            value for index, value in enumerate(targets) if index != omitted_index
+        ]
+        if exact_rank(reduced_matrix) != 2:
+            raise ValueError(
+                f"transfer leave-one-family-out matrix for {family} does not retain exact rank two"
+            )
+        alternate, _scales, _residual = _scaled_decimal_least_squares(
+            reduced_matrix, reduced_targets
+        )
+        observed, offset, body, common = components[family]
+        predicted = (
+            offset
+            + _decimal_from_fraction(body) * alternate[0]
+            + _decimal_from_fraction(common) * alternate[1]
+        )
+        ape = _ape_or_reject_zero_signal(
+            predicted,
+            observed,
+            label=f"transfer leave-one-family-out {family} slope",
+        )
+        if ape > Decimal("0.10"):
+            raise ValueError(
+                "transfer leave-one-family-out omitted slope APE exceeds 0.10 "
+                f"for {family}: {ape}"
+            )
+        evidence[family] = {
+            "observed_full_slope": observed,
+            "predicted_full_slope": predicted,
+            "omitted_slope_ape": ape,
+        }
+    return evidence
+
+
+def _opcode_holdout_evidence(
+    holdout_rows: Sequence[BlockCalibrationRow],
+    fit_rows: Sequence[BlockCalibrationRow],
+    fit_lines: Mapping[str, tuple[Decimal, Decimal]],
+) -> dict[str, dict[str, Decimal | int | str]]:
+    evidence: dict[str, dict[str, Decimal | int | str]] = {}
+    for family, (intercept, slope) in fit_lines.items():
+        fit_family = [row for row in fit_rows if row.workload_family == family]
+        holdout = next(
+            row for row in holdout_rows if row.workload_family == family
+        )
+        first_count = min(int(row.workload_count) for row in fit_family)
+        holdout_count = int(holdout.workload_count)
+        first_fit_line = intercept + slope * Decimal(first_count)
+        predicted = intercept + slope * Decimal(holdout_count)
+        delta_signal = holdout.prover_gas - first_fit_line
+        if delta_signal != 0:
+            delta_ape = abs(predicted - holdout.prover_gas) / abs(delta_signal)
+        elif predicted == holdout.prover_gas:
+            delta_ape = Decimal(0)
+        else:
+            raise ValueError(
+                f"opcode holdout {family} has zero delta signal but nonzero residual"
+            )
+        if delta_ape > Decimal("0.10"):
+            raise ValueError(
+                "opcode holdout delta-signal APE exceeds 0.10 for "
+                f"{family}: {delta_ape}"
+            )
+        evidence[family] = {
+            "status": "accepted",
+            "fit_intercept": intercept,
+            "fit_slope": slope,
+            "first_fit_count": first_count,
+            "holdout_count": holdout_count,
+            "fit_line_at_first_count": first_fit_line,
+            "predicted_holdout": predicted,
+            "actual_holdout": holdout.prover_gas,
+            "delta_signal": delta_signal,
+            "delta_signal_ape": delta_ape,
+        }
+    return evidence
+
+
+def _opcode_contribution(
+    row: BlockCalibrationRow, opcode_multipliers: Mapping[str, Decimal]
+) -> Decimal:
+    return sum(
+        (
+            Decimal(units) * opcode_multipliers[key]
+            for key, units in row.raw_gas_by_key.items()
+        ),
+        Decimal(0),
+    )
+
+
+def _predict_staged_block_rows(
+    rows: Sequence[BlockCalibrationRow],
+    opcode_multipliers: Mapping[str, Decimal],
+    feature_keys: tuple[str, ...],
+    fixed_costs: Mapping[str, Decimal],
+) -> tuple[dict[str, dict[str, Decimal | str]], list[Decimal]]:
+    predictions: dict[str, dict[str, Decimal | str]] = {}
+    apes = []
+    for row in rows:
+        predicted = _opcode_contribution(row, opcode_multipliers) + sum(
+            (
+                Decimal(row.feature_counts[key]) * fixed_costs[key]
+                for key in feature_keys
+            ),
+            Decimal(0),
+        )
+        ape = abs(predicted - row.prover_gas) / row.prover_gas
+        predictions[row.row_id] = {
+            "split": row.split,
+            "actual_prover_gas": row.prover_gas,
+            "predicted_prover_gas": predicted,
+            "ape": ape,
+        }
+        apes.append(ape)
+    return predictions, apes
+
+
+def _freeze_nested_mapping(
+    values: Mapping[str, Mapping[str, Any]],
+) -> Mapping[str, Mapping[str, Any]]:
+    return MappingProxyType(
+        {key: MappingProxyType(dict(value)) for key, value in values.items()}
+    )
+
+
 def _block_design(
     affine_model: AffineOpcodeModel,
     rows: Sequence[BlockCalibrationRow],
     feature_keys: tuple[str, ...],
+    anchor_q: Mapping[str, Decimal],
 ) -> tuple[list[list[Fraction]], list[Decimal], list[Decimal]]:
     matrix: list[list[Fraction]] = []
     offsets: list[Decimal] = []
@@ -338,19 +757,33 @@ def _block_design(
             if type(value) is not int or value < 0:
                 raise ValueError("block calibration counts must be nonnegative integers")
 
-        projected = []
+        projected: dict[str, Fraction] = {}
         for anchor_key in affine_model.anchor_keys:
-            projected.append(
-                sum(
-                    (
-                        Fraction(units) * affine_model.anchor_basis[key][anchor_key]
-                        for key, units in row.raw_gas_by_key.items()
-                    ),
-                    Fraction(0),
-                )
+            projected[anchor_key] = sum(
+                (
+                    Fraction(units) * affine_model.anchor_basis[key][anchor_key]
+                    for key, units in row.raw_gas_by_key.items()
+                ),
+                Fraction(0),
             )
+        body_scale = sum(
+            (
+                value
+                * Fraction(anchor_q[anchor_key])
+                / _ANCHOR_RAW_GAS[anchor_key]
+                for anchor_key, value in projected.items()
+            ),
+            Fraction(0),
+        )
+        common_overhead = sum(
+            (
+                value / _ANCHOR_RAW_GAS[anchor_key]
+                for anchor_key, value in projected.items()
+            ),
+            Fraction(0),
+        )
         fixed = [Fraction(row.feature_counts[key]) for key in feature_keys]
-        matrix.append([*projected, *fixed])
+        matrix.append([body_scale, common_overhead, *fixed])
         offsets.append(
             sum(
                 (
@@ -429,71 +862,6 @@ def _scaled_decimal_least_squares(
         ]
     )
     return solution, scales, residual
-
-
-def _predict_block_rows(
-    rows: Sequence[BlockCalibrationRow],
-    matrix: Sequence[Sequence[Fraction]],
-    offsets: Sequence[Decimal],
-    parameters: Sequence[Decimal],
-    actuals: Sequence[Decimal],
-) -> tuple[dict[str, dict[str, Decimal | str]], list[Decimal]]:
-    predictions = {}
-    apes = []
-    for row, exact_design, offset, actual in zip(rows, matrix, offsets, actuals):
-        predicted = offset + sum(
-            (
-                _decimal_from_fraction(coefficient) * parameter
-                for coefficient, parameter in zip(exact_design, parameters)
-            ),
-            Decimal(0),
-        )
-        ape = abs(predicted - actual) / actual
-        predictions[row.row_id] = {
-            "split": row.split,
-            "actual_prover_gas": actual,
-            "predicted_prover_gas": predicted,
-            "ape": ape,
-        }
-        apes.append(ape)
-    return predictions, apes
-
-
-def _leave_one_family_out(
-    affine_model: AffineOpcodeModel,
-    fit_rows: Sequence[BlockCalibrationRow],
-    feature_keys: tuple[str, ...],
-    parameter_order: tuple[str, ...],
-    full_parameters: Sequence[Decimal],
-) -> dict[str, dict[str, Decimal]]:
-    evidence = {}
-    families = tuple(dict.fromkeys(row.workload_family for row in fit_rows))
-    if len(families) < 2:
-        raise ValueError("leave-one-family-out requires at least two workload families")
-    for family in families:
-        reduced_rows = tuple(row for row in fit_rows if row.workload_family != family)
-        matrix, offsets, actuals = _block_design(
-            affine_model, reduced_rows, feature_keys
-        )
-        rank = exact_rank(matrix)
-        if rank != len(parameter_order):
-            raise ValueError(
-                f"leave-one-family-out matrix for {family} does not retain exact rank eight"
-            )
-        targets = [actual - offset for actual, offset in zip(actuals, offsets)]
-        reduced, _scales, _residual = _scaled_decimal_least_squares(matrix, targets)
-        drifts = {}
-        for key, full, alternate in zip(parameter_order, full_parameters, reduced):
-            if full == 0:
-                raise ValueError("leave-one-family-out cannot compare a zero coefficient")
-            drift = abs(alternate - full) / abs(full)
-            if drift > Decimal("0.05"):
-                raise ValueError(
-                    f"leave-one-family-out coefficient drift exceeds 0.05 for {family}/{key}: {drift}"
-                )
-            drifts[key] = drift
-        evidence[family] = drifts
-    return evidence
 
 
 def _dot(left: Sequence[Decimal], right: Sequence[Decimal]) -> Decimal:

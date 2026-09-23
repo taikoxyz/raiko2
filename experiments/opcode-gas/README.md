@@ -32,6 +32,58 @@ cargo run -r -p xtask -- build-guest sp1 --bench
 cargo build -r -p guest-launcher --features sp1-sdk/profiling
 ```
 
+### Synthetic Four-Anchor Ratio Probe
+
+The dedicated `sp1-opcode-lab` guest has an independent diagnostic mode for the four free relation
+anchors `POP`, `PUSH0`, `DUP1`, and `SWAP1`. It is not the REVM transaction guest and does not
+produce production opcode costs or a candidate table. It calls REVM's actual `Stack` primitives in
+a synthetic loop, so its accepted output is a frozen body-cost prior. The authoritative rank-98
+real-REVM relation system and production controlled-block validation remain mandatory. The
+production fit consumes the four per-operation slopes only through two shared transfer parameters:
+`theta_i = (body_scale * synthetic_body_cost_i + common_opcode_overhead) / raw_gas_i`.
+
+Generate, run, and fit it only inside a freshly frozen calibration run, using the canonical commands
+below. The gas estimator is host code, so the evidence binds the calibration revision, SP1 SDK
+version, exact guest-launcher binary digest, fixture manifest, raw rows, and opcode-lab ELF. An
+artifact copied from an older or standalone host run is diagnostic only and is rejected by the
+candidate path.
+
+The frozen fit counts are `[0, 1024, 4096, 16384, 65536]`, the predeclared checkpoint is `131072`,
+and every lane has three exact repeats. The probe keeps the historical `OpcodeLabInput` wire schema:
+the dedicated opcode-lab binary decodes the equal-length scenarios `anchor_target_` and
+`anchor_control` only when the exact case/opcode/envelope declaration also matches. This binary-only
+path is deliberate; adding probe state to shared primitives or the shared guest library changes
+unrelated proposal, precompile, and REVM guest programs. Serialized bincode length and bytecode
+remain fixed across counts; `target_count` is the only count-varying workload value. Both lanes perform the same stack
+seeding, loop bookkeeping, one indirect step call, compiler barrier, accumulator mix, and fixed-size
+public-output preparation. Lane/opcode selection occurs once before the loop. The control step is a
+no-op; the target step calls exactly one REVM `Stack::{pop,push,dup,swap}` primitive.
+
+For each count, define `delta(n) = P_target(n) - P_control(n)` and fit it with a free intercept. This
+removes common fixed guest startup from the slope; equivalently, the slope sees
+`[P_target(n)-P_target(0)] - [P_control(n)-P_control(0)]`. A nonzero `delta(0)` is allowed fixed lane
+overhead, not per-operation cost. The fit requires positive signal, `R2 >= 0.99`, relative slope
+standard error at most `0.05`, residual/signal and count-zero intercept residual/signal at most
+`0.02`, and marginal checkpoint APE at most `0.10`, where
+`predicted = slope * checkpoint_count` and
+`observed = delta(checkpoint_count) - fitted_intercept`. The denominator is this positive observed
+marginal signal, not total proverGas, so fixed startup cannot hide nonlinear extrapolation. Output fields are
+`prover_gas_per_operation` and `prover_gas_per_raw_gas`, with explicit
+`synthetic_prior_only=true` and `candidate_eligible=false`.
+
+Target/control subtraction and the free intercept remove fixed ELF startup and fixed lane overhead.
+They do not include the production interpreter's per-opcode dispatch/wrapper path because the lab
+calls `Stack` primitives directly. `common_opcode_overhead` represents that repeated production
+work; it is distinct from startup and from the four block/base costs. A one-scale transfer was
+tested and rejected because it could not keep all reconstructed multipliers positive while meeting
+the controlled-family error gates.
+
+The old variable-bytecode sweeps are not substitutes. A free intercept removes fixed startup, but
+their bytecode, serialized input/deserialization, and helper work still grow with count and enter the
+slope. The launcher also requires an opcode-lab guest exit code of zero before single or batch
+reports can be published; an obsolete ELF that exits nonzero with empty public values fails closed
+instead of becoming a zero-slope row.
+
 First freeze the controlled manifest. `CALIBRATION_RUN` must be the exact directory emitted by
 `prepare-calibration`; do not discover the newest run directory. The machine-readable
 `--run-path-file` flow captures that directory for every subsequent command:
@@ -40,9 +92,33 @@ First freeze the controlled manifest. `CALIBRATION_RUN` must be the exact direct
 RUN_PATH_FILE="$(mktemp)"
 ~/.venv/bin/python experiments/opcode-gas/opcode_gas.py prepare-calibration \
   --controlled-manifest experiments/opcode-gas/manifests/sp1-calibration-v1.toml \
+  --guest-launcher target/release/guest-launcher \
   --out experiments/opcode-gas \
   --run-path-file "$RUN_PATH_FILE"
 CALIBRATION_RUN="$(<"$RUN_PATH_FILE")"
+```
+
+The candidate-bearing probe must be generated after that freeze and persisted inside the exact run.
+The consumer checks that its ELF hash equals the `sp1_opcode_lab.elf` hash frozen in
+`experiment.json`; the `/tmp` diagnostic above is not accepted as a substitute for this canonical
+artifact path:
+
+```bash
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py generate-anchor-probe \
+  --calibration-run "$CALIBRATION_RUN" \
+  --guest-launcher target/release/guest-launcher \
+  --elf crates/guests/elf/sp1_opcode_lab.elf \
+  --out "$CALIBRATION_RUN/generated/anchor-probe"
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py run-anchor-probe \
+  --calibration-run "$CALIBRATION_RUN" \
+  --guest-launcher target/release/guest-launcher \
+  --elf crates/guests/elf/sp1_opcode_lab.elf \
+  --fixtures "$CALIBRATION_RUN/generated/anchor-probe" \
+  --out "$CALIBRATION_RUN/raw/anchor-probe.jsonl"
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py fit-anchor-probe \
+  --calibration-run "$CALIBRATION_RUN" \
+  --runs "$CALIBRATION_RUN/raw/anchor-probe.jsonl" \
+  --out "$CALIBRATION_RUN/anchor-probe-fit.json"
 ```
 
 ### Authoritative Relative-Relation And Block-Calibration Flow
@@ -71,9 +147,11 @@ it with a discovered or manually selected run directory.
   --calibration-run "$CALIBRATION_RUN" \
   --controlled-manifest experiments/opcode-gas/manifests/sp1-calibration-v1.toml \
   --relations "$CALIBRATION_RUN/opcode-relations.json" \
+  --anchor-probe "$CALIBRATION_RUN/anchor-probe-fit.json" \
   --out "$CALIBRATION_RUN/block-calibration-rows.jsonl"
 ~/.venv/bin/python experiments/opcode-gas/opcode_gas.py fit-block-calibration \
   --relations "$CALIBRATION_RUN/opcode-relations.json" \
+  --anchor-probe "$CALIBRATION_RUN/anchor-probe-fit.json" \
   --runs "$CALIBRATION_RUN/block-calibration-rows.jsonl" \
   --controlled-manifest experiments/opcode-gas/manifests/sp1-calibration-v1.toml \
   --out "$CALIBRATION_RUN/block-calibration.json"
@@ -145,9 +223,12 @@ contamination but is not a candidate source.
 
 The relation fit reconstructs pure-opcode costs from the frozen rank-98 system and four internal
 algebraic basis coordinates; their opcode labels do not give them special physical meaning. `A_i`
-and `x_j` use actual per-key raw-gas totals, not execution counts. The controlled block fit jointly
-solves those basis coordinates with `proposal_startup`, `block_base`, `tx_base`, and
-`native_value_transfer`. Dynamic raw-gas scenarios are holdouts and never refit the model.
+and `x_j` use actual per-key raw-gas totals, not execution counts. Calibration is deliberately
+staged: within-family count slopes first solve only the two anchor-transfer parameters, then the
+reconstructed opcode table is frozen and the four fixed/base costs are fitted from residual block
+cost. This prevents the roughly 159M startup term from compensating for the much smaller opcode
+signal in one joint least-squares solve. Dynamic raw-gas scenarios are holdouts and never refit the
+model.
 
 The commands below are retained as exploratory predecessor workflows only. They are not the current
 candidate path, and the old early-STOP opcode fit is explicitly non-candidate.
@@ -215,6 +296,7 @@ operand-path problems before running the formal controlled candidate workflow:
 ```bash
 ~/.venv/bin/python experiments/opcode-gas/opcode_gas.py prepare-calibration \
   --controlled-manifest experiments/opcode-gas/manifests/sp1-calibration-v1.toml \
+  --guest-launcher target/release/guest-launcher \
   --out experiments/opcode-gas
 
 ~/.venv/bin/python experiments/opcode-gas/opcode_gas.py generate-matched-control \
@@ -300,8 +382,10 @@ record that does not reference the exact sealed 128 raw artifact.
 ~/.venv/bin/python experiments/opcode-gas/opcode_gas.py build-candidate \
   --run experiments/opcode-gas/runs/<calibration-id> \
   --controlled-manifest experiments/opcode-gas/manifests/sp1-calibration-v1.toml \
-  --fit experiments/opcode-gas/runs/<calibration-id>/controlled-fit.json \
-  --overheads experiments/opcode-gas/runs/<calibration-id>/controlled-overheads.json \
+  --relations experiments/opcode-gas/runs/<calibration-id>/opcode-relations.json \
+  --anchor-probe experiments/opcode-gas/runs/<calibration-id>/anchor-probe-fit.json \
+  --block-calibration experiments/opcode-gas/runs/<calibration-id>/block-calibration.json \
+  --controlled-fit experiments/opcode-gas/runs/<calibration-id>/controlled-fit.json \
   --provenance experiments/opcode-gas/runs/<calibration-id>/provenance.json
 
 ~/.venv/bin/python experiments/opcode-gas/opcode_gas.py build-sp1-bridge \
@@ -451,8 +535,8 @@ prediction, error computation, and canonical numeric serialization use 80-digit 
 binary `float` is never a canonical intermediate. The candidate never writes a protocol multiplier
 table, Alethia source, generated guest artifact, or production prover config.
 Candidate sealing requires the accepted rank-98 relation system, positive reconstructed ADD,
-dynamic raw-gas holdouts, the eight-parameter controlled block fit/holdouts, and canonical component
-hashes. The
+dynamic raw-gas holdouts, the staged rank-two transfer and rank-four fixed/base fits and holdouts,
+and canonical component hashes. The
 instruction-count sample, controlled SP1 bridge, and diagnostic overheads have
 independent digests and cannot change the primary candidate.
 

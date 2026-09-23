@@ -18,6 +18,9 @@ def write_execution_identity(root):
     artifact = root / "sp1-test.elf"
     artifact.write_bytes(b"test SP1 guest artifact")
     guest_artifacts = {artifact.name: opcode_gas.sha256_file(artifact)}
+    guest_launcher = root / "target/release/guest-launcher"
+    guest_launcher.parent.mkdir(parents=True)
+    guest_launcher.write_bytes(b"test guest launcher")
     identity = {
         "implementation_revision": revision,
         "alethia_reth_revision": "d" * 40,
@@ -30,6 +33,7 @@ def write_execution_identity(root):
         "guest_artifacts_sha256": opcode_gas.sha256_bytes(
             opcode_gas.canonical_json(guest_artifacts)
         ),
+        "guest_launcher_sha256": opcode_gas.sha256_file(guest_launcher),
         "normalization_reference_key": "opcode:0x01",
         "sp1_execution_parameters": opcode_gas.sp1_execution_parameters(),
         "primary_metric": "proverGas",
@@ -244,6 +248,8 @@ class RunnerTests(unittest.TestCase):
                 "experiments/opcode-gas",
                 "--controlled-manifest",
                 "experiments/opcode-gas/manifests/sp1-calibration-v1.toml",
+                "--guest-launcher",
+                "target/release/guest-launcher",
                 "--run-path-file",
                 "/tmp/run-path",
             ]

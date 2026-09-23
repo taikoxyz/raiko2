@@ -122,12 +122,15 @@ class RunManifestTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
             controlled = root / "controlled.toml"
+            launcher = root / "guest-launcher"
+            launcher.write_bytes(b"test guest launcher")
             controlled.write_text('normalization_reference_key = "opcode:0x01"\nq_formula = ["proposal_startup", "block_base", "tx_base", "native_value_transfer"]\nbridge_key_ids = ["opcode:0x01", "opcode:0x02", "precompile:0x1", "proposal_startup", "block_base", "tx_base", "native_value_transfer"]\n')
             with mock.patch.object(opcode_gas, "git_worktree_status", return_value=" crates/prover/src/lib.rs\n"):
                 with self.assertRaisesRegex(ValueError, "implementation path"):
                     opcode_gas.prepare_calibration(
                         root,
                         controlled,
+                        guest_launcher=launcher,
                         implementation_revision="a" * 40,
                         complete_schedule_hash="b" * 64,
                     )
@@ -137,6 +140,7 @@ class RunManifestTests(unittest.TestCase):
                 experiment = opcode_gas.prepare_calibration(
                     root,
                     controlled,
+                    guest_launcher=launcher,
                     implementation_revision="a" * 40,
                     complete_schedule_hash="b" * 64,
                 )
@@ -287,12 +291,13 @@ class RunManifestTests(unittest.TestCase):
             "prepare-corpus",
         )
         self.assertEqual(parser.parse_args(["publish-corpus", "--archive", "/tmp/a.tar", "--object-uri", "gs://bucket/x.tar", "--manifest", "/tmp/manifest.json"]).command, "publish-corpus")
-        self.assertEqual(parser.parse_args(["prepare-calibration", "--out", "/tmp/out", "--controlled-manifest", "/tmp/control.toml"]).command, "prepare-calibration")
+        self.assertEqual(parser.parse_args(["prepare-calibration", "--out", "/tmp/out", "--controlled-manifest", "/tmp/control.toml", "--guest-launcher", "/tmp/guest-launcher"]).command, "prepare-calibration")
         self.assertEqual(parser.parse_args(["prepare-validation", "--out", "/tmp/out", "--run", "/tmp/run", "--corpus", "/tmp/corpus.json"]).command, "prepare-validation")
         candidate = parser.parse_args([
             "build-candidate", "--run", "/tmp/run",
             "--controlled-manifest", "/tmp/control.toml",
             "--relations", "/tmp/run/opcode-relations.json",
+            "--anchor-probe", "/tmp/run/anchor-probe-fit.json",
             "--block-calibration", "/tmp/run/block-calibration.json",
             "--controlled-fit", "/tmp/run/controlled-fit.json",
             "--provenance", "/tmp/run/provenance.json",
@@ -343,6 +348,8 @@ class RunManifestTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
             controlled = root / "controlled.toml"
+            launcher = root / "guest-launcher"
+            launcher.write_bytes(b"test guest launcher")
             controlled.write_text(
                 'normalization_reference_key = "opcode:0x01"\n'
                 'q_formula = ["proposal_startup", "block_base", "tx_base", "native_value_transfer"]\n'
@@ -354,6 +361,7 @@ class RunManifestTests(unittest.TestCase):
                 experiment = opcode_gas.prepare_calibration(
                     root,
                     controlled,
+                    guest_launcher=launcher,
                     implementation_revision="a" * 40,
                     complete_schedule_hash="b" * 64,
                 )
@@ -367,6 +375,8 @@ class RunManifestTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
             controlled = root / "controlled.toml"
+            launcher = root / "guest-launcher"
+            launcher.write_bytes(b"test guest launcher")
             controlled.write_text(
                 'normalization_reference_key = "opcode:0x01"\n'
                 'q_formula = ["proposal_startup", "block_base", "tx_base", "native_value_transfer"]\n'
@@ -378,7 +388,11 @@ class RunManifestTests(unittest.TestCase):
                 opcode_gas, "_locked_package_version", return_value="6.3.0"
             ):
                 experiment = opcode_gas.prepare_calibration(
-                    root, controlled, implementation_revision="a" * 40, complete_schedule_hash="b" * 64
+                    root,
+                    controlled,
+                    guest_launcher=launcher,
+                    implementation_revision="a" * 40,
+                    complete_schedule_hash="b" * 64,
                 )
         identity = experiment["calibration_identity"]
         self.assertEqual(identity["rust_version"], "rustc test")
@@ -624,13 +638,19 @@ class RunManifestTests(unittest.TestCase):
             root = pathlib.Path(tmp)
             manifest_a = root / "manifest-a.toml"
             manifest_b = root / "manifest-b.toml"
+            launcher = root / "guest-launcher"
+            launcher.write_bytes(b"test guest launcher")
             manifest_a.write_text(controlled_manifest_text("controlled-a"))
             manifest_b.write_text(controlled_manifest_text("controlled-b"))
             with mock.patch.object(opcode_gas, "git_worktree_status", return_value=""), mock.patch.object(
                 opcode_gas, "git_head", return_value="a" * 40
             ):
                 experiment = opcode_gas.prepare_calibration(
-                    root, manifest_a, implementation_revision="a" * 40, complete_schedule_hash="b" * 64
+                    root,
+                    manifest_a,
+                    guest_launcher=launcher,
+                    implementation_revision="a" * 40,
+                    complete_schedule_hash="b" * 64,
                 )
             run = root / "runs" / experiment["calibration_id"]
             self.assertEqual((run / "controlled-manifest.toml").read_bytes(), manifest_a.read_bytes())
@@ -881,6 +901,9 @@ def write_controlled_run(root, revision="a" * 40):
     guest_artifacts = {
         str(guest_artifact.relative_to(root)): opcode_gas.sha256_file(guest_artifact)
     }
+    guest_launcher = root / "target/release/guest-launcher"
+    guest_launcher.parent.mkdir(parents=True)
+    guest_launcher.write_bytes(b"test guest launcher")
     identity = {
         "implementation_revision": revision,
         "alethia_reth_revision": "d" * 40,
@@ -893,6 +916,7 @@ def write_controlled_run(root, revision="a" * 40):
         "guest_artifacts_sha256": opcode_gas.sha256_bytes(
             opcode_gas.canonical_json(guest_artifacts)
         ),
+        "guest_launcher_sha256": opcode_gas.sha256_file(guest_launcher),
         "normalization_reference_key": "opcode:0x01",
         "sp1_execution_parameters": opcode_gas.sp1_execution_parameters(),
         "primary_metric": "proverGas",

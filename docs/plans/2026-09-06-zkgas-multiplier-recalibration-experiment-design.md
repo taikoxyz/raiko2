@@ -86,8 +86,9 @@ fitting, candidate construction, or final validation.
 
 1. **Implementation provenance**: one clean `implementation_revision` captured before controlled
    measurement, the Cargo-pinned alethia-reth revision, the exported Unzen schedule hash, guest
-   ELF/VK hashes, and relevant SDK versions from that checkout. Candidate, bridge, and validation
-   provenance all retain that same revision until the run is complete.
+   ELF/VK hashes, the exact host guest-launcher binary hash, and relevant SDK versions from that
+   checkout. Candidate, bridge, and validation provenance all retain that same revision until the
+   run is complete.
 2. **Measurement backend**: SP1 normalized software `proverGas` is the sole V1 candidate and
    validation metric. SP1 total instruction count is recorded alongside it as a non-gating secondary
    bridge input. RISC0 is not executed for V1 measurements; its guest is rebuilt and identity-checked
@@ -101,8 +102,8 @@ fitting, candidate construction, or final validation.
    coefficient, scale, feature choice, threshold, or model selection.
 
 The runner must refuse to mix rows whose provenance does not match the relevant manifest. A different
-SDK, dependency revision, ELF, schedule, or controlled manifest creates a new calibration ID and
-candidate digest. A different candidate digest or proposal corpus creates a new validation ID; no
+SDK, dependency revision, ELF, guest-launcher binary, schedule, or controlled manifest creates a new
+calibration ID and candidate digest. A different candidate digest or proposal corpus creates a new validation ID; no
 command overwrites or silently extends an existing report. Before any proposal result may be opened,
 the calibration run separately seals (a) the complete `proverGas` candidate table, fixed/base costs,
 prediction formula, coverage rules, and acceptance thresholds and (b) the sidecar bridge manifest,
@@ -380,11 +381,15 @@ precompile work is represented by the raw-gas operation sum. A successfully spaw
 wrapper is represented by the fixed-event sum; the child opcode/precompile work is represented by its
 own events and forwarded gas is never priced twice.
 
-The four fixed/base costs are fitted jointly with the four opcode anchors from the frozen controlled
-block cohort. The old sequential overhead residualization DAG is not a candidate construction path.
-Each row supplies the exact non-Anchor opcode raw-gas vector `x_j` and the four-element feature vector
-`q_j`; the fit uses the four-anchor model above. It must have exact rank eight before SP1 execution,
-at least 40 predeclared fit rows, and at least eight separately predeclared holdout rows. Every fit
+The opcode transfer and fixed/base costs use a staged fit from the frozen controlled block cohort.
+First, within each of the four opcode families, regress observed proverGas and both transfer columns
+against the frozen workload count with a free intercept. The four resulting slopes form an exact
+rank-two system for `body_scale` and `common_opcode_overhead_per_operation`; this cancels startup and
+the fixed/base features, which remain constant inside each family. Freeze the reconstructed opcode
+table, subtract its contribution, and then solve the separate exact rank-four `q_j` system for the
+four fixed/base costs. Do not jointly fit the small opcode slopes with the much larger startup/base
+columns. The manifest freezes both ranks before SP1 execution, at least 40 predeclared fit rows, and
+at least eight separately predeclared holdout rows. Every fit
 and holdout row runs three times through `sp1-shasta-proposal`; block rows with precompile or spawned
 wrapper work are ineligible.
 
@@ -506,7 +511,7 @@ never participates in fitting, prefix selection, normalization, or coefficient c
 the same isolation and target/control requirements and require:
 
 ```text
-observed_checkpoint_delta_p = response_p(checkpoint_count) - response_p(0)
+observed_checkpoint_delta_p = response_p(checkpoint_count) - fitted_intercept_p
 predicted_checkpoint_delta_p = slope_p * checkpoint_count
 APE_checkpoint_p = abs(predicted_checkpoint_delta_p - observed_checkpoint_delta_p) /
                    observed_checkpoint_delta_p
@@ -532,14 +537,17 @@ All SP1 runs use local execute mode. They never request a proof and never call a
 
 Run the frozen controlled block fit and holdout rows through the production `sp1-shasta-proposal`
 guest without access to final-validation proposal observations. These are post-Unzen synthetic
-GuestInputs, not Mainnet or Hoodi samples. They jointly fit the four natural opcode anchors and
-`beta = [proposal_startup, block_base, tx_base, native_value_transfer]` from the exact model in this
-document. They never re-fit a matched-control relation.
+GuestInputs, not Mainnet or Hoodi samples. They first fit the rank-two transfer from four
+within-family workload-count slopes, freeze the reconstructed opcode table, and then fit
+`beta = [proposal_startup, block_base, tx_base, native_value_transfer]` from the remaining rank-four
+residual system. They never jointly fit transfer with fixed/base columns and never re-fit a
+matched-control relation.
 
 The manifest freezes at least 40 fit rows and eight holdout rows, all row identities, every exact
 raw-gas and fixed/base feature vector, and the workload-family assignments before execution. It
-requires exact rank eight pre-execution, three identical runs per row, fit MAPE at most 5%, maximum
-fit and holdout APE at most 10%, positive reconstructed costs, and leave-one-family-out stability.
+requires exact transfer rank two and fixed/base rank four pre-execution, three identical runs per
+row, fit MAPE at most 5%, maximum fit and holdout APE at most 10%, positive reconstructed costs,
+and leave-one-family-out omitted-slope prediction within 10%.
 Precompile and spawned-wrapper execution are excluded from the anchor rows; witness/input/blob/KZG
 work remains diagnostic/unmeasured. A failed row is rejected rather than recovered through proposal
 regression. Secondary instruction-count observations remain bridge-only and cannot alter the primary

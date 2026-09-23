@@ -28,16 +28,19 @@ independent rows and rank 98. Fixing the natural anchors `POP`, `PUSH0`, `DUP1`,
 a square full-rank 98-column system. Therefore the opcode lab has completed the relative
 measurement problem; four anchor multipliers remain unidentified.
 
-The experiment does not need to invent standalone absolute opcode costs. Controlled blocks through
-the production SP1 proposal guest can fit those four anchors together with the four already-declared
-fixed/base costs.
+The experiment does not need to invent standalone absolute opcode costs. The dedicated opcode-lab
+guest supplies the four anchor body-cost slopes after matched target/control subtraction. Controlled
+blocks through the production SP1 proposal guest then fit a shared body scale, a shared production
+interpreter cost per executed opcode, and the four already-declared fixed/base costs.
 
 ## Goals
 
 1. Promote accepted matched-control slopes from diagnostics into the formal opcode relation model.
-2. Preserve the four unidentified opcode anchor multipliers as explicit model parameters.
-3. Fit those four anchors and the four required fixed/base costs using only frozen controlled block
-   fixtures executed through `sp1-shasta-proposal`.
+2. Preserve the four unidentified opcode anchor multipliers as an exact affine nullspace, then
+   constrain them from four frozen synthetic body-cost slopes with two production transfer
+   parameters.
+3. Fit those two transfer parameters and the four required fixed/base costs using only frozen
+   controlled block fixtures executed through `sp1-shasta-proposal`.
 4. Reconstruct one positive SP1-native raw-gas multiplier for every required opcode, then derive
    the existing ADD-normalized view.
 5. Validate dynamic-gas opcode multipliers on frozen raw-gas ranges without refitting them.
@@ -94,6 +97,76 @@ accepted `A * mu = d` system when the four natural anchors are set to zero. Neit
 block data. The solver must verify the rank and the natural-anchor property from the frozen
 manifest rather than trusting constants in code.
 
+### Synthetic Anchor-Ratio Prior
+
+The experiment-only `sp1-opcode-lab` guest may measure a diagnostic positive ratio among the four
+free anchors before production-block fitting. This is a prior on relative shape only: it is not a
+production opcode cost, cannot enter the rank-98 relation equations as an accepted row, cannot set
+the final anchor scale, and cannot satisfy or bypass production controlled-block validation.
+
+The probe reuses the historical `OpcodeLabInput` wire schema. Inside the dedicated
+`sp1-opcode-lab` binary, an exact case/opcode/envelope declaration plus one of the equal-length
+scenarios `anchor_target_` or `anchor_control` decodes to a binary-private typed lane. No probe type
+or dispatch code is added to shared primitives or the shared SP1 guest library, so proposal,
+aggregation, precompile, and REVM guest artifacts remain byte-identical. The ordinary
+bytecode-interpreter path remains unchanged for every other declaration. Probe mode supports exactly
+`POP (0x50)`, `PUSH0 (0x5f)`, `DUP1 (0x80)`, and `SWAP1 (0x90)` and rejects every other opcode or
+malformed declaration. For both lanes, the guest executes identical runtime-count loop setup,
+bookkeeping, fixed-slot observation, accumulator folding, and fixed-size public-output preparation.
+The probe uses REVM's actual `revm::interpreter::Stack` primitive, while remaining outside the full
+EVM transaction and dispatch path. Every iteration clears and seeds the same two `U256` words in
+both lanes. Lane and opcode selection happens once before the loop, producing an `#[inline(never)]`
+function pointer. Both lanes make one function-pointer call per iteration; the control function is
+a no-op and each target function calls exactly one of `Stack::pop`, `push(U256::ZERO)`, `dup(1)`, or
+`swap(1)`. Both lanes then pass the stack through the same compiler barrier and perform identical
+accumulator mixing that does not inspect stack length or contents. This avoids count-scaled opcode
+match ordering and observation-branch confounds while keeping the target operation live.
+
+For each anchor and lane, all guest fields and bytecode remain fixed while `target_count` changes.
+The bincode representation uses the fixed-width `u64` count, so input length is constant. Target and
+control differ only in the equal-length scenario that decodes to the typed lane. Freeze fit counts `[0, 1024, 4096, 16384, 65536]`, checkpoint
+`131072`, and three exact repeats. Bind the guest ELF SHA-256, canonical bincode input SHA-256 and
+length, fixture hash, gas-estimator engine/cadence, sample/pair identity, and raw ordering.
+The calibration identity also binds the exact guest-launcher binary SHA-256; generation, execution,
+replay, and candidate consumption reject a different launcher even if all derived rows are
+self-consistently rewritten.
+
+Fit `delta_p(n) = P_target(n) - P_control(n)` with a free intercept and Decimal arithmetic. A
+nonzero count-zero lane delta is allowed fixed overhead, not per-operation cost. Require each
+count-zero lane to be repeat-deterministic and require
+`abs(delta_p(0) - fitted_intercept) / total_fit_signal <= 0.02`. Also require positive slope,
+`R2 >= 0.99`, relative slope standard error `<= 0.05`, maximum residual/total signal `<= 0.02`,
+and marginal checkpoint APE `<= 0.10`, with predicted marginal signal `slope * checkpoint` and
+observed marginal signal `delta_p(checkpoint) - fitted_intercept`. Report
+`prover_gas_per_operation` and the slope divided by raw gas
+`(2, 2, 3, 3)` as `prover_gas_per_raw_gas`.
+
+The sealed diagnostic declares `synthetic_prior_only = true` and `candidate_eligible = false`.
+This means it cannot become a candidate table by itself. The production controlled-block fit may
+consume its four per-operation slopes only through the transfer model below and must bind the
+diagnostic artifact hash. The earlier variable-bytecode sweeps are not reusable: although a free
+slope removes fixed guest startup, their changing bytecode/input and helper/deserialization work
+remains count-dependent.
+
+The target/control difference removes ELF startup, input decoding, loop bookkeeping, and the
+shared indirect call. A free intercept then prevents a fixed target/control lane difference from
+becoming per-operation cost. It does not measure the production EVM interpreter's repeated
+dispatch/wrapper path, because the synthetic guest invokes `Stack` primitives directly. Therefore
+one ratio scale is insufficient. Let `s_i` be the accepted synthetic proverGas-per-operation slope
+and `g_i` the corresponding raw EVM gas `(2, 2, 3, 3)`. Define the four production anchors from two
+shared transfer parameters:
+
+```text
+a = body_scale
+h = common_opcode_overhead_per_operation
+theta_i(a, h) = (a * s_i + h) / g_i
+```
+
+`a` absorbs the shared difference between the synthetic primitive body and its production context.
+`h` represents production per-executed-opcode work omitted by direct primitive invocation. `h` is
+not guest startup and is not any of the four block/base costs. Require `a > 0` and `h >= 0`; the
+controlled production rows, not the synthetic guest, identify both values.
+
 ### Controlled Block Model
 
 The required fixed/base vector remains:
@@ -109,16 +182,21 @@ For controlled production-guest row `j`, let:
   each element is the sum of actual interpreter raw gas for one resolved opcode key;
 - `q_j` be the exact four-element fixed/base feature vector using the existing ownership rules.
 
-The fitted model is:
+Let `C` be the exact four-by-two transfer matrix whose row `i` is
+`[s_i / g_i, 1 / g_i]`, and let `lambda = [a, h]`. The fitted model is:
 
 ```text
-p_hat_j = x_j * (mu_zero + B * theta) + q_j * beta
-        = x_j * mu_zero + [x_j * B, q_j] * [theta, beta]
+theta = C * lambda
+mu = mu_zero + B * C * lambda
+
+p_hat_j = x_j * (mu_zero + B * C * lambda) + q_j * beta
 ```
 
-Only the eight parameters `[theta, beta]` are fitted. The 98 accepted relation slopes remain frozen;
-block rows cannot alter them. The fit uses Decimal arithmetic and the predeclared controlled rows
-only.
+Only the six parameters `[a, h, beta]` are fitted, but not in one joint regression: `[a, h]` come
+from within-family opcode count slopes, then `mu` is frozen before `beta` is fitted from residual
+block cost. The synthetic slopes, raw-gas divisors, affine basis, and 98 accepted relation slopes
+remain frozen; block rows cannot alter them. Both stages use Decimal arithmetic and only the
+predeclared controlled rows.
 
 Precompile costs remain paired-control marginals. Confirmed spawned-wrapper costs remain
 fixed-per-event marginals measured after their opcode/precompile dependencies resolve. Neither is an
@@ -258,10 +336,10 @@ new scenario, or repairs the multiplier.
 The controlled manifest declares all fit and holdout rows before any block result is opened. Every
 row uses post-Unzen synthetic state and the production `sp1-shasta-proposal` guest. Rows must
 exclude precompile and spawned-wrapper execution so those later dependencies cannot enter the
-anchor fit. The six dynamic-gas opcode totals must be zero or identical across every anchor-fit
-row; their separate holdouts cannot influence the eight fitted parameters.
+  anchor fit. The six dynamic-gas opcode totals must be zero or identical across every anchor-fit
+  row; their separate holdouts cannot influence the six fitted parameters.
 
-The fit cohort contains at least five rows per free parameter: at least 40 rows for the eight
+The frozen fit cohort retains its 40 rows and exceeds five rows per free parameter for the six
 parameters. It must independently vary:
 
 - valid stack-consuming arithmetic/`POP`-family work;
@@ -301,8 +379,10 @@ The gas estimator is an offline calibration and validation oracle only. It is no
 online quote or admission path; online operation continues to use the host-native operation ledger
 and the sealed coefficient table.
 
-Fixture generation must compute the exact rational design matrix before SP1 execution and reject it
-unless all eight columns have exact full rank. It must not round `B`, `x_j * B`, or the rank input.
+Fixture generation must compute both staged exact-rational design matrices before SP1 execution.
+The four opcode-family count slopes over `[x_j * B * C]` must have transfer rank two, and the 40
+fit-row `q_j` matrix must have fixed/base rank four. It must not round `B`, `C`, family slopes, or
+either rank input.
 The manifest also freezes at least eight controlled holdout rows that are excluded from fitting and
 exercise every anchor family and every fixed/base feature.
 
@@ -313,22 +393,34 @@ wrapper is ineligible.
 
 ## Fit And Acceptance
 
-1. Subtract the frozen `x_j * mu_zero` term from every fit observation.
-2. Solve ordinary least squares for the eight Decimal parameters `[theta, beta]`.
-3. Reconstruct all 102 opcode multipliers as `c_p = mu_zero + B * theta`.
-4. Compute the existing exact ADD-normalized view `m_p(k) = c_p(k) / c_p(ADD)`.
-5. Apply the frozen model without refitting to the controlled holdout rows.
+1. Within each of the four opcode families, fit the observed `p_j`, `x_j * mu_zero`,
+   `x_j * B * synthetic_body_cost / raw_gas`, and `x_j * B / raw_gas` against the frozen workload
+   count with a free intercept. This within-family slope removes startup and every fixed/base
+   feature, which are constant inside the family.
+2. Solve the resulting four-by-two Decimal slope system for `[a, h]`. Do not jointly fit transfer
+   parameters with the much larger startup/base columns; that permits those columns to compensate
+   for the smaller opcode signal and can produce nonphysical anchors.
+3. Reconstruct the four anchors as `theta_i = (a * s_i + h) / g_i`, then all 102 opcode
+   multipliers as `c_p = mu_zero + B * theta`.
+4. Freeze `c_p`, subtract `x_j * c_p` from all 40 fit rows, and solve only the rank-four `q_j`
+   system for `beta`.
+5. Compute the existing exact ADD-normalized view `m_p(k) = c_p(k) / c_p(ADD)` and apply both
+   stages without refitting to the controlled holdout rows.
 
 The fit is accepted only when:
 
-- the exact fit matrix has rank eight;
-- every fitted parameter is finite;
+- the exact opcode-family slope matrix has rank two and the fixed/base matrix has rank four;
+- `body_scale` is positive, `common_opcode_overhead_per_operation` is nonnegative, and every fitted
+  fixed/base parameter is finite and positive;
 - every reconstructed opcode multiplier and every required fixed/base cost is positive;
+- every fitted opcode-family production-slope APE is at most 10%, and extrapolating each family to
+  its frozen larger-count holdout has signal-relative APE at most 10%;
 - fit MAPE is at most 5% and maximum fit-row APE is at most 10%;
 - maximum holdout-row APE is at most 10%;
 - every dynamic raw-gas holdout and per-key consistency gate passes;
-- refitting after removing any one predeclared workload family changes every opcode anchor and
-  fixed/base coefficient by at most 5%;
+- removing any one opcode family retains transfer rank two and predicts that omitted family's
+  complete production slope with APE at most 10%; removing any one workload family also retains
+  fixed/base rank four;
 - all required relation, provenance, ownership, and repeat checks pass.
 
 APE is always:
@@ -350,8 +442,8 @@ The calibration run adds independently hashed artifacts for:
 - controlled block fit/holdout row identities, exact feature matrices, and raw observations;
 - dynamic raw-gas holdout identities, signed slopes, predictions, APE values, and per-key
   consistency results;
-- fitted anchors, fixed/base costs, reconstructed opcode multipliers, residuals, APE values, and
-  leave-one-family-out stability results.
+- fitted anchors, fixed/base costs, reconstructed opcode multipliers, staged residuals, family
+  slopes, APE values, holdout extrapolations, and leave-one-family-out predictions.
 
 The candidate root transitively binds those artifacts, the existing precompile and spawned-wrapper
 components, provenance, formula, thresholds, and the complete review-only cost table. A changed
@@ -384,15 +476,17 @@ Implementation tests must prove:
 
 1. The checked-in 102-key manifest derives 98 independent nonzero relations and the four natural
    anchors leave a full-rank 98-column system.
-2. A synthetic known-cost fixture recovers all four anchors, all four fixed/base coefficients, and
-   all 102 reconstructed opcode multipliers exactly, including dynamic-gas operation rows.
+2. A synthetic known-cost staged fixture recovers both transfer parameters, all four reconstructed
+   anchors, all four fixed/base coefficients, and all 102 reconstructed opcode multipliers exactly,
+   including dynamic-gas operation rows.
 3. Signed negative relations are accepted when their gates pass; self-controls remain zero-only
    checks.
 4. EXP, KECCAK256, MLOAD, MSTORE, MSTORE8, and MCOPY require frozen multi-raw-gas holdouts; a
    scenario-dependent multiplier prevents sealing without changing the canonical relation fit.
 5. Missing relations, wrong relation orientation, rank-deficient block rows, proposal-purpose rows,
    unresolved operation traces, and non-positive reconstructed costs are rejected.
-6. Holdout and leave-one-family-out failures prevent sealing without modifying raw observations.
+6. Opcode-slope holdout, block holdout, and leave-one-family-out prediction failures prevent
+   sealing without modifying raw observations.
 7. Candidate hashing binds every relation, parameterization, dynamic holdout, controlled-block,
    threshold, and fit artifact.
 8. Existing precompile, spawned-wrapper, bridge isolation, provenance, resume, and final-validation
@@ -405,7 +499,8 @@ Implementation tests must prove:
 3. Add and run manifest-frozen dynamic raw-gas holdouts without changing the canonical equation
    system.
 4. Add manifest-frozen block anchor fit and holdout fixtures plus pre-execution rank validation.
-5. Implement the eight-parameter block solver and reconstruction gates.
+5. Implement the rank-two transfer-slope stage, freeze the opcode table, then implement the
+   rank-four fixed/base stage and reconstruction gates.
 6. Reconnect precompile, spawned-wrapper, candidate sealing, and bridge sampling to the
    reconstructed opcode table.
 7. Create a fresh calibration identity and rerun the frozen relation cohort.

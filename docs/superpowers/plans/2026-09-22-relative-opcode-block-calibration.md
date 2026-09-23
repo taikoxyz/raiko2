@@ -5,8 +5,9 @@
 > checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Produce and seal a review-only SP1 proving-cost mapping model whose opcode multipliers are
-derived from formal relative measurements and whose four remaining opcode anchors plus four
-fixed/base costs are calibrated on controlled production-guest blocks.
+derived from formal relative measurements, a synthetic four-anchor body-cost prior, and six
+parameters calibrated on controlled production-guest blocks: body scale, common per-opcode
+interpreter overhead, and four fixed/base costs.
 
 **Architecture:** Keep experiment orchestration, manifests, CLI commands, provenance, and sealing in
 `opcode_gas.py`; put exact relation algebra and Decimal block fitting in a new dependency-free
@@ -33,8 +34,10 @@ Rust, REVM/Alethia host tracing, SP1 `ExecutionReport::gas()`, TOML/JSON artifac
   fitting, prediction, APE, and serialization. Never convert a candidate value through `float`.
 - Candidate fitting consumes controlled fixtures only. `integration_smoke` and `final_validation`
   rows are rejected by every calibration entrypoint.
-- Do not update the production multiplier table, block limit, Boundless configuration, guest ELF,
-  or alethia-reth revision in this plan.
+- Do not update the production multiplier table, block limit, Boundless configuration, production
+  guest ELFs, or alethia-reth revision in this plan. Task 3A may rebuild only the dedicated
+  diagnostic opcode-lab ELF/VK; proposal, aggregation, precompile, and REVM artifacts must remain
+  byte-identical.
 - Preserve old calibration directories unchanged. Any implementation, manifest, or artifact change
   requires a new content-addressed calibration identity.
 - Use `~/.venv/bin/python` for Python commands. Generated run artifacts remain ignored and
@@ -61,10 +64,13 @@ Use the exact model below and remove statements requiring an isolated positive
 
 ```text
 A * mu = d
-theta = [mu(POP), mu(PUSH0), mu(DUP1), mu(SWAP1)]
+theta_i = (body_scale * synthetic_body_cost_i + common_opcode_overhead) / raw_gas_i
 mu = mu_zero + B * theta
 
-p_hat_j = x_j * mu_zero + [x_j * B, q_j] * [theta, beta]
+family_slope_j = slope_count(x_j * mu_zero) +
+  slope_count(x_j * B * C) * [body_scale, common_opcode_overhead]
+mu = mu_zero + B * theta
+p_hat_j = x_j * mu + q_j * beta
 beta = [proposal_startup, block_base, tx_base, native_value_transfer]
 ```
 
@@ -494,6 +500,86 @@ git commit -m "feat(zkgas): formalize opcode relation fitting"
 
 ---
 
+### Task 3A: Add The Synthetic Four-Anchor Ratio Probe
+
+**Files:**
+- Modify: `guests/sp1/src/opcode_lab.rs`
+- Create: `guests/sp1/src/opcode_anchor_probe.rs`
+- Create: `guests/sp1/tests/opcode_anchor_probe.rs`
+- Modify: `bin/guest-launcher/src/main.rs`
+- Modify: `experiments/opcode-gas/opcode_gas.py`
+- Test: `guests/sp1/tests/opcode_anchor_probe.rs`
+- Test: `bin/guest-launcher/src/main.rs`
+- Test: `experiments/opcode-gas/tests/test_fixture_emit.py`
+- Test: `experiments/opcode-gas/tests/test_runner.py`
+- Test: `experiments/opcode-gas/tests/test_sp1_candidate_report.py`
+
+**Interfaces:**
+- Consumes: the synthetic `sp1-opcode-lab` guest, canonical gas-estimator cadence, and the four
+  ordered natural anchors.
+- Produces: `generate-anchor-probe`, `run-anchor-probe`, and `fit-anchor-probe`; the final artifact
+  is synthetic-prior-only and cannot be consumed as a candidate table.
+
+- [ ] **Step 1: Write failing lane-decode and guest-loop tests**
+
+Keep the historical `OpcodeLabInput` schema unchanged. In a module reachable only from the dedicated
+`sp1-opcode-lab` binary, decode the exact case/opcode/envelope plus equal-length `anchor_target_` or
+`anchor_control` scenario into a typed lane. Assert all other JSON/bincode follows the ordinary path,
+unrelated guest ELFs remain byte-identical, and only opcodes `0x50`, `0x5f`, `0x80`, and `0x90` validate.
+Assert the target/control loop returns deterministic common-mix accumulators, binds lane in the
+fixed-size public digest, calls all four REVM stack primitives successfully, keeps bincode length
+fixed, and rejects unsupported probes.
+
+- [ ] **Step 2: Implement the minimal probe guest path**
+
+Keep ordinary `execute_bytecode` unchanged. In probe mode, instantiate REVM's real
+`revm::interpreter::Stack`, clear and seed the same two `U256` words in both lanes, and call only the
+selected `pop`, `push(U256::ZERO)`, `dup(1)`, or `swap(1)` primitive in the target lane. Select an
+`#[inline(never)]` target or no-op control function once before the loop so both lanes make one
+function-pointer call per iteration without a per-iteration opcode match. Apply the same
+`black_box(&stack)` compiler barrier and accumulator mix in both lanes without reading stack length
+or contents. Keep every guest field except
+the fixed-width `target_count` identical across counts and prepare the public digest from a
+fixed-size byte array.
+
+- [ ] **Step 3: Write failing launcher identity and exit tests**
+
+Assert opcode-lab input reports contain the SHA-256 and length of their canonical bincode input in
+single and batch assembly. Assert missing/nonzero SP1 exit code fails before single JSON or batch
+JSONL publication for both `opcode-lab` and `revm-opcode-lab` gas-estimator paths.
+
+- [ ] **Step 4: Implement fail-closed report finalization**
+
+Use one report finalizer for single and batch opcode stages. It installs canonical input identity,
+applies execution metadata, requires `exit_code == 0`, and only then permits serialization. A stale
+ELF that exits 3 with empty public values must return an error and cannot create an accepted raw row.
+
+- [ ] **Step 5: Write failing end-to-end Python tests**
+
+Freeze fit counts `[0, 1024, 4096, 16384, 65536]`, checkpoint `131072`, and three repeats. Test
+stable guest fields/bytecode/input length, target/control pair identities, exact raw ordering, ELF
+hash and cadence binding, unsupported declarations, repeat nondeterminism, nonpositive/tiny signal,
+R2/residual/stderr failure, count-zero intercept-residual failure, and checkpoint APE failure.
+
+- [ ] **Step 6: Implement generate/run/fit commands and diagnostic sealing**
+
+Fit `P_target(n) - P_control(n)` with a free Decimal intercept. Require positive slope,
+`R2 >= 0.99`, relative stderr `<= 0.05`, residual/signal `<= 0.02`, count-zero
+intercept-residual/signal `<= 0.02`, marginal checkpoint APE `<= 0.10`, and exact repeat
+determinism. Compute checkpoint prediction as `slope * checkpoint_count` and observation as
+`delta(checkpoint_count) - fitted_intercept`; never divide by total proverGas. Emit
+per-operation and raw-gas-normalized slopes for POP/PUSH0/DUP1/SWAP1 plus canonical hashes and
+explicit `synthetic_prior_only=true`, `candidate_eligible=false` declarations.
+
+- [ ] **Step 7: Document boundaries and verify without committing**
+
+Update the experiment README and calibration-pitfalls solution. Run focused Python/Rust tests, the
+complete `experiments/opcode-gas/tests` suite, relevant primitives/guest-launcher tests,
+`py_compile`, `cargo fmt --all -- --check`, and `git diff --check`. Do not build or run a real SP1
+campaign and do not modify an existing run artifact.
+
+---
+
 ### Task 4: Build Manifest-Frozen Production-Guest Block Fixtures
 
 **Files:**
@@ -596,8 +682,8 @@ Add exactly five `fit` rows and one `holdout` row for each of the eight frozen f
 controlled count sequence `1, 2, 4, 8, 16` in each count-bearing fit family. The five
 `proposal_startup` rows are separately named manifest panels with different predeclared controlled
 operation/base-feature mixes; startup remains exactly one in every valid guest execution. The
-complete exact-rational `[xB,q]` fit matrix must have rank eight, and the eight holdouts must cover
-all eight families.
+exact four-family `slope_count(xBC)` transfer matrix must have rank two, the 40-row `q` matrix must
+have rank four, and the eight holdouts must cover all eight families.
 
 Freeze these diagnostic fields on every row: `guest_input_bincode_length`, `witness_node_count`,
 `witness_byte_count`, `blob_count`, `kzg_invocation_count`, `calldata_length`, `bytecode_length`,
@@ -614,9 +700,10 @@ def preflight_block_calibration_rows(
 ) -> dict[str, Any]:
 ```
 
-Build exact `Fraction` rows `[x_j * B, q_j]` from manifest expectations before launching SP1.
-Require 40 fit rows, rank eight, eight holdouts covering all parameter families, no precompile or
-spawned work, and zero dynamic-key totals across fit and holdout rows. Reject rounded basis values.
+Build exact `Fraction` transfer-family slope rows from `x_j * B * C` and separate exact `q_j` rows
+from manifest expectations before launching SP1. Require 40 fit rows, transfer rank two,
+fixed/base rank four, eight holdouts covering all workload families, no precompile or spawned work,
+and zero dynamic-key totals across fit and holdout rows. Reject rounded basis values.
 
 - [ ] **Step 6: Run all host traces before each SP1 execution**
 
@@ -660,7 +747,7 @@ git commit -m "feat(zkgas): add controlled block calibration fixtures"
 
 ---
 
-### Task 5: Fit Eight Block Parameters And Validate Dynamic Holdouts
+### Task 5: Fit Six Transfer/Block Parameters And Validate Dynamic Holdouts
 
 **Files:**
 - Modify: `experiments/opcode-gas/calibration_model.py`
@@ -669,10 +756,12 @@ git commit -m "feat(zkgas): add controlled block calibration fixtures"
 - Modify: `experiments/opcode-gas/tests/test_sp1_candidate_report.py`
 
 **Interfaces:**
-- Consumes: accepted `opcode-relations.json` and validated controlled block rows.
-- Produces: `BlockCalibrationResult`, accepted anchor multipliers, four fixed/base costs, all 102
-  reconstructed opcode multipliers, fit/holdout predictions, dynamic holdout results, and
-  leave-one-family-out stability results.
+- Consumes: accepted `opcode-relations.json`, accepted `anchor-probe-fit.json`, and validated
+  controlled block rows.
+- Produces: `BlockCalibrationResult`, two production transfer parameters, four reconstructed anchor
+  multipliers, four fixed/base costs, all 102 reconstructed opcode multipliers, fit/holdout
+  predictions, dynamic holdout results, opcode-family slope evidence, and leave-one-family-out
+  omitted-slope predictions.
 
 - [ ] **Step 1: Write failing known-recovery and gate tests**
 
@@ -687,11 +776,13 @@ class BlockCalibrationRow:
     prover_gas: Decimal
     raw_gas_by_key: Mapping[str, int]
     feature_counts: Mapping[str, int]
+    workload_count: int | None
 
 
 @dataclass(frozen=True)
 class BlockCalibrationResult:
-    anchors: Mapping[str, Decimal]
+    transfer_params: Mapping[str, Decimal]
+    reconstructed_anchors: Mapping[str, Decimal]
     fixed_costs: Mapping[str, Decimal]
     opcode_multipliers: Mapping[str, Decimal]
     fit_mape: Decimal
@@ -700,10 +791,13 @@ class BlockCalibrationResult:
     status: str
 ```
 
-Create a synthetic rank-eight dataset with known positive values and assert recovery within
-`Decimal("1e-60")` for every parameter and reconstructed multiplier. Add
-separate tests rejecting rank seven, a negative reconstructed multiplier, fit MAPE above 5%, fit or
-holdout maximum APE above 10%, and leave-one-family-out coefficient drift above 5%.
+Create a synthetic staged dataset with a rank-two opcode-family slope matrix and rank-four fixed
+matrix. Assert recovery within
+`Decimal("1e-60")` for both transfer parameters, every fixed/base parameter, and every reconstructed
+multiplier. Add separate tests rejecting transfer rank one, fixed rank three, invalid transfer
+parameters, a negative
+reconstructed multiplier, fit MAPE above 5%, fit or holdout maximum APE above 10%, and
+leave-one-family-out omitted production-slope APE above 10%.
 
 - [ ] **Step 2: Run tests and verify RED**
 
@@ -732,14 +826,22 @@ def fit_block_calibration(
     affine_model: AffineOpcodeModel,
     rows: Sequence[BlockCalibrationRow],
     feature_keys: tuple[str, ...],
+    anchor_body_costs: Mapping[str, Decimal],
 ) -> BlockCalibrationResult:
 ```
 
 Compute every row error as
 `abs(predicted_prover_gas - actual_prover_gas) / actual_prover_gas`; reject a missing, non-finite,
-or non-positive actual value. Run one refit per predeclared workload family, require every reduced
-fit matrix to retain exact rank eight, and compare every anchor/fixed coefficient to the complete
-fit.
+or non-positive actual value. Within each opcode family, regress each transfer column,
+`x * mu_zero`, and observed proverGas on the frozen workload count with a free intercept. Fit
+`[body_scale, common_opcode_overhead]` only from the resulting four-by-two slope system, then freeze
+the reconstructed opcode table. Build the two transfer columns from
+`theta_i = (body_scale * anchor_body_costs[i] + common_opcode_overhead) / raw_gas_i` using the
+frozen raw-gas divisors `(2, 2, 3, 3)`. Fit the four fixed/base coefficients in a separate
+rank-four least-squares solve after subtracting `x * mu`. Run one transfer refit per opcode family,
+require the reduced slope matrix to retain rank two, and gate the omitted family's complete
+production-slope APE rather than coefficient drift. Require every fixed/base leave-one-family-out
+matrix to retain rank four.
 
 - [ ] **Step 4: Implement dynamic raw-gas validation**
 
@@ -998,6 +1100,7 @@ git status --short
 cargo build -r -p guest-launcher
 ~/.venv/bin/python experiments/opcode-gas/opcode_gas.py prepare-calibration \
   --controlled-manifest experiments/opcode-gas/manifests/sp1-calibration-v1.toml \
+  --guest-launcher target/release/guest-launcher \
   --out experiments/opcode-gas \
   --run-path-file /tmp/raiko2-zkgas-calibration-run-path
 read -r CALIBRATION_RUN < /tmp/raiko2-zkgas-calibration-run-path
@@ -1006,9 +1109,24 @@ test -d "$CALIBRATION_RUN"
 
 Expected: tracked worktree is clean and a new run ID names the current implementation revision.
 
-- [ ] **Step 2: Run and fit the formal opcode relation cohort**
+- [ ] **Step 2: Run and fit the frozen synthetic probe and formal opcode relation cohort**
 
 ```bash
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py generate-anchor-probe \
+  --calibration-run "$CALIBRATION_RUN" \
+  --guest-launcher target/release/guest-launcher \
+  --elf crates/guests/elf/sp1_opcode_lab.elf \
+  --out "$CALIBRATION_RUN/generated/anchor-probe"
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py run-anchor-probe \
+  --calibration-run "$CALIBRATION_RUN" \
+  --guest-launcher target/release/guest-launcher \
+  --elf crates/guests/elf/sp1_opcode_lab.elf \
+  --fixtures "$CALIBRATION_RUN/generated/anchor-probe" \
+  --out "$CALIBRATION_RUN/raw/anchor-probe.jsonl"
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py fit-anchor-probe \
+  --calibration-run "$CALIBRATION_RUN" \
+  --runs "$CALIBRATION_RUN/raw/anchor-probe.jsonl" \
+  --out "$CALIBRATION_RUN/anchor-probe-fit.json"
 ~/.venv/bin/python experiments/opcode-gas/opcode_gas.py generate-relations \
   --manifest experiments/opcode-gas/manifests/sp1-calibration-v1.toml \
   --calibration-run "$CALIBRATION_RUN" \
@@ -1037,17 +1155,19 @@ relation; do not change a threshold or scenario after seeing output.
   --calibration-run "$CALIBRATION_RUN" \
   --controlled-manifest experiments/opcode-gas/manifests/sp1-calibration-v1.toml \
   --relations "$CALIBRATION_RUN/opcode-relations.json" \
+  --anchor-probe "$CALIBRATION_RUN/anchor-probe-fit.json" \
   --out "$CALIBRATION_RUN/block-calibration-rows.jsonl"
 ```
 
-Confirm preflight reports exact relation rank 98 and block rank eight before the first
-production-guest SP1 execution. Preserve every raw row if a later gate fails.
+Confirm preflight reports exact relation rank 98, transfer rank two, and fixed/base rank four
+before the first production-guest SP1 execution. Preserve every raw row if a later gate fails.
 
 - [ ] **Step 4: Fit anchors, fixed/base costs, and dynamic holdouts**
 
 ```bash
 ~/.venv/bin/python experiments/opcode-gas/opcode_gas.py fit-block-calibration \
   --relations "$CALIBRATION_RUN/opcode-relations.json" \
+  --anchor-probe "$CALIBRATION_RUN/anchor-probe-fit.json" \
   --runs "$CALIBRATION_RUN/block-calibration-rows.jsonl" \
   --controlled-manifest experiments/opcode-gas/manifests/sp1-calibration-v1.toml \
   --out "$CALIBRATION_RUN/block-calibration.json"
@@ -1074,6 +1194,7 @@ then seal the candidate and bridge:
   --run "$CALIBRATION_RUN" \
   --controlled-manifest experiments/opcode-gas/manifests/sp1-calibration-v1.toml \
   --relations "$CALIBRATION_RUN/opcode-relations.json" \
+  --anchor-probe "$CALIBRATION_RUN/anchor-probe-fit.json" \
   --block-calibration "$CALIBRATION_RUN/block-calibration.json" \
   --controlled-fit "$CALIBRATION_RUN/controlled-fit.json" \
   --provenance "$CALIBRATION_RUN/provenance.json"
@@ -1088,7 +1209,8 @@ Verify `candidate.sha256` before and after bridge construction is identical.
 - [ ] **Step 6: Produce the controlled calibration summary**
 
 Report the calibration ID, implementation revision, artifact hashes, every rejected/unmeasured key,
-all four anchors, all four fixed/base costs, fit MAPE/max APE, holdout max APE, dynamic-key results,
+both transfer parameters, all four reconstructed anchors, all four fixed/base costs, fit MAPE/max
+APE, holdout max APE, dynamic-key results,
 and the candidate digest. Do not claim validation against real proposals yet.
 
 ---

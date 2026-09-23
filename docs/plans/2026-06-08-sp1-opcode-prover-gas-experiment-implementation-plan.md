@@ -1123,7 +1123,8 @@ the Alethia revision and all guest code/artifacts are final.
 
 Add `prepare-calibration` to write `runs/<calibration-id>/experiment.json` from one clean
 `implementation_revision`, dirty-state flag, Alethia/reth revisions, Rust/SP1 SDK versions,
-controlled manifest hash, SP1 ELF/VK hashes, SP1 execution parameters, complete schedule hash, ADD
+controlled manifest hash, SP1 ELF/VK hashes, exact guest-launcher binary hash, SP1 execution
+parameters, complete schedule hash, ADD
 normalization reference, primary formulas and quality gates, the exact out-of-fit checkpoint mapping
 and threshold, the workload-identity schema/version and canonicalization rule, and the exact
 `bridge_key_ids`, bridge model, bridge thresholds, and missing-data rules. It also materializes the

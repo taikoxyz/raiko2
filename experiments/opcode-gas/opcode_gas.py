@@ -5032,6 +5032,7 @@ def _fit_one_opcode_relation(
         repeat_index = row.get("repeat_index")
         lane = row.get("lane")
         generator_max = row.get("generator_max_count")
+        exit_code = row.get("exit_code")
         if (
             isinstance(count, bool)
             or not isinstance(count, int)
@@ -5044,6 +5045,8 @@ def _fit_one_opcode_relation(
             or generator_max <= 0
         ):
             raise ValueError("formal relation row has invalid count/lane identity")
+        if type(exit_code) is not int or exit_code != 0:
+            raise ValueError("formal relation row exit code is invalid")
         generator_bounds.add(generator_max)
         grouped.setdefault((count, str(lane)), []).append(row)
     if len(generator_bounds) != 1:
@@ -5068,8 +5071,6 @@ def _fit_one_opcode_relation(
             for field in ("backend_input_sha256", "public_values", "exit_code"):
                 if len({str(row.get(field)) for row in repeats}) != 1:
                     raise ValueError("formal relation repeat identity differs")
-            if any(row.get("exit_code") != 0 for row in repeats):
-                raise ValueError("formal relation repeat exit code is nonzero")
             actual_maps = [
                 _parse_canonical_int_map(
                     row.get("actual_raw_gas_by_key"), label="actual raw-gas map"
@@ -5484,14 +5485,19 @@ def validate_opcode_relations_artifact(
         "raw_rows_sha256",
         "affine_model",
         "artifact_sha256",
-    } or artifact.get("schema_version") != 1:
+    } or (
+        type(artifact.get("schema_version")) is not int
+        or artifact.get("schema_version") != 1
+    ):
         raise ValueError("opcode relation artifact schema is invalid")
     artifact_provenance = _validate_formal_relation_provenance(
         artifact.get("provenance")
     )
-    if artifact_provenance != expected_provenance:
+    if not _exact_json_equal(artifact_provenance, expected_provenance):
         raise ValueError("opcode relation artifact provenance differs from calibration run")
-    if artifact.get("quality_gates") != FORMAL_RELATION_QUALITY_GATES:
+    if not _exact_json_equal(
+        artifact.get("quality_gates"), FORMAL_RELATION_QUALITY_GATES
+    ):
         raise ValueError("opcode relation artifact quality gates differ from frozen gates")
     raw_rows_sha256 = sha256_bytes(canonical_json(rows))
     if artifact.get("raw_rows_sha256") != raw_rows_sha256:
@@ -5531,11 +5537,15 @@ def validate_opcode_relations_artifact(
         for row in recomputed_results
         if row.get("split") == "dynamic_holdout" and row.get("status") == "accepted"
     ]
-    if artifact.get("self_controls") != recomputed_self_controls:
+    if not _exact_json_equal(
+        artifact.get("self_controls"), recomputed_self_controls
+    ):
         raise ValueError("opcode relation artifact self controls differ from raw rows")
-    if artifact.get("equations") != recomputed_equations:
+    if not _exact_json_equal(artifact.get("equations"), recomputed_equations):
         raise ValueError("opcode relation artifact equations quality evidence differs from raw rows")
-    if artifact.get("dynamic_holdouts") != recomputed_holdouts:
+    if not _exact_json_equal(
+        artifact.get("dynamic_holdouts"), recomputed_holdouts
+    ):
         raise ValueError(
             "opcode relation artifact dynamic holdouts quality evidence differs from raw rows"
         )
@@ -5575,13 +5585,15 @@ def validate_opcode_relations_artifact(
             or row.get("scenario_id") != relation.scenario_id
             or row.get("status") != "passed"
             or row.get("exact_zero") is not True
-            or row.get("checked_counts") != expected_counts
-            or dict(checkpoint)
-            != {
-                "count": bound,
-                "observed_delta_p": "0",
-                "status": "passed_exact_zero",
-            }
+            or not _exact_json_equal(row.get("checked_counts"), expected_counts)
+            or not _exact_json_equal(
+                dict(checkpoint),
+                {
+                    "count": bound,
+                    "observed_delta_p": "0",
+                    "status": "passed_exact_zero",
+                },
+            )
         ):
             raise ValueError("opcode relation artifact self controls evidence is invalid")
     equation_relations = [
@@ -5650,7 +5662,7 @@ def validate_opcode_relations_artifact(
                 _parse_fraction_text(value)
     except ValueError as exc:
         raise ValueError(f"opcode relation artifact basis is invalid: {exc}") from exc
-    if dict(actual_model) != expected_model:
+    if not _exact_json_equal(dict(actual_model), expected_model):
         raise ValueError("opcode relation artifact basis differs from exact derivation")
 
 
@@ -6187,13 +6199,16 @@ def _candidate_source_measurements(
         relation_artifact, label="opcode relation"
     )
     if (
-        relation_artifact.get("schema_version") != 1
+        type(relation_artifact.get("schema_version")) is not int
+        or relation_artifact.get("schema_version") != 1
         or relation_artifact.get("purpose") != FORMAL_RELATION_PURPOSE
         or relation_artifact.get("signal_kind") != FORMAL_RELATION_SIGNAL_KIND
         or relation_artifact.get("status") != "accepted"
     ):
         raise ValueError("opcode relation artifact is not accepted formal evidence")
-    if relation_artifact.get("quality_gates") != FORMAL_RELATION_QUALITY_GATES:
+    if not _exact_json_equal(
+        relation_artifact.get("quality_gates"), FORMAL_RELATION_QUALITY_GATES
+    ):
         raise ValueError("opcode relation gates differ from the frozen contract")
     affine_model = relation_artifact.get("affine_model")
     if (
@@ -6204,7 +6219,8 @@ def _candidate_source_measurements(
 
     _validate_content_addressed_artifact(block_artifact, label="block calibration")
     if (
-        block_artifact.get("schema_version") != 1
+        type(block_artifact.get("schema_version")) is not int
+        or block_artifact.get("schema_version") != 1
         or block_artifact.get("purpose") != "block_calibration"
         or block_artifact.get("status") != "accepted"
         or block_artifact.get("relation_artifact_sha256") != relation_sha
@@ -6212,12 +6228,16 @@ def _candidate_source_measurements(
         != relation_artifact.get("raw_rows_sha256")
     ):
         raise ValueError("block calibration artifact is not bound to the accepted relation")
-    if block_artifact.get("parameter_order") != BLOCK_CALIBRATION_PARAMETER_ORDER:
+    if not _exact_json_equal(
+        block_artifact.get("parameter_order"), BLOCK_CALIBRATION_PARAMETER_ORDER
+    ):
         raise ValueError("block calibration parameter order differs from the frozen contract")
-    if block_artifact.get("formulas") != BLOCK_CALIBRATION_FORMULAS:
+    if not _exact_json_equal(
+        block_artifact.get("formulas"), BLOCK_CALIBRATION_FORMULAS
+    ):
         raise ValueError("block calibration formula differs from the frozen contract")
     gates = block_artifact.get("gates")
-    if gates != BLOCK_CALIBRATION_GATES:
+    if not _exact_json_equal(gates, BLOCK_CALIBRATION_GATES):
         raise ValueError("block calibration gates differ from the frozen contract")
     if block_artifact.get("exact_fit_rank") != 8:
         raise ValueError("block calibration rank evidence is not exact rank eight")
@@ -6265,7 +6285,13 @@ def _candidate_source_measurements(
         raise ValueError("block calibration dynamic holdout evidence failed")
 
     rows = controlled_fit.get("case_results")
-    if controlled_fit.get("schema_version") != 1 or not isinstance(rows, list):
+    if (
+        type(controlled_fit.get("schema_version")) is not int
+        or controlled_fit.get("schema_version") != 1
+        or type(controlled_fit.get("generator_max_count")) is not int
+        or controlled_fit.get("generator_max_count") not in CONTROLLED_GENERATOR_ROUNDS
+        or not isinstance(rows, list)
+    ):
         raise ValueError("controlled fit artifact is invalid")
     remaining_case_ids = _remaining_controlled_case_ids(manifest)
     pure_case_ids = {
@@ -7176,7 +7202,9 @@ def verify_candidate_directory(run: pathlib.Path) -> dict[str, Any]:
     if recorded != actual:
         raise ValueError("candidate root digest does not match canonical bytes")
     if (
-        manifest.get("q_formula") != Q_FORMULA
+        type(manifest.get("schema_version")) is not int
+        or manifest.get("schema_version") != 1
+        or manifest.get("q_formula") != Q_FORMULA
         or manifest.get("status") != "sealed_controlled_candidate"
         or manifest.get("review_only") is not True
         or manifest.get("production_write") is not False
@@ -7344,10 +7372,16 @@ def verify_candidate_directory(run: pathlib.Path) -> dict[str, Any]:
     ):
         raise ValueError("candidate cost table contains a non-positive or non-canonical value")
     rows = observations.get("rows")
-    if observations.get("schema_version") != 1 or not isinstance(rows, list) or any(
-        not isinstance(row, Mapping)
-        or row.get("purpose") in {"final_validation", "integration_smoke", "proposal"}
-        for row in rows
+    if (
+        type(observations.get("schema_version")) is not int
+        or observations.get("schema_version") != 1
+        or not isinstance(rows, list)
+        or any(
+            not isinstance(row, Mapping)
+            or row.get("purpose")
+            in {"final_validation", "integration_smoke", "proposal"}
+            for row in rows
+        )
     ):
         raise ValueError("candidate primary observations are invalid")
     frozen_manifest = run / "controlled-manifest.toml"
@@ -8775,7 +8809,7 @@ def cmd_fit_relations(args: argparse.Namespace) -> None:
     manifest, frozen_identity = verify_frozen_controlled_manifest(
         calibration_run, controlled_manifest
     )
-    if execution_identity != frozen_identity:
+    if not _exact_json_equal(execution_identity, frozen_identity):
         raise ValueError("formal relation calibration identity changed during validation")
     expected_provenance = {
         "calibration_id": calibration_run.name,
@@ -9177,7 +9211,7 @@ def cmd_run_block_calibration(args: argparse.Namespace) -> None:
         calibration_run,
         _resolve_repo_path(args.controlled_manifest, field_name="controlled_manifest"),
     )
-    if execution_identity != frozen_identity:
+    if not _exact_json_equal(execution_identity, frozen_identity):
         raise ValueError("block calibration identity changed during validation")
     relations_path = _canonical_run_artifact(
         calibration_run,
@@ -9714,7 +9748,7 @@ def cmd_fit_block_calibration(args: argparse.Namespace) -> None:
         calibration_run,
         _resolve_repo_path(args.controlled_manifest, field_name="controlled_manifest"),
     )
-    if execution_identity != frozen_identity:
+    if not _exact_json_equal(execution_identity, frozen_identity):
         raise ValueError("block calibration identity changed during validation")
     relations_path = _canonical_run_artifact(
         calibration_run,
@@ -10492,9 +10526,12 @@ def _load_controlled_bridge_inputs(
         "generator_max_count",
         "raw_runs",
         "raw_runs_sha256",
-    } or payload.get("schema_version") != 1 or payload.get(
-        "generator_max_count"
-    ) != generator_max_count:
+    } or (
+        type(payload.get("schema_version")) is not int
+        or payload.get("schema_version") != 1
+        or type(payload.get("generator_max_count")) is not int
+        or payload.get("generator_max_count") != generator_max_count
+    ):
         raise ValueError("controlled bridge input sidecar is invalid")
     expected_name = f"controlled-runs.generator-max-{generator_max_count}.jsonl"
     if payload.get("raw_runs") != expected_name:
@@ -10514,9 +10551,18 @@ def validate_persisted_controlled_decisions(
     manifest: Manifest,
 ) -> dict[int, Mapping[str, Any]]:
     rounds = decisions.get("rounds")
-    if decisions.get("schema_version") != 1 or not isinstance(rounds, list):
+    if (
+        type(decisions.get("schema_version")) is not int
+        or decisions.get("schema_version") != 1
+        or not isinstance(rounds, list)
+        or any(
+            not isinstance(record, Mapping)
+            or type(record.get("generator_max_count")) is not int
+            for record in rounds
+        )
+    ):
         raise ValueError("invalid persisted controlled decisions")
-    observed = [int(record.get("generator_max_count", -1)) for record in rounds]
+    observed = [record["generator_max_count"] for record in rounds]
     if observed != list(CONTROLLED_GENERATOR_ROUNDS[: len(observed)]):
         raise ValueError("persisted controlled rounds must be a unique contiguous prefix")
     validated: dict[int, Mapping[str, Any]] = {}
@@ -10542,7 +10588,9 @@ def validate_persisted_controlled_decisions(
         ):
             raise ValueError("persisted controlled round artifact changed")
         fit_payload = json.loads(fit_path.read_text())
-        if fit_payload.get("generator_max_count") != generator_max_count:
+        if not _exact_json_equal(
+            fit_payload.get("generator_max_count"), generator_max_count
+        ):
             raise ValueError("persisted controlled fit footprint changed")
         replayed_fit = {
             "schema_version": 1,
@@ -10621,7 +10669,7 @@ def load_terminal_controlled_artifacts(
     ):
         raise ValueError("canonical controlled artifacts do not match terminal decision")
     fit = json.loads(fit_path.read_text())
-    if fit.get("generator_max_count") != terminal_count:
+    if not _exact_json_equal(fit.get("generator_max_count"), terminal_count):
         raise ValueError("canonical controlled artifact footprint is not terminal")
     bridge_inputs = _load_controlled_bridge_inputs(calibration_run, terminal_count)
     return {

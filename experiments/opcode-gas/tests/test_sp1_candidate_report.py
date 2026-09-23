@@ -3209,6 +3209,53 @@ class CandidateConstructionTests(unittest.TestCase):
                     run, decisions, manifest
                 )
 
+    def test_controlled_source_metadata_requires_exact_integer_types(self):
+        manifest = controlled_manifest()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            run, _identity = persist_completed_controlled_run(
+                root,
+                manifest,
+                [
+                    accepted_case(
+                        "identity", "precompile:0x04", "raw_gas_slope", 7200, 18
+                    )
+                ],
+                {},
+            )
+            bridge_inputs_path = run / "controlled-bridge-inputs.json"
+            bridge_inputs = opcode_gas.json.loads(bridge_inputs_path.read_text())
+            decisions = opcode_gas.json.loads(
+                (run / "controlled-decisions.json").read_text()
+            )
+            for field, value in (
+                ("schema_version", True),
+                ("generator_max_count", True),
+            ):
+                aliased = copy.deepcopy(bridge_inputs)
+                aliased[field] = value
+                bridge_inputs_path.write_bytes(opcode_gas.canonical_json(aliased))
+                with self.subTest(sidecar=field), self.assertRaisesRegex(
+                    ValueError, "sidecar"
+                ):
+                    opcode_gas._load_controlled_bridge_inputs(run, 8)
+            bridge_inputs_path.write_bytes(opcode_gas.canonical_json(bridge_inputs))
+
+            aliased = copy.deepcopy(decisions)
+            aliased["schema_version"] = True
+            with self.assertRaisesRegex(ValueError, "persisted controlled decisions"):
+                opcode_gas.validate_persisted_controlled_decisions(
+                    run, aliased, manifest
+                )
+            aliased = copy.deepcopy(decisions)
+            aliased["rounds"][0]["generator_max_count"] = True
+            with self.assertRaisesRegex(
+                ValueError, "invalid persisted|generator|contiguous prefix"
+            ):
+                opcode_gas.validate_persisted_controlled_decisions(
+                    run, aliased, manifest
+                )
+
     def test_complete_component_ledger_distinguishes_evm_and_host_actions(self):
         manifest = controlled_manifest()
         rows = [
@@ -3537,6 +3584,101 @@ class CandidateConstructionTests(unittest.TestCase):
                     [],
                     {},
                 )
+
+    def test_candidate_source_replay_rejects_typed_relation_artifact_schema(self):
+        manifest = formal_relation_manifest()
+        relation_rows, relation, block_rows, _block = (
+            production_candidate_source_evidence(manifest)
+        )
+        aliased_relation = copy.deepcopy(relation)
+        aliased_relation["schema_version"] = True
+        aliased_relation["artifact_sha256"] = opcode_gas.sha256_bytes(
+            opcode_gas.canonical_json(
+                {
+                    key: value
+                    for key, value in aliased_relation.items()
+                    if key != "artifact_sha256"
+                }
+            )
+        )
+        rebound_rows = copy.deepcopy(block_rows)
+        for row in rebound_rows:
+            row["relation_artifact_sha256"] = aliased_relation[
+                "artifact_sha256"
+            ]
+        rebound_block = opcode_gas.fit_block_calibration_artifact(
+            manifest,
+            opcode_gas._affine_model_from_validated_artifact(
+                manifest, aliased_relation
+            ),
+            aliased_relation,
+            rebound_rows,
+        )
+        with self.assertRaisesRegex(ValueError, "schema"):
+            opcode_gas.replay_candidate_source_evidence(
+                manifest,
+                aliased_relation,
+                relation_rows,
+                rebound_block,
+                rebound_rows,
+                formal_relation_provenance(relation_rows),
+            )
+
+    def test_candidate_source_replay_rejects_boolean_relation_exit_code(self):
+        manifest = formal_relation_manifest()
+        relation_rows, relation, block_rows, _block = (
+            production_candidate_source_evidence(manifest)
+        )
+        changed_identity = (
+            relation_rows[0]["relation_id"],
+            relation_rows[0]["diagnostic_count"],
+            relation_rows[0]["lane"],
+        )
+        aliased_rows = copy.deepcopy(relation_rows)
+        for row in aliased_rows:
+            identity = (
+                row["relation_id"],
+                row["diagnostic_count"],
+                row["lane"],
+            )
+            if identity == changed_identity:
+                row["exit_code"] = False
+        aliased_relation = copy.deepcopy(relation)
+        aliased_relation["raw_rows_sha256"] = opcode_gas.sha256_bytes(
+            opcode_gas.canonical_json(aliased_rows)
+        )
+        aliased_relation["artifact_sha256"] = opcode_gas.sha256_bytes(
+            opcode_gas.canonical_json(
+                {
+                    key: value
+                    for key, value in aliased_relation.items()
+                    if key != "artifact_sha256"
+                }
+            )
+        )
+        rebound_rows = copy.deepcopy(block_rows)
+        for row in rebound_rows:
+            row["relation_artifact_sha256"] = aliased_relation[
+                "artifact_sha256"
+            ]
+            row["relation_raw_rows_sha256"] = aliased_relation["raw_rows_sha256"]
+        rebound_block = opcode_gas.fit_block_calibration_artifact(
+            manifest,
+            opcode_gas._affine_model_from_validated_artifact(
+                manifest, aliased_relation
+            ),
+            aliased_relation,
+            rebound_rows,
+        )
+        with self.assertRaisesRegex(ValueError, "exit code|exact integer"):
+            opcode_gas.replay_candidate_source_evidence(
+                manifest,
+                aliased_relation,
+                aliased_rows,
+                rebound_block,
+                rebound_rows,
+                formal_relation_provenance(aliased_rows),
+            )
 
     def test_direct_seal_rejects_self_hashed_malformed_sources(self):
         manifest = formal_relation_manifest()

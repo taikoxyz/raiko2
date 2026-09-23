@@ -7112,15 +7112,7 @@ def seal_bridge_directory(
     bridge_dir = run / "bridge"
     frozen_manifest_path = bridge_dir / "bridge-manifest.json"
     frozen_manifest = json.loads(frozen_manifest_path.read_text())
-    expected_contract = {
-        "schema_version": 1,
-        "implementation_revision": revision,
-        "bridge_key_ids": list(manifest.bridge_key_ids),
-        "model": manifest.bridge_model,
-        "controlled_ape_max": "0.10",
-        "proposal_ape_max": "0.10",
-        "missing_data": "insufficient_data_is_sealable_and_non_gating",
-    }
+    expected_contract = _bridge_manifest_contract(manifest, revision)
     if frozen_manifest != expected_contract:
         raise ValueError("premeasurement bridge manifest does not match experiment contract")
     controlled_bridge = build_controlled_bridge(manifest, controlled_samples)
@@ -7441,6 +7433,7 @@ def verify_bridge_directory(run: pathlib.Path) -> dict[str, Any]:
     components = root.get("components")
     if not isinstance(components, Mapping) or set(components) != set(expected_paths):
         raise ValueError("bridge root component set differs from frozen V1 contract")
+    payloads = {}
     for name, path in expected_paths.items():
         try:
             payload = json.loads(path.read_text())
@@ -7448,7 +7441,79 @@ def verify_bridge_directory(run: pathlib.Path) -> dict[str, Any]:
             raise ValueError(f"bridge component is unreadable: {name}") from exc
         if sha256_bytes(canonical_json(payload)) != components[name]:
             raise ValueError(f"bridge component digest mismatch: {name}")
+        payloads[name] = payload
+
+    manifest, identity = verify_frozen_controlled_manifest(
+        run, run / "controlled-manifest.toml"
+    )
+    artifacts = load_terminal_controlled_artifacts(run, identity, manifest)
+    candidate_sha256 = verify_candidate_directory(run)["candidate_sha256"]
+    expected_samples = _replay_bridge_sample_artifact(
+        run, manifest, artifacts, candidate_sha256
+    )
+    if not _exact_json_equal(
+        payloads["controlled-cycle-cost-samples.json"], expected_samples
+    ):
+        raise ValueError("controlled bridge samples differ from exact source replay")
+    expected_controlled = build_controlled_bridge(
+        manifest, expected_samples["samples"]
+    )
+    if not _exact_json_equal(
+        payloads["controlled-bridge.json"], expected_controlled
+    ):
+        raise ValueError("controlled bridge differs from exact sample replay")
+    revision = artifacts["provenance_declaration"]["implementation_revision"]
+    expected_manifest = _bridge_manifest_contract(manifest, revision)
+    if not _exact_json_equal(payloads["bridge-manifest.json"], expected_manifest):
+        raise ValueError("premeasurement bridge manifest differs from frozen contract")
+    expected_root = {
+        "schema_version": 1,
+        "implementation_revision": revision,
+        "components": {
+            name: sha256_bytes(canonical_json(payloads[name]))
+            for name in expected_paths
+        },
+        "component_schemas": {name: 1 for name in expected_paths},
+        "status": expected_controlled["status"],
+        "calibration_id": expected_samples["calibration_id"],
+        "candidate_sha256": candidate_sha256,
+    }
+    if not _exact_json_equal(root, expected_root):
+        raise ValueError("bridge root differs from exact source replay")
     return {"bridge_sha256": recorded, "bridge_root": root}
+
+
+def _bridge_manifest_contract(
+    manifest: Manifest, implementation_revision: str
+) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "implementation_revision": implementation_revision,
+        "bridge_key_ids": list(manifest.bridge_key_ids),
+        "model": manifest.bridge_model,
+        "controlled_ape_max": "0.10",
+        "proposal_ape_max": "0.10",
+        "missing_data": "insufficient_data_is_sealable_and_non_gating",
+    }
+
+
+def _replay_bridge_sample_artifact(
+    run: pathlib.Path,
+    manifest: Manifest,
+    artifacts: Mapping[str, Any],
+    candidate_sha256: str,
+) -> dict[str, Any]:
+    relation_rows = list(iter_jsonl(run / "raw" / "formal-relations.jsonl"))
+    block_rows = list(iter_jsonl(run / "block-calibration-rows.jsonl"))
+    block_artifact = json.loads((run / "block-calibration.json").read_text())
+    return _controlled_sample_artifact(
+        manifest,
+        artifacts,
+        candidate_sha256,
+        block_artifact,
+        relation_rows,
+        block_rows,
+    )
 
 
 def _read_candidate_pool(paths: Iterable[pathlib.Path]) -> list[dict[str, Any]]:
@@ -8204,7 +8269,7 @@ def prepare_validation(output_root: pathlib.Path, run: pathlib.Path, corpus_path
     if bridge_root.get("implementation_revision") != revision:
         raise ValueError("bridge provenance does not match implementation_revision")
     candidate_sha = verify_candidate_directory(run)["candidate_sha256"]
-    bridge_sha = _verify_seal(run / "bridge" / "bridge.sha256", bridge_root, label="bridge")
+    bridge_sha = verify_bridge_directory(run)["bridge_sha256"]
     corpus = json.loads(corpus_path.read_text())
     _validate_frozen_corpus(corpus, revision)
     validate_manifest_for_publication(
@@ -10893,16 +10958,8 @@ def cmd_build_sp1_bridge(args: argparse.Namespace) -> None:
     )
     payload = json.loads(samples_path.read_text())
     candidate = verify_candidate_directory(run)
-    relation_rows = list(iter_jsonl(run / "raw" / "formal-relations.jsonl"))
-    block_rows = list(iter_jsonl(run / "block-calibration-rows.jsonl"))
-    block_artifact = json.loads((run / "block-calibration.json").read_text())
-    expected = _controlled_sample_artifact(
-        manifest,
-        artifacts,
-        candidate["candidate_sha256"],
-        block_artifact,
-        relation_rows,
-        block_rows,
+    expected = _replay_bridge_sample_artifact(
+        run, manifest, artifacts, candidate["candidate_sha256"]
     )
     if payload != expected:
         raise ValueError("controlled samples do not match sealed candidate/run identity")

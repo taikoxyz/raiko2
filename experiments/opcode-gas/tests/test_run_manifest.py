@@ -172,9 +172,18 @@ class RunManifestTests(unittest.TestCase):
                             opcode_gas.canonical_json(candidate)
                         )
                     },
-                ) as verify_candidate:
+                ) as verify_candidate, mock.patch.object(
+                    opcode_gas,
+                    "verify_bridge_directory",
+                    return_value={
+                        "bridge_sha256": opcode_gas.sha256_bytes(
+                            opcode_gas.canonical_json(bridge)
+                        )
+                    },
+                ) as verify_bridge:
                     validation = opcode_gas.prepare_validation(root, run, corpus_path)
                 verify_candidate.assert_called_once_with(run)
+                verify_bridge.assert_called_once_with(run)
             self.assertEqual(validation["implementation_revision"], revision)
             self.assertTrue((root / "validations" / validation["validation_id"] / "candidate-ref.json").exists())
 
@@ -199,6 +208,77 @@ class RunManifestTests(unittest.TestCase):
             with mock.patch.object(opcode_gas, "git_head", return_value=revision), mock.patch.object(opcode_gas, "git_worktree_status", return_value=""):
                 with self.assertRaisesRegex(ValueError, "candidate provenance"):
                     opcode_gas.prepare_validation(root, run, corpus_path)
+
+    def test_prepare_validation_rejects_tampered_bridge_component_before_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            revision = "a" * 40
+            run = root / "runs" / "run"
+            candidate_dir = run / "candidate"
+            bridge_dir = run / "bridge"
+            samples_dir = run / "samples"
+            candidate_dir.mkdir(parents=True)
+            bridge_dir.mkdir()
+            samples_dir.mkdir()
+            candidate = {"implementation_revision": revision}
+            (candidate_dir / "candidate-manifest.json").write_text(
+                json.dumps(candidate)
+            )
+            (run / "experiment.json").write_text(
+                json.dumps({"implementation_revision": revision})
+            )
+            bridge_components = {
+                "bridge-manifest.json": {"schema_version": 1},
+                "controlled-cycle-cost-samples.json": {
+                    "schema_version": 1,
+                    "samples": {},
+                },
+                "controlled-bridge.json": {
+                    "schema_version": 1,
+                    "status": "insufficient_data",
+                },
+            }
+            component_paths = {
+                "bridge-manifest.json": bridge_dir / "bridge-manifest.json",
+                "controlled-cycle-cost-samples.json": samples_dir
+                / "controlled-cycle-cost-samples.json",
+                "controlled-bridge.json": bridge_dir / "controlled-bridge.json",
+            }
+            for name, payload in bridge_components.items():
+                component_paths[name].write_bytes(opcode_gas.canonical_json(payload))
+            bridge_root = {
+                "schema_version": 1,
+                "implementation_revision": revision,
+                "components": {
+                    name: opcode_gas.sha256_bytes(opcode_gas.canonical_json(payload))
+                    for name, payload in bridge_components.items()
+                },
+                "component_schemas": {name: 1 for name in bridge_components},
+                "status": "insufficient_data",
+            }
+            (bridge_dir / "bridge-root.json").write_bytes(
+                opcode_gas.canonical_json(bridge_root)
+            )
+            (bridge_dir / "bridge.sha256").write_text(
+                opcode_gas.sha256_bytes(opcode_gas.canonical_json(bridge_root)) + "\n"
+            )
+            component_paths["controlled-bridge.json"].write_text(
+                '{"schema_version":1,"status":"stable_controlled"}\n'
+            )
+            with mock.patch.object(opcode_gas, "REPO_ROOT", root):
+                corpus_path = write_frozen_corpus(root, revision)
+                with mock.patch.object(
+                    opcode_gas, "git_head", return_value=revision
+                ), mock.patch.object(
+                    opcode_gas, "git_worktree_status", return_value=""
+                ), mock.patch.object(
+                    opcode_gas,
+                    "verify_candidate_directory",
+                    return_value={"candidate_sha256": "b" * 64},
+                ):
+                    with self.assertRaisesRegex(ValueError, "component digest"):
+                        opcode_gas.prepare_validation(root, run, corpus_path)
+            self.assertFalse((root / "validations").exists())
 
     def test_parser_exposes_freeze_and_sealing_commands(self):
         parser = opcode_gas.build_parser()

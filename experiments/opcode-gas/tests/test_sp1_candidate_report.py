@@ -2320,6 +2320,62 @@ class CandidateConstructionTests(unittest.TestCase):
                         )
                     )
                 samples_path.write_bytes(opcode_gas.canonical_json(sample_artifact))
+                original_controlled = opcode_gas.json.loads(
+                    (bridge_dir / "controlled-bridge.json").read_text()
+                )
+                original_root = opcode_gas.json.loads(
+                    (bridge_dir / "bridge-root.json").read_text()
+                )
+                forged_samples = copy.deepcopy(sample_artifact)
+                changed_key = next(
+                    key
+                    for key, sample in forged_samples["samples"].items()
+                    if sample.get("status") == "available"
+                )
+                forged_samples["samples"][changed_key]["prover_gas"] = "999999"
+                forged_samples.pop("sha256")
+                forged_samples["sha256"] = opcode_gas.sha256_bytes(
+                    opcode_gas.canonical_json(forged_samples)
+                )
+                forged_controlled = opcode_gas.build_controlled_bridge(
+                    manifest, forged_samples["samples"]
+                )
+                forged_root = copy.deepcopy(original_root)
+                forged_root["status"] = forged_controlled["status"]
+                forged_root["components"][
+                    "controlled-cycle-cost-samples.json"
+                ] = opcode_gas.sha256_bytes(
+                    opcode_gas.canonical_json(forged_samples)
+                )
+                forged_root["components"][
+                    "controlled-bridge.json"
+                ] = opcode_gas.sha256_bytes(
+                    opcode_gas.canonical_json(forged_controlled)
+                )
+                samples_path.write_bytes(opcode_gas.canonical_json(forged_samples))
+                (bridge_dir / "controlled-bridge.json").write_bytes(
+                    opcode_gas.canonical_json(forged_controlled)
+                )
+                (bridge_dir / "bridge-root.json").write_bytes(
+                    opcode_gas.canonical_json(forged_root)
+                )
+                (bridge_dir / "bridge.sha256").write_text(
+                    opcode_gas.sha256_bytes(opcode_gas.canonical_json(forged_root))
+                    + "\n"
+                )
+                with self.assertRaisesRegex(ValueError, "exact source replay"):
+                    opcode_gas.verify_bridge_directory(run)
+                samples_path.write_bytes(opcode_gas.canonical_json(sample_artifact))
+                (bridge_dir / "controlled-bridge.json").write_bytes(
+                    opcode_gas.canonical_json(original_controlled)
+                )
+                (bridge_dir / "bridge-root.json").write_bytes(
+                    opcode_gas.canonical_json(original_root)
+                )
+                (bridge_dir / "bridge.sha256").write_text(
+                    opcode_gas.sha256_bytes(opcode_gas.canonical_json(original_root))
+                    + "\n"
+                )
             result = opcode_gas.json.loads(
                 (bridge_dir / "controlled-bridge.json").read_text()
             )
@@ -4085,7 +4141,7 @@ class IdentityAndValidationTests(unittest.TestCase):
             self.assertEqual(sealed["controlled_bridge"]["status"], "insufficient_data")
             self.assertTrue((run / "bridge" / "bridge.sha256").is_file())
             self.assertEqual(
-                opcode_gas.verify_bridge_directory(run)["bridge_sha256"],
+                (run / "bridge" / "bridge.sha256").read_text().strip(),
                 sealed["bridge_sha256"],
             )
             candidate_refs = sealed["bridge_root"].get("candidate_sha256")

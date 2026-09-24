@@ -189,6 +189,457 @@ class DynamicOpcodeFitEvidence:
     predictions: Mapping[str, Mapping[str, Decimal | str]]
 
 
+@dataclass(frozen=True)
+class SharedMemoryFitEvidence:
+    status: str
+    parameter_order: tuple[str, ...]
+    exact_rank: int
+    parameter_count: int
+    observation_count: int
+    fit_count: int
+    holdout_count: int
+    body_coefficients: Mapping[str, Decimal]
+    production_coefficients: Mapping[str, Decimal]
+    fit_body_mape: Decimal
+    fit_body_max_ape: Decimal
+    holdout_body_max_ape: Decimal
+    fit_production_mape: Decimal
+    fit_production_max_ape: Decimal
+    holdout_production_max_ape: Decimal
+    quality_failures: tuple[str, ...]
+    exact_fit_design_matrix: tuple[tuple[Fraction, ...], ...]
+    solver_column_scales: tuple[Decimal, ...]
+    solver_residual: Decimal
+    predictions: Mapping[str, Mapping[str, Decimal | str]]
+
+
+@dataclass(frozen=True)
+class StructuredDynamicOpcodeFitResult:
+    status: str
+    shared_memory_model: SharedMemoryFitEvidence
+    opcode_models: Mapping[str, DynamicOpcodeFitEvidence]
+    aggregate_exact_rank: int
+    aggregate_parameter_count: int
+
+
+_STRUCTURED_DYNAMIC_KEYS = (
+    "opcode:0x0a",
+    "opcode:0x20",
+    "opcode:0x51",
+    "opcode:0x52",
+    "opcode:0x53",
+    "opcode:0x5e",
+)
+_MEMORY_OPCODE_KEYS = ("opcode:0x51", "opcode:0x52", "opcode:0x53")
+_MEMORY_FEATURE_NAMES = (
+    "memory_growth_event",
+    "memory_evm_gas_delta",
+    "memory_4k_page_crossings",
+)
+_SHARED_MEMORY_PARAMETER_ORDER = (
+    "opcode:0x51:constant",
+    "opcode:0x52:constant",
+    "opcode:0x53:constant",
+    *_MEMORY_FEATURE_NAMES,
+)
+_STRUCTURED_FEATURE_NAMES = MappingProxyType(
+    {
+        "opcode:0x0a": (
+            "constant",
+            "exponent_bytes",
+            "exponent_bytes_squared",
+        ),
+        "opcode:0x20": ("constant", "input_words", *_MEMORY_FEATURE_NAMES),
+        "opcode:0x51": ("constant", *_MEMORY_FEATURE_NAMES),
+        "opcode:0x52": ("constant", *_MEMORY_FEATURE_NAMES),
+        "opcode:0x53": ("constant", *_MEMORY_FEATURE_NAMES),
+        "opcode:0x5e": ("constant", "copy_words", *_MEMORY_FEATURE_NAMES),
+    }
+)
+
+
+def _dynamic_quality_failures(
+    fit_mape: Decimal, fit_max_ape: Decimal, holdout_max_ape: Decimal
+) -> tuple[str, ...]:
+    return tuple(
+        name
+        for name, failed in (
+            ("fit_mape", fit_mape > Decimal("0.05")),
+            ("fit_max_ape", fit_max_ape > Decimal("0.10")),
+            ("holdout_max_ape", holdout_max_ape > Decimal("0.10")),
+        )
+        if failed
+    )
+
+
+def _dynamic_prediction_evidence(
+    observations: Sequence[DynamicOpcodeObservation],
+    predicted_body_costs: Sequence[Decimal],
+    *,
+    body_scale: Decimal,
+    common_overhead: Decimal,
+    prediction_ids: Sequence[str],
+    extras: Sequence[Mapping[str, Decimal]] | None = None,
+) -> tuple[
+    Mapping[str, Mapping[str, Decimal | str]],
+    Decimal,
+    Decimal,
+    Decimal,
+    Decimal,
+    Decimal,
+    Decimal,
+]:
+    if not (
+        len(observations) == len(predicted_body_costs) == len(prediction_ids)
+    ):
+        raise ValueError("dynamic prediction inputs differ in length")
+    extra_rows = extras or tuple({} for _ in observations)
+    if len(extra_rows) != len(observations):
+        raise ValueError("dynamic prediction extras differ in length")
+    predictions: dict[str, Mapping[str, Decimal | str]] = {}
+    fit_body_apes = []
+    holdout_body_apes = []
+    fit_production_apes = []
+    holdout_production_apes = []
+    for observation, predicted_body, prediction_id, extra in zip(
+        observations, predicted_body_costs, prediction_ids, extra_rows
+    ):
+        actual_body = observation.target_body_cost
+        body_ape = abs(predicted_body - actual_body) / actual_body
+        actual_production = actual_body * body_scale + common_overhead
+        predicted_production = predicted_body * body_scale + common_overhead
+        production_ape = (
+            abs(predicted_production - actual_production) / actual_production
+        )
+        values = (
+            predicted_body,
+            body_ape,
+            actual_production,
+            predicted_production,
+            production_ape,
+            *extra.values(),
+        )
+        if any(not value.is_finite() for value in values):
+            raise ValueError(
+                "dynamic prediction produced a nonfinite value: "
+                f"{observation.dynamic_key}/{observation.scenario_id}"
+            )
+        predictions[prediction_id] = MappingProxyType(
+            {
+                "model_split": observation.model_split,
+                "actual_body_cost": actual_body,
+                "predicted_body_cost": predicted_body,
+                "body_ape": body_ape,
+                "actual_production_cost": actual_production,
+                "predicted_production_cost": predicted_production,
+                "production_ape": production_ape,
+                **extra,
+            }
+        )
+        if observation.model_split == "fit":
+            fit_body_apes.append(body_ape)
+            fit_production_apes.append(production_ape)
+        else:
+            holdout_body_apes.append(body_ape)
+            holdout_production_apes.append(production_ape)
+    if not fit_body_apes or not holdout_body_apes:
+        raise ValueError("dynamic model requires fit and holdout observations")
+    return (
+        MappingProxyType(predictions),
+        sum(fit_body_apes, Decimal(0)) / Decimal(len(fit_body_apes)),
+        max(fit_body_apes),
+        max(holdout_body_apes),
+        sum(fit_production_apes, Decimal(0))
+        / Decimal(len(fit_production_apes)),
+        max(fit_production_apes),
+        max(holdout_production_apes),
+    )
+
+
+def fit_structured_dynamic_opcode_models(
+    observations: Sequence[DynamicOpcodeObservation],
+    *,
+    body_scale: Decimal,
+    common_overhead: Decimal,
+) -> StructuredDynamicOpcodeFitResult:
+    """Fit EXP plus a shared memory family used by KECCAK256 and MCOPY."""
+    if (
+        not isinstance(body_scale, Decimal)
+        or not body_scale.is_finite()
+        or body_scale <= 0
+    ):
+        raise ValueError("body_scale must be a positive finite Decimal")
+    if (
+        not isinstance(common_overhead, Decimal)
+        or not common_overhead.is_finite()
+        or common_overhead < 0
+    ):
+        raise ValueError("common_overhead must be a nonnegative finite Decimal")
+    if any(not isinstance(row, DynamicOpcodeObservation) for row in observations):
+        raise ValueError("dynamic observation has an invalid type")
+    observed_keys = {row.dynamic_key for row in observations}
+    if observed_keys != set(_STRUCTURED_DYNAMIC_KEYS):
+        raise ValueError("structured dynamic keys differ from the frozen model")
+    for key in _STRUCTURED_DYNAMIC_KEYS:
+        key_rows = [row for row in observations if row.dynamic_key == key]
+        _validate_unique((row.scenario_id for row in key_rows), "dynamic scenario ID")
+        if not any(row.model_split == "fit" for row in key_rows) or not any(
+            row.model_split == "holdout" for row in key_rows
+        ):
+            raise ValueError(f"structured dynamic key {key} requires fit and holdout rows")
+        for row in key_rows:
+            if row.model_split not in {"fit", "holdout"}:
+                raise ValueError("dynamic model_split must be fit or holdout")
+            if set(row.features) != set(_STRUCTURED_FEATURE_NAMES[key]):
+                raise ValueError(
+                    f"structured dynamic feature set differs for {key}/{row.scenario_id}"
+                )
+            if any(not isinstance(value, Fraction) for value in row.features.values()):
+                raise ValueError("dynamic feature values must be Fractions")
+            if row.features["constant"] != Fraction(1):
+                raise ValueError("dynamic constant feature must be Fraction(1)")
+            if (
+                not isinstance(row.target_body_cost, Decimal)
+                or not row.target_body_cost.is_finite()
+                or row.target_body_cost <= 0
+            ):
+                raise ValueError("dynamic target body cost must be positive and finite")
+
+    with localcontext(_CALIBRATION_DECIMAL_CONTEXT):
+        memory_rows = tuple(
+            row for row in observations if row.dynamic_key in _MEMORY_OPCODE_KEYS
+        )
+        memory_fit_rows = tuple(
+            row for row in memory_rows if row.model_split == "fit"
+        )
+        memory_matrix = []
+        for row in memory_fit_rows:
+            memory_matrix.append(
+                [
+                    Fraction(int(row.dynamic_key == key))
+                    for key in _MEMORY_OPCODE_KEYS
+                ]
+                + [row.features[name] for name in _MEMORY_FEATURE_NAMES]
+            )
+        memory_rank = exact_rank(memory_matrix)
+        if memory_rank != len(_SHARED_MEMORY_PARAMETER_ORDER):
+            raise ValueError(
+                "shared memory fit matrix exact rank must equal parameter count "
+                f"{len(_SHARED_MEMORY_PARAMETER_ORDER)}, got {memory_rank}"
+            )
+        memory_values, memory_scales, memory_residual = (
+            _scaled_decimal_least_squares(
+                memory_matrix,
+                [row.target_body_cost for row in memory_fit_rows],
+            )
+        )
+        memory_body = dict(zip(_SHARED_MEMORY_PARAMETER_ORDER, memory_values))
+        memory_production = {
+            name: value * body_scale
+            + (common_overhead if name.endswith(":constant") else Decimal(0))
+            for name, value in memory_body.items()
+        }
+
+        def shared_memory_cost(row: DynamicOpcodeObservation) -> Decimal:
+            return sum(
+                (
+                    _decimal_from_fraction(row.features[name])
+                    * memory_body[name]
+                    for name in _MEMORY_FEATURE_NAMES
+                ),
+                Decimal(0),
+            )
+
+        memory_predictions = [
+            memory_body[f"{row.dynamic_key}:constant"] + shared_memory_cost(row)
+            for row in memory_rows
+        ]
+        (
+            memory_prediction_rows,
+            memory_fit_body_mape,
+            memory_fit_body_max,
+            memory_holdout_body_max,
+            memory_fit_production_mape,
+            memory_fit_production_max,
+            memory_holdout_production_max,
+        ) = _dynamic_prediction_evidence(
+            memory_rows,
+            memory_predictions,
+            body_scale=body_scale,
+            common_overhead=common_overhead,
+            prediction_ids=tuple(
+                f"{row.dynamic_key}/{row.scenario_id}" for row in memory_rows
+            ),
+        )
+        memory_failures = _dynamic_quality_failures(
+            memory_fit_production_mape,
+            memory_fit_production_max,
+            memory_holdout_production_max,
+        )
+        shared_memory_model = SharedMemoryFitEvidence(
+            status="not_supported" if memory_failures else "supported",
+            parameter_order=_SHARED_MEMORY_PARAMETER_ORDER,
+            exact_rank=memory_rank,
+            parameter_count=len(_SHARED_MEMORY_PARAMETER_ORDER),
+            observation_count=len(memory_rows),
+            fit_count=len(memory_fit_rows),
+            holdout_count=len(memory_rows) - len(memory_fit_rows),
+            body_coefficients=MappingProxyType(memory_body),
+            production_coefficients=MappingProxyType(memory_production),
+            fit_body_mape=memory_fit_body_mape,
+            fit_body_max_ape=memory_fit_body_max,
+            holdout_body_max_ape=memory_holdout_body_max,
+            fit_production_mape=memory_fit_production_mape,
+            fit_production_max_ape=memory_fit_production_max,
+            holdout_production_max_ape=memory_holdout_production_max,
+            quality_failures=memory_failures,
+            exact_fit_design_matrix=tuple(tuple(row) for row in memory_matrix),
+            solver_column_scales=tuple(memory_scales),
+            solver_residual=memory_residual,
+            predictions=memory_prediction_rows,
+        )
+
+        opcode_models: dict[str, DynamicOpcodeFitEvidence] = {}
+        for key, feature_names in (
+            (
+                "opcode:0x0a",
+                ("constant", "exponent_bytes", "exponent_bytes_squared"),
+            ),
+            ("opcode:0x20", ("constant", "input_words")),
+            ("opcode:0x5e", ("constant", "copy_words")),
+        ):
+            key_rows = tuple(row for row in observations if row.dynamic_key == key)
+            fit_rows = tuple(row for row in key_rows if row.model_split == "fit")
+            matrix = [
+                [row.features[name] for name in feature_names] for row in fit_rows
+            ]
+            rank = exact_rank(matrix)
+            if rank != len(feature_names):
+                raise ValueError(
+                    f"dynamic fit matrix exact rank for {key} must equal "
+                    f"parameter count {len(feature_names)}, got {rank}"
+                )
+            fit_targets = [
+                row.target_body_cost
+                - (Decimal(0) if key == "opcode:0x0a" else shared_memory_cost(row))
+                for row in fit_rows
+            ]
+            if any(not value.is_finite() for value in fit_targets):
+                raise ValueError(
+                    f"dynamic operation-specific body cost must be finite: {key}"
+                )
+            operation_target_failures = (
+                ("nonpositive_operation_fit_target",)
+                if any(value <= 0 for value in fit_targets)
+                else ()
+            )
+            values, scales, residual = _scaled_decimal_least_squares(
+                matrix, fit_targets
+            )
+            body_coefficients = dict(zip(feature_names, values))
+            production_coefficients = {
+                name: value * body_scale
+                + (common_overhead if name == "constant" else Decimal(0))
+                for name, value in body_coefficients.items()
+            }
+            operation_predictions = [
+                sum(
+                    (
+                        _decimal_from_fraction(row.features[name])
+                        * body_coefficients[name]
+                        for name in feature_names
+                    ),
+                    Decimal(0),
+                )
+                for row in key_rows
+            ]
+            shared_costs = [
+                Decimal(0) if key == "opcode:0x0a" else shared_memory_cost(row)
+                for row in key_rows
+            ]
+            total_predictions = [
+                operation + shared
+                for operation, shared in zip(operation_predictions, shared_costs)
+            ]
+            (
+                predictions,
+                fit_body_mape,
+                fit_body_max,
+                holdout_body_max,
+                fit_production_mape,
+                fit_production_max,
+                holdout_production_max,
+            ) = _dynamic_prediction_evidence(
+                key_rows,
+                total_predictions,
+                body_scale=body_scale,
+                common_overhead=common_overhead,
+                prediction_ids=tuple(row.scenario_id for row in key_rows),
+                extras=tuple(
+                    {
+                        "predicted_operation_body_cost": operation,
+                        "shared_memory_body_cost": shared,
+                    }
+                    for operation, shared in zip(
+                        operation_predictions, shared_costs
+                    )
+                ),
+            )
+            failures = tuple(
+                dict.fromkeys(
+                    (
+                        *operation_target_failures,
+                        *_dynamic_quality_failures(
+                            fit_production_mape,
+                            fit_production_max,
+                            holdout_production_max,
+                        ),
+                    )
+                )
+            )
+            opcode_models[key] = DynamicOpcodeFitEvidence(
+                dynamic_key=key,
+                status="not_supported" if failures else "supported",
+                feature_names=feature_names,
+                exact_rank=rank,
+                parameter_count=len(feature_names),
+                observation_count=len(key_rows),
+                fit_count=len(fit_rows),
+                holdout_count=len(key_rows) - len(fit_rows),
+                body_coefficients=MappingProxyType(body_coefficients),
+                production_coefficients=MappingProxyType(production_coefficients),
+                fit_body_mape=fit_body_mape,
+                fit_body_max_ape=fit_body_max,
+                holdout_body_max_ape=holdout_body_max,
+                fit_production_mape=fit_production_mape,
+                fit_production_max_ape=fit_production_max,
+                holdout_production_max_ape=holdout_production_max,
+                quality_failures=failures,
+                exact_fit_design_matrix=tuple(tuple(row) for row in matrix),
+                solver_column_scales=tuple(scales),
+                solver_residual=residual,
+                predictions=predictions,
+            )
+        aggregate_rank = memory_rank + sum(
+            model.exact_rank for model in opcode_models.values()
+        )
+        aggregate_parameters = len(_SHARED_MEMORY_PARAMETER_ORDER) + sum(
+            model.parameter_count for model in opcode_models.values()
+        )
+        all_models = (shared_memory_model, *opcode_models.values())
+        return StructuredDynamicOpcodeFitResult(
+            status=(
+                "supported"
+                if all(model.status == "supported" for model in all_models)
+                else "not_supported"
+            ),
+            shared_memory_model=shared_memory_model,
+            opcode_models=MappingProxyType(opcode_models),
+            aggregate_exact_rank=aggregate_rank,
+            aggregate_parameter_count=aggregate_parameters,
+        )
+
+
 def fit_dynamic_opcode_models(
     observations: Sequence[DynamicOpcodeObservation],
     feature_names_by_key: Mapping[str, tuple[str, ...]],

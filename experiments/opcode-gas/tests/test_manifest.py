@@ -398,9 +398,12 @@ class ManifestTests(unittest.TestCase):
             ("canonical", "fit", {"highest_touched_offset": 0, "initial_memory_words": 1}),
             ("dynamic_holdout", "fit", {"highest_touched_offset": 256, "initial_memory_words": 1}),
             ("dynamic_holdout", "fit", {"highest_touched_offset": 4096, "initial_memory_words": 1}),
-            ("dynamic_holdout", "fit", {"highest_touched_offset": 256, "initial_memory_words": 9}),
-            ("dynamic_holdout", "holdout", {"highest_touched_offset": 1024, "initial_memory_words": 1}),
+            ("dynamic_holdout", "holdout", {"highest_touched_offset": 256, "initial_memory_words": 9}),
+            ("dynamic_holdout", "fit", {"highest_touched_offset": 1024, "initial_memory_words": 1}),
             ("dynamic_holdout", "holdout", {"highest_touched_offset": 4096, "initial_memory_words": 129}),
+            ("dynamic_holdout", "holdout", {"highest_touched_offset": 2048, "initial_memory_words": 1}),
+            ("dynamic_holdout", "holdout", {"highest_touched_offset": 4064, "initial_memory_words": 1}),
+            ("dynamic_holdout", "holdout", {"highest_touched_offset": 8192, "initial_memory_words": 1}),
         ]
         for key in ("opcode:0x51", "opcode:0x52", "opcode:0x53"):
             expected[key] = memory_scenarios
@@ -421,7 +424,7 @@ class ManifestTests(unittest.TestCase):
         )
         self.assertEqual(
             sum(relation.split != "canonical" for relations in scenarios.values() for relation in relations),
-            33,
+            42,
         )
 
     def test_formal_relation_manifest_rejects_anchor_dynamic_and_relation_contract_drift(self):

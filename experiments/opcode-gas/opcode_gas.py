@@ -31,7 +31,7 @@ from calibration_model import (
     derive_affine_opcode_model,
     exact_rank,
     fit_block_calibration,
-    fit_dynamic_opcode_models,
+    fit_structured_dynamic_opcode_models,
     reconstruct_lab_multipliers,
     validate_dynamic_holdouts,
 )
@@ -72,11 +72,38 @@ DYNAMIC_RAW_GAS_KEYS = (
 DYNAMIC_OPCODE_FEATURE_ORDERS = MappingProxyType(
     {
         "opcode:0x0a": ("constant", "exponent_bytes", "exponent_bytes_squared"),
-        "opcode:0x20": ("constant", "input_words", "memory_growth_words"),
-        "opcode:0x51": ("constant", "memory_growth_words"),
-        "opcode:0x52": ("constant", "memory_growth_words"),
-        "opcode:0x53": ("constant", "memory_growth_words"),
-        "opcode:0x5e": ("constant", "copy_words", "memory_growth_words"),
+        "opcode:0x20": (
+            "constant",
+            "input_words",
+            "memory_growth_event",
+            "memory_evm_gas_delta",
+            "memory_4k_page_crossings",
+        ),
+        "opcode:0x51": (
+            "constant",
+            "memory_growth_event",
+            "memory_evm_gas_delta",
+            "memory_4k_page_crossings",
+        ),
+        "opcode:0x52": (
+            "constant",
+            "memory_growth_event",
+            "memory_evm_gas_delta",
+            "memory_4k_page_crossings",
+        ),
+        "opcode:0x53": (
+            "constant",
+            "memory_growth_event",
+            "memory_evm_gas_delta",
+            "memory_4k_page_crossings",
+        ),
+        "opcode:0x5e": (
+            "constant",
+            "copy_words",
+            "memory_growth_event",
+            "memory_evm_gas_delta",
+            "memory_4k_page_crossings",
+        ),
     }
 )
 _DYNAMIC_RELATION_SCENARIO_MATRIX = {
@@ -205,18 +232,33 @@ _MEMORY_RELATION_SCENARIOS = (
     ),
     (
         "dynamic_holdout",
-        "fit",
+        "holdout",
         (("highest_touched_offset", 256), ("initial_memory_words", 9)),
     ),
     (
         "dynamic_holdout",
-        "holdout",
+        "fit",
         (("highest_touched_offset", 1024), ("initial_memory_words", 1)),
     ),
     (
         "dynamic_holdout",
         "holdout",
         (("highest_touched_offset", 4096), ("initial_memory_words", 129)),
+    ),
+    (
+        "dynamic_holdout",
+        "holdout",
+        (("highest_touched_offset", 2048), ("initial_memory_words", 1)),
+    ),
+    (
+        "dynamic_holdout",
+        "holdout",
+        (("highest_touched_offset", 4064), ("initial_memory_words", 1)),
+    ),
+    (
+        "dynamic_holdout",
+        "holdout",
+        (("highest_touched_offset", 8192), ("initial_memory_words", 1)),
     ),
 )
 for _memory_key in ("opcode:0x51", "opcode:0x52", "opcode:0x53"):
@@ -2158,7 +2200,15 @@ def _dynamic_relation_target_raw_gas(
         return 30 + 6 * words + max(0, _memory_cost(words) - _memory_cost(initial_words))
     if case.template in {"memory_load_32", "memory_store_32", "memory_store8"}:
         offset = scenario.get("highest_touched_offset")
-        if type(offset) is not int or offset not in {0, 0x0100, 0x0400, 0x1000}:
+        if type(offset) is not int or offset not in {
+            0,
+            0x0100,
+            0x0400,
+            0x0800,
+            0x0FE0,
+            0x1000,
+            0x2000,
+        }:
             raise ValueError("memory relation has invalid offset")
         touched = int(offset) + (1 if case.template == "memory_store8" else 32)
         words = (touched + 31) // 32
@@ -6221,7 +6271,7 @@ def fit_opcode_relations(
         raise ValueError("formal relation self-control set is incomplete")
     if len(equations) != 98:
         raise ValueError(f"formal relation matrix requires 98 equations, got {len(equations)}")
-    if len(holdouts) != 33:
+    if len(holdouts) != 42:
         raise ValueError("formal noncanonical dynamic observation set is incomplete")
     for key in manifest.dynamic_raw_gas_keys:
         observed = tuple(
@@ -6723,8 +6773,8 @@ def validate_opcode_relations_artifact(
         for relation in manifest.opcode_relations
         if relation.split == "dynamic_holdout"
     ]
-    if len(holdout_relations) != 33:
-        raise ValueError("opcode relation manifest must define 33 noncanonical dynamic rows")
+    if len(holdout_relations) != 42:
+        raise ValueError("opcode relation manifest must define 42 noncanonical dynamic rows")
     _validate_artifact_relation_rows(
         artifact.get("dynamic_holdouts"),
         holdout_relations,
@@ -12180,6 +12230,17 @@ def _dynamic_opcode_features(
         return value
 
     initial_words = exact_nonnegative_int("initial_memory_words")
+
+    def memory_features(final_words: int) -> tuple[int, int, int]:
+        growth_event = int(final_words > initial_words)
+        evm_gas_delta = max(0, _memory_cost(final_words) - _memory_cost(initial_words))
+
+        def extra_pages(words: int) -> int:
+            return max(0, (words + 127) // 128 - 1)
+
+        page_crossings = max(0, extra_pages(final_words) - extra_pages(initial_words))
+        return growth_event, evm_gas_delta, page_crossings
+
     if dynamic_key == "opcode:0x0a":
         if set(scenario) != {"exponent_byte_length", "initial_memory_words"}:
             raise ValueError("EXP dynamic opcode scenario fields differ from the frozen schema")
@@ -12192,20 +12253,20 @@ def _dynamic_opcode_features(
             raise ValueError("KECCAK256 dynamic opcode scenario fields differ from the frozen schema")
         input_length = exact_nonnegative_int("input_length")
         input_words = (input_length + 31) // 32
-        values = (1, input_words, max(0, input_words - initial_words))
+        values = (1, input_words, *memory_features(input_words))
     elif dynamic_key in {"opcode:0x51", "opcode:0x52", "opcode:0x53"}:
         if set(scenario) != {"highest_touched_offset", "initial_memory_words"}:
             raise ValueError("memory dynamic opcode scenario fields differ from the frozen schema")
         offset = exact_nonnegative_int("highest_touched_offset")
         access_bytes = 1 if dynamic_key == "opcode:0x53" else 32
         touched_words = (offset + access_bytes + 31) // 32
-        values = (1, max(0, touched_words - initial_words))
+        values = (1, *memory_features(touched_words))
     else:
         if set(scenario) != {"copy_length", "initial_memory_words"}:
             raise ValueError("MCOPY dynamic opcode scenario fields differ from the frozen schema")
         copy_length = exact_nonnegative_int("copy_length")
         copy_words = (copy_length + 31) // 32
-        values = (1, copy_words, max(0, copy_words - initial_words))
+        values = (1, copy_words, *memory_features(copy_words))
     return {
         name: Fraction(value)
         for name, value in zip(DYNAMIC_OPCODE_FEATURE_ORDERS[dynamic_key], values)
@@ -12478,23 +12539,19 @@ def fit_dynamic_opcode_models_artifact(
     observations = _dynamic_opcode_observations_from_relation_artifact(
         manifest, affine_model, relation_artifact, anchor_body_costs
     )
-    feature_orders = {
-        key: DYNAMIC_OPCODE_FEATURE_ORDERS[key]
-        for key in manifest.dynamic_raw_gas_keys
-    }
     transfer_params = block_result.transfer_params
-    evidence = fit_dynamic_opcode_models(
+    result = fit_structured_dynamic_opcode_models(
         observations,
-        feature_orders,
         body_scale=transfer_params["body_scale"],
         common_overhead=transfer_params[
             "common_opcode_overhead_per_operation"
         ],
     )
-    models = {
-        key: {
+
+    def evidence_payload(item: Any, parameter_order: tuple[str, ...]) -> dict[str, Any]:
+        return {
             "status": item.status,
-            "feature_order": list(item.feature_names),
+            "parameter_order": list(parameter_order),
             "exact_fit_rank": item.exact_rank,
             "parameter_count": item.parameter_count,
             "observation_count": item.observation_count,
@@ -12524,16 +12581,14 @@ def fit_dynamic_opcode_models_artifact(
             "solver_residual": _decimal_text(item.solver_residual),
             "predictions": _serialize_decimal_tree(item.predictions),
         }
-        for key, item in evidence.items()
+    models = {
+        key: evidence_payload(item, item.feature_names)
+        for key, item in result.opcode_models.items()
     }
     artifact = {
-        "schema_version": 1,
+        "schema_version": 2,
         "purpose": "dynamic_opcode_models",
-        "status": (
-            "supported"
-            if all(item.status == "supported" for item in evidence.values())
-            else "not_supported"
-        ),
+        "status": result.status,
         "candidate_eligible": False,
         "provenance": dict(relation_artifact["provenance"]),
         "source_hashes": {
@@ -12553,14 +12608,15 @@ def fit_dynamic_opcode_models_artifact(
             "holdout_production_max_ape_max": "0.10",
         },
         "feature_orders": {
-            key: list(names) for key, names in feature_orders.items()
+            key: list(DYNAMIC_OPCODE_FEATURE_ORDERS[key])
+            for key in manifest.dynamic_raw_gas_keys
         },
-        "aggregate_exact_fit_rank": sum(
-            item.exact_rank for item in evidence.values()
+        "shared_memory_model": evidence_payload(
+            result.shared_memory_model,
+            result.shared_memory_model.parameter_order,
         ),
-        "aggregate_parameter_count": sum(
-            item.parameter_count for item in evidence.values()
-        ),
+        "aggregate_exact_fit_rank": result.aggregate_exact_rank,
+        "aggregate_parameter_count": result.aggregate_parameter_count,
         "models": models,
     }
     artifact["artifact_sha256"] = sha256_bytes(canonical_json(artifact))

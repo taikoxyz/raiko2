@@ -352,10 +352,14 @@ parser tests for `generate-relations`, `run-relations`, `fit-relations`, and the
 
 Freeze the complete dynamic model matrix in the formal relation manifest. `EXP`, `KECCAK256`, and
 `MCOPY` each have five fit scenarios and two untouched model holdouts. `MLOAD`, `MSTORE`, and
-`MSTORE8` each have four fit scenarios and two untouched model holdouts. Every key retains exactly
-one `canonical` relation for `A`; the other 33 relations remain outside `A`. Bind `model_split` and
-the exact structured `relation_scenario` through the manifest, emitted fixtures, raw rows, adaptive
-decisions, and final relation artifact.
+`MSTORE8` each have four fit scenarios, two reused zero-growth warmed diagnostics, and three newly
+added untouched expansion holdouts. Every key retains exactly one `canonical` relation for `A`; the
+other 42 relations remain outside `A`. Bind `model_split` and the exact structured
+`relation_scenario` through the manifest, emitted fixtures, raw rows, adaptive decisions, and final
+relation artifact.
+
+The added memory rows change the controlled-manifest content identity. Prepare a fresh calibration
+run; the existing real-run artifacts predate this matrix and are not validation evidence for it.
 
 For memory-sensitive scenarios, make `initial_memory_words` executable: the warmup must allocate
 the declared memory before the target operation. Tests must show that changing this field changes
@@ -888,28 +892,32 @@ Add a separate `fit_dynamic_opcode_models` diagnostic over these frozen feature 
 ```python
 DYNAMIC_OPCODE_FEATURE_ORDERS = {
     "opcode:0x0a": ("constant", "exponent_bytes", "exponent_bytes_squared"),
-    "opcode:0x20": ("constant", "input_words", "memory_growth_words"),
-    "opcode:0x51": ("constant", "memory_growth_words"),
-    "opcode:0x52": ("constant", "memory_growth_words"),
-    "opcode:0x53": ("constant", "memory_growth_words"),
-    "opcode:0x5e": ("constant", "copy_words", "memory_growth_words"),
+    "opcode:0x20": ("constant", "input_words", *SHARED_MEMORY_FEATURES),
+    "opcode:0x51": ("constant", *SHARED_MEMORY_FEATURES),
+    "opcode:0x52": ("constant", *SHARED_MEMORY_FEATURES),
+    "opcode:0x53": ("constant", *SHARED_MEMORY_FEATURES),
+    "opcode:0x5e": ("constant", "copy_words", *SHARED_MEMORY_FEATURES),
 }
 ```
 
 Recover target body cost by removing the signed static-control contribution from each accepted
-relation slope. Require exact full column rank independently for every key; the aggregate rank and
-parameter count must both be 15. Fit with `Decimal`, never binary `float`, and transform to
-production units with the staged block fit:
+relation slope. Fit MLOAD, MSTORE, and MSTORE8 jointly with opcode-specific constants and shared
+`memory_growth_event`, exact EVM memory-gas delta, and extra 4-KiB page-crossing coefficients.
+Subtract the shared memory contribution before fitting KECCAK256 and MCOPY and add it back for their
+predictions. Require exact rank six for the shared matrix and aggregate rank and parameter count 13.
+Fit with `Decimal`, never binary `float`, and transform to production units with the staged block fit:
 
 ```text
 production_constant = body_scale * body_constant + common_opcode_overhead
 production_nonconstant = body_scale * body_nonconstant
 ```
 
-Gate production-space fit MAPE at 5%, fit max APE at 10%, and untouched holdout max APE at 10%.
+Gate production-space fit MAPE at 5%, fit max APE at 10%, and holdout max APE at 10%.
 Quality failures produce `status = not_supported` with complete evidence. Structural identity,
 rank, provenance, or numeric failures still raise. Serialize the result as the content-addressed,
-non-candidate `dynamic-opcode-models.json`; do not pass it to `build-candidate`.
+schema-2 non-candidate `dynamic-opcode-models.json`; do not pass it to `build-candidate`. Treat the
+shared V1 `f_mem` as a hypothesis that future evidence may split by opcode family or zkVM without
+changing the non-memory multiplier model.
 
 - [ ] **Step 5: Add `fit-block-calibration` and canonical serialization**
 
@@ -1219,9 +1227,11 @@ before the first production-guest SP1 execution. Preserve every raw row if a lat
   --out "$CALIBRATION_RUN/block-calibration.json"
 ```
 
-Require `dynamic-opcode-models.json` to preserve all six per-key fits, exact ranks, production-space
-errors, and untouched holdouts even when a quality gate reports `not_supported`. The structured
-artifact is diagnostic only. `fit-block-calibration` retains the lab-body scalar dynamic gate; if
+Require `dynamic-opcode-models.json` to preserve the explicit shared-memory fit, the three
+operation-specific fits, exact ranks, production-space errors, zero-growth diagnostics, and
+untouched expansion holdouts even when a quality gate reports `not_supported`. The structured
+artifact is diagnostic only.
+`fit-block-calibration` retains the lab-body scalar dynamic gate; if
 it rejects
 the already falsified one-multiplier hypothesis, preserve that failure and do not proceed to
 candidate sealing. A future promotion task must choose and review the production representation

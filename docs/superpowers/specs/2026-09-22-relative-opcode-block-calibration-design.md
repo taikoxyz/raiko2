@@ -319,39 +319,54 @@ observations. Passing this body-space check alone would not validate a productio
 the nonzero common per-operation overhead also needs an explicit representation when raw gas varies.
 
 The next diagnostic asks the narrower question needed before choosing a production representation:
-which semantic components of each operation's SP1 cost are independently identifiable? Freeze 39
-scenarios, including untouched holdouts, and fit the following target-body models:
+which semantic components of each operation's SP1 cost are independently identifiable? Freeze 48
+scenarios, including reused zero-growth warmed diagnostics and three newly added untouched expansion
+holdouts per memory opcode, and fit the following target-body models:
 
 ```text
-q_EXP        = beta_0 + beta_b * exponent_bytes + beta_b2 * exponent_bytes^2
-q_KECCAK256  = beta_0 + beta_w * input_words + beta_g * memory_growth_words
-q_MLOAD      = beta_0 + beta_g * memory_growth_words
-q_MSTORE     = beta_0 + beta_g * memory_growth_words
-q_MSTORE8    = beta_0 + beta_g * memory_growth_words
-q_MCOPY      = beta_0 + beta_w * copy_words + beta_g * memory_growth_words
+f_mem = beta_event * memory_growth_event
+      + beta_evm * memory_evm_gas_delta
+      + beta_page * memory_4k_page_crossings
+
+q_EXP       = beta_0 + beta_b * exponent_bytes + beta_b2 * exponent_bytes^2
+q_MLOAD     = beta_load + f_mem
+q_MSTORE    = beta_store + f_mem
+q_MSTORE8   = beta_store8 + f_mem
+q_KECCAK256 = beta_0 + beta_w * input_words + f_mem
+q_MCOPY     = beta_0 + beta_w * copy_words + f_mem
 
 p_operation = body_scale * q_operation + common_opcode_overhead
 ```
 
 Here `q_operation` is the target opcode body cost recovered from the signed target/control relation,
 not raw EVM gas. Static reference-opcode terms use the already reconstructed lab multipliers and are
-subtracted before fitting. `memory_growth_words` is the number of newly touched 32-byte words, not
-the EVM quadratic memory-gas charge. The manifest's executable warmup allocates
-`initial_memory_words` before the target operation, so copy/input length and memory growth can vary
-independently. Metadata-only warmup would create an apparently full-rank matrix over identical
-executions and is invalid.
+subtracted before fitting. `memory_growth_event` is one only when logical memory grows.
+`memory_evm_gas_delta` is the exact positive delta of `C(w) = 3w + floor(w^2 / 512)`, and
+`memory_4k_page_crossings` counts additional 128-word pages beyond the first. The manifest's
+executable warmup allocates `initial_memory_words` before the target operation, so copy/input length
+and memory expansion can vary independently. Metadata-only warmup would create an apparently
+full-rank matrix over identical executions and is invalid.
 
-The per-key fit matrices must have exact full column rank; aggregate parameter count and exact rank
-are both 15. The diagnostic reports body-space and production-space coefficients, predictions, and
-APE. Acceptance uses production-space fit MAPE at most 5%, fit maximum APE at most 10%, and untouched
-holdout maximum APE at most 10%. Failed quality gates produce a content-addressed `not_supported`
-artifact rather than aborting or refitting the matrix. The artifact is explicitly
-`candidate_eligible = false` and cannot update the production table.
+Fit the three memory opcodes jointly with three opcode-specific constants and the three shared
+memory coefficients. Subtract that shared body contribution before fitting KECCAK256 and MCOPY,
+then add it back for their predictions and gates. In production space, add common overhead only to
+the opcode-specific constants; scale shared coefficients by `body_scale` without adding overhead.
+The shared matrix has exact rank six and the overall structured model has exact rank and parameter
+count 13. The schema-2 diagnostic reports the shared family explicitly, alongside EXP, KECCAK256,
+and MCOPY operation-specific models. Acceptance uses production-space fit MAPE at most 5%, fit
+maximum APE at most 10%, and holdout maximum APE at most 10%. Failed quality gates produce
+a content-addressed `not_supported` artifact rather than aborting or refitting the matrix. The
+artifact is explicitly `candidate_eligible = false` and cannot update the production table.
+
+The expanded memory matrix changes the frozen manifest identity and requires a fresh calibration
+run. Artifacts from the earlier 39-scenario run cannot validate the 48-scenario model.
 
 The result may show that a term is stable, only approximately stable, or below the experiment's
 resolving power. It is valid to merge indistinguishable terms or omit a negligible term in a future
 production model, but only after reporting the resulting block-level residual. This diagnostic does
-not assume that every member is uniquely recoverable.
+not assume that every member is uniquely recoverable. Shared `f_mem` is a V1 hypothesis, not an
+architectural promise: future evidence may split it by opcode family or zkVM without changing the
+independent non-memory multiplier model.
 
 ### Block Anchor Cohort
 

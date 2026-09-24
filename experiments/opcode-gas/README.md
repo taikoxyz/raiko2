@@ -171,18 +171,26 @@ recovers each target opcode's body cost from its signed target/control relation 
 semantic model:
 
 ```text
+f_mem     = beta_event * memory_growth_event
+          + beta_evm * memory_evm_gas_delta
+          + beta_page * memory_4k_page_crossings
 EXP        = beta_0 + beta_b * exponent_bytes + beta_b2 * exponent_bytes^2
-KECCAK256  = beta_0 + beta_w * input_words + beta_g * memory_growth_words
-MLOAD/...  = beta_0 + beta_g * memory_growth_words
-MCOPY      = beta_0 + beta_w * copy_words + beta_g * memory_growth_words
+KECCAK256  = beta_0 + beta_w * input_words + f_mem
+MLOAD      = beta_load + f_mem
+MSTORE     = beta_store + f_mem
+MSTORE8    = beta_store8 + f_mem
+MCOPY      = beta_0 + beta_w * copy_words + f_mem
 
 production_cost = body_scale * body_cost + common_opcode_overhead
 ```
 
-The 39-scenario matrix has aggregate exact rank 15. Fit rows and untouched holdouts are declared in
-the manifest before execution. Production-space fit MAPE must be at most 5%, and fit/holdout maximum
-APE must be at most 10%. A quality failure is preserved as `not_supported`; it does not abort the
-diagnostic artifact, modify a coefficient after seeing results, or enter candidate construction.
+The 48-scenario matrix has aggregate exact rank and parameter count 13; its shared-memory fit has
+exact rank six. Fit rows and holdouts are declared in the manifest before execution. For each memory
+opcode, the reused warmed rows at offsets `0x0100` and `0x1000` are zero-growth diagnostics. Only the
+three newly added expansion sizes at offsets `0x0800`, `0x0fe0`, and `0x2000` are untouched
+holdouts. Production-space fit MAPE must be at most 5%, and fit/holdout maximum APE must be at most
+10%. A quality failure is preserved as `not_supported`; it does not abort the schema-2 diagnostic
+artifact, modify a coefficient after seeing results, or enter candidate construction.
 `fit-block-calibration` deliberately retains the scalar lab-body dynamic holdout gate and therefore
 remains fail-closed until a separately reviewed promotion defines the production representation.
 A lab-body scalar pass would not by itself prove that one production per-raw-gas scalar is valid:

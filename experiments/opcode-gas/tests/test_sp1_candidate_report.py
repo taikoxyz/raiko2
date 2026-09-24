@@ -1970,10 +1970,10 @@ class FormalOpcodeRelationTests(unittest.TestCase):
         self.assertEqual(artifact["status"], "accepted")
         self.assertEqual(len(artifact["equations"]), 98)
         self.assertEqual(len(artifact["self_controls"]), 4)
-        self.assertEqual(len(artifact["dynamic_holdouts"]), 33)
+        self.assertEqual(len(artifact["dynamic_holdouts"]), 42)
         self.assertEqual(
             Counter(row["model_split"] for row in artifact["dynamic_holdouts"]),
-            Counter({"fit": 21, "holdout": 12}),
+            Counter({"fit": 21, "holdout": 21}),
         )
         self.assertEqual(artifact["affine_model"]["rank"], 98)
         self.assertEqual(artifact["affine_model"]["nullity"], 4)
@@ -2257,23 +2257,50 @@ class DynamicOpcodeModelTests(unittest.TestCase):
             ),
             "opcode:0x20": (
                 {"input_length": 512, "initial_memory_words": 1},
-                {"constant": Fraction(1), "input_words": Fraction(16), "memory_growth_words": Fraction(15)},
+                {
+                    "constant": Fraction(1),
+                    "input_words": Fraction(16),
+                    "memory_growth_event": Fraction(1),
+                    "memory_evm_gas_delta": Fraction(45),
+                    "memory_4k_page_crossings": Fraction(0),
+                },
             ),
             "opcode:0x51": (
                 {"highest_touched_offset": 256, "initial_memory_words": 1},
-                {"constant": Fraction(1), "memory_growth_words": Fraction(8)},
+                {
+                    "constant": Fraction(1),
+                    "memory_growth_event": Fraction(1),
+                    "memory_evm_gas_delta": Fraction(24),
+                    "memory_4k_page_crossings": Fraction(0),
+                },
             ),
             "opcode:0x52": (
                 {"highest_touched_offset": 256, "initial_memory_words": 1},
-                {"constant": Fraction(1), "memory_growth_words": Fraction(8)},
+                {
+                    "constant": Fraction(1),
+                    "memory_growth_event": Fraction(1),
+                    "memory_evm_gas_delta": Fraction(24),
+                    "memory_4k_page_crossings": Fraction(0),
+                },
             ),
             "opcode:0x53": (
                 {"highest_touched_offset": 256, "initial_memory_words": 1},
-                {"constant": Fraction(1), "memory_growth_words": Fraction(8)},
+                {
+                    "constant": Fraction(1),
+                    "memory_growth_event": Fraction(1),
+                    "memory_evm_gas_delta": Fraction(24),
+                    "memory_4k_page_crossings": Fraction(0),
+                },
             ),
             "opcode:0x5e": (
                 {"copy_length": 512, "initial_memory_words": 1},
-                {"constant": Fraction(1), "copy_words": Fraction(16), "memory_growth_words": Fraction(15)},
+                {
+                    "constant": Fraction(1),
+                    "copy_words": Fraction(16),
+                    "memory_growth_event": Fraction(1),
+                    "memory_evm_gas_delta": Fraction(45),
+                    "memory_4k_page_crossings": Fraction(0),
+                },
             ),
         }
         for key, (scenario, features) in expected.items():
@@ -2283,16 +2310,28 @@ class DynamicOpcodeModelTests(unittest.TestCase):
                     tuple(features), opcode_gas.DYNAMIC_OPCODE_FEATURE_ORDERS[key]
                 )
 
-        for key, scenario_rows in opcode_gas.DYNAMIC_RELATION_SCENARIO_MATRIX.items():
-            fit_matrix = [
-                list(opcode_gas._dynamic_opcode_features(key, dict(scenario)).values())
-                for _split, model_split, scenario in scenario_rows
-                if model_split == "fit"
-            ]
-            self.assertEqual(
-                opcode_gas.exact_rank(fit_matrix),
-                len(opcode_gas.DYNAMIC_OPCODE_FEATURE_ORDERS[key]),
-            )
+    def test_memory_features_cover_event_gas_and_exact_page_boundaries(self):
+        cases = (
+            ({"highest_touched_offset": 0, "initial_memory_words": 1}, (0, 0, 0)),
+            ({"highest_touched_offset": 256, "initial_memory_words": 1}, (1, 24, 0)),
+            ({"highest_touched_offset": 4064, "initial_memory_words": 1}, (1, 413, 0)),
+            ({"highest_touched_offset": 4096, "initial_memory_words": 1}, (1, 416, 1)),
+            ({"highest_touched_offset": 8192, "initial_memory_words": 1}, (1, 897, 2)),
+        )
+        for scenario, expected in cases:
+            with self.subTest(scenario=scenario):
+                features = opcode_gas._dynamic_opcode_features("opcode:0x51", scenario)
+                self.assertEqual(
+                    tuple(
+                        features[name]
+                        for name in (
+                            "memory_growth_event",
+                            "memory_evm_gas_delta",
+                            "memory_4k_page_crossings",
+                        )
+                    ),
+                    tuple(Fraction(value) for value in expected),
+                )
 
     def test_dynamic_observation_recovers_target_after_negative_static_control(self):
         dynamic_key = "opcode:0x0a"
@@ -2370,6 +2409,20 @@ class DynamicOpcodeModelTests(unittest.TestCase):
         self.assertEqual(args.command, "fit-dynamic-opcode-models")
         self.assertTrue(callable(args.func))
 
+        candidate = opcode_gas.build_parser().parse_args(
+            [
+                "build-candidate",
+                "--run", "run",
+                "--controlled-manifest", "manifest.toml",
+                "--relations", "run/opcode-relations.json",
+                "--anchor-probe", "run/anchor-probe-fit.json",
+                "--block-calibration", "run/block-calibration.json",
+                "--controlled-fit", "run/controlled-fit.json",
+                "--provenance", "run/provenance.json",
+            ]
+        )
+        self.assertFalse(hasattr(candidate, "dynamic_opcode_models"))
+
     def test_dynamic_quality_failure_returns_content_addressed_diagnostic(self):
         dynamic_key = "opcode:0x0a"
         static_key = "opcode:0x50"
@@ -2414,7 +2467,8 @@ class DynamicOpcodeModelTests(unittest.TestCase):
                 }
             )
         manifest = types.SimpleNamespace(
-            dynamic_raw_gas_keys=(dynamic_key,), opcode_relations=tuple(specs)
+            dynamic_raw_gas_keys=opcode_gas.DYNAMIC_RAW_GAS_KEYS,
+            opcode_relations=tuple(specs),
         )
         model = AffineOpcodeModel(
             opcode_keys=(static_key, dynamic_key),
@@ -2442,6 +2496,86 @@ class DynamicOpcodeModelTests(unittest.TestCase):
                 "common_opcode_overhead_per_operation": Decimal("1000"),
             }
         )
+
+        def evidence(
+            *, key, status, order, rank, predictions=None, shared=False
+        ):
+            values = {name: Decimal(index + 1) for index, name in enumerate(order)}
+            fields = {
+                "status": status,
+                "exact_rank": rank,
+                "parameter_count": len(order),
+                "observation_count": 4,
+                "fit_count": 3,
+                "holdout_count": 1,
+                "body_coefficients": values,
+                "production_coefficients": values,
+                "fit_body_mape": Decimal(0),
+                "fit_body_max_ape": Decimal(0),
+                "holdout_body_max_ape": Decimal("0.2") if status == "not_supported" else Decimal(0),
+                "fit_production_mape": Decimal(0),
+                "fit_production_max_ape": Decimal(0),
+                "holdout_production_max_ape": Decimal("0.2") if status == "not_supported" else Decimal(0),
+                "quality_failures": ("holdout_max_ape",) if status == "not_supported" else (),
+                "exact_fit_design_matrix": tuple(
+                    tuple(Fraction(int(row == column)) for column in range(len(order)))
+                    for row in range(len(order))
+                ),
+                "solver_column_scales": (Decimal(1),) * len(order),
+                "solver_residual": Decimal(0),
+                "predictions": predictions or {},
+            }
+            if shared:
+                fields["parameter_order"] = order
+            else:
+                fields["feature_names"] = order
+                fields["dynamic_key"] = key
+            return types.SimpleNamespace(**fields)
+
+        shared_order = (
+            "opcode:0x51:constant",
+            "opcode:0x52:constant",
+            "opcode:0x53:constant",
+            "memory_growth_event",
+            "memory_evm_gas_delta",
+            "memory_4k_page_crossings",
+        )
+        fit_result = types.SimpleNamespace(
+            status="not_supported",
+            shared_memory_model=evidence(
+                key="shared_memory",
+                status="supported",
+                order=shared_order,
+                rank=6,
+                shared=True,
+            ),
+            opcode_models={
+                dynamic_key: evidence(
+                    key=dynamic_key,
+                    status="not_supported",
+                    order=("constant", "exponent_bytes", "exponent_bytes_squared"),
+                    rank=3,
+                    predictions={"exp-2": {"model_split": "holdout"}},
+                ),
+                "opcode:0x20": evidence(
+                    key="opcode:0x20",
+                    status="supported",
+                    order=("constant", "input_words"),
+                    rank=2,
+                ),
+                "opcode:0x5e": evidence(
+                    key="opcode:0x5e",
+                    status="supported",
+                    order=("constant", "copy_words"),
+                    rank=2,
+                ),
+            },
+            aggregate_parameter_count=13,
+            aggregate_exact_rank=13,
+        )
+        fit_result.opcode_models[dynamic_key].quality_failures = (
+            "nonpositive_operation_fit_target",
+        )
         with mock.patch.object(
             opcode_gas, "_validated_block_calibration_rows", return_value=()
         ), mock.patch.object(
@@ -2450,6 +2584,14 @@ class DynamicOpcodeModelTests(unittest.TestCase):
             return_value={static_key: Decimal("3")},
         ), mock.patch.object(
             opcode_gas, "fit_block_calibration", return_value=block_result
+        ), mock.patch.object(
+            opcode_gas,
+            "_dynamic_opcode_observations_from_relation_artifact",
+            return_value=(),
+        ), mock.patch.object(
+            opcode_gas,
+            "fit_structured_dynamic_opcode_models",
+            return_value=fit_result,
         ):
             artifact = opcode_gas.fit_dynamic_opcode_models_artifact(
                 manifest,
@@ -2461,10 +2603,19 @@ class DynamicOpcodeModelTests(unittest.TestCase):
             )
 
         self.assertEqual(artifact["status"], "not_supported")
+        self.assertEqual(artifact["schema_version"], 2)
         self.assertFalse(artifact["candidate_eligible"])
-        self.assertEqual(artifact["aggregate_parameter_count"], 3)
-        self.assertEqual(artifact["aggregate_exact_fit_rank"], 3)
+        self.assertEqual(artifact["aggregate_parameter_count"], 13)
+        self.assertEqual(artifact["aggregate_exact_fit_rank"], 13)
+        self.assertIn("shared_memory_model", artifact)
+        self.assertNotIn("opcode:0x51", artifact["models"])
+        self.assertNotIn("opcode:0x52", artifact["models"])
+        self.assertNotIn("opcode:0x53", artifact["models"])
         self.assertEqual(artifact["models"][dynamic_key]["status"], "not_supported")
+        self.assertEqual(
+            artifact["models"][dynamic_key]["quality_failures"],
+            ["nonpositive_operation_fit_target"],
+        )
         self.assertEqual(
             artifact["models"][dynamic_key]["predictions"]["exp-2"]["model_split"],
             "holdout",

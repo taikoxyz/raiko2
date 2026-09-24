@@ -20,6 +20,7 @@ from calibration_model import (
     exact_rank,
     fit_block_calibration,
     fit_dynamic_opcode_models,
+    fit_structured_dynamic_opcode_models,
     validate_dynamic_holdouts,
 )
 
@@ -143,6 +144,280 @@ def synthetic_block_rows(
 
 
 class CalibrationModelTests(unittest.TestCase):
+    def _structured_dynamic_observations(self):
+        memory_coefficients = {
+            "memory_growth_event": Decimal("2"),
+            "memory_evm_gas_delta": Decimal("3"),
+            "memory_4k_page_crossings": Decimal("5"),
+        }
+        constants = {
+            "opcode:0x51": Decimal("10"),
+            "opcode:0x52": Decimal("20"),
+            "opcode:0x53": Decimal("30"),
+        }
+
+        def memory_target(key, event, gas_delta, pages):
+            return (
+                constants[key]
+                + Decimal(event) * memory_coefficients["memory_growth_event"]
+                + Decimal(gas_delta) * memory_coefficients["memory_evm_gas_delta"]
+                + Decimal(pages) * memory_coefficients["memory_4k_page_crossings"]
+            )
+
+        observations = []
+        memory_fit = ((0, 0, 0), (1, 3, 0), (1, 100, 1), (1, 200, 2))
+        for key in constants:
+            for index, (event, gas_delta, pages) in enumerate(memory_fit):
+                observations.append(
+                    DynamicOpcodeObservation(
+                        key,
+                        f"{key}-fit-{index}",
+                        "fit",
+                        {
+                            "constant": Fraction(1),
+                            "memory_growth_event": Fraction(event),
+                            "memory_evm_gas_delta": Fraction(gas_delta),
+                            "memory_4k_page_crossings": Fraction(pages),
+                        },
+                        memory_target(key, event, gas_delta, pages),
+                    )
+                )
+            observations.append(
+                DynamicOpcodeObservation(
+                    key,
+                    f"{key}-holdout",
+                    "holdout",
+                    {
+                        "constant": Fraction(1),
+                        "memory_growth_event": Fraction(1),
+                        "memory_evm_gas_delta": Fraction(300),
+                        "memory_4k_page_crossings": Fraction(3),
+                    },
+                    memory_target(key, 1, 300, 3),
+                )
+            )
+
+        for key, word_name, constant, word_coefficient in (
+            ("opcode:0x20", "input_words", Decimal("40"), Decimal("4")),
+            ("opcode:0x5e", "copy_words", Decimal("50"), Decimal("6")),
+        ):
+            for index, (split, words, event, gas_delta, pages) in enumerate(
+                (
+                    ("fit", 1, 0, 0, 0),
+                    ("fit", 8, 1, 21, 0),
+                    ("fit", 32, 1, 101, 1),
+                    ("holdout", 64, 1, 205, 2),
+                )
+            ):
+                shared = Decimal(event) * Decimal("2") + Decimal(gas_delta) * Decimal("3") + Decimal(pages) * Decimal("5")
+                observations.append(
+                    DynamicOpcodeObservation(
+                        key,
+                        f"{key}-{index}",
+                        split,
+                        {
+                            "constant": Fraction(1),
+                            word_name: Fraction(words),
+                            "memory_growth_event": Fraction(event),
+                            "memory_evm_gas_delta": Fraction(gas_delta),
+                            "memory_4k_page_crossings": Fraction(pages),
+                        },
+                        constant + Decimal(words) * word_coefficient + shared,
+                    )
+                )
+
+        for index, (split, exponent_bytes) in enumerate(
+            (("fit", 1), ("fit", 4), ("fit", 8), ("holdout", 2))
+        ):
+            observations.append(
+                DynamicOpcodeObservation(
+                    "opcode:0x0a",
+                    f"opcode:0x0a-{index}",
+                    split,
+                    {
+                        "constant": Fraction(1),
+                        "exponent_bytes": Fraction(exponent_bytes),
+                        "exponent_bytes_squared": Fraction(exponent_bytes**2),
+                    },
+                    Decimal(7 + 2 * exponent_bytes + 3 * exponent_bytes**2),
+                )
+            )
+        return tuple(observations)
+
+    def test_structured_dynamic_fit_shares_memory_coefficients_and_overhead(self):
+        result = fit_structured_dynamic_opcode_models(
+            self._structured_dynamic_observations(),
+            body_scale=Decimal("2"),
+            common_overhead=Decimal("11"),
+        )
+
+        self.assertEqual(result.status, "supported")
+        self.assertEqual(result.aggregate_exact_rank, 13)
+        self.assertEqual(result.aggregate_parameter_count, 13)
+        memory = result.shared_memory_model
+        self.assertEqual(memory.exact_rank, 6)
+        self.assertEqual(
+            memory.parameter_order,
+            (
+                "opcode:0x51:constant",
+                "opcode:0x52:constant",
+                "opcode:0x53:constant",
+                "memory_growth_event",
+                "memory_evm_gas_delta",
+                "memory_4k_page_crossings",
+            ),
+        )
+        for name, expected in {
+            "opcode:0x51:constant": Decimal("10"),
+            "opcode:0x52:constant": Decimal("20"),
+            "opcode:0x53:constant": Decimal("30"),
+            "memory_growth_event": Decimal("2"),
+            "memory_evm_gas_delta": Decimal("3"),
+            "memory_4k_page_crossings": Decimal("5"),
+        }.items():
+            self.assertLessEqual(
+                abs(memory.body_coefficients[name] - expected), Decimal("1e-60")
+            )
+        for name, expected in {
+            "opcode:0x51:constant": Decimal("31"),
+            "opcode:0x52:constant": Decimal("51"),
+            "opcode:0x53:constant": Decimal("71"),
+            "memory_growth_event": Decimal("4"),
+            "memory_evm_gas_delta": Decimal("6"),
+            "memory_4k_page_crossings": Decimal("10"),
+        }.items():
+            self.assertLessEqual(
+                abs(memory.production_coefficients[name] - expected),
+                Decimal("1e-60"),
+            )
+
+    def test_structured_dynamic_fit_rejects_rank_deficient_shared_memory(self):
+        observations = tuple(
+            DynamicOpcodeObservation(
+                row.dynamic_key,
+                row.scenario_id,
+                row.model_split,
+                {
+                    **row.features,
+                    "memory_4k_page_crossings": Fraction(0),
+                },
+                row.target_body_cost,
+            )
+            if row.dynamic_key in {"opcode:0x51", "opcode:0x52", "opcode:0x53"}
+            else row
+            for row in self._structured_dynamic_observations()
+        )
+
+        with self.assertRaisesRegex(ValueError, "shared memory.*exact rank"):
+            fit_structured_dynamic_opcode_models(
+                observations,
+                body_scale=Decimal("2"),
+                common_overhead=Decimal("11"),
+            )
+
+    def test_structured_dynamic_fit_rejects_invalid_observation_type(self):
+        with self.assertRaisesRegex(ValueError, "invalid type"):
+            fit_structured_dynamic_opcode_models(
+                (*self._structured_dynamic_observations(), object()),
+                body_scale=Decimal("2"),
+                common_overhead=Decimal("11"),
+            )
+
+    def test_structured_dynamic_holdout_failure_keeps_evidence(self):
+        observations = list(self._structured_dynamic_observations())
+        index = next(
+            index
+            for index, row in enumerate(observations)
+            if row.dynamic_key == "opcode:0x51" and row.model_split == "holdout"
+        )
+        observations[index] = DynamicOpcodeObservation(
+            **{
+                **observations[index].__dict__,
+                "target_body_cost": observations[index].target_body_cost * Decimal("2"),
+            }
+        )
+
+        result = fit_structured_dynamic_opcode_models(
+            observations,
+            body_scale=Decimal("2"),
+            common_overhead=Decimal("11"),
+        )
+
+        self.assertEqual(result.status, "not_supported")
+        self.assertEqual(result.shared_memory_model.status, "not_supported")
+        self.assertIn("holdout_max_ape", result.shared_memory_model.quality_failures)
+        self.assertIn(
+            "opcode:0x51/opcode:0x51-holdout",
+            result.shared_memory_model.predictions,
+        )
+
+    def test_nonpositive_operation_fit_target_is_not_supported_evidence(self):
+        observations = list(self._structured_dynamic_observations())
+        index = next(
+            index
+            for index, row in enumerate(observations)
+            if row.dynamic_key == "opcode:0x20"
+            and row.model_split == "fit"
+            and row.features["memory_growth_event"] == Fraction(1)
+        )
+        observations[index] = DynamicOpcodeObservation(
+            **{
+                **observations[index].__dict__,
+                "target_body_cost": Decimal("1"),
+            }
+        )
+
+        result = fit_structured_dynamic_opcode_models(
+            observations,
+            body_scale=Decimal("2"),
+            common_overhead=Decimal("11"),
+        )
+
+        model = result.opcode_models["opcode:0x20"]
+        self.assertEqual(result.status, "not_supported")
+        self.assertEqual(model.status, "not_supported")
+        self.assertIn("nonpositive_operation_fit_target", model.quality_failures)
+        self.assertEqual(
+            set(model.predictions),
+            {
+                row.scenario_id
+                for row in observations
+                if row.dynamic_key == "opcode:0x20"
+            },
+        )
+        self.assertTrue(
+            all(
+                value.is_finite()
+                for prediction in model.predictions.values()
+                for name, value in prediction.items()
+                if name != "model_split"
+            )
+        )
+
+    def test_structured_keccak_and_mcopy_predictions_reuse_shared_memory(self):
+        result = fit_structured_dynamic_opcode_models(
+            self._structured_dynamic_observations(),
+            body_scale=Decimal("2"),
+            common_overhead=Decimal("11"),
+        )
+
+        for key in ("opcode:0x20", "opcode:0x5e"):
+            model = result.opcode_models[key]
+            prediction = next(
+                row for row in model.predictions.values()
+                if row["model_split"] == "holdout"
+            )
+            self.assertGreater(prediction["shared_memory_body_cost"], Decimal(0))
+            self.assertLessEqual(
+                abs(
+                    prediction["predicted_body_cost"]
+                    - prediction["predicted_operation_body_cost"]
+                    - prediction["shared_memory_body_cost"]
+                ),
+                Decimal("1e-60"),
+            )
+            self.assertLessEqual(prediction["body_ape"], Decimal("1e-60"))
+
     def test_dynamic_opcode_fit_recovers_body_and_production_coefficients(self):
         observations = (
             DynamicOpcodeObservation(

@@ -1906,6 +1906,32 @@ class FormalOpcodeRelationTests(unittest.TestCase):
                 expected_provenance=provenance,
             )
 
+    def test_round_fit_is_byte_identical_across_caller_decimal_contexts(self):
+        manifest = formal_relation_manifest()
+        relation = next(
+            item for item in manifest.opcode_relations if item.signed_raw_gas_by_key
+        )
+        rows = canonical_formal_relation_round_rows(manifest, relation)
+        for row in rows:
+            if row["lane"] == "target" and row["diagnostic_count"] == 1:
+                row["prover_gas"] += 1
+        provenance = formal_relation_provenance(rows)
+
+        artifacts = []
+        for precision in (28, 80):
+            with localcontext() as caller:
+                caller.prec = precision
+                result = opcode_gas.fit_formal_relation_round(
+                    manifest,
+                    copy.deepcopy(rows),
+                    [relation.id],
+                    8,
+                    expected_provenance=provenance,
+                )
+                artifacts.append(opcode_gas.canonical_json(result))
+
+        self.assertEqual(artifacts[0], artifacts[1])
+
     def test_relation_artifact_is_byte_identical_across_caller_decimal_contexts(self):
         manifest = formal_relation_manifest()
         rows = formal_relation_rows(manifest)

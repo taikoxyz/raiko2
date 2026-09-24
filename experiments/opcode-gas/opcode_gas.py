@@ -6148,6 +6148,7 @@ def _fit_one_opcode_relation(
     }
 
 
+@_isolated_decimal_context
 def fit_formal_relation_round(
     manifest: Manifest,
     rows: Iterable[Mapping[str, Any]],

@@ -351,12 +351,12 @@ parser tests for `generate-relations`, `run-relations`, `fit-relations`, and the
 `prepare-calibration --run-path-file` machine-readable run handoff.
 
 Freeze the complete dynamic model matrix in the formal relation manifest. `EXP` and `MCOPY` each
-have five fit scenarios and two untouched model holdouts. KECCAK256 has 15 fit scenarios and seven
+have five fit scenarios and two untouched model holdouts. KECCAK256 has 22 fit scenarios and seven
 fresh untouched model holdouts. `MLOAD`, `MSTORE`, and
 `MSTORE8` each have five fit scenarios, two reused zero-growth warmed holdouts, two retained
 previously passing expansion holdouts, and one fresh untouched `0x4000` expansion holdout. The
 viewed `0x2000` row is fit/diagnostic evidence. Every key retains exactly one `canonical` relation
-for `A`; the other 60 relations remain outside `A`. Bind `model_split` and the exact structured
+for `A`; the other 67 relations remain outside `A`. Bind `model_split` and the exact structured
 `relation_scenario` through the manifest, emitted fixtures, raw rows, adaptive decisions, and final
 relation artifact.
 
@@ -380,12 +380,24 @@ Replace the KECCAK256 operation-specific feature with
 `keccak_permutations = 0 if input_length == 0 else floor(input_length / 136) + 1`. This follows
 REVM's zero-length fast path, which returns `KECCAK_EMPTY` without calling Keccak, while counting
 the mandatory padded Keccak-f[1600] permutation for nonzero input and the additional permutation
-at exact 136-byte multiples. Keep previously viewed 32/256/512/1024 rows in the fit set. Add fit
-rows at 0, 64, 135, 136, 137, 271, 272, and 273 bytes, retaining warmed/expanding pairs where they
-already exist. Freeze untouched holdouts at 17, 200, 407, 408, 409, 777, and 2048 bytes. These
-changes produce a 66-scenario dynamic matrix with 60 noncanonical rows and require a fresh manifest
-identity and calibration run. Prior run `8e2abe743f28f69ec2f89c8b` remains validation evidence only
-for the unchanged shared-memory family.
+at exact 136-byte multiples. Model that distinct path with
+`keccak_zero_length_event = 1 if input_length == 0 else 0`; do not force zero and nonzero inputs to
+share the nonempty hash/syscall setup constant. Keep all previously viewed rows in the fit set.
+Retain fit rows at 0, 17, 32, 64, 135, 136, 137, 200, 256, 271, 272, 273, 407, 408, 409, 512, 777,
+1024, and 2048 bytes, including the existing warmed/expanding pairs. Freeze untouched holdouts at
+95, 333, 543, 544 (with 17 warmed memory words), 545, 1500, and 4096 bytes. These changes produce a
+73-scenario dynamic matrix with 67 noncanonical rows and require a fresh manifest identity and
+calibration run. Prior run `8e2abe743f28f69ec2f89c8b` remains
+validation evidence only for the unchanged shared-memory family.
+
+Run `77cff7accc62325aad8c047b` accepted all 162 formal relations and kept every frozen nonzero
+KECCAK256 holdout below 1.841% production APE, but the two-parameter permutation model failed on
+the zero-length fit row at 232.621% APE. A read-only three-parameter diagnostic produced 0.603% fit
+MAPE, 1.388% fit maximum APE, and 0.801% holdout maximum APE. Because these results were viewed
+before freezing the zero-length branch, they are motivation rather than validation; all viewed
+rows are fit evidence and the seven replacement holdouts remain untouched. Rerun under a fresh
+implementation revision and calibration identity. Report zero-length support narrowly: the branch
+has REVM source semantics plus three repeated fit measurements, not a distinct length holdout.
 
 For memory-sensitive scenarios, make `initial_memory_words` executable: the warmup must allocate
 the declared memory before the target operation. Tests must show that changing this field changes
@@ -918,7 +930,12 @@ Add a separate `fit_dynamic_opcode_models` diagnostic over these frozen feature 
 ```python
 DYNAMIC_OPCODE_FEATURE_ORDERS = {
     "opcode:0x0a": ("constant", "exponent_bytes", "exponent_bytes_squared"),
-    "opcode:0x20": ("constant", "keccak_permutations", *SHARED_MEMORY_FEATURES),
+    "opcode:0x20": (
+        "constant",
+        "keccak_zero_length_event",
+        "keccak_permutations",
+        *SHARED_MEMORY_FEATURES,
+    ),
     "opcode:0x51": ("constant", *SHARED_MEMORY_FEATURES),
     "opcode:0x52": ("constant", *SHARED_MEMORY_FEATURES),
     "opcode:0x53": ("constant", *SHARED_MEMORY_FEATURES),
@@ -932,7 +949,7 @@ relation slope. Fit MLOAD, MSTORE, and MSTORE8 jointly with opcode-specific cons
 coefficient. The boundary event is one when the operation crosses at least one additional 4-KiB
 logical-memory boundary beyond the warmed state, regardless of how many boundaries it crosses.
 Subtract the shared memory contribution before fitting KECCAK256 and MCOPY and add it back for their
-predictions. Require exact rank six for the shared matrix and aggregate rank and parameter count 13.
+predictions. Require exact rank six for the shared matrix and aggregate rank and parameter count 14.
 Fit with `Decimal`, never binary `float`, and transform to production units with the staged block fit:
 
 ```text

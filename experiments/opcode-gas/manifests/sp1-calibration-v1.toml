@@ -395,7 +395,7 @@ id = "opcode:0x20:input-17"
 case_id = "keccak256"
 key_id = "opcode:0x20"
 split = "dynamic_holdout"
-model_split = "holdout"
+model_split = "fit"
 scenario_id = "input-17"
 scenario = { input_length = 17, initial_memory_words = 1 }
 target_raw_gas = 36
@@ -406,7 +406,7 @@ id = "opcode:0x20:input-200"
 case_id = "keccak256"
 key_id = "opcode:0x20"
 split = "dynamic_holdout"
-model_split = "holdout"
+model_split = "fit"
 scenario_id = "input-200"
 scenario = { input_length = 200, initial_memory_words = 1 }
 target_raw_gas = 90
@@ -417,7 +417,7 @@ id = "opcode:0x20:input-407"
 case_id = "keccak256"
 key_id = "opcode:0x20"
 split = "dynamic_holdout"
-model_split = "holdout"
+model_split = "fit"
 scenario_id = "input-407"
 scenario = { input_length = 407, initial_memory_words = 1 }
 target_raw_gas = 144
@@ -428,7 +428,7 @@ id = "opcode:0x20:input-408"
 case_id = "keccak256"
 key_id = "opcode:0x20"
 split = "dynamic_holdout"
-model_split = "holdout"
+model_split = "fit"
 scenario_id = "input-408"
 scenario = { input_length = 408, initial_memory_words = 1 }
 target_raw_gas = 144
@@ -439,7 +439,7 @@ id = "opcode:0x20:input-409"
 case_id = "keccak256"
 key_id = "opcode:0x20"
 split = "dynamic_holdout"
-model_split = "holdout"
+model_split = "fit"
 scenario_id = "input-409"
 scenario = { input_length = 409, initial_memory_words = 1 }
 target_raw_gas = 144
@@ -450,7 +450,7 @@ id = "opcode:0x20:input-777"
 case_id = "keccak256"
 key_id = "opcode:0x20"
 split = "dynamic_holdout"
-model_split = "holdout"
+model_split = "fit"
 scenario_id = "input-777"
 scenario = { input_length = 777, initial_memory_words = 1 }
 target_raw_gas = 253
@@ -461,10 +461,87 @@ id = "opcode:0x20:input-2048"
 case_id = "keccak256"
 key_id = "opcode:0x20"
 split = "dynamic_holdout"
-model_split = "holdout"
+model_split = "fit"
 scenario_id = "input-2048"
 scenario = { input_length = 2048, initial_memory_words = 1 }
 target_raw_gas = 611
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x20:input-95"
+case_id = "keccak256"
+key_id = "opcode:0x20"
+split = "dynamic_holdout"
+model_split = "holdout"
+scenario_id = "input-95"
+scenario = { input_length = 95, initial_memory_words = 1 }
+target_raw_gas = 54
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x20:input-333"
+case_id = "keccak256"
+key_id = "opcode:0x20"
+split = "dynamic_holdout"
+model_split = "holdout"
+scenario_id = "input-333"
+scenario = { input_length = 333, initial_memory_words = 1 }
+target_raw_gas = 126
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x20:input-543"
+case_id = "keccak256"
+key_id = "opcode:0x20"
+split = "dynamic_holdout"
+model_split = "holdout"
+scenario_id = "input-543"
+scenario = { input_length = 543, initial_memory_words = 1 }
+target_raw_gas = 180
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x20:input-544-memory-17"
+case_id = "keccak256"
+key_id = "opcode:0x20"
+split = "dynamic_holdout"
+model_split = "holdout"
+scenario_id = "input-544-memory-17"
+scenario = { input_length = 544, initial_memory_words = 17 }
+target_raw_gas = 132
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x20:input-545"
+case_id = "keccak256"
+key_id = "opcode:0x20"
+split = "dynamic_holdout"
+model_split = "holdout"
+scenario_id = "input-545"
+scenario = { input_length = 545, initial_memory_words = 1 }
+target_raw_gas = 189
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x20:input-1500"
+case_id = "keccak256"
+key_id = "opcode:0x20"
+split = "dynamic_holdout"
+model_split = "holdout"
+scenario_id = "input-1500"
+scenario = { input_length = 1500, initial_memory_words = 1 }
+target_raw_gas = 454
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x20:input-4096"
+case_id = "keccak256"
+key_id = "opcode:0x20"
+split = "dynamic_holdout"
+model_split = "holdout"
+scenario_id = "input-4096"
+scenario = { input_length = 4096, initial_memory_words = 1 }
+target_raw_gas = 1211
 reference_raw_gas_total = 2
 
 [[opcode_relation_scenarios]]

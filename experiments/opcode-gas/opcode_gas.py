@@ -74,6 +74,7 @@ DYNAMIC_OPCODE_FEATURE_ORDERS = MappingProxyType(
         "opcode:0x0a": ("constant", "exponent_bytes", "exponent_bytes_squared"),
         "opcode:0x20": (
             "constant",
+            "keccak_zero_length_event",
             "keccak_permutations",
             "memory_growth_event",
             "memory_evm_gas_delta",
@@ -218,38 +219,73 @@ _DYNAMIC_RELATION_SCENARIO_MATRIX = {
         ),
         (
             "dynamic_holdout",
-            "holdout",
+            "fit",
             (("initial_memory_words", 1), ("input_length", 17)),
         ),
         (
             "dynamic_holdout",
-            "holdout",
+            "fit",
             (("initial_memory_words", 1), ("input_length", 200)),
         ),
         (
             "dynamic_holdout",
-            "holdout",
+            "fit",
             (("initial_memory_words", 1), ("input_length", 407)),
         ),
         (
             "dynamic_holdout",
-            "holdout",
+            "fit",
             (("initial_memory_words", 1), ("input_length", 408)),
         ),
         (
             "dynamic_holdout",
-            "holdout",
+            "fit",
             (("initial_memory_words", 1), ("input_length", 409)),
         ),
         (
             "dynamic_holdout",
-            "holdout",
+            "fit",
             (("initial_memory_words", 1), ("input_length", 777)),
         ),
         (
             "dynamic_holdout",
-            "holdout",
+            "fit",
             (("initial_memory_words", 1), ("input_length", 2048)),
+        ),
+        (
+            "dynamic_holdout",
+            "holdout",
+            (("initial_memory_words", 1), ("input_length", 95)),
+        ),
+        (
+            "dynamic_holdout",
+            "holdout",
+            (("initial_memory_words", 1), ("input_length", 333)),
+        ),
+        (
+            "dynamic_holdout",
+            "holdout",
+            (("initial_memory_words", 1), ("input_length", 543)),
+        ),
+        (
+            "dynamic_holdout",
+            "holdout",
+            (("initial_memory_words", 17), ("input_length", 544)),
+        ),
+        (
+            "dynamic_holdout",
+            "holdout",
+            (("initial_memory_words", 1), ("input_length", 545)),
+        ),
+        (
+            "dynamic_holdout",
+            "holdout",
+            (("initial_memory_words", 1), ("input_length", 1500)),
+        ),
+        (
+            "dynamic_holdout",
+            "holdout",
+            (("initial_memory_words", 1), ("input_length", 4096)),
         ),
     ),
     "opcode:0x51": (),
@@ -2279,6 +2315,7 @@ def _dynamic_relation_target_raw_gas(
             17,
             32,
             64,
+            95,
             135,
             136,
             137,
@@ -2287,13 +2324,19 @@ def _dynamic_relation_target_raw_gas(
             271,
             272,
             273,
+            333,
             407,
             408,
             409,
             512,
+            543,
+            544,
+            545,
             777,
             1024,
+            1500,
             2048,
+            4096,
         }:
             raise ValueError("KECCAK256 relation has invalid input length")
         words = (int(length) + 31) // 32
@@ -12374,8 +12417,14 @@ def _dynamic_opcode_features(
             raise ValueError("KECCAK256 dynamic opcode scenario fields differ from the frozen schema")
         input_length = exact_nonnegative_int("input_length")
         input_words = (input_length + 31) // 32
+        zero_length_event = int(input_length == 0)
         keccak_permutations = 0 if input_length == 0 else input_length // 136 + 1
-        values = (1, keccak_permutations, *memory_features(input_words))
+        values = (
+            1,
+            zero_length_event,
+            keccak_permutations,
+            *memory_features(input_words),
+        )
     elif dynamic_key in {"opcode:0x51", "opcode:0x52", "opcode:0x53"}:
         if set(scenario) != {"highest_touched_offset", "initial_memory_words"}:
             raise ValueError("memory dynamic opcode scenario fields differ from the frozen schema")

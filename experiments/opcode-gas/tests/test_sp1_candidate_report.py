@@ -1970,10 +1970,10 @@ class FormalOpcodeRelationTests(unittest.TestCase):
         self.assertEqual(artifact["status"], "accepted")
         self.assertEqual(len(artifact["equations"]), 98)
         self.assertEqual(len(artifact["self_controls"]), 4)
-        self.assertEqual(len(artifact["dynamic_holdouts"]), 60)
+        self.assertEqual(len(artifact["dynamic_holdouts"]), 67)
         self.assertEqual(
             Counter(row["model_split"] for row in artifact["dynamic_holdouts"]),
-            Counter({"fit": 34, "holdout": 26}),
+            Counter({"fit": 41, "holdout": 26}),
         )
         self.assertEqual(artifact["affine_model"]["rank"], 98)
         self.assertEqual(artifact["affine_model"]["nullity"], 4)
@@ -2054,7 +2054,7 @@ class FormalOpcodeRelationTests(unittest.TestCase):
             )
 
         self.assertEqual(len(artifact["equations"]), 98)
-        self.assertEqual(len(artifact["dynamic_holdouts"]), 61)
+        self.assertEqual(len(artifact["dynamic_holdouts"]), 68)
         self.assertEqual(artifact["affine_model"]["rank"], 98)
 
     def test_relation_artifact_replays_model_split_and_exact_scenario_metadata(self):
@@ -2306,6 +2306,7 @@ class DynamicOpcodeModelTests(unittest.TestCase):
                 {"input_length": 512, "initial_memory_words": 1},
                 {
                     "constant": Fraction(1),
+                    "keccak_zero_length_event": Fraction(0),
                     "keccak_permutations": Fraction(4),
                     "memory_growth_event": Fraction(1),
                     "memory_evm_gas_delta": Fraction(45),
@@ -2381,6 +2382,9 @@ class DynamicOpcodeModelTests(unittest.TestCase):
                     features,
                     {
                         "constant": Fraction(1),
+                        "keccak_zero_length_event": Fraction(
+                            int(input_length == 0)
+                        ),
                         "keccak_permutations": Fraction(expected_permutations),
                         "memory_growth_event": Fraction(0),
                         "memory_evm_gas_delta": Fraction(0),
@@ -2639,8 +2643,12 @@ class DynamicOpcodeModelTests(unittest.TestCase):
                 "opcode:0x20": evidence(
                     key="opcode:0x20",
                     status="supported",
-                    order=("constant", "keccak_permutations"),
-                    rank=2,
+                    order=(
+                        "constant",
+                        "keccak_zero_length_event",
+                        "keccak_permutations",
+                    ),
+                    rank=3,
                 ),
                 "opcode:0x5e": evidence(
                     key="opcode:0x5e",
@@ -2649,8 +2657,8 @@ class DynamicOpcodeModelTests(unittest.TestCase):
                     rank=2,
                 ),
             },
-            aggregate_parameter_count=13,
-            aggregate_exact_rank=13,
+            aggregate_parameter_count=14,
+            aggregate_exact_rank=14,
         )
         fit_result.opcode_models[dynamic_key].quality_failures = (
             "nonpositive_operation_fit_target",
@@ -2688,14 +2696,15 @@ class DynamicOpcodeModelTests(unittest.TestCase):
             artifact["feature_orders"]["opcode:0x20"],
             [
                 "constant",
+                "keccak_zero_length_event",
                 "keccak_permutations",
                 "memory_growth_event",
                 "memory_evm_gas_delta",
                 "memory_4k_boundary_event",
             ],
         )
-        self.assertEqual(artifact["aggregate_parameter_count"], 13)
-        self.assertEqual(artifact["aggregate_exact_fit_rank"], 13)
+        self.assertEqual(artifact["aggregate_parameter_count"], 14)
+        self.assertEqual(artifact["aggregate_exact_fit_rank"], 14)
         self.assertIn("shared_memory_model", artifact)
         self.assertNotIn("opcode:0x51", artifact["models"])
         self.assertNotIn("opcode:0x52", artifact["models"])

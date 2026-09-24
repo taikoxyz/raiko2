@@ -334,7 +334,9 @@ q_MLOAD     = beta_load + f_mem
 q_MSTORE    = beta_store + f_mem
 q_MSTORE8   = beta_store8 + f_mem
 keccak_permutations = 0 if input_length == 0 else floor(input_length / 136) + 1
-q_KECCAK256 = beta_0 + beta_p * keccak_permutations + f_mem
+keccak_zero_length_event = 1 if input_length == 0 else 0
+q_KECCAK256 = beta_0 + beta_z * keccak_zero_length_event
+              + beta_p * keccak_permutations + f_mem
 q_MCOPY     = beta_0 + beta_w * copy_words + f_mem
 
 p_operation = body_scale * q_operation + common_opcode_overhead
@@ -355,7 +357,7 @@ memory coefficients. Subtract that shared body contribution before fitting KECCA
 then add it back for their predictions and gates. In production space, add common overhead only to
 the opcode-specific constants; scale shared coefficients by `body_scale` without adding overhead.
 The shared matrix has exact rank six and the overall structured model has exact rank and parameter
-count 13. The schema-3 diagnostic reports the shared family explicitly, alongside EXP, KECCAK256,
+count 14. The schema-3 diagnostic reports the shared family explicitly, alongside EXP, KECCAK256,
 and MCOPY operation-specific models. Acceptance uses production-space fit MAPE at most 5%, fit
 maximum APE at most 10%, and holdout maximum APE at most 10%. Failed quality gates produce
 a content-addressed `not_supported` artifact rather than aborting or refitting the matrix. The
@@ -380,17 +382,29 @@ superseded `input_words` KECCAK256 model failed its fit gates (10.318% MAPE and 
 APE); EXP and MCOPY are supported. This aggregate status does not invalidate the shared-memory
 result, but the run cannot validate the replacement KECCAK256 model.
 
-The replacement 66-scenario matrix keeps the validated shared-memory rows and expands KECCAK256 to
-15 fit rows and seven fresh holdouts. Its semantic feature follows the measured REVM path: a
+The replacement 73-scenario matrix keeps the validated shared-memory rows and expands KECCAK256 to
+22 fit rows and seven fresh holdouts. Its semantic feature follows the measured REVM path: a
 zero-length operation returns `KECCAK_EMPTY` without a permutation, inputs of 1 through 135 bytes
 require one padded Keccak-f[1600] permutation, 136 through 271 require two, and each subsequent
-136-byte interval adds one. Previously viewed 32/256/512/1024 rows are fit
-evidence; untouched holdouts are frozen at 17, 200, 407, 408, 409, 777, and 2048 bytes. The fit rows
-cover both sides of the 136- and 272-byte boundaries and retain warmed/expanding memory pairs so
-that shared `f_mem` is subtracted independently. The 60 noncanonical rows, exact scenarios, and
+136-byte interval adds one. All previously viewed rows are fit evidence; untouched holdouts are
+frozen at 95, 333, 543, 544 (with 17 warmed memory words), 545, 1500, and 4096 bytes. The fit rows
+cover both sides of the 136- and 272-byte boundaries; the holdouts add the 544-byte boundary and
+distant extrapolation while retaining a warmed boundary case so that shared `f_mem` is subtracted
+independently. The 67 noncanonical rows, exact scenarios, and
 model splits are manifest-bound. A fresh calibration identity must validate the full replacement
 matrix; run `8e2abe743f28f69ec2f89c8b` remains prior validation only for the unchanged shared-memory
 family.
+
+Fresh run `77cff7accc62325aad8c047b` accepted all 162 formal relations. The nonzero KECCAK256 rows
+supported the permutation slope and all seven then-frozen holdouts stayed below 1.841% production APE,
+but the two-parameter fit was `not_supported`: its zero-length fit row had 232.621% APE because
+REVM returns `KECCAK_EMPTY` without entering the nonempty hash/syscall setup path. A read-only
+diagnostic with the explicit zero-length event produced 0.603% fit MAPE, 1.388% fit maximum APE,
+and 0.801% holdout maximum APE. This is motivation, not validation, and every viewed row moves to
+fit evidence. Freeze the semantic branch and replacement holdouts in the implementation and require
+a new calibration identity before calling the model supported. The zero-length branch itself has
+no distinct length-domain holdout: its evidence is explicitly limited to REVM semantics and three
+repeated fit measurements; fresh holdouts validate the nonzero permutation relation only.
 
 The result may show that a term is stable, only approximately stable, or below the experiment's
 resolving power. It is valid to merge indistinguishable terms or omit a negligible term in a future

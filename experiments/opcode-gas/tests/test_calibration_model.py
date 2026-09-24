@@ -228,19 +228,29 @@ class CalibrationModelTests(unittest.TestCase):
                     + Decimal(gas_delta) * Decimal("3")
                     + Decimal(boundary_event) * Decimal("5")
                 )
+                zero_length_event = int(key == "opcode:0x20" and words == 0)
+                zero_length_adjustment = Decimal("-5")
+                features = {
+                    "constant": Fraction(1),
+                    word_name: Fraction(words),
+                    "memory_growth_event": Fraction(growth_event),
+                    "memory_evm_gas_delta": Fraction(gas_delta),
+                    "memory_4k_boundary_event": Fraction(boundary_event),
+                }
+                if key == "opcode:0x20":
+                    features["keccak_zero_length_event"] = Fraction(
+                        zero_length_event
+                    )
                 observations.append(
                     DynamicOpcodeObservation(
                         key,
                         f"{key}-{index}",
                         split,
-                        {
-                            "constant": Fraction(1),
-                            word_name: Fraction(words),
-                            "memory_growth_event": Fraction(growth_event),
-                            "memory_evm_gas_delta": Fraction(gas_delta),
-                            "memory_4k_boundary_event": Fraction(boundary_event),
-                        },
-                        constant + Decimal(words) * word_coefficient + shared,
+                        features,
+                        constant
+                        + Decimal(words) * word_coefficient
+                        + Decimal(zero_length_event) * zero_length_adjustment
+                        + shared,
                     )
                 )
 
@@ -270,13 +280,13 @@ class CalibrationModelTests(unittest.TestCase):
         )
 
         self.assertEqual(result.status, "supported")
-        self.assertEqual(result.aggregate_exact_rank, 13)
-        self.assertEqual(result.aggregate_parameter_count, 13)
+        self.assertEqual(result.aggregate_exact_rank, 14)
+        self.assertEqual(result.aggregate_parameter_count, 14)
         keccak = result.opcode_models["opcode:0x20"]
-        self.assertEqual(keccak.exact_rank, 2)
+        self.assertEqual(keccak.exact_rank, 3)
         self.assertEqual(
             keccak.exact_fit_design_matrix[0],
-            (Fraction(1), Fraction(0)),
+            (Fraction(1), Fraction(1), Fraction(0)),
         )
         self.assertLessEqual(
             abs(keccak.body_coefficients["constant"] - Decimal("40")),
@@ -284,6 +294,13 @@ class CalibrationModelTests(unittest.TestCase):
         )
         self.assertLessEqual(
             abs(keccak.body_coefficients["keccak_permutations"] - Decimal("4")),
+            Decimal("1e-60"),
+        )
+        self.assertLessEqual(
+            abs(
+                keccak.body_coefficients["keccak_zero_length_event"]
+                - Decimal("-5")
+            ),
             Decimal("1e-60"),
         )
         memory = result.shared_memory_model

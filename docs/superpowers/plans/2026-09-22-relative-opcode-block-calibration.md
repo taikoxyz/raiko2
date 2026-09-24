@@ -399,6 +399,20 @@ rows are fit evidence and the seven replacement holdouts remain untouched. Rerun
 implementation revision and calibration identity. Report zero-length support narrowly: the branch
 has REVM source semantics plus three repeated fit measurements, not a distinct length holdout.
 
+Fresh run `e8663a09b3f35da37196cbdf` at implementation revision `3b9ba3b3` accepted all 169 formal
+relations and returned `supported` for the full-rank 14-parameter structured model. KECCAK256 fit
+production MAPE/max APE were 0.535%/1.378%; the seven untouched holdouts had 0.675% maximum APE.
+EXP, MCOPY, and shared memory also remained supported, and the structured artifact stayed
+`candidate_eligible = false`. Record the separate scalar block-candidate failure on nonpositive
+static `opcode:0x19` lab-body reconstruction as a distinct affine/scalar precheck failure. It does
+not validate or invalidate the structured dynamic result.
+
+The run also exposed a replay-only precision bug: direct `fit_formal_relation_round` calls inherited
+the caller's Decimal context even though CLI execution already used 80 digits. Isolate the context at
+that round-computation boundary and cover 28-versus-80-digit byte identity. Replaying all five sealed
+rounds after this fix must return 169 accepted relations and the exact canonical row stream. The fix
+does not change the run's sampled evidence and does not require resampling.
+
 For memory-sensitive scenarios, make `initial_memory_words` executable: the warmup must allocate
 the declared memory before the target operation. Tests must show that changing this field changes
 the bytecode and raw-gas expectation. A metadata-only initial-memory declaration is invalid because

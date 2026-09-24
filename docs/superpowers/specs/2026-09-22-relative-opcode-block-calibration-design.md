@@ -406,6 +406,23 @@ a new calibration identity before calling the model supported. The zero-length b
 no distinct length-domain holdout: its evidence is explicitly limited to REVM semantics and three
 repeated fit measurements; fresh holdouts validate the nonzero permutation relation only.
 
+Fresh run `e8663a09b3f35da37196cbdf`, bound to implementation revision `3b9ba3b3`, accepted all 169
+formal relations and supported the exact-rank-14 structured model. KECCAK256's 22 fit rows produced
+0.535% production MAPE and 1.378% maximum production APE; its seven untouched holdouts produced
+0.675% maximum production APE. The production-space coefficients were approximately 678.14 for the
+nonempty setup constant, -500.51 for the zero-length fast-path adjustment, and 2147.09 per padded
+permutation, plus the independently fitted shared `f_mem`. EXP, MCOPY, and shared memory also
+remained supported, while the entire diagnostic remained ineligible for candidate construction.
+The scalar block-candidate path continued to fail closed on a nonpositive `opcode:0x19` multiplier;
+this is a separate static lab-body affine/scalar precheck reached before dynamic-scalar validation.
+It neither validates nor invalidates the structured dynamic result.
+
+A post-run replay audit found that direct round-fit library calls inherited caller Decimal precision,
+although the CLI had generated the run inside the required 80-digit context. Isolating the Decimal
+context at `fit_formal_relation_round` makes default-precision replay reproduce all five persisted
+rounds exactly. Because the CLI sampling and fitting already used the same 80-digit context, this
+replay fix does not alter the sealed raw evidence or require a new empirical run.
+
 The result may show that a term is stable, only approximately stable, or below the experiment's
 resolving power. It is valid to merge indistinguishable terms or omit a negligible term in a future
 production model, but only after reporting the resulting block-level residual. This diagnostic does

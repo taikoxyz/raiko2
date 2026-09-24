@@ -234,6 +234,25 @@ and run. The zero-length coefficient has no distinct length-domain holdout; supp
 is limited to the REVM fast-path semantics plus its three repeated fit measurements, while the fresh
 holdouts validate only the nonzero permutation relation.
 
+Fresh run `e8663a09b3f35da37196cbdf`, frozen at implementation revision `3b9ba3b3`,
+accepted all 169 formal relations and produced a full-rank 14-parameter structured model with
+`status = supported`. KECCAK256 used 22 fit rows and seven untouched holdouts: production-space fit
+MAPE was 0.535%, fit maximum APE was 1.378%, and holdout maximum APE was 0.675%. The holdout APEs
+for 95, 333, 543, warmed 544, 545, 1500, and 4096 bytes were respectively 0.488%, 0.029%, 0.675%,
+0.308%, 0.291%, 0.052%, and 0.007%. Its fitted production-space term was approximately
+`678.14 - 500.51 * zero_length_event + 2147.09 * keccak_permutations + f_mem`. EXP, MCOPY, and the
+shared-memory family also remained supported; the shared-memory holdout maximum APE remained 8.887%.
+The diagnostic is deliberately `candidate_eligible = false`. The old scalar block-candidate path
+still fails closed on a nonpositive reconstructed lab-body scalar for static `opcode:0x19`, before
+reaching dynamic-scalar validation. This is a separate static affine/scalar issue; it neither
+validates nor invalidates the structured dynamic result.
+
+A replay audit of this run found that direct library calls to `fit_formal_relation_round` inherited
+the caller's Decimal precision, while the CLI already ran at the required 80-digit precision. The
+round fitter now isolates that context directly, and default-precision replay reproduces the sealed
+169-relation ledger byte-for-byte. This fix does not change the sampled rows or fitted artifact, so
+the run remains evidence for revision `3b9ba3b3` and does not require resampling.
+
 `fit-block-calibration` deliberately retains the scalar lab-body dynamic holdout gate and therefore
 remains fail-closed until a separately reviewed promotion defines the production representation.
 A lab-body scalar pass would not by itself prove that one production per-raw-gas scalar is valid:

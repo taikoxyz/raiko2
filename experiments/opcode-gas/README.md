@@ -175,7 +175,8 @@ f_mem     = beta_event * memory_growth_event
           + beta_evm * memory_evm_gas_delta
           + beta_boundary * memory_4k_boundary_event
 EXP        = beta_0 + beta_b * exponent_bytes + beta_b2 * exponent_bytes^2
-KECCAK256  = beta_0 + beta_w * input_words + f_mem
+keccak_permutations = 0 if input_length == 0 else floor(input_length / 136) + 1
+KECCAK256  = beta_0 + beta_p * keccak_permutations + f_mem
 MLOAD      = beta_load + f_mem
 MSTORE     = beta_store + f_mem
 MSTORE8    = beta_store8 + f_mem
@@ -191,7 +192,7 @@ overpredicted `0x2000` by about 42% for all three memory opcodes. Replacing the 
 row informed the revised hypothesis, `0x2000` is now fit/diagnostic evidence and cannot remain a
 holdout.
 
-The revised 51-scenario matrix has aggregate exact rank and parameter count 13; its shared-memory
+The revised 66-scenario matrix has aggregate exact rank and parameter count 13; its shared-memory
 fit has exact rank six. For each memory opcode, the reused warmed rows at offsets `0x0100` and
 `0x1000` remain zero-growth holdouts, `0x0800` and `0x0fe0` are retained after passing the prior
 model, and `0x4000` is the fresh untouched expansion holdout. Production-space fit MAPE must be at
@@ -207,7 +208,16 @@ previously untouched `0x4000` production-space holdouts were 7.223% for MLOAD, 7
 and 7.410% for MSTORE8, all below the frozen 10% gate. The aggregate artifact is nevertheless
 `not_supported` and `candidate_eligible = false` because the independent KECCAK256 model failed its
 fit gates (10.318% MAPE and 29.384% maximum APE). EXP, MCOPY, and the shared-memory family are
-supported; the aggregate status must not be interpreted as a shared-memory failure.
+supported; the aggregate status must not be interpreted as a shared-memory failure. That run used
+the superseded `input_words` KECCAK256 model, so its KECCAK256 failure is motivation rather than
+validation evidence for the permutation model.
+
+KECCAK256 now has 15 fit rows, including its canonical row and previously viewed 32/256/512/1024
+evidence, plus seven frozen untouched holdouts at 17, 200, 407, 408, 409, 777, and 2048 bytes. The
+fit rows exercise both sides of the 136- and 272-byte padding boundaries. A fresh manifest identity
+and calibration run must validate this matrix; the shared-memory evidence from run
+`8e2abe743f28f69ec2f89c8b` remains valid prior evidence because that family and its rows are
+unchanged.
 
 `fit-block-calibration` deliberately retains the scalar lab-body dynamic holdout gate and therefore
 remains fail-closed until a separately reviewed promotion defines the production representation.

@@ -74,7 +74,7 @@ DYNAMIC_OPCODE_FEATURE_ORDERS = MappingProxyType(
         "opcode:0x0a": ("constant", "exponent_bytes", "exponent_bytes_squared"),
         "opcode:0x20": (
             "constant",
-            "input_words",
+            "keccak_permutations",
             "memory_growth_event",
             "memory_evm_gas_delta",
             "memory_4k_boundary_event",
@@ -149,12 +149,32 @@ _DYNAMIC_RELATION_SCENARIO_MATRIX = {
         (
             "dynamic_holdout",
             "fit",
-            (("initial_memory_words", 8), ("input_length", 256)),
+            (("initial_memory_words", 1), ("input_length", 0)),
         ),
         (
             "dynamic_holdout",
             "fit",
-            (("initial_memory_words", 32), ("input_length", 1024)),
+            (("initial_memory_words", 1), ("input_length", 64)),
+        ),
+        (
+            "dynamic_holdout",
+            "fit",
+            (("initial_memory_words", 1), ("input_length", 135)),
+        ),
+        (
+            "dynamic_holdout",
+            "fit",
+            (("initial_memory_words", 1), ("input_length", 136)),
+        ),
+        (
+            "dynamic_holdout",
+            "fit",
+            (("initial_memory_words", 1), ("input_length", 137)),
+        ),
+        (
+            "dynamic_holdout",
+            "fit",
+            (("initial_memory_words", 8), ("input_length", 256)),
         ),
         (
             "dynamic_holdout",
@@ -164,17 +184,72 @@ _DYNAMIC_RELATION_SCENARIO_MATRIX = {
         (
             "dynamic_holdout",
             "fit",
+            (("initial_memory_words", 1), ("input_length", 271)),
+        ),
+        (
+            "dynamic_holdout",
+            "fit",
+            (("initial_memory_words", 1), ("input_length", 272)),
+        ),
+        (
+            "dynamic_holdout",
+            "fit",
+            (("initial_memory_words", 1), ("input_length", 273)),
+        ),
+        (
+            "dynamic_holdout",
+            "fit",
+            (("initial_memory_words", 16), ("input_length", 512)),
+        ),
+        (
+            "dynamic_holdout",
+            "fit",
+            (("initial_memory_words", 1), ("input_length", 512)),
+        ),
+        (
+            "dynamic_holdout",
+            "fit",
+            (("initial_memory_words", 32), ("input_length", 1024)),
+        ),
+        (
+            "dynamic_holdout",
+            "fit",
             (("initial_memory_words", 1), ("input_length", 1024)),
         ),
         (
             "dynamic_holdout",
             "holdout",
-            (("initial_memory_words", 16), ("input_length", 512)),
+            (("initial_memory_words", 1), ("input_length", 17)),
         ),
         (
             "dynamic_holdout",
             "holdout",
-            (("initial_memory_words", 1), ("input_length", 512)),
+            (("initial_memory_words", 1), ("input_length", 200)),
+        ),
+        (
+            "dynamic_holdout",
+            "holdout",
+            (("initial_memory_words", 1), ("input_length", 407)),
+        ),
+        (
+            "dynamic_holdout",
+            "holdout",
+            (("initial_memory_words", 1), ("input_length", 408)),
+        ),
+        (
+            "dynamic_holdout",
+            "holdout",
+            (("initial_memory_words", 1), ("input_length", 409)),
+        ),
+        (
+            "dynamic_holdout",
+            "holdout",
+            (("initial_memory_words", 1), ("input_length", 777)),
+        ),
+        (
+            "dynamic_holdout",
+            "holdout",
+            (("initial_memory_words", 1), ("input_length", 2048)),
         ),
     ),
     "opcode:0x51": (),
@@ -2199,7 +2274,27 @@ def _dynamic_relation_target_raw_gas(
         return 10 + 50 * int(byte_length)
     if case.template == "keccak_32":
         length = scenario.get("input_length")
-        if type(length) is not int or length not in {32, 256, 512, 1024}:
+        if type(length) is not int or length not in {
+            0,
+            17,
+            32,
+            64,
+            135,
+            136,
+            137,
+            200,
+            256,
+            271,
+            272,
+            273,
+            407,
+            408,
+            409,
+            512,
+            777,
+            1024,
+            2048,
+        }:
             raise ValueError("KECCAK256 relation has invalid input length")
         words = (int(length) + 31) // 32
         return 30 + 6 * words + max(0, _memory_cost(words) - _memory_cost(initial_words))
@@ -12279,7 +12374,8 @@ def _dynamic_opcode_features(
             raise ValueError("KECCAK256 dynamic opcode scenario fields differ from the frozen schema")
         input_length = exact_nonnegative_int("input_length")
         input_words = (input_length + 31) // 32
-        values = (1, input_words, *memory_features(input_words))
+        keccak_permutations = 0 if input_length == 0 else input_length // 136 + 1
+        values = (1, keccak_permutations, *memory_features(input_words))
     elif dynamic_key in {"opcode:0x51", "opcode:0x52", "opcode:0x53"}:
         if set(scenario) != {"highest_touched_offset", "initial_memory_words"}:
             raise ValueError("memory dynamic opcode scenario fields differ from the frozen schema")

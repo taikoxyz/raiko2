@@ -333,7 +333,8 @@ q_EXP       = beta_0 + beta_b * exponent_bytes + beta_b2 * exponent_bytes^2
 q_MLOAD     = beta_load + f_mem
 q_MSTORE    = beta_store + f_mem
 q_MSTORE8   = beta_store8 + f_mem
-q_KECCAK256 = beta_0 + beta_w * input_words + f_mem
+keccak_permutations = 0 if input_length == 0 else floor(input_length / 136) + 1
+q_KECCAK256 = beta_0 + beta_p * keccak_permutations + f_mem
 q_MCOPY     = beta_0 + beta_w * copy_words + f_mem
 
 p_operation = body_scale * q_operation + common_opcode_overhead
@@ -368,15 +369,28 @@ move into fit/diagnostic evidence, while `0x4000` becomes the fresh untouched ho
 
 This second expanded memory matrix changes the frozen manifest identity again and requires a fresh
 calibration run. Neither the earlier 39-scenario artifact nor run `25db29d91bd3311441fe8317` can
-validate the revised 51-scenario model.
+validate the revised shared-memory model.
 
 Fresh run `8e2abe743f28f69ec2f89c8b` supplied that independent validation. Its shared-memory family had
 exact rank six, 1.926% production MAPE, 7.416% fit maximum APE, and 8.887% holdout maximum APE. The
 new `0x4000` production-space holdouts were 7.223% for MLOAD, 7.288% for MSTORE, and 7.410% for
 MSTORE8, so the frozen shared `f_mem` hypothesis is supported. The aggregate dynamic artifact remains
-`not_supported` and ineligible for candidate construction solely because the separate KECCAK256
-model failed its fit gates (10.318% MAPE and 29.384% maximum APE); EXP and MCOPY are supported.
-This aggregate status does not invalidate the shared-memory result.
+`not_supported` and ineligible for candidate construction solely because the separate, now
+superseded `input_words` KECCAK256 model failed its fit gates (10.318% MAPE and 29.384% maximum
+APE); EXP and MCOPY are supported. This aggregate status does not invalidate the shared-memory
+result, but the run cannot validate the replacement KECCAK256 model.
+
+The replacement 66-scenario matrix keeps the validated shared-memory rows and expands KECCAK256 to
+15 fit rows and seven fresh holdouts. Its semantic feature follows the measured REVM path: a
+zero-length operation returns `KECCAK_EMPTY` without a permutation, inputs of 1 through 135 bytes
+require one padded Keccak-f[1600] permutation, 136 through 271 require two, and each subsequent
+136-byte interval adds one. Previously viewed 32/256/512/1024 rows are fit
+evidence; untouched holdouts are frozen at 17, 200, 407, 408, 409, 777, and 2048 bytes. The fit rows
+cover both sides of the 136- and 272-byte boundaries and retain warmed/expanding memory pairs so
+that shared `f_mem` is subtracted independently. The 60 noncanonical rows, exact scenarios, and
+model splits are manifest-bound. A fresh calibration identity must validate the full replacement
+matrix; run `8e2abe743f28f69ec2f89c8b` remains prior validation only for the unchanged shared-memory
+family.
 
 The result may show that a term is stable, only approximately stable, or below the experiment's
 resolving power. It is valid to merge indistinguishable terms or omit a negligible term in a future

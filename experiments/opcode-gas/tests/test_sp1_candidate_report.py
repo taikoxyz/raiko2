@@ -1970,10 +1970,10 @@ class FormalOpcodeRelationTests(unittest.TestCase):
         self.assertEqual(artifact["status"], "accepted")
         self.assertEqual(len(artifact["equations"]), 98)
         self.assertEqual(len(artifact["self_controls"]), 4)
-        self.assertEqual(len(artifact["dynamic_holdouts"]), 45)
+        self.assertEqual(len(artifact["dynamic_holdouts"]), 60)
         self.assertEqual(
             Counter(row["model_split"] for row in artifact["dynamic_holdouts"]),
-            Counter({"fit": 24, "holdout": 21}),
+            Counter({"fit": 34, "holdout": 26}),
         )
         self.assertEqual(artifact["affine_model"]["rank"], 98)
         self.assertEqual(artifact["affine_model"]["nullity"], 4)
@@ -2054,7 +2054,7 @@ class FormalOpcodeRelationTests(unittest.TestCase):
             )
 
         self.assertEqual(len(artifact["equations"]), 98)
-        self.assertEqual(len(artifact["dynamic_holdouts"]), 46)
+        self.assertEqual(len(artifact["dynamic_holdouts"]), 61)
         self.assertEqual(artifact["affine_model"]["rank"], 98)
 
     def test_relation_artifact_replays_model_split_and_exact_scenario_metadata(self):
@@ -2306,7 +2306,7 @@ class DynamicOpcodeModelTests(unittest.TestCase):
                 {"input_length": 512, "initial_memory_words": 1},
                 {
                     "constant": Fraction(1),
-                    "input_words": Fraction(16),
+                    "keccak_permutations": Fraction(4),
                     "memory_growth_event": Fraction(1),
                     "memory_evm_gas_delta": Fraction(45),
                     "memory_4k_boundary_event": Fraction(0),
@@ -2355,6 +2355,37 @@ class DynamicOpcodeModelTests(unittest.TestCase):
                 self.assertEqual(opcode_gas._dynamic_opcode_features(key, scenario), features)
                 self.assertEqual(
                     tuple(features), opcode_gas.DYNAMIC_OPCODE_FEATURE_ORDERS[key]
+                )
+
+    def test_keccak_features_use_padded_permutation_boundaries(self):
+        for input_length, expected_permutations in (
+            (0, 0),
+            (32, 1),
+            (135, 1),
+            (136, 2),
+            (137, 2),
+            (271, 2),
+            (272, 3),
+            (273, 3),
+        ):
+            with self.subTest(input_length=input_length):
+                input_words = (input_length + 31) // 32
+                features = opcode_gas._dynamic_opcode_features(
+                    "opcode:0x20",
+                    {
+                        "input_length": input_length,
+                        "initial_memory_words": input_words,
+                    },
+                )
+                self.assertEqual(
+                    features,
+                    {
+                        "constant": Fraction(1),
+                        "keccak_permutations": Fraction(expected_permutations),
+                        "memory_growth_event": Fraction(0),
+                        "memory_evm_gas_delta": Fraction(0),
+                        "memory_4k_boundary_event": Fraction(0),
+                    },
                 )
 
     def test_memory_features_cover_event_gas_and_exact_page_boundaries(self):
@@ -2608,7 +2639,7 @@ class DynamicOpcodeModelTests(unittest.TestCase):
                 "opcode:0x20": evidence(
                     key="opcode:0x20",
                     status="supported",
-                    order=("constant", "input_words"),
+                    order=("constant", "keccak_permutations"),
                     rank=2,
                 ),
                 "opcode:0x5e": evidence(
@@ -2653,6 +2684,16 @@ class DynamicOpcodeModelTests(unittest.TestCase):
         self.assertEqual(artifact["status"], "not_supported")
         self.assertEqual(artifact["schema_version"], 3)
         self.assertFalse(artifact["candidate_eligible"])
+        self.assertEqual(
+            artifact["feature_orders"]["opcode:0x20"],
+            [
+                "constant",
+                "keccak_permutations",
+                "memory_growth_event",
+                "memory_evm_gas_delta",
+                "memory_4k_boundary_event",
+            ],
+        )
         self.assertEqual(artifact["aggregate_parameter_count"], 13)
         self.assertEqual(artifact["aggregate_exact_fit_rank"], 13)
         self.assertIn("shared_memory_model", artifact)

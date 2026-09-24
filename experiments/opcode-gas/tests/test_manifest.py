@@ -377,12 +377,27 @@ class ManifestTests(unittest.TestCase):
             ],
             "opcode:0x20": [
                 ("canonical", "fit", {"input_length": 32, "initial_memory_words": 1}),
+                ("dynamic_holdout", "fit", {"input_length": 0, "initial_memory_words": 1}),
+                ("dynamic_holdout", "fit", {"input_length": 64, "initial_memory_words": 1}),
+                ("dynamic_holdout", "fit", {"input_length": 135, "initial_memory_words": 1}),
+                ("dynamic_holdout", "fit", {"input_length": 136, "initial_memory_words": 1}),
+                ("dynamic_holdout", "fit", {"input_length": 137, "initial_memory_words": 1}),
                 ("dynamic_holdout", "fit", {"input_length": 256, "initial_memory_words": 8}),
-                ("dynamic_holdout", "fit", {"input_length": 1024, "initial_memory_words": 32}),
                 ("dynamic_holdout", "fit", {"input_length": 256, "initial_memory_words": 1}),
+                ("dynamic_holdout", "fit", {"input_length": 271, "initial_memory_words": 1}),
+                ("dynamic_holdout", "fit", {"input_length": 272, "initial_memory_words": 1}),
+                ("dynamic_holdout", "fit", {"input_length": 273, "initial_memory_words": 1}),
+                ("dynamic_holdout", "fit", {"input_length": 512, "initial_memory_words": 16}),
+                ("dynamic_holdout", "fit", {"input_length": 512, "initial_memory_words": 1}),
+                ("dynamic_holdout", "fit", {"input_length": 1024, "initial_memory_words": 32}),
                 ("dynamic_holdout", "fit", {"input_length": 1024, "initial_memory_words": 1}),
-                ("dynamic_holdout", "holdout", {"input_length": 512, "initial_memory_words": 16}),
-                ("dynamic_holdout", "holdout", {"input_length": 512, "initial_memory_words": 1}),
+                ("dynamic_holdout", "holdout", {"input_length": 17, "initial_memory_words": 1}),
+                ("dynamic_holdout", "holdout", {"input_length": 200, "initial_memory_words": 1}),
+                ("dynamic_holdout", "holdout", {"input_length": 407, "initial_memory_words": 1}),
+                ("dynamic_holdout", "holdout", {"input_length": 408, "initial_memory_words": 1}),
+                ("dynamic_holdout", "holdout", {"input_length": 409, "initial_memory_words": 1}),
+                ("dynamic_holdout", "holdout", {"input_length": 777, "initial_memory_words": 1}),
+                ("dynamic_holdout", "holdout", {"input_length": 2048, "initial_memory_words": 1}),
             ],
             "opcode:0x5e": [
                 ("canonical", "fit", {"copy_length": 32, "initial_memory_words": 1}),
@@ -425,7 +440,7 @@ class ManifestTests(unittest.TestCase):
         )
         self.assertEqual(
             sum(relation.split != "canonical" for relations in scenarios.values() for relation in relations),
-            45,
+            60,
         )
 
     def test_formal_relation_manifest_rejects_anchor_dynamic_and_relation_contract_drift(self):

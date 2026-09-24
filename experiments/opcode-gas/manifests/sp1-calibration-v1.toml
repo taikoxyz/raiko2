@@ -237,6 +237,61 @@ target_raw_gas = 36
 reference_raw_gas_total = 2
 
 [[opcode_relation_scenarios]]
+id = "opcode:0x20:input-0"
+case_id = "keccak256"
+key_id = "opcode:0x20"
+split = "dynamic_holdout"
+model_split = "fit"
+scenario_id = "input-0"
+scenario = { input_length = 0, initial_memory_words = 1 }
+target_raw_gas = 30
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x20:input-64"
+case_id = "keccak256"
+key_id = "opcode:0x20"
+split = "dynamic_holdout"
+model_split = "fit"
+scenario_id = "input-64"
+scenario = { input_length = 64, initial_memory_words = 1 }
+target_raw_gas = 45
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x20:input-135"
+case_id = "keccak256"
+key_id = "opcode:0x20"
+split = "dynamic_holdout"
+model_split = "fit"
+scenario_id = "input-135"
+scenario = { input_length = 135, initial_memory_words = 1 }
+target_raw_gas = 72
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x20:input-136"
+case_id = "keccak256"
+key_id = "opcode:0x20"
+split = "dynamic_holdout"
+model_split = "fit"
+scenario_id = "input-136"
+scenario = { input_length = 136, initial_memory_words = 1 }
+target_raw_gas = 72
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x20:input-137"
+case_id = "keccak256"
+key_id = "opcode:0x20"
+split = "dynamic_holdout"
+model_split = "fit"
+scenario_id = "input-137"
+scenario = { input_length = 137, initial_memory_words = 1 }
+target_raw_gas = 72
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
 id = "opcode:0x20:input-256-memory-8"
 case_id = "keccak256"
 key_id = "opcode:0x20"
@@ -245,17 +300,6 @@ model_split = "fit"
 scenario_id = "input-256-memory-8"
 scenario = { input_length = 256, initial_memory_words = 8 }
 target_raw_gas = 78
-reference_raw_gas_total = 2
-
-[[opcode_relation_scenarios]]
-id = "opcode:0x20:input-1024-memory-32"
-case_id = "keccak256"
-key_id = "opcode:0x20"
-split = "dynamic_holdout"
-model_split = "fit"
-scenario_id = "input-1024-memory-32"
-scenario = { input_length = 1024, initial_memory_words = 32 }
-target_raw_gas = 222
 reference_raw_gas_total = 2
 
 [[opcode_relation_scenarios]]
@@ -270,6 +314,72 @@ target_raw_gas = 99
 reference_raw_gas_total = 2
 
 [[opcode_relation_scenarios]]
+id = "opcode:0x20:input-271"
+case_id = "keccak256"
+key_id = "opcode:0x20"
+split = "dynamic_holdout"
+model_split = "fit"
+scenario_id = "input-271"
+scenario = { input_length = 271, initial_memory_words = 1 }
+target_raw_gas = 108
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x20:input-272"
+case_id = "keccak256"
+key_id = "opcode:0x20"
+split = "dynamic_holdout"
+model_split = "fit"
+scenario_id = "input-272"
+scenario = { input_length = 272, initial_memory_words = 1 }
+target_raw_gas = 108
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x20:input-273"
+case_id = "keccak256"
+key_id = "opcode:0x20"
+split = "dynamic_holdout"
+model_split = "fit"
+scenario_id = "input-273"
+scenario = { input_length = 273, initial_memory_words = 1 }
+target_raw_gas = 108
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x20:input-512-memory-16"
+case_id = "keccak256"
+key_id = "opcode:0x20"
+split = "dynamic_holdout"
+model_split = "fit"
+scenario_id = "input-512-memory-16"
+scenario = { input_length = 512, initial_memory_words = 16 }
+target_raw_gas = 126
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x20:input-512"
+case_id = "keccak256"
+key_id = "opcode:0x20"
+split = "dynamic_holdout"
+model_split = "fit"
+scenario_id = "input-512"
+scenario = { input_length = 512, initial_memory_words = 1 }
+target_raw_gas = 171
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x20:input-1024-memory-32"
+case_id = "keccak256"
+key_id = "opcode:0x20"
+split = "dynamic_holdout"
+model_split = "fit"
+scenario_id = "input-1024-memory-32"
+scenario = { input_length = 1024, initial_memory_words = 32 }
+target_raw_gas = 222
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
 id = "opcode:0x20:input-1024"
 case_id = "keccak256"
 key_id = "opcode:0x20"
@@ -281,25 +391,80 @@ target_raw_gas = 317
 reference_raw_gas_total = 2
 
 [[opcode_relation_scenarios]]
-id = "opcode:0x20:input-512-memory-16"
+id = "opcode:0x20:input-17"
 case_id = "keccak256"
 key_id = "opcode:0x20"
 split = "dynamic_holdout"
 model_split = "holdout"
-scenario_id = "input-512-memory-16"
-scenario = { input_length = 512, initial_memory_words = 16 }
-target_raw_gas = 126
+scenario_id = "input-17"
+scenario = { input_length = 17, initial_memory_words = 1 }
+target_raw_gas = 36
 reference_raw_gas_total = 2
 
 [[opcode_relation_scenarios]]
-id = "opcode:0x20:input-512"
+id = "opcode:0x20:input-200"
 case_id = "keccak256"
 key_id = "opcode:0x20"
 split = "dynamic_holdout"
 model_split = "holdout"
-scenario_id = "input-512"
-scenario = { input_length = 512, initial_memory_words = 1 }
-target_raw_gas = 171
+scenario_id = "input-200"
+scenario = { input_length = 200, initial_memory_words = 1 }
+target_raw_gas = 90
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x20:input-407"
+case_id = "keccak256"
+key_id = "opcode:0x20"
+split = "dynamic_holdout"
+model_split = "holdout"
+scenario_id = "input-407"
+scenario = { input_length = 407, initial_memory_words = 1 }
+target_raw_gas = 144
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x20:input-408"
+case_id = "keccak256"
+key_id = "opcode:0x20"
+split = "dynamic_holdout"
+model_split = "holdout"
+scenario_id = "input-408"
+scenario = { input_length = 408, initial_memory_words = 1 }
+target_raw_gas = 144
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x20:input-409"
+case_id = "keccak256"
+key_id = "opcode:0x20"
+split = "dynamic_holdout"
+model_split = "holdout"
+scenario_id = "input-409"
+scenario = { input_length = 409, initial_memory_words = 1 }
+target_raw_gas = 144
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x20:input-777"
+case_id = "keccak256"
+key_id = "opcode:0x20"
+split = "dynamic_holdout"
+model_split = "holdout"
+scenario_id = "input-777"
+scenario = { input_length = 777, initial_memory_words = 1 }
+target_raw_gas = 253
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x20:input-2048"
+case_id = "keccak256"
+key_id = "opcode:0x20"
+split = "dynamic_holdout"
+model_split = "holdout"
+scenario_id = "input-2048"
+scenario = { input_length = 2048, initial_memory_words = 1 }
+target_raw_gas = 611
 reference_raw_gas_total = 2
 
 [[opcode_relation_scenarios]]

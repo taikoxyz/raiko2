@@ -201,7 +201,12 @@ class CalibrationModelTests(unittest.TestCase):
             )
 
         for key, word_name, constant, word_coefficient in (
-            ("opcode:0x20", "input_words", Decimal("40"), Decimal("4")),
+            (
+                "opcode:0x20",
+                "keccak_permutations",
+                Decimal("40"),
+                Decimal("4"),
+            ),
             ("opcode:0x5e", "copy_words", Decimal("50"), Decimal("6")),
         ):
             for index, (
@@ -212,7 +217,7 @@ class CalibrationModelTests(unittest.TestCase):
                 boundary_event,
             ) in enumerate(
                 (
-                    ("fit", 1, 0, 0, 0),
+                    ("fit", 0, 0, 0, 0),
                     ("fit", 8, 1, 21, 0),
                     ("fit", 32, 1, 101, 1),
                     ("holdout", 64, 1, 205, 1),
@@ -267,6 +272,20 @@ class CalibrationModelTests(unittest.TestCase):
         self.assertEqual(result.status, "supported")
         self.assertEqual(result.aggregate_exact_rank, 13)
         self.assertEqual(result.aggregate_parameter_count, 13)
+        keccak = result.opcode_models["opcode:0x20"]
+        self.assertEqual(keccak.exact_rank, 2)
+        self.assertEqual(
+            keccak.exact_fit_design_matrix[0],
+            (Fraction(1), Fraction(0)),
+        )
+        self.assertLessEqual(
+            abs(keccak.body_coefficients["constant"] - Decimal("40")),
+            Decimal("1e-60"),
+        )
+        self.assertLessEqual(
+            abs(keccak.body_coefficients["keccak_permutations"] - Decimal("4")),
+            Decimal("1e-60"),
+        )
         memory = result.shared_memory_model
         self.assertEqual(memory.exact_rank, 6)
         self.assertEqual(

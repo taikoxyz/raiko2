@@ -249,7 +249,11 @@ _STRUCTURED_FEATURE_NAMES = MappingProxyType(
             "exponent_bytes",
             "exponent_bytes_squared",
         ),
-        "opcode:0x20": ("constant", "input_words", *_MEMORY_FEATURE_NAMES),
+        "opcode:0x20": (
+            "constant",
+            "keccak_permutations",
+            *_MEMORY_FEATURE_NAMES,
+        ),
         "opcode:0x51": ("constant", *_MEMORY_FEATURE_NAMES),
         "opcode:0x52": ("constant", *_MEMORY_FEATURE_NAMES),
         "opcode:0x53": ("constant", *_MEMORY_FEATURE_NAMES),
@@ -505,7 +509,7 @@ def fit_structured_dynamic_opcode_models(
                 "opcode:0x0a",
                 ("constant", "exponent_bytes", "exponent_bytes_squared"),
             ),
-            ("opcode:0x20", ("constant", "input_words")),
+            ("opcode:0x20", ("constant", "keccak_permutations")),
             ("opcode:0x5e", ("constant", "copy_words")),
         ):
             key_rows = tuple(row for row in observations if row.dynamic_key == key)

@@ -395,10 +395,21 @@ id = "opcode:0x51:offset-0x2000"
 case_id = "mload"
 key_id = "opcode:0x51"
 split = "dynamic_holdout"
-model_split = "holdout"
+model_split = "fit"
 scenario_id = "offset-0x2000"
 scenario = { highest_touched_offset = 8192, initial_memory_words = 1 }
 target_raw_gas = 900
+reference_raw_gas_total = 3
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x51:offset-0x4000"
+case_id = "mload"
+key_id = "opcode:0x51"
+split = "dynamic_holdout"
+model_split = "holdout"
+scenario_id = "offset-0x4000"
+scenario = { highest_touched_offset = 16384, initial_memory_words = 1 }
+target_raw_gas = 2053
 reference_raw_gas_total = 3
 
 [[opcode_relation_scenarios]]
@@ -494,10 +505,21 @@ id = "opcode:0x52:offset-0x2000"
 case_id = "mstore"
 key_id = "opcode:0x52"
 split = "dynamic_holdout"
-model_split = "holdout"
+model_split = "fit"
 scenario_id = "offset-0x2000"
 scenario = { highest_touched_offset = 8192, initial_memory_words = 1 }
 target_raw_gas = 900
+reference_raw_gas_total = 5
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x52:offset-0x4000"
+case_id = "mstore"
+key_id = "opcode:0x52"
+split = "dynamic_holdout"
+model_split = "holdout"
+scenario_id = "offset-0x4000"
+scenario = { highest_touched_offset = 16384, initial_memory_words = 1 }
+target_raw_gas = 2053
 reference_raw_gas_total = 5
 
 [[opcode_relation_scenarios]]
@@ -593,10 +615,21 @@ id = "opcode:0x53:offset-0x2000"
 case_id = "mstore8"
 key_id = "opcode:0x53"
 split = "dynamic_holdout"
-model_split = "holdout"
+model_split = "fit"
 scenario_id = "offset-0x2000"
 scenario = { highest_touched_offset = 8192, initial_memory_words = 1 }
 target_raw_gas = 900
+reference_raw_gas_total = 5
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x53:offset-0x4000"
+case_id = "mstore8"
+key_id = "opcode:0x53"
+split = "dynamic_holdout"
+model_split = "holdout"
+scenario_id = "offset-0x4000"
+scenario = { highest_touched_offset = 16384, initial_memory_words = 1 }
+target_raw_gas = 2053
 reference_raw_gas_total = 5
 
 [[opcode_relation_scenarios]]

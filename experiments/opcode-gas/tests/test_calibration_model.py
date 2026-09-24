@@ -148,7 +148,7 @@ class CalibrationModelTests(unittest.TestCase):
         memory_coefficients = {
             "memory_growth_event": Decimal("2"),
             "memory_evm_gas_delta": Decimal("3"),
-            "memory_4k_page_crossings": Decimal("5"),
+            "memory_4k_boundary_event": Decimal("5"),
         }
         constants = {
             "opcode:0x51": Decimal("10"),
@@ -156,18 +156,21 @@ class CalibrationModelTests(unittest.TestCase):
             "opcode:0x53": Decimal("30"),
         }
 
-        def memory_target(key, event, gas_delta, pages):
+        def memory_target(key, growth_event, gas_delta, boundary_event):
             return (
                 constants[key]
-                + Decimal(event) * memory_coefficients["memory_growth_event"]
+                + Decimal(growth_event) * memory_coefficients["memory_growth_event"]
                 + Decimal(gas_delta) * memory_coefficients["memory_evm_gas_delta"]
-                + Decimal(pages) * memory_coefficients["memory_4k_page_crossings"]
+                + Decimal(boundary_event)
+                * memory_coefficients["memory_4k_boundary_event"]
             )
 
         observations = []
-        memory_fit = ((0, 0, 0), (1, 3, 0), (1, 100, 1), (1, 200, 2))
+        memory_fit = ((0, 0, 0), (1, 3, 0), (1, 100, 1), (1, 200, 1))
         for key in constants:
-            for index, (event, gas_delta, pages) in enumerate(memory_fit):
+            for index, (growth_event, gas_delta, boundary_event) in enumerate(
+                memory_fit
+            ):
                 observations.append(
                     DynamicOpcodeObservation(
                         key,
@@ -175,11 +178,11 @@ class CalibrationModelTests(unittest.TestCase):
                         "fit",
                         {
                             "constant": Fraction(1),
-                            "memory_growth_event": Fraction(event),
+                            "memory_growth_event": Fraction(growth_event),
                             "memory_evm_gas_delta": Fraction(gas_delta),
-                            "memory_4k_page_crossings": Fraction(pages),
+                            "memory_4k_boundary_event": Fraction(boundary_event),
                         },
-                        memory_target(key, event, gas_delta, pages),
+                        memory_target(key, growth_event, gas_delta, boundary_event),
                     )
                 )
             observations.append(
@@ -191,9 +194,9 @@ class CalibrationModelTests(unittest.TestCase):
                         "constant": Fraction(1),
                         "memory_growth_event": Fraction(1),
                         "memory_evm_gas_delta": Fraction(300),
-                        "memory_4k_page_crossings": Fraction(3),
+                        "memory_4k_boundary_event": Fraction(1),
                     },
-                    memory_target(key, 1, 300, 3),
+                    memory_target(key, 1, 300, 1),
                 )
             )
 
@@ -201,15 +204,25 @@ class CalibrationModelTests(unittest.TestCase):
             ("opcode:0x20", "input_words", Decimal("40"), Decimal("4")),
             ("opcode:0x5e", "copy_words", Decimal("50"), Decimal("6")),
         ):
-            for index, (split, words, event, gas_delta, pages) in enumerate(
+            for index, (
+                split,
+                words,
+                growth_event,
+                gas_delta,
+                boundary_event,
+            ) in enumerate(
                 (
                     ("fit", 1, 0, 0, 0),
                     ("fit", 8, 1, 21, 0),
                     ("fit", 32, 1, 101, 1),
-                    ("holdout", 64, 1, 205, 2),
+                    ("holdout", 64, 1, 205, 1),
                 )
             ):
-                shared = Decimal(event) * Decimal("2") + Decimal(gas_delta) * Decimal("3") + Decimal(pages) * Decimal("5")
+                shared = (
+                    Decimal(growth_event) * Decimal("2")
+                    + Decimal(gas_delta) * Decimal("3")
+                    + Decimal(boundary_event) * Decimal("5")
+                )
                 observations.append(
                     DynamicOpcodeObservation(
                         key,
@@ -218,9 +231,9 @@ class CalibrationModelTests(unittest.TestCase):
                         {
                             "constant": Fraction(1),
                             word_name: Fraction(words),
-                            "memory_growth_event": Fraction(event),
+                            "memory_growth_event": Fraction(growth_event),
                             "memory_evm_gas_delta": Fraction(gas_delta),
-                            "memory_4k_page_crossings": Fraction(pages),
+                            "memory_4k_boundary_event": Fraction(boundary_event),
                         },
                         constant + Decimal(words) * word_coefficient + shared,
                     )
@@ -264,7 +277,7 @@ class CalibrationModelTests(unittest.TestCase):
                 "opcode:0x53:constant",
                 "memory_growth_event",
                 "memory_evm_gas_delta",
-                "memory_4k_page_crossings",
+                "memory_4k_boundary_event",
             ),
         )
         for name, expected in {
@@ -273,7 +286,7 @@ class CalibrationModelTests(unittest.TestCase):
             "opcode:0x53:constant": Decimal("30"),
             "memory_growth_event": Decimal("2"),
             "memory_evm_gas_delta": Decimal("3"),
-            "memory_4k_page_crossings": Decimal("5"),
+            "memory_4k_boundary_event": Decimal("5"),
         }.items():
             self.assertLessEqual(
                 abs(memory.body_coefficients[name] - expected), Decimal("1e-60")
@@ -284,7 +297,7 @@ class CalibrationModelTests(unittest.TestCase):
             "opcode:0x53:constant": Decimal("71"),
             "memory_growth_event": Decimal("4"),
             "memory_evm_gas_delta": Decimal("6"),
-            "memory_4k_page_crossings": Decimal("10"),
+            "memory_4k_boundary_event": Decimal("10"),
         }.items():
             self.assertLessEqual(
                 abs(memory.production_coefficients[name] - expected),
@@ -299,7 +312,7 @@ class CalibrationModelTests(unittest.TestCase):
                 row.model_split,
                 {
                     **row.features,
-                    "memory_4k_page_crossings": Fraction(0),
+                    "memory_4k_boundary_event": Fraction(0),
                 },
                 row.target_body_cost,
             )

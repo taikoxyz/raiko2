@@ -1970,10 +1970,10 @@ class FormalOpcodeRelationTests(unittest.TestCase):
         self.assertEqual(artifact["status"], "accepted")
         self.assertEqual(len(artifact["equations"]), 98)
         self.assertEqual(len(artifact["self_controls"]), 4)
-        self.assertEqual(len(artifact["dynamic_holdouts"]), 42)
+        self.assertEqual(len(artifact["dynamic_holdouts"]), 45)
         self.assertEqual(
             Counter(row["model_split"] for row in artifact["dynamic_holdouts"]),
-            Counter({"fit": 21, "holdout": 21}),
+            Counter({"fit": 24, "holdout": 21}),
         )
         self.assertEqual(artifact["affine_model"]["rank"], 98)
         self.assertEqual(artifact["affine_model"]["nullity"], 4)
@@ -2009,6 +2009,53 @@ class FormalOpcodeRelationTests(unittest.TestCase):
         opcode_gas.validate_opcode_relations_artifact(
             manifest, artifact, rows, formal_relation_provenance(rows)
         )
+
+    def test_relation_inventory_growth_uses_manifest_counts(self):
+        manifest = formal_relation_manifest()
+        template = next(
+            relation
+            for relation in manifest.opcode_relations
+            if relation.dynamic_key == "opcode:0x51"
+            and relation.scenario_id == "offset-0x4000"
+        )
+        added = replace(
+            template,
+            id=f"{template.id}-growth-regression",
+            scenario_id=f"{template.scenario_id}-growth-regression",
+        )
+        expanded_manifest = replace(
+            manifest,
+            opcode_relations=(*manifest.opcode_relations, added),
+        )
+        expanded_matrix = {
+            **opcode_gas.DYNAMIC_RELATION_SCENARIO_MATRIX,
+            added.dynamic_key: (
+                *opcode_gas.DYNAMIC_RELATION_SCENARIO_MATRIX[added.dynamic_key],
+                (
+                    added.split,
+                    added.model_split,
+                    tuple(sorted(added.scenario.items())),
+                ),
+            ),
+        }
+        rows = formal_relation_rows(expanded_manifest)
+
+        with mock.patch.object(
+            opcode_gas,
+            "DYNAMIC_RELATION_SCENARIO_MATRIX",
+            expanded_matrix,
+        ):
+            artifact = opcode_gas.fit_opcode_relations(expanded_manifest, rows)
+            opcode_gas.validate_opcode_relations_artifact(
+                expanded_manifest,
+                artifact,
+                rows,
+                formal_relation_provenance(rows),
+            )
+
+        self.assertEqual(len(artifact["equations"]), 98)
+        self.assertEqual(len(artifact["dynamic_holdouts"]), 46)
+        self.assertEqual(artifact["affine_model"]["rank"], 98)
 
     def test_relation_artifact_replays_model_split_and_exact_scenario_metadata(self):
         manifest = formal_relation_manifest()
@@ -2262,7 +2309,7 @@ class DynamicOpcodeModelTests(unittest.TestCase):
                     "input_words": Fraction(16),
                     "memory_growth_event": Fraction(1),
                     "memory_evm_gas_delta": Fraction(45),
-                    "memory_4k_page_crossings": Fraction(0),
+                    "memory_4k_boundary_event": Fraction(0),
                 },
             ),
             "opcode:0x51": (
@@ -2271,7 +2318,7 @@ class DynamicOpcodeModelTests(unittest.TestCase):
                     "constant": Fraction(1),
                     "memory_growth_event": Fraction(1),
                     "memory_evm_gas_delta": Fraction(24),
-                    "memory_4k_page_crossings": Fraction(0),
+                    "memory_4k_boundary_event": Fraction(0),
                 },
             ),
             "opcode:0x52": (
@@ -2280,7 +2327,7 @@ class DynamicOpcodeModelTests(unittest.TestCase):
                     "constant": Fraction(1),
                     "memory_growth_event": Fraction(1),
                     "memory_evm_gas_delta": Fraction(24),
-                    "memory_4k_page_crossings": Fraction(0),
+                    "memory_4k_boundary_event": Fraction(0),
                 },
             ),
             "opcode:0x53": (
@@ -2289,7 +2336,7 @@ class DynamicOpcodeModelTests(unittest.TestCase):
                     "constant": Fraction(1),
                     "memory_growth_event": Fraction(1),
                     "memory_evm_gas_delta": Fraction(24),
-                    "memory_4k_page_crossings": Fraction(0),
+                    "memory_4k_boundary_event": Fraction(0),
                 },
             ),
             "opcode:0x5e": (
@@ -2299,7 +2346,7 @@ class DynamicOpcodeModelTests(unittest.TestCase):
                     "copy_words": Fraction(16),
                     "memory_growth_event": Fraction(1),
                     "memory_evm_gas_delta": Fraction(45),
-                    "memory_4k_page_crossings": Fraction(0),
+                    "memory_4k_boundary_event": Fraction(0),
                 },
             ),
         }
@@ -2316,7 +2363,8 @@ class DynamicOpcodeModelTests(unittest.TestCase):
             ({"highest_touched_offset": 256, "initial_memory_words": 1}, (1, 24, 0)),
             ({"highest_touched_offset": 4064, "initial_memory_words": 1}, (1, 413, 0)),
             ({"highest_touched_offset": 4096, "initial_memory_words": 1}, (1, 416, 1)),
-            ({"highest_touched_offset": 8192, "initial_memory_words": 1}, (1, 897, 2)),
+            ({"highest_touched_offset": 8192, "initial_memory_words": 1}, (1, 897, 1)),
+            ({"highest_touched_offset": 16384, "initial_memory_words": 1}, (1, 2050, 1)),
         )
         for scenario, expected in cases:
             with self.subTest(scenario=scenario):
@@ -2327,7 +2375,7 @@ class DynamicOpcodeModelTests(unittest.TestCase):
                         for name in (
                             "memory_growth_event",
                             "memory_evm_gas_delta",
-                            "memory_4k_page_crossings",
+                            "memory_4k_boundary_event",
                         )
                     ),
                     tuple(Fraction(value) for value in expected),
@@ -2538,7 +2586,7 @@ class DynamicOpcodeModelTests(unittest.TestCase):
             "opcode:0x53:constant",
             "memory_growth_event",
             "memory_evm_gas_delta",
-            "memory_4k_page_crossings",
+            "memory_4k_boundary_event",
         )
         fit_result = types.SimpleNamespace(
             status="not_supported",
@@ -2603,7 +2651,7 @@ class DynamicOpcodeModelTests(unittest.TestCase):
             )
 
         self.assertEqual(artifact["status"], "not_supported")
-        self.assertEqual(artifact["schema_version"], 2)
+        self.assertEqual(artifact["schema_version"], 3)
         self.assertFalse(artifact["candidate_eligible"])
         self.assertEqual(artifact["aggregate_parameter_count"], 13)
         self.assertEqual(artifact["aggregate_exact_fit_rank"], 13)

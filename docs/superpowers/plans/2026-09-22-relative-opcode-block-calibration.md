@@ -352,14 +352,19 @@ parser tests for `generate-relations`, `run-relations`, `fit-relations`, and the
 
 Freeze the complete dynamic model matrix in the formal relation manifest. `EXP`, `KECCAK256`, and
 `MCOPY` each have five fit scenarios and two untouched model holdouts. `MLOAD`, `MSTORE`, and
-`MSTORE8` each have four fit scenarios, two reused zero-growth warmed diagnostics, and three newly
-added untouched expansion holdouts. Every key retains exactly one `canonical` relation for `A`; the
-other 42 relations remain outside `A`. Bind `model_split` and the exact structured
+`MSTORE8` each have five fit scenarios, two reused zero-growth warmed holdouts, two retained
+previously passing expansion holdouts, and one fresh untouched `0x4000` expansion holdout. The
+viewed `0x2000` row is fit/diagnostic evidence. Every key retains exactly one `canonical` relation
+for `A`; the other 45 relations remain outside `A`. Bind `model_split` and the exact structured
 `relation_scenario` through the manifest, emitted fixtures, raw rows, adaptive decisions, and final
 relation artifact.
 
-The added memory rows change the controlled-manifest content identity. Prepare a fresh calibration
-run; the existing real-run artifacts predate this matrix and are not validation evidence for it.
+Run `25db29d91bd3311441fe8317` showed that the linear page-count hypothesis fit at 0.259%
+production MAPE and 1.103% maximum APE and passed the `0x0800` and `0x0fe0` holdouts, but
+overpredicted `0x2000` by about 42% for all three memory opcodes. Replacing the count post hoc with a
+binary boundary event reduced those viewed-row errors to 5.72%, 5.79%, and 5.96%. This observation
+motivates the new feature, but it is not validation evidence: `0x2000` moves to fit/diagnostic and a
+fresh run must evaluate `0x4000` under the new controlled-manifest identity.
 
 For memory-sensitive scenarios, make `initial_memory_words` executable: the warmup must allocate
 the declared memory before the target operation. Tests must show that changing this field changes
@@ -902,7 +907,9 @@ DYNAMIC_OPCODE_FEATURE_ORDERS = {
 
 Recover target body cost by removing the signed static-control contribution from each accepted
 relation slope. Fit MLOAD, MSTORE, and MSTORE8 jointly with opcode-specific constants and shared
-`memory_growth_event`, exact EVM memory-gas delta, and extra 4-KiB page-crossing coefficients.
+`memory_growth_event`, exact EVM memory-gas delta, and a binary `memory_4k_boundary_event`
+coefficient. The boundary event is one when the operation crosses at least one additional 4-KiB
+logical-memory boundary beyond the warmed state, regardless of how many boundaries it crosses.
 Subtract the shared memory contribution before fitting KECCAK256 and MCOPY and add it back for their
 predictions. Require exact rank six for the shared matrix and aggregate rank and parameter count 13.
 Fit with `Decimal`, never binary `float`, and transform to production units with the staged block fit:
@@ -915,7 +922,7 @@ production_nonconstant = body_scale * body_nonconstant
 Gate production-space fit MAPE at 5%, fit max APE at 10%, and holdout max APE at 10%.
 Quality failures produce `status = not_supported` with complete evidence. Structural identity,
 rank, provenance, or numeric failures still raise. Serialize the result as the content-addressed,
-schema-2 non-candidate `dynamic-opcode-models.json`; do not pass it to `build-candidate`. Treat the
+schema-3 non-candidate `dynamic-opcode-models.json`; do not pass it to `build-candidate`. Treat the
 shared V1 `f_mem` as a hypothesis that future evidence may split by opcode family or zkVM without
 changing the non-memory multiplier model.
 
@@ -1228,9 +1235,9 @@ before the first production-guest SP1 execution. Preserve every raw row if a lat
 ```
 
 Require `dynamic-opcode-models.json` to preserve the explicit shared-memory fit, the three
-operation-specific fits, exact ranks, production-space errors, zero-growth diagnostics, and
-untouched expansion holdouts even when a quality gate reports `not_supported`. The structured
-artifact is diagnostic only.
+operation-specific fits, exact ranks, production-space errors, zero-growth holdouts, retained
+expansion holdouts, and the fresh untouched expansion holdout even when a quality gate reports
+`not_supported`. The structured artifact is diagnostic only.
 `fit-block-calibration` retains the lab-body scalar dynamic gate; if
 it rejects
 the already falsified one-multiplier hypothesis, preserve that failure and do not proceed to

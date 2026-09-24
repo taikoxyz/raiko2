@@ -319,14 +319,15 @@ observations. Passing this body-space check alone would not validate a productio
 the nonzero common per-operation overhead also needs an explicit representation when raw gas varies.
 
 The next diagnostic asks the narrower question needed before choosing a production representation:
-which semantic components of each operation's SP1 cost are independently identifiable? Freeze 48
-scenarios, including reused zero-growth warmed diagnostics and three newly added untouched expansion
-holdouts per memory opcode, and fit the following target-body models:
+which semantic components of each operation's SP1 cost are independently identifiable? Freeze 51
+scenarios, including reused zero-growth warmed holdouts, retained previously passing expansion
+holdouts, viewed `0x2000` fit rows, and one fresh untouched `0x4000` holdout per memory opcode, and
+fit the following target-body models:
 
 ```text
 f_mem = beta_event * memory_growth_event
       + beta_evm * memory_evm_gas_delta
-      + beta_page * memory_4k_page_crossings
+      + beta_boundary * memory_4k_boundary_event
 
 q_EXP       = beta_0 + beta_b * exponent_bytes + beta_b2 * exponent_bytes^2
 q_MLOAD     = beta_load + f_mem
@@ -342,24 +343,32 @@ Here `q_operation` is the target opcode body cost recovered from the signed targ
 not raw EVM gas. Static reference-opcode terms use the already reconstructed lab multipliers and are
 subtracted before fitting. `memory_growth_event` is one only when logical memory grows.
 `memory_evm_gas_delta` is the exact positive delta of `C(w) = 3w + floor(w^2 / 512)`, and
-`memory_4k_page_crossings` counts additional 128-word pages beyond the first. The manifest's
-executable warmup allocates `initial_memory_words` before the target operation, so copy/input length
-and memory expansion can vary independently. Metadata-only warmup would create an apparently
-full-rank matrix over identical executions and is invalid.
+`memory_4k_boundary_event` is one when the operation crosses any additional 128-word logical-page
+boundary beyond the warmed state, regardless of the number crossed. The manifest's executable
+warmup allocates `initial_memory_words` before the target operation, so copy/input length and memory
+expansion can vary independently. Metadata-only warmup would create an apparently full-rank matrix
+over identical executions and is invalid.
 
 Fit the three memory opcodes jointly with three opcode-specific constants and the three shared
 memory coefficients. Subtract that shared body contribution before fitting KECCAK256 and MCOPY,
 then add it back for their predictions and gates. In production space, add common overhead only to
 the opcode-specific constants; scale shared coefficients by `body_scale` without adding overhead.
 The shared matrix has exact rank six and the overall structured model has exact rank and parameter
-count 13. The schema-2 diagnostic reports the shared family explicitly, alongside EXP, KECCAK256,
+count 13. The schema-3 diagnostic reports the shared family explicitly, alongside EXP, KECCAK256,
 and MCOPY operation-specific models. Acceptance uses production-space fit MAPE at most 5%, fit
 maximum APE at most 10%, and holdout maximum APE at most 10%. Failed quality gates produce
 a content-addressed `not_supported` artifact rather than aborting or refitting the matrix. The
 artifact is explicitly `candidate_eligible = false` and cannot update the production table.
 
-The expanded memory matrix changes the frozen manifest identity and requires a fresh calibration
-run. Artifacts from the earlier 39-scenario run cannot validate the 48-scenario model.
+Fresh run `25db29d91bd3311441fe8317` fit the former linear page-count model at 0.259% production
+MAPE and 1.103% maximum APE, and passed the `0x0800` and `0x0fe0` holdouts, but consistently
+overpredicted `0x2000` by about 42% across MLOAD, MSTORE, and MSTORE8. A post-hoc binary boundary
+event reduced those viewed-row errors to 5.72%, 5.79%, and 5.96%. The viewed `0x2000` rows therefore
+move into fit/diagnostic evidence, while `0x4000` becomes the fresh untouched holdout.
+
+This second expanded memory matrix changes the frozen manifest identity again and requires a fresh
+calibration run. Neither the earlier 39-scenario artifact nor run `25db29d91bd3311441fe8317` can
+validate the revised 51-scenario model.
 
 The result may show that a term is stable, only approximately stable, or below the experiment's
 resolving power. It is valid to merge indistinguishable terms or omit a negligible term in a future

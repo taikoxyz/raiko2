@@ -234,7 +234,7 @@ _MEMORY_OPCODE_KEYS = ("opcode:0x51", "opcode:0x52", "opcode:0x53")
 _MEMORY_FEATURE_NAMES = (
     "memory_growth_event",
     "memory_evm_gas_delta",
-    "memory_4k_page_crossings",
+    "memory_4k_boundary_event",
 )
 _SHARED_MEMORY_PARAMETER_ORDER = (
     "opcode:0x51:constant",

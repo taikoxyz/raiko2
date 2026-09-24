@@ -173,7 +173,7 @@ semantic model:
 ```text
 f_mem     = beta_event * memory_growth_event
           + beta_evm * memory_evm_gas_delta
-          + beta_page * memory_4k_page_crossings
+          + beta_boundary * memory_4k_boundary_event
 EXP        = beta_0 + beta_b * exponent_bytes + beta_b2 * exponent_bytes^2
 KECCAK256  = beta_0 + beta_w * input_words + f_mem
 MLOAD      = beta_load + f_mem
@@ -184,13 +184,22 @@ MCOPY      = beta_0 + beta_w * copy_words + f_mem
 production_cost = body_scale * body_cost + common_opcode_overhead
 ```
 
-The 48-scenario matrix has aggregate exact rank and parameter count 13; its shared-memory fit has
-exact rank six. Fit rows and holdouts are declared in the manifest before execution. For each memory
-opcode, the reused warmed rows at offsets `0x0100` and `0x1000` are zero-growth diagnostics. Only the
-three newly added expansion sizes at offsets `0x0800`, `0x0fe0`, and `0x2000` are untouched
-holdouts. Production-space fit MAPE must be at most 5%, and fit/holdout maximum APE must be at most
-10%. A quality failure is preserved as `not_supported`; it does not abort the schema-2 diagnostic
-artifact, modify a coefficient after seeing results, or enter candidate construction.
+Run `25db29d91bd3311441fe8317` showed that the former linear 4-KiB page-count term fit its training
+rows (production MAPE 0.259%, maximum APE 1.103%) and passed the `0x0800` and `0x0fe0` holdouts, but
+overpredicted `0x2000` by about 42% for all three memory opcodes. Replacing the count with the binary
+`memory_4k_boundary_event` lowered those viewed-row errors to 5.72%, 5.79%, and 5.96%. Because that
+row informed the revised hypothesis, `0x2000` is now fit/diagnostic evidence and cannot remain a
+holdout.
+
+The revised 51-scenario matrix has aggregate exact rank and parameter count 13; its shared-memory
+fit has exact rank six. For each memory opcode, the reused warmed rows at offsets `0x0100` and
+`0x1000` remain zero-growth holdouts, `0x0800` and `0x0fe0` are retained after passing the prior
+model, and `0x4000` is the fresh untouched expansion holdout. Production-space fit MAPE must be at
+most 5%, and
+fit/holdout maximum APE must be at most 10%. A quality failure is preserved as `not_supported`; it
+does not abort the schema-3 diagnostic artifact, modify a coefficient after seeing results, or enter
+candidate construction. The revised manifest requires another fresh calibration identity; the run
+above motivated the change but cannot validate it.
 `fit-block-calibration` deliberately retains the scalar lab-body dynamic holdout gate and therefore
 remains fail-closed until a separately reviewed promotion defines the production representation.
 A lab-body scalar pass would not by itself prove that one production per-raw-gas scalar is valid:

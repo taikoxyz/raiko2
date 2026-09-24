@@ -77,32 +77,32 @@ DYNAMIC_OPCODE_FEATURE_ORDERS = MappingProxyType(
             "input_words",
             "memory_growth_event",
             "memory_evm_gas_delta",
-            "memory_4k_page_crossings",
+            "memory_4k_boundary_event",
         ),
         "opcode:0x51": (
             "constant",
             "memory_growth_event",
             "memory_evm_gas_delta",
-            "memory_4k_page_crossings",
+            "memory_4k_boundary_event",
         ),
         "opcode:0x52": (
             "constant",
             "memory_growth_event",
             "memory_evm_gas_delta",
-            "memory_4k_page_crossings",
+            "memory_4k_boundary_event",
         ),
         "opcode:0x53": (
             "constant",
             "memory_growth_event",
             "memory_evm_gas_delta",
-            "memory_4k_page_crossings",
+            "memory_4k_boundary_event",
         ),
         "opcode:0x5e": (
             "constant",
             "copy_words",
             "memory_growth_event",
             "memory_evm_gas_delta",
-            "memory_4k_page_crossings",
+            "memory_4k_boundary_event",
         ),
     }
 )
@@ -257,8 +257,13 @@ _MEMORY_RELATION_SCENARIOS = (
     ),
     (
         "dynamic_holdout",
-        "holdout",
+        "fit",
         (("highest_touched_offset", 8192), ("initial_memory_words", 1)),
+    ),
+    (
+        "dynamic_holdout",
+        "holdout",
+        (("highest_touched_offset", 16384), ("initial_memory_words", 1)),
     ),
 )
 for _memory_key in ("opcode:0x51", "opcode:0x52", "opcode:0x53"):
@@ -2208,6 +2213,7 @@ def _dynamic_relation_target_raw_gas(
             0x0FE0,
             0x1000,
             0x2000,
+            0x4000,
         }:
             raise ValueError("memory relation has invalid offset")
         touched = int(offset) + (1 if case.template == "memory_store8" else 32)
@@ -6269,10 +6275,24 @@ def fit_opcode_relations(
         manifest.opcode_relation_anchors
     ):
         raise ValueError("formal relation self-control set is incomplete")
-    if len(equations) != 98:
-        raise ValueError(f"formal relation matrix requires 98 equations, got {len(equations)}")
-    if len(holdouts) != 42:
-        raise ValueError("formal noncanonical dynamic observation set is incomplete")
+    expected_equation_count = sum(
+        relation.split == "canonical" and bool(relation.signed_raw_gas_by_key)
+        for relation in manifest.opcode_relations
+    )
+    if len(equations) != expected_equation_count:
+        raise ValueError(
+            "formal relation equation result count differs: "
+            f"expected {expected_equation_count}, got {len(equations)}"
+        )
+    expected_dynamic_count = sum(
+        relation.split == "dynamic_holdout"
+        for relation in manifest.opcode_relations
+    )
+    if len(holdouts) != expected_dynamic_count:
+        raise ValueError(
+            "formal noncanonical dynamic result count differs: "
+            f"expected {expected_dynamic_count}, got {len(holdouts)}"
+        )
     for key in manifest.dynamic_raw_gas_keys:
         observed = tuple(
             (
@@ -6371,7 +6391,17 @@ def _validate_artifact_relation_rows(
     *,
     label: str,
 ) -> list[RelationEquation]:
-    if not isinstance(rows, list) or [row.get("relation_id") for row in rows] != [
+    if not isinstance(rows, list):
+        raise ValueError(
+            f"opcode relation artifact {label} count differs: "
+            f"expected {len(relations)}, got non-list"
+        )
+    if len(rows) != len(relations):
+        raise ValueError(
+            f"opcode relation artifact {label} count differs: "
+            f"expected {len(relations)}, got {len(rows)}"
+        )
+    if [row.get("relation_id") for row in rows] != [
         relation.id for relation in relations
     ]:
         raise ValueError(f"opcode relation artifact {label} set is incomplete")
@@ -6763,8 +6793,6 @@ def validate_opcode_relations_artifact(
         for relation in manifest.opcode_relations
         if relation.split == "canonical" and relation.signed_raw_gas_by_key
     ]
-    if len(equation_relations) != 98:
-        raise ValueError("opcode relation manifest must define 98 equations")
     algebra = _validate_artifact_relation_rows(
         artifact.get("equations"), equation_relations, label="equations"
     )
@@ -6773,8 +6801,6 @@ def validate_opcode_relations_artifact(
         for relation in manifest.opcode_relations
         if relation.split == "dynamic_holdout"
     ]
-    if len(holdout_relations) != 42:
-        raise ValueError("opcode relation manifest must define 42 noncanonical dynamic rows")
     _validate_artifact_relation_rows(
         artifact.get("dynamic_holdouts"),
         holdout_relations,
@@ -12238,8 +12264,8 @@ def _dynamic_opcode_features(
         def extra_pages(words: int) -> int:
             return max(0, (words + 127) // 128 - 1)
 
-        page_crossings = max(0, extra_pages(final_words) - extra_pages(initial_words))
-        return growth_event, evm_gas_delta, page_crossings
+        boundary_event = int(extra_pages(final_words) > extra_pages(initial_words))
+        return growth_event, evm_gas_delta, boundary_event
 
     if dynamic_key == "opcode:0x0a":
         if set(scenario) != {"exponent_byte_length", "initial_memory_words"}:
@@ -12586,7 +12612,7 @@ def fit_dynamic_opcode_models_artifact(
         for key, item in result.opcode_models.items()
     }
     artifact = {
-        "schema_version": 2,
+        "schema_version": 3,
         "purpose": "dynamic_opcode_models",
         "status": result.status,
         "candidate_eligible": False,

@@ -1615,6 +1615,19 @@ without changing the rest of the endpoint posture.
 
 ## RPC and Witness Expectations
 
+Shasta preflight reads proposal blobs from each pair's `rpc.pairs[*].beacon_rpc` through
+`GET /eth/v1/beacon/blobs/{slot}?versioned_hashes=...`. Any path prefix in `beacon_rpc` is
+preserved. The deprecated `/eth/v1/beacon/blob_sidecars/{slot}` endpoint is not used as a fallback.
+
+Before deploying a raiko2 release with this API migration, verify that every configured beacon
+endpoint and intervening proxy exposes the blobs route. Prysm deployments must run **v7.1.8 or
+later**: Prysm v6.1.0 through v7.1.7 can drop the connection when a requested blob appears more than
+once in its block ([OffchainLabs/prysm#17199](https://github.com/OffchainLabs/prysm/pull/17199)).
+Raiko2 does not parse or gate beacon-client versions because gateways may hide or rewrite version
+metadata. An incompatible endpoint instead fails preflight with the slot, endpoint route, failure
+reason, and this Prysm compatibility hint so the endpoint can be upgraded or reconfigured and the
+failed task retried.
+
 `rpc.pairs[*].l2_rpc` should ideally point to a witness-capable endpoint that supports
 `debug_executionWitness` for the best latency envelope.
 

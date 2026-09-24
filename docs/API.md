@@ -1230,8 +1230,11 @@ set both SGX lane timeouts. Use the independent `prover.sgx.timeout_ms` and
   rejected until exact deletion and state finalization converge. Immutable proof content is retained,
   and a later lifecycle may publish identical or different content under a new manifest generation.
 - `rpc.pairs` is the canonical configuration for allowed `(network, l1_network)` combinations.
-- `rpc.pairs[*].beacon_rpc` is optional. When set, blob sidecar fetches use that L1
-  beacon endpoint instead of the built-in endpoint from the resolved L1 chain spec.
+- `rpc.pairs[*].beacon_rpc` is optional. When set, Shasta blob fetches use that L1 beacon endpoint
+  instead of the built-in endpoint from the resolved L1 chain spec. Raiko2 preserves any configured
+  path prefix and calls `GET /eth/v1/beacon/blobs/{slot}?versioned_hashes=...`; it does not fall back
+  to the deprecated `blob_sidecars` route. Prysm operators must deploy v7.1.8 or later before using
+  this path.
 - `rpc.pairs[*].l2_rpc` is the canonical read/state RPC used for blocks and account/state proofs.
 - `rpc.pairs[*].l2_provider` selects the L2 execution-client family. It defaults to `reth`;
   set it to `geth` when `l2_rpc`/`l2_witness_rpc` points at a geth endpoint with native

@@ -366,6 +366,14 @@ binary boundary event reduced those viewed-row errors to 5.72%, 5.79%, and 5.96%
 motivates the new feature, but it is not validation evidence: `0x2000` moves to fit/diagnostic and a
 fresh run must evaluate `0x4000` under the new controlled-manifest identity.
 
+Fresh run `8e2abe743f28f69ec2f89c8b` completed that evaluation. The shared-memory family had exact rank
+six, 1.926% production MAPE, 7.416% fit maximum APE, and 8.887% holdout maximum APE. Its untouched
+`0x4000` production-space holdouts were 7.223% for MLOAD, 7.288% for MSTORE, and 7.410% for MSTORE8,
+all below the frozen 10% gate. The aggregate dynamic artifact is still `not_supported` and
+`candidate_eligible = false` because the independent KECCAK256 model failed its fit gates (10.318%
+MAPE and 29.384% maximum APE); EXP, MCOPY, and shared memory are supported. Treat that aggregate
+status as a KECCAK256 blocker, not as a failure of the shared `f_mem` hypothesis.
+
 For memory-sensitive scenarios, make `initial_memory_words` executable: the warmup must allocate
 the declared memory before the target operation. Tests must show that changing this field changes
 the bytecode and raw-gas expectation. A metadata-only initial-memory declaration is invalid because

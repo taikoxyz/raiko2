@@ -370,6 +370,14 @@ This second expanded memory matrix changes the frozen manifest identity again an
 calibration run. Neither the earlier 39-scenario artifact nor run `25db29d91bd3311441fe8317` can
 validate the revised 51-scenario model.
 
+Fresh run `8e2abe743f28f69ec2f89c8b` supplied that independent validation. Its shared-memory family had
+exact rank six, 1.926% production MAPE, 7.416% fit maximum APE, and 8.887% holdout maximum APE. The
+new `0x4000` production-space holdouts were 7.223% for MLOAD, 7.288% for MSTORE, and 7.410% for
+MSTORE8, so the frozen shared `f_mem` hypothesis is supported. The aggregate dynamic artifact remains
+`not_supported` and ineligible for candidate construction solely because the separate KECCAK256
+model failed its fit gates (10.318% MAPE and 29.384% maximum APE); EXP and MCOPY are supported.
+This aggregate status does not invalidate the shared-memory result.
+
 The result may show that a term is stable, only approximately stable, or below the experiment's
 resolving power. It is valid to merge indistinguishable terms or omit a negligible term in a future
 production model, but only after reporting the resulting block-level residual. This diagnostic does

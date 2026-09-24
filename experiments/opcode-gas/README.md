@@ -200,6 +200,15 @@ fit/holdout maximum APE must be at most 10%. A quality failure is preserved as `
 does not abort the schema-3 diagnostic artifact, modify a coefficient after seeing results, or enter
 candidate construction. The revised manifest requires another fresh calibration identity; the run
 above motivated the change but cannot validate it.
+
+Fresh run `8e2abe743f28f69ec2f89c8b` validated the revised shared-memory hypothesis. The shared fit had
+exact rank six, 1.926% production MAPE, 7.416% fit maximum APE, and 8.887% holdout maximum APE. The
+previously untouched `0x4000` production-space holdouts were 7.223% for MLOAD, 7.288% for MSTORE,
+and 7.410% for MSTORE8, all below the frozen 10% gate. The aggregate artifact is nevertheless
+`not_supported` and `candidate_eligible = false` because the independent KECCAK256 model failed its
+fit gates (10.318% MAPE and 29.384% maximum APE). EXP, MCOPY, and the shared-memory family are
+supported; the aggregate status must not be interpreted as a shared-memory failure.
+
 `fit-block-calibration` deliberately retains the scalar lab-body dynamic holdout gate and therefore
 remains fail-closed until a separately reviewed promotion defines the production representation.
 A lab-body scalar pass would not by itself prove that one production per-raw-gas scalar is valid:

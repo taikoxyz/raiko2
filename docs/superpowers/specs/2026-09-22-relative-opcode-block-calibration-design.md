@@ -41,10 +41,12 @@ interpreter cost per executed opcode, and the four already-declared fixed/base c
    parameters.
 3. Fit those two transfer parameters and the four required fixed/base costs using only frozen
    controlled block fixtures executed through `sp1-shasta-proposal`.
-4. Reconstruct one positive SP1-native raw-gas multiplier for every required opcode, then derive
-   the existing ADD-normalized view.
-5. Validate dynamic-gas opcode multipliers on frozen raw-gas ranges without refitting them.
-6. Seal the complete controlled candidate before opening final Mainnet or Hoodi proposal results.
+4. Reconstruct positive SP1-native raw-gas multipliers for the static-cost opcodes and derive the
+   existing ADD-normalized view.
+5. Keep the failed scalar lab-body dynamic-opcode hypothesis as a candidate gate, while separately
+   fitting frozen semantic diagnostics to learn which dynamic terms are identifiable or negligible.
+6. Seal the complete controlled candidate only after a later reviewed promotion chooses the dynamic
+   production representation, and before opening final Mainnet or Hoodi proposal results.
 
 ## Non-Goals
 
@@ -240,8 +242,9 @@ identities; acceptance depends on exact recomputation, not global uniqueness.
 Static EVM fixture counts use `evm_opcode_counts`; SP1's `opcode_counts` remains the RISC-V execution
 profile in the guest report. Raw-row construction preserves both namespaces and rejects any formal
 fixture/report key collision instead of allowing report metadata to replace canonical evidence.
-The resulting formal relation artifact uses schema version 2; schema version 1 does not carry the
-activation/tail evidence and is not accepted by candidate construction.
+The resulting formal relation artifact uses schema version 3; schema versions 1 and 2 do not carry
+the complete activation/tail and dynamic `model_split` evidence and are not accepted by candidate
+construction.
 
 `formal-relation-decisions.json` plus its SHA-256 seal is the terminal source of truth for every
 downstream relation consumer. The loader replays the complete accepted decision state, derives the
@@ -300,36 +303,55 @@ fit slope was about `817.4076`, positive-fit residual/signal about `0.000486`, a
 activation gap about `+43254.95`. This isolates count-0/activation and slot-order effects without
 promoting that failed artifact.
 
-### Dynamic Raw-Gas Holdouts
+### Dynamic Opcode Models
 
 The current V1 pure-opcode set has six keys whose actual interpreter raw gas can change for the
 same opcode identity: `EXP`, `KECCAK256`, `MLOAD`, `MSTORE`, `MSTORE8`, and `MCOPY`. The manifest
 marks these keys explicitly and rejects an unmarked dynamic-gas template.
 
-For each dynamic key, freeze one canonical relation scenario plus at least two non-fitting holdout
-scenarios before SP1 output is opened. Their host-native traces must expose at least three distinct
-positive target raw-gas totals. The middle target raw-gas total must be at least twice the canonical
-total, and the largest must be at least four times the canonical total. The manifest binds the
-operand, exponent width, memory offset, input/copy length, initial memory state, expected reference
-program, and expected target/reference raw-gas totals for every scenario.
+The original candidate hypothesis assigned one scalar lab-body multiplier to all raw-gas units of
+one key. Re-evaluating the completed controlled run in consistent opcode-lab units falsifies that
+hypothesis: anchor body costs are first divided by their raw-gas values, and the canonical and
+non-canonical scenarios still cannot satisfy the frozen relation APE and implied-multiplier
+consistency gates simultaneously. Keep that lab-body scalar validator in `fit-block-calibration` as
+the candidate fail-closed boundary. Do not repair or average the failed scalar after opening the
+observations. Passing this body-space check alone would not validate a production scalar because
+the nonzero common per-operation overhead also needs an explicit representation when raw gas varies.
 
-Only the canonical scenario contributes a row to the rank-98 relation system. After block fitting
-reconstructs `c_p`, apply it without refitting to every dynamic holdout:
+The next diagnostic asks the narrower question needed before choosing a production representation:
+which semantic components of each operation's SP1 cost are independently identifiable? Freeze 39
+scenarios, including untouched holdouts, and fit the following target-body models:
 
 ```text
-predicted_relation_slope(h) = A_h * c_p
-relation_APE(h) = abs(predicted_relation_slope(h) - observed_relation_slope(h)) /
-                  abs(observed_relation_slope(h))
+q_EXP        = beta_0 + beta_b * exponent_bytes + beta_b2 * exponent_bytes^2
+q_KECCAK256  = beta_0 + beta_w * input_words + beta_g * memory_growth_words
+q_MLOAD      = beta_0 + beta_g * memory_growth_words
+q_MSTORE     = beta_0 + beta_g * memory_growth_words
+q_MSTORE8    = beta_0 + beta_g * memory_growth_words
+q_MCOPY      = beta_0 + beta_w * copy_words + beta_g * memory_growth_words
 
-implied_mu_h(k) = (observed_relation_slope(h) - reference_raw_gas_terms(h, c_p)) /
-                  target_raw_gas(h, k)
+p_operation = body_scale * q_operation + common_opcode_overhead
 ```
 
-Every observed holdout slope must be finite and nonzero, have the predicted sign, and satisfy
-`relation_APE <= 0.10`. For each dynamic key, all canonical and holdout `implied_mu` values must be
-positive and satisfy `max(implied_mu) / min(implied_mu) - 1 <= 0.05`. A failed dynamic holdout
-rejects the key and prevents candidate sealing; it never adds a row, changes an offset, selects a
-new scenario, or repairs the multiplier.
+Here `q_operation` is the target opcode body cost recovered from the signed target/control relation,
+not raw EVM gas. Static reference-opcode terms use the already reconstructed lab multipliers and are
+subtracted before fitting. `memory_growth_words` is the number of newly touched 32-byte words, not
+the EVM quadratic memory-gas charge. The manifest's executable warmup allocates
+`initial_memory_words` before the target operation, so copy/input length and memory growth can vary
+independently. Metadata-only warmup would create an apparently full-rank matrix over identical
+executions and is invalid.
+
+The per-key fit matrices must have exact full column rank; aggregate parameter count and exact rank
+are both 15. The diagnostic reports body-space and production-space coefficients, predictions, and
+APE. Acceptance uses production-space fit MAPE at most 5%, fit maximum APE at most 10%, and untouched
+holdout maximum APE at most 10%. Failed quality gates produce a content-addressed `not_supported`
+artifact rather than aborting or refitting the matrix. The artifact is explicitly
+`candidate_eligible = false` and cannot update the production table.
+
+The result may show that a term is stable, only approximately stable, or below the experiment's
+resolving power. It is valid to merge indistinguishable terms or omit a negligible term in a future
+production model, but only after reporting the resulting block-level residual. This diagnostic does
+not assume that every member is uniquely recoverable.
 
 ### Block Anchor Cohort
 

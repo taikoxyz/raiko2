@@ -13,11 +13,13 @@ import calibration_model
 from calibration_model import (
     AffineOpcodeModel,
     BlockCalibrationRow,
+    DynamicOpcodeObservation,
     DynamicRelationObservation,
     RelationEquation,
     derive_affine_opcode_model,
     exact_rank,
     fit_block_calibration,
+    fit_dynamic_opcode_models,
     validate_dynamic_holdouts,
 )
 
@@ -141,6 +143,399 @@ def synthetic_block_rows(
 
 
 class CalibrationModelTests(unittest.TestCase):
+    def test_dynamic_opcode_fit_recovers_body_and_production_coefficients(self):
+        observations = (
+            DynamicOpcodeObservation(
+                dynamic_key="memory_expansion",
+                scenario_id="fit-0",
+                model_split="fit",
+                features={"constant": Fraction(1), "words": Fraction(0)},
+                target_body_cost=Decimal("3"),
+            ),
+            DynamicOpcodeObservation(
+                dynamic_key="memory_expansion",
+                scenario_id="fit-1",
+                model_split="fit",
+                features={"constant": Fraction(1), "words": Fraction(1)},
+                target_body_cost=Decimal("5"),
+            ),
+            DynamicOpcodeObservation(
+                dynamic_key="memory_expansion",
+                scenario_id="holdout-3",
+                model_split="holdout",
+                features={"constant": Fraction(1), "words": Fraction(3)},
+                target_body_cost=Decimal("9"),
+            ),
+        )
+
+        evidence = fit_dynamic_opcode_models(
+            observations,
+            {"memory_expansion": ("constant", "words")},
+            body_scale=Decimal("4"),
+            common_overhead=Decimal("7"),
+        )["memory_expansion"]
+
+        self.assertEqual(evidence.status, "supported")
+        self.assertEqual(evidence.exact_rank, 2)
+        self.assertEqual(evidence.parameter_count, 2)
+        self.assertEqual(evidence.observation_count, 3)
+        self.assertEqual(evidence.fit_count, 2)
+        self.assertEqual(evidence.holdout_count, 1)
+        for name, expected in {"constant": Decimal("3"), "words": Decimal("2")}.items():
+            self.assertLessEqual(
+                abs(evidence.body_coefficients[name] - expected), Decimal("1e-60")
+            )
+        for name, expected in {
+            "constant": Decimal("19"),
+            "words": Decimal("8"),
+        }.items():
+            self.assertLessEqual(
+                abs(evidence.production_coefficients[name] - expected), Decimal("1e-60")
+            )
+        self.assertLessEqual(evidence.fit_body_mape, Decimal("1e-60"))
+        self.assertLessEqual(evidence.fit_body_max_ape, Decimal("1e-60"))
+        self.assertLessEqual(evidence.holdout_body_max_ape, Decimal("1e-60"))
+        self.assertLessEqual(evidence.fit_production_max_ape, Decimal("1e-60"))
+        self.assertLessEqual(evidence.holdout_production_max_ape, Decimal("1e-60"))
+        self.assertEqual(evidence.quality_failures, ())
+        prediction = evidence.predictions["holdout-3"]
+        self.assertEqual(prediction["model_split"], "holdout")
+        self.assertEqual(prediction["actual_body_cost"], Decimal("9"))
+        self.assertLessEqual(
+            abs(prediction["predicted_body_cost"] - Decimal("9")), Decimal("1e-60")
+        )
+        self.assertLessEqual(prediction["body_ape"], Decimal("1e-60"))
+        self.assertEqual(prediction["actual_production_cost"], Decimal("43"))
+        self.assertLessEqual(
+            abs(prediction["predicted_production_cost"] - Decimal("43")),
+            Decimal("1e-60"),
+        )
+        self.assertLessEqual(prediction["production_ape"], Decimal("1e-60"))
+
+    def test_dynamic_opcode_fit_returns_not_supported_with_quality_evidence(self):
+        observations = (
+            DynamicOpcodeObservation(
+                dynamic_key="storage",
+                scenario_id="fit-0",
+                model_split="fit",
+                features={"constant": Fraction(1), "slots": Fraction(0)},
+                target_body_cost=Decimal("10"),
+            ),
+            DynamicOpcodeObservation(
+                dynamic_key="storage",
+                scenario_id="fit-1",
+                model_split="fit",
+                features={"constant": Fraction(1), "slots": Fraction(1)},
+                target_body_cost=Decimal("20"),
+            ),
+            DynamicOpcodeObservation(
+                dynamic_key="storage",
+                scenario_id="fit-2",
+                model_split="fit",
+                features={"constant": Fraction(1), "slots": Fraction(2)},
+                target_body_cost=Decimal("100"),
+            ),
+            DynamicOpcodeObservation(
+                dynamic_key="storage",
+                scenario_id="holdout",
+                model_split="holdout",
+                features={"constant": Fraction(1), "slots": Fraction(3)},
+                target_body_cost=Decimal("1"),
+            ),
+        )
+
+        evidence = fit_dynamic_opcode_models(
+            observations,
+            {"storage": ("constant", "slots")},
+            body_scale=Decimal("2"),
+            common_overhead=Decimal("1"),
+        )["storage"]
+
+        self.assertEqual(evidence.status, "not_supported")
+        expected_constant = Decimal(
+            "-1.6666666666666666666666666666666666666666666666666666666666666666666666666666667"
+        )
+        self.assertLessEqual(
+            abs(evidence.body_coefficients["constant"] - expected_constant),
+            Decimal("1e-60"),
+        )
+        self.assertLessEqual(
+            abs(evidence.body_coefficients["slots"] - Decimal("45")),
+            Decimal("1e-60"),
+        )
+        self.assertGreater(evidence.fit_body_mape, Decimal("0.05"))
+        self.assertGreater(evidence.fit_body_max_ape, Decimal("0.10"))
+        self.assertGreater(evidence.holdout_body_max_ape, Decimal("0.10"))
+        self.assertEqual(
+            evidence.quality_failures,
+            ("fit_mape", "fit_max_ape", "holdout_max_ape"),
+        )
+        self.assertEqual(
+            set(evidence.predictions),
+            {row.scenario_id for row in observations},
+        )
+
+    def test_dynamic_opcode_quality_gates_use_production_units(self):
+        observations = (
+            DynamicOpcodeObservation(
+                dynamic_key="memory",
+                scenario_id="fit-0",
+                model_split="fit",
+                features={"constant": Fraction(1), "words": Fraction(0)},
+                target_body_cost=Decimal("1"),
+            ),
+            DynamicOpcodeObservation(
+                dynamic_key="memory",
+                scenario_id="fit-1",
+                model_split="fit",
+                features={"constant": Fraction(1), "words": Fraction(1)},
+                target_body_cost=Decimal("2"),
+            ),
+            DynamicOpcodeObservation(
+                dynamic_key="memory",
+                scenario_id="fit-2",
+                model_split="fit",
+                features={"constant": Fraction(1), "words": Fraction(2)},
+                target_body_cost=Decimal("4"),
+            ),
+            DynamicOpcodeObservation(
+                dynamic_key="memory",
+                scenario_id="holdout",
+                model_split="holdout",
+                features={"constant": Fraction(1), "words": Fraction(3)},
+                target_body_cost=Decimal("5"),
+            ),
+        )
+
+        evidence = fit_dynamic_opcode_models(
+            observations,
+            {"memory": ("constant", "words")},
+            body_scale=Decimal("1"),
+            common_overhead=Decimal("1000"),
+        )["memory"]
+
+        self.assertGreater(evidence.fit_body_mape, Decimal("0.05"))
+        self.assertLess(evidence.fit_production_mape, Decimal("0.05"))
+        self.assertEqual(evidence.status, "supported")
+        self.assertEqual(evidence.quality_failures, ())
+
+    def test_dynamic_opcode_fit_rejects_structural_and_provenance_failures(self):
+        valid = (
+            DynamicOpcodeObservation(
+                dynamic_key="copy",
+                scenario_id="fit-0",
+                model_split="fit",
+                features={"constant": Fraction(1), "bytes": Fraction(0)},
+                target_body_cost=Decimal("1"),
+            ),
+            DynamicOpcodeObservation(
+                dynamic_key="copy",
+                scenario_id="fit-1",
+                model_split="fit",
+                features={"constant": Fraction(1), "bytes": Fraction(1)},
+                target_body_cost=Decimal("2"),
+            ),
+            DynamicOpcodeObservation(
+                dynamic_key="copy",
+                scenario_id="holdout",
+                model_split="holdout",
+                features={"constant": Fraction(1), "bytes": Fraction(2)},
+                target_body_cost=Decimal("3"),
+            ),
+        )
+
+        cases = (
+            (
+                (*valid, DynamicOpcodeObservation(**valid[0].__dict__)),
+                {"copy": ("constant", "bytes")},
+                Decimal("2"),
+                Decimal("1"),
+                "duplicate dynamic scenario ID",
+            ),
+            (
+                tuple(row for row in valid if row.model_split == "fit"),
+                {"copy": ("constant", "bytes")},
+                Decimal("2"),
+                Decimal("1"),
+                "at least one holdout",
+            ),
+            (
+                (
+                    valid[0],
+                    DynamicOpcodeObservation(
+                        **{**valid[1].__dict__, "features": {"constant": Fraction(1)}}
+                    ),
+                    valid[2],
+                ),
+                {"copy": ("constant", "bytes")},
+                Decimal("2"),
+                Decimal("1"),
+                "feature set",
+            ),
+            (
+                (
+                    DynamicOpcodeObservation(
+                        **{
+                            **valid[0].__dict__,
+                            "features": {"constant": Fraction(2), "bytes": Fraction(0)},
+                        }
+                    ),
+                    valid[1],
+                    valid[2],
+                ),
+                {"copy": ("constant", "bytes")},
+                Decimal("2"),
+                Decimal("1"),
+                "constant.*Fraction\\(1",
+            ),
+            (
+                (
+                    valid[0],
+                    DynamicOpcodeObservation(
+                        **{
+                            **valid[1].__dict__,
+                            "features": {"constant": Fraction(1), "bytes": Fraction(0)},
+                        }
+                    ),
+                    valid[2],
+                ),
+                {"copy": ("constant", "bytes")},
+                Decimal("2"),
+                Decimal("1"),
+                "exact rank",
+            ),
+            (
+                (
+                    DynamicOpcodeObservation(
+                        **{**valid[0].__dict__, "target_body_cost": Decimal("NaN")}
+                    ),
+                    valid[1],
+                    valid[2],
+                ),
+                {"copy": ("constant", "bytes")},
+                Decimal("2"),
+                Decimal("1"),
+                "target body cost.*positive finite Decimal",
+            ),
+            (
+                valid,
+                {"copy": ("constant", "bytes")},
+                Decimal("0"),
+                Decimal("1"),
+                "body_scale.*positive finite Decimal",
+            ),
+            (
+                valid,
+                {"copy": ("constant", "bytes")},
+                Decimal("2"),
+                Decimal("-1"),
+                "common_overhead.*nonnegative finite Decimal",
+            ),
+        )
+        for rows, feature_names, body_scale, common_overhead, message in cases:
+            with self.subTest(message=message), self.assertRaisesRegex(
+                ValueError, message
+            ):
+                fit_dynamic_opcode_models(
+                    rows,
+                    feature_names,
+                    body_scale=body_scale,
+                    common_overhead=common_overhead,
+                )
+
+    def test_dynamic_opcode_fit_rejects_non_fraction_features_and_invalid_keys(self):
+        base = (
+            DynamicOpcodeObservation(
+                dynamic_key="hash",
+                scenario_id="fit-0",
+                model_split="fit",
+                features={"constant": Fraction(1), "words": Fraction(0)},
+                target_body_cost=Decimal("2"),
+            ),
+            DynamicOpcodeObservation(
+                dynamic_key="hash",
+                scenario_id="fit-1",
+                model_split="fit",
+                features={"constant": Fraction(1), "words": Fraction(1)},
+                target_body_cost=Decimal("3"),
+            ),
+            DynamicOpcodeObservation(
+                dynamic_key="hash",
+                scenario_id="holdout",
+                model_split="holdout",
+                features={"constant": Fraction(1), "words": Fraction(2)},
+                target_body_cost=Decimal("4"),
+            ),
+        )
+        invalid_feature = DynamicOpcodeObservation(
+            **{**base[0].__dict__, "features": {"constant": Fraction(1), "words": 0}}
+        )
+        invalid_split = DynamicOpcodeObservation(
+            **{**base[0].__dict__, "model_split": "training"}
+        )
+        invalid_scenario_id = DynamicOpcodeObservation(
+            **{**base[0].__dict__, "scenario_id": 7}
+        )
+
+        for observations, feature_names, message in (
+            ((invalid_feature, *base[1:]), {"hash": ("constant", "words")}, "Fraction"),
+            (
+                (invalid_split, *base[1:]),
+                {"hash": ("constant", "words")},
+                "fit or holdout",
+            ),
+            (
+                (invalid_scenario_id, *base[1:]),
+                {"hash": ("constant", "words")},
+                "scenario ID.*nonempty string",
+            ),
+            (base, {"other": ("constant", "words")}, "dynamic keys"),
+            (base, {"hash": ("words",)}, "constant"),
+            (base, {"hash": ("constant", "constant")}, "duplicate feature name"),
+        ):
+            with self.subTest(message=message), self.assertRaisesRegex(
+                ValueError, message
+            ):
+                fit_dynamic_opcode_models(
+                    observations,
+                    feature_names,
+                    body_scale=Decimal("2"),
+                    common_overhead=Decimal("1"),
+                )
+
+    def test_dynamic_opcode_fit_uses_isolated_decimal_context(self):
+        observations = (
+            DynamicOpcodeObservation(
+                "log", "fit-0", "fit",
+                {"constant": Fraction(1), "topics": Fraction(0)}, Decimal("1")
+            ),
+            DynamicOpcodeObservation(
+                "log", "fit-1", "fit",
+                {"constant": Fraction(1), "topics": Fraction(1)}, Decimal("3")
+            ),
+            DynamicOpcodeObservation(
+                "log", "holdout", "holdout",
+                {"constant": Fraction(1), "topics": Fraction(2)}, Decimal("5")
+            ),
+        )
+
+        with localcontext() as hostile:
+            hostile.prec = 7
+            hostile.rounding = ROUND_DOWN
+            hostile.traps[Inexact] = True
+
+            evidence = fit_dynamic_opcode_models(
+                observations,
+                {"log": ("constant", "topics")},
+                body_scale=Decimal("2"),
+                common_overhead=Decimal("1"),
+            )["log"]
+
+            self.assertEqual(evidence.status, "supported")
+            self.assertEqual(hostile.prec, 7)
+            self.assertEqual(hostile.rounding, ROUND_DOWN)
+            self.assertTrue(hostile.traps[Inexact])
+
     def test_block_fit_recovers_staged_transfer_parameters_and_multipliers(self):
         model = synthetic_affine_model()
         expected_anchors = dict(zip(ANCHORS, map(Decimal, ("10", "12", "10", "12"))))
@@ -458,6 +853,7 @@ class CalibrationModelTests(unittest.TestCase):
                 ("canonical", "canonical", 1),
                 ("medium", "dynamic_holdout", 2),
                 ("large", "dynamic_holdout", 4),
+                ("larger", "dynamic_holdout", 8),
             )
         )
 
@@ -472,7 +868,7 @@ class CalibrationModelTests(unittest.TestCase):
                 row["implied_multiplier"]
                 for row in evidence[ANCHORS[0]]["observations"]
             ],
-            [Decimal("2"), Decimal("2"), Decimal("2")],
+            [Decimal("2"), Decimal("2"), Decimal("2"), Decimal("2")],
         )
 
     def test_dynamic_holdouts_reject_shape_sign_ape_and_consistency_failures(self):
@@ -524,7 +920,7 @@ class CalibrationModelTests(unittest.TestCase):
             )
         )
         cases = (
-            (observations()[:2], "one canonical and two"),
+            (observations()[:1], "one canonical and at least one"),
             (observations((Decimal("1"), Decimal("1"), Decimal("5"))), "predicted sign"),
             (observations((Decimal("-1"), Decimal("2"), Decimal("5"))), "relation APE"),
             (inconsistent, "implied multiplier consistency"),

@@ -288,6 +288,33 @@ was complete. Finish candidate construction and full implementation verification
 one fresh calibration identity and rerun formal relations and all controlled block rows. Otherwise
 the subsequent implementation commit changes the bound source revision and invalidates the data.
 
+### Dynamic Raw Gas Is Not Automatically A Prover-Cost Basis
+
+The first complete controlled fit, re-evaluated in consistent opcode-lab units, showed that one
+scalar lab-body prover-cost multiplier per opcode cannot describe `EXP`, `KECCAK256`, `MLOAD`,
+`MSTORE`, `MSTORE8`, and `MCOPY` across operand and memory scenarios. Anchor probe values are
+per-operation body costs and must be divided by their anchor raw gas before affine reconstruction.
+Production multipliers after `body_scale` and common overhead must never be compared directly to
+opcode-lab relation slopes. EVM raw gas is a useful protocol charge, but its internal formula is not
+evidence that SP1 prover cost uses the same basis or proportions.
+
+Preserve the scalar failure as a candidate gate. Diagnose the missing structure separately with
+predeclared semantic features and untouched holdouts. The current diagnostic splits exponent size,
+input/copy words, and newly grown memory words, fits each opcode independently, and records body- and
+production-space errors without changing the candidate. Some terms may prove indistinguishable or
+negligible; merge or omit them only after the controlled result reports that limitation and later
+block-level validation accepts the approximation.
+
+Even a passing lab-body scalar would not establish one production per-raw-gas scalar for a dynamic
+opcode: a nonzero common per-operation overhead does not scale with raw gas. Promotion must state
+how that fixed operation cost is represented instead of silently folding it into a canonical raw-gas
+ratio.
+
+`initial_memory_words` must alter execution. An early fixture version used it in the expected raw-gas
+formula while the bytecode always warmed one word. That confounded input size with memory expansion
+and made the declared design matrix more informative than the executions. Allocate the declared
+initial memory in the warmup and test that both emitted bytecode and expected raw gas change.
+
 ### Backend Metrics Were Treated As Interchangeable
 
 SP1 `ExecutionReport::gas()`, SP1 total instruction count, and RISC0 user/padded cycles are different

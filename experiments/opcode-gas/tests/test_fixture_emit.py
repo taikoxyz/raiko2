@@ -310,7 +310,7 @@ class FixtureEmitTests(unittest.TestCase):
                 for row, path in zip(rows, written)
             }
 
-        self.assertEqual(len(rows), 12)
+        self.assertEqual(len(rows), 28)
         self.assertEqual({row["purpose"] for row in rows}, {"formal_opcode_relation"})
         self.assertEqual({row["diagnostic_only"] for row in rows}, {False})
         self.assertEqual({row["signal_kind"] for row in rows}, {"signed_raw_gas_relation"})
@@ -323,12 +323,19 @@ class FixtureEmitTests(unittest.TestCase):
             ),
             key=lambda row: row["target_raw_gas"],
         )
-        self.assertEqual([row["target_raw_gas"] for row in targets], [60, 410, 1610])
+        self.assertEqual(
+            [row["target_raw_gas"] for row in targets],
+            [60, 110, 210, 410, 810, 1210, 1610],
+        )
         self.assertEqual(
             [row["target_raw_gas_by_key"] for row in targets],
             [
                 {"opcode:0x0a": "60"},
+                {"opcode:0x0a": "110"},
+                {"opcode:0x0a": "210"},
                 {"opcode:0x0a": "410"},
+                {"opcode:0x0a": "810"},
+                {"opcode:0x0a": "1210"},
                 {"opcode:0x0a": "1610"},
             ],
         )
@@ -359,7 +366,7 @@ class FixtureEmitTests(unittest.TestCase):
             expected_purpose=opcode_gas.FORMAL_RELATION_PURPOSE,
             guest_inputs=inputs,
         )
-        self.assertEqual(len(pairs), 6)
+        self.assertEqual(len(pairs), 14)
         altered = [dict(row) for row in rows]
         first_relation_id = altered[0]["relation_id"]
         for row in altered:
@@ -371,6 +378,130 @@ class FixtureEmitTests(unittest.TestCase):
                 expected_purpose=opcode_gas.FORMAL_RELATION_PURPOSE,
                 guest_inputs=inputs,
             )
+
+    def test_dynamic_memory_warmup_changes_executed_bytecode_and_target_raw_gas(self):
+        manifest = opcode_gas.load_manifest(
+            ROOT
+            / "experiments"
+            / "opcode-gas"
+            / "manifests"
+            / "sp1-calibration-v1.toml",
+            schedule=fixture_schedule(),
+        )
+        relations = tuple(
+            relation
+            for relation in manifest.opcode_relations
+            if relation.dynamic_key == "opcode:0x20"
+            and relation.scenario["input_length"] == 256
+        )
+        self.assertEqual(
+            [dict(relation.scenario) for relation in relations],
+            [
+                {"input_length": 256, "initial_memory_words": 8},
+                {"input_length": 256, "initial_memory_words": 1},
+            ],
+        )
+        manifest = replace(manifest, variants=[1], opcode_relations=relations)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            written = opcode_gas.generate_relation_cases(
+                manifest,
+                pathlib.Path(tmp),
+                provenance=diagnostic_provenance(),
+                generator_max_count=8,
+            )
+            rows = [opcode_gas.json.loads(path.read_text()) for path in written]
+
+        prefix_rows = [
+            row
+            for row in rows
+            if row["relation_placement"] == "active_prefix"
+            and row["diagnostic_count"] == 1
+        ]
+        target_rows = [row for row in prefix_rows if row["lane"] == "target"]
+        self.assertEqual([row["target_raw_gas"] for row in target_rows], [78, 99])
+        self.assertEqual(
+            [row["target_raw_gas_by_key"] for row in target_rows],
+            [{"opcode:0x20": "78"}, {"opcode:0x20": "99"}],
+        )
+
+        zero_word = bytes(32)
+
+        def expected_warmup(initial_words):
+            return (
+                b"\x7f"
+                + (initial_words * 32).to_bytes(32, "big")
+                + b"\x7f"
+                + zero_word
+                + b"\x7f"
+                + zero_word
+                + b"\x37"
+            )
+
+        first_programs = {}
+        for row in prefix_rows:
+            first_program = opcode_gas.decode_fixed_microprograms(
+                bytes.fromhex(row["bytecode"].removeprefix("0x"))
+            )[0]
+            initial_words = row["relation_scenario"]["initial_memory_words"]
+            self.assertTrue(first_program.startswith(expected_warmup(initial_words)))
+            first_programs[(initial_words, row["lane"])] = first_program
+        self.assertNotEqual(
+            first_programs[(8, "target")], first_programs[(1, "target")]
+        )
+        for initial_words in (8, 1):
+            warmup_len = len(expected_warmup(initial_words))
+            self.assertEqual(
+                first_programs[(initial_words, "target")][:warmup_len],
+                first_programs[(initial_words, "control")][:warmup_len],
+            )
+
+    def test_formal_relation_model_split_is_required_and_fail_closed(self):
+        manifest = opcode_gas.load_manifest(
+            ROOT
+            / "experiments"
+            / "opcode-gas"
+            / "manifests"
+            / "sp1-calibration-v1.toml",
+            schedule=fixture_schedule(),
+        )
+        relation = next(
+            relation
+            for relation in manifest.opcode_relations
+            if relation.dynamic_key is not None and relation.split == "canonical"
+        )
+        manifest = replace(manifest, variants=[1], opcode_relations=(relation,))
+        with tempfile.TemporaryDirectory() as tmp:
+            written = opcode_gas.generate_relation_cases(
+                manifest,
+                pathlib.Path(tmp),
+                provenance=diagnostic_provenance(),
+                generator_max_count=8,
+            )
+            rows = [opcode_gas.json.loads(path.read_text()) for path in written]
+            inputs = {
+                row["fixture_sha256"]: opcode_gas.json.loads(
+                    path.with_name("guest-input.json").read_text()
+                )
+                for row, path in zip(rows, written)
+            }
+
+        self.assertEqual({row["model_split"] for row in rows}, {"fit"})
+        for mutation in ("missing", "tampered"):
+            malformed = [dict(row) for row in rows]
+            for row in malformed:
+                if mutation == "missing":
+                    row.pop("model_split")
+                else:
+                    row["model_split"] = "holdout"
+            with self.subTest(mutation=mutation), self.assertRaisesRegex(
+                ValueError, "model split"
+            ):
+                opcode_gas.validate_matched_control_fixture_pairs(
+                    malformed,
+                    expected_purpose=opcode_gas.FORMAL_RELATION_PURPOSE,
+                    guest_inputs=inputs,
+                )
 
     def test_matched_control_binary_emits_equal_footprint_op_minus_pop_pair(self):
         data = controlled_manifest_data()

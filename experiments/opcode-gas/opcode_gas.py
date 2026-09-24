@@ -25,11 +25,14 @@ from typing import Any, Iterable, Mapping
 from calibration_model import (
     AffineOpcodeModel,
     BlockCalibrationRow,
+    DynamicOpcodeObservation,
     DynamicRelationObservation,
     RelationEquation,
     derive_affine_opcode_model,
     exact_rank,
     fit_block_calibration,
+    fit_dynamic_opcode_models,
+    reconstruct_lab_multipliers,
     validate_dynamic_holdouts,
 )
 
@@ -49,7 +52,7 @@ def _isolated_decimal_context(function):
 
 FORMAL_RELATION_PURPOSE = "formal_opcode_relation"
 FORMAL_RELATION_SIGNAL_KIND = "signed_raw_gas_relation"
-FORMAL_RELATION_ARTIFACT_SCHEMA_VERSION = 2
+FORMAL_RELATION_ARTIFACT_SCHEMA_VERSION = 3
 FORMAL_RELATION_PREFIX_PLACEMENT = "active_prefix"
 FORMAL_RELATION_TAIL_PLACEMENT = "active_tail"
 OPCODE_RELATION_ANCHORS = (
@@ -65,6 +68,161 @@ DYNAMIC_RAW_GAS_KEYS = (
     "opcode:0x52",
     "opcode:0x53",
     "opcode:0x5e",
+)
+DYNAMIC_OPCODE_FEATURE_ORDERS = MappingProxyType(
+    {
+        "opcode:0x0a": ("constant", "exponent_bytes", "exponent_bytes_squared"),
+        "opcode:0x20": ("constant", "input_words", "memory_growth_words"),
+        "opcode:0x51": ("constant", "memory_growth_words"),
+        "opcode:0x52": ("constant", "memory_growth_words"),
+        "opcode:0x53": ("constant", "memory_growth_words"),
+        "opcode:0x5e": ("constant", "copy_words", "memory_growth_words"),
+    }
+)
+_DYNAMIC_RELATION_SCENARIO_MATRIX = {
+    "opcode:0x0a": (
+        (
+            "canonical",
+            "fit",
+            (("exponent_byte_length", 1), ("initial_memory_words", 0)),
+        ),
+        (
+            "dynamic_holdout",
+            "fit",
+            (("exponent_byte_length", 4), ("initial_memory_words", 0)),
+        ),
+        (
+            "dynamic_holdout",
+            "fit",
+            (("exponent_byte_length", 8), ("initial_memory_words", 0)),
+        ),
+        (
+            "dynamic_holdout",
+            "fit",
+            (("exponent_byte_length", 16), ("initial_memory_words", 0)),
+        ),
+        (
+            "dynamic_holdout",
+            "fit",
+            (("exponent_byte_length", 32), ("initial_memory_words", 0)),
+        ),
+        (
+            "dynamic_holdout",
+            "holdout",
+            (("exponent_byte_length", 2), ("initial_memory_words", 0)),
+        ),
+        (
+            "dynamic_holdout",
+            "holdout",
+            (("exponent_byte_length", 24), ("initial_memory_words", 0)),
+        ),
+    ),
+    "opcode:0x20": (
+        ("canonical", "fit", (("initial_memory_words", 1), ("input_length", 32))),
+        (
+            "dynamic_holdout",
+            "fit",
+            (("initial_memory_words", 8), ("input_length", 256)),
+        ),
+        (
+            "dynamic_holdout",
+            "fit",
+            (("initial_memory_words", 32), ("input_length", 1024)),
+        ),
+        (
+            "dynamic_holdout",
+            "fit",
+            (("initial_memory_words", 1), ("input_length", 256)),
+        ),
+        (
+            "dynamic_holdout",
+            "fit",
+            (("initial_memory_words", 1), ("input_length", 1024)),
+        ),
+        (
+            "dynamic_holdout",
+            "holdout",
+            (("initial_memory_words", 16), ("input_length", 512)),
+        ),
+        (
+            "dynamic_holdout",
+            "holdout",
+            (("initial_memory_words", 1), ("input_length", 512)),
+        ),
+    ),
+    "opcode:0x51": (),
+    "opcode:0x52": (),
+    "opcode:0x53": (),
+    "opcode:0x5e": (
+        ("canonical", "fit", (("copy_length", 32), ("initial_memory_words", 1))),
+        (
+            "dynamic_holdout",
+            "fit",
+            (("copy_length", 256), ("initial_memory_words", 8)),
+        ),
+        (
+            "dynamic_holdout",
+            "fit",
+            (("copy_length", 1024), ("initial_memory_words", 32)),
+        ),
+        (
+            "dynamic_holdout",
+            "fit",
+            (("copy_length", 256), ("initial_memory_words", 1)),
+        ),
+        (
+            "dynamic_holdout",
+            "fit",
+            (("copy_length", 1024), ("initial_memory_words", 1)),
+        ),
+        (
+            "dynamic_holdout",
+            "holdout",
+            (("copy_length", 512), ("initial_memory_words", 16)),
+        ),
+        (
+            "dynamic_holdout",
+            "holdout",
+            (("copy_length", 512), ("initial_memory_words", 1)),
+        ),
+    ),
+}
+_MEMORY_RELATION_SCENARIOS = (
+    (
+        "canonical",
+        "fit",
+        (("highest_touched_offset", 0), ("initial_memory_words", 1)),
+    ),
+    (
+        "dynamic_holdout",
+        "fit",
+        (("highest_touched_offset", 256), ("initial_memory_words", 1)),
+    ),
+    (
+        "dynamic_holdout",
+        "fit",
+        (("highest_touched_offset", 4096), ("initial_memory_words", 1)),
+    ),
+    (
+        "dynamic_holdout",
+        "fit",
+        (("highest_touched_offset", 256), ("initial_memory_words", 9)),
+    ),
+    (
+        "dynamic_holdout",
+        "holdout",
+        (("highest_touched_offset", 1024), ("initial_memory_words", 1)),
+    ),
+    (
+        "dynamic_holdout",
+        "holdout",
+        (("highest_touched_offset", 4096), ("initial_memory_words", 129)),
+    ),
+)
+for _memory_key in ("opcode:0x51", "opcode:0x52", "opcode:0x53"):
+    _DYNAMIC_RELATION_SCENARIO_MATRIX[_memory_key] = _MEMORY_RELATION_SCENARIOS
+DYNAMIC_RELATION_SCENARIO_MATRIX = MappingProxyType(
+    _DYNAMIC_RELATION_SCENARIO_MATRIX
 )
 FORMAL_RELATION_QUALITY_GATES = {
     "repeats": 3,
@@ -190,6 +348,7 @@ class OpcodeRelationSpec:
     case_id: str
     key_id: str
     split: str
+    model_split: str
     scenario_id: str
     scenario: Mapping[str, int | str]
     target_raw_gas_by_key: Mapping[str, int]
@@ -1545,10 +1704,13 @@ def _fixed_target_instruction(case: CaseSpec) -> bytes:
     return bytes([case.opcode])
 
 
-def _fixed_memory_warmup(case: CaseSpec) -> bytes:
+def _fixed_memory_warmup(case: CaseSpec, initial_memory_words: int = 1) -> bytes:
     assert case.opcode is not None
+    if type(initial_memory_words) is not int or initial_memory_words < 0:
+        raise ValueError("initial memory words must be a nonnegative integer")
     return b"".join(
-        _fixed_push(value, target_opcode=case.opcode) for value in (32, 0, 0)
+        _fixed_push(value, target_opcode=case.opcode)
+        for value in (initial_memory_words * 32, 0, 0)
     ) + bytes([0x37])
 
 
@@ -1981,30 +2143,30 @@ def _dynamic_relation_target_raw_gas(
 ) -> int:
     """Return the frozen actual target-op raw gas for a formal scenario."""
     initial_words = scenario.get("initial_memory_words", 0)
-    if isinstance(initial_words, bool) or not isinstance(initial_words, int) or initial_words < 0:
+    if type(initial_words) is not int or initial_words < 0:
         raise ValueError("dynamic relation initial_memory_words must be nonnegative")
     if case.template == "stack_exp":
         byte_length = scenario.get("exponent_byte_length")
-        if byte_length not in {1, 8, 32}:
-            raise ValueError("EXP relation requires exponent byte length 1, 8, or 32")
+        if type(byte_length) is not int or byte_length not in {1, 2, 4, 8, 16, 24, 32}:
+            raise ValueError("EXP relation has invalid exponent byte length")
         return 10 + 50 * int(byte_length)
     if case.template == "keccak_32":
         length = scenario.get("input_length")
-        if length not in {32, 256, 1024}:
-            raise ValueError("KECCAK256 relation requires input length 32, 256, or 1024")
+        if type(length) is not int or length not in {32, 256, 512, 1024}:
+            raise ValueError("KECCAK256 relation has invalid input length")
         words = (int(length) + 31) // 32
         return 30 + 6 * words + max(0, _memory_cost(words) - _memory_cost(initial_words))
     if case.template in {"memory_load_32", "memory_store_32", "memory_store8"}:
         offset = scenario.get("highest_touched_offset")
-        if offset not in {0, 0x0100, 0x1000}:
-            raise ValueError("memory relation requires offset 0x00, 0x0100, or 0x1000")
+        if type(offset) is not int or offset not in {0, 0x0100, 0x0400, 0x1000}:
+            raise ValueError("memory relation has invalid offset")
         touched = int(offset) + (1 if case.template == "memory_store8" else 32)
         words = (touched + 31) // 32
         return 3 + max(0, _memory_cost(words) - _memory_cost(initial_words))
     if case.template == "memory_copy_32":
         length = scenario.get("copy_length")
-        if length not in {32, 256, 1024}:
-            raise ValueError("MCOPY relation requires copy length 32, 256, or 1024")
+        if type(length) is not int or length not in {32, 256, 512, 1024}:
+            raise ValueError("MCOPY relation has invalid copy length")
         words = (int(length) + 31) // 32
         return 3 + 3 * words + max(
             0, _memory_cost(words) - _memory_cost(initial_words)
@@ -2052,23 +2214,35 @@ def relation_matched_control_spec(
         setup = b"".join(_fixed_push(value, target_opcode=case.opcode or 0) for value in operands)
     elif case.template == "keccak_32":
         operands = (int(scenario["input_length"]), 0)
-        setup = _fixed_memory_warmup(case) + b"".join(
-            _fixed_push(value, target_opcode=case.opcode or 0) for value in operands
+        setup = _fixed_memory_warmup(
+            case, int(scenario["initial_memory_words"])
+        ) + b"".join(
+            _fixed_push(value, target_opcode=case.opcode or 0)
+            for value in operands
         )
     elif case.template == "memory_load_32":
         operands = (int(scenario["highest_touched_offset"]),)
-        setup = _fixed_memory_warmup(case) + b"".join(
-            _fixed_push(value, target_opcode=case.opcode or 0) for value in operands
+        setup = _fixed_memory_warmup(
+            case, int(scenario["initial_memory_words"])
+        ) + b"".join(
+            _fixed_push(value, target_opcode=case.opcode or 0)
+            for value in operands
         )
     elif case.template in {"memory_store_32", "memory_store8"}:
         operands = (1, int(scenario["highest_touched_offset"]))
-        setup = _fixed_memory_warmup(case) + b"".join(
-            _fixed_push(value, target_opcode=case.opcode or 0) for value in operands
+        setup = _fixed_memory_warmup(
+            case, int(scenario["initial_memory_words"])
+        ) + b"".join(
+            _fixed_push(value, target_opcode=case.opcode or 0)
+            for value in operands
         )
     elif case.template == "memory_copy_32":
         operands = (int(scenario["copy_length"]), 0, 0)
-        setup = _fixed_memory_warmup(case) + b"".join(
-            _fixed_push(value, target_opcode=case.opcode or 0) for value in operands
+        setup = _fixed_memory_warmup(
+            case, int(scenario["initial_memory_words"])
+        ) + b"".join(
+            _fixed_push(value, target_opcode=case.opcode or 0)
+            for value in operands
         )
     else:
         raise ValueError(f"unmarked dynamic raw-gas template: {case.template}")
@@ -2152,6 +2326,12 @@ def _parse_opcode_relations(
         split = item.get("split")
         if split not in {"canonical", "dynamic_holdout"}:
             raise ValueError("dynamic relation split is invalid")
+        model_split = item.get("model_split")
+        if model_split not in {"fit", "holdout"}:
+            raise ValueError("dynamic relation model split is invalid")
+        scenario_id = item.get("scenario_id")
+        if not isinstance(scenario_id, str) or not scenario_id:
+            raise ValueError("dynamic relation scenario ID must be nonempty")
         scenario = item.get("scenario")
         if not isinstance(scenario, Mapping):
             raise ValueError("dynamic relation scenario parameters are missing")
@@ -2173,7 +2353,8 @@ def _parse_opcode_relations(
             case_id=case.name,
             key_id=str(key_id),
             split=str(split),
-            scenario_id=str(item.get("scenario_id")),
+            model_split=str(model_split),
+            scenario_id=scenario_id,
             scenario=scenario,
             target_raw_gas_by_key=MappingProxyType(target),
             control_raw_gas_by_key=MappingProxyType(control),
@@ -2187,19 +2368,18 @@ def _parse_opcode_relations(
         missing = sorted(expected_dynamic - set(explicit_by_key))
         raise ValueError(f"dynamic relation scenarios are missing: {missing!r}")
     for key, relations in explicit_by_key.items():
-        if [relation.split for relation in relations] != [
-            "canonical",
-            "dynamic_holdout",
-            "dynamic_holdout",
-        ]:
-            raise ValueError(f"dynamic relation {key} must have one canonical and two holdouts")
-        if len({relation.scenario_id for relation in relations}) != 3:
+        if len({relation.scenario_id for relation in relations}) != len(relations):
             raise ValueError(f"dynamic relation {key} has duplicate scenario IDs")
-        totals = [relation.target_raw_gas_by_key[key] for relation in relations]
-        if not (0 < totals[0] < totals[1] < totals[2]):
-            raise ValueError(f"dynamic relation {key} raw-gas totals are not distinct positive")
-        if totals[1] < 2 * totals[0] or totals[2] < 4 * totals[0]:
-            raise ValueError(f"dynamic relation {key} fails the 1x/2x/4x raw-gas range")
+        actual_matrix = tuple(
+            (
+                relation.split,
+                relation.model_split,
+                tuple(sorted(relation.scenario.items())),
+            )
+            for relation in relations
+        )
+        if actual_matrix != DYNAMIC_RELATION_SCENARIO_MATRIX[key]:
+            raise ValueError(f"dynamic relation {key} differs from frozen scenario matrix")
 
     relations: list[OpcodeRelationSpec] = []
     for key, case in opcode_cases.items():
@@ -2220,6 +2400,7 @@ def _parse_opcode_relations(
                 case_id=case.name,
                 key_id=key,
                 split="canonical",
+                model_split="fit",
                 scenario_id="canonical",
                 scenario=MappingProxyType({}),
                 target_raw_gas_by_key=MappingProxyType(target),
@@ -2483,6 +2664,7 @@ MATCHED_CONTROL_COMMON_FIELDS = MATCHED_CONTROL_WORKLOAD_FIELDS + (
 FORMAL_RELATION_FIELDS = (
     "relation_id",
     "relation_split",
+    "model_split",
     "scenario_id",
     "relation_scenario",
     "dynamic_key",
@@ -2612,6 +2794,12 @@ def _matched_control_pair_spec(
     ):
         raise ValueError("matched-control control declaration is invalid")
     if purpose == FORMAL_RELATION_PURPOSE:
+        model_split = target.get("model_split")
+        relation_split = target.get("relation_split")
+        if model_split not in {"fit", "holdout"} or (
+            relation_split == "canonical" and model_split != "fit"
+        ):
+            raise ValueError("formal relation model split is invalid")
         placement = target.get("relation_placement")
         if target.get("relation_sample_id") != formal_relation_sample_id(
             str(placement), diagnostic_count
@@ -2641,7 +2829,8 @@ def _matched_control_pair_spec(
             id=str(target.get("relation_id")),
             case_id=reconstructed_case.name,
             key_id=f"opcode:0x{original_opcode:02x}",
-            split=str(target.get("relation_split")),
+            split=str(relation_split),
+            model_split=str(model_split),
             scenario_id=str(target.get("scenario_id")),
             scenario=MappingProxyType(dict(relation_scenario)),
             target_raw_gas_by_key=MappingProxyType(target_map),
@@ -3674,6 +3863,7 @@ def _canonical_formal_relation_fixture_pair(
             "guest_input_status": "opcode_lab_guest_input",
             "relation_id": relation.id,
             "relation_split": relation.split,
+            "model_split": relation.model_split,
             "scenario_id": relation.scenario_id,
             "relation_scenario": dict(relation.scenario),
             "dynamic_key": relation.dynamic_key,
@@ -4065,7 +4255,7 @@ def _formal_actual_raw_gas_map(
 def validate_formal_dynamic_raw_gas_preflight(
     rows: Iterable[Mapping[str, Any]],
 ) -> None:
-    """Require executed dynamic scenario totals to span the frozen range before publish."""
+    """Require executed dynamic scenarios to match the frozen matrix before publish."""
     grouped: dict[str, dict[str, list[Mapping[str, Any]]]] = {}
     for row in rows:
         dynamic_key = row.get("dynamic_key")
@@ -4083,9 +4273,9 @@ def validate_formal_dynamic_raw_gas_preflight(
     if set(grouped) != set(DYNAMIC_RAW_GAS_KEYS):
         raise ValueError("formal dynamic raw-gas preflight is incomplete")
     for key, relations in grouped.items():
-        observations: list[tuple[str, int]] = []
-        if len(relations) != 3:
-            raise ValueError(f"formal dynamic relation {key} must have three scenarios")
+        observations: list[tuple[str, str, tuple[tuple[str, Any], ...]]] = []
+        if len(relations) != len(DYNAMIC_RELATION_SCENARIO_MATRIX[key]):
+            raise ValueError(f"formal dynamic relation {key} has wrong scenario count")
         for relation_rows in relations.values():
             ordered = sorted(
                 relation_rows, key=lambda row: int(row.get("repeat_index", -1))
@@ -4101,22 +4291,25 @@ def validate_formal_dynamic_raw_gas_preflight(
                 total = trace.get("executed_target_raw_gas")
                 if count != 1 or isinstance(total, bool) or not isinstance(total, int) or total <= 0:
                     raise ValueError("formal dynamic preflight has invalid executed target raw gas")
+                if total != row.get("target_raw_gas"):
+                    raise ValueError("formal dynamic preflight differs from fixture target raw gas")
                 values.append(total)
             if len(set(values)) != 1:
                 raise ValueError("formal dynamic preflight executed totals are nondeterministic")
-            observations.append((str(ordered[0].get("relation_split")), values[0]))
-        canonical = [total for split, total in observations if split == "canonical"]
-        holdouts = sorted(
-            total for split, total in observations if split == "dynamic_holdout"
-        )
-        if (
-            len(canonical) != 1
-            or len(holdouts) != 2
-            or len({canonical[0], *holdouts}) != 3
-            or holdouts[0] < 2 * canonical[0]
-            or holdouts[1] < 4 * canonical[0]
-        ):
-            raise ValueError(f"formal dynamic relation {key} fails actual 1x/2x/4x preflight")
+            scenario = ordered[0].get("relation_scenario")
+            if not isinstance(scenario, Mapping):
+                raise ValueError("formal dynamic preflight relation scenario is invalid")
+            observations.append(
+                (
+                    str(ordered[0].get("relation_split")),
+                    str(ordered[0].get("model_split")),
+                    tuple(sorted(scenario.items())),
+                )
+            )
+        if tuple(observations) != DYNAMIC_RELATION_SCENARIO_MATRIX[key]:
+            raise ValueError(
+                f"formal dynamic relation {key} differs from frozen scenario matrix"
+            )
 
 
 def raw_run_from_report(case: dict[str, Any], report: dict[str, Any]) -> dict[str, Any]:
@@ -4608,6 +4801,10 @@ BLOCK_CALIBRATION_FORMULAS = {
     "opcode": "mu = mu_zero + B * theta",
     "fixed_fit": "beta = least_squares(q, p - x * mu)",
     "prediction": "p_hat = x * mu + q * beta",
+    "dynamic_holdout": (
+        "slope_lab = signed_raw_gas * mu_lab; "
+        "mu_lab = reconstruct(anchor_body_cost / anchor_raw_gas)"
+    ),
     "ape": "abs(predicted_prover_gas - actual_prover_gas) / actual_prover_gas",
 }
 BLOCK_CALIBRATION_GATES = {
@@ -5519,9 +5716,15 @@ def _fit_one_opcode_relation(
         if row.get("signal_kind") != FORMAL_RELATION_SIGNAL_KIND:
             raise ValueError("formal relation row has the wrong signal kind")
         validate_sp1_execution_provenance(row, workload_kind="opcode")
-        if row.get("relation_split") != relation.split or row.get(
-            "scenario_id"
-        ) != relation.scenario_id or row.get("dynamic_key") != relation.dynamic_key:
+        if (
+            row.get("relation_split") != relation.split
+            or row.get("model_split") != relation.model_split
+            or row.get("scenario_id") != relation.scenario_id
+            or row.get("dynamic_key") != relation.dynamic_key
+            or not _exact_json_equal(
+                row.get("relation_scenario"), dict(relation.scenario)
+            )
+        ):
             raise ValueError("formal relation row differs from manifest scenario identity")
         if _relation_row_map(row, "target_raw_gas_by_key") != expected_target:
             raise ValueError("formal relation target raw-gas units differ from manifest")
@@ -5646,7 +5849,9 @@ def _fit_one_opcode_relation(
         return {
             "relation_id": relation.id,
             "key_id": relation.key_id,
+            "model_split": relation.model_split,
             "scenario_id": relation.scenario_id,
+            "relation_scenario": dict(relation.scenario),
             "status": "passed",
             "self_control": True,
             "exact_flat": True,
@@ -5712,7 +5917,9 @@ def _fit_one_opcode_relation(
         "relation_id": relation.id,
         "key_id": relation.key_id,
         "split": relation.split,
+        "model_split": relation.model_split,
         "scenario_id": relation.scenario_id,
+        "relation_scenario": dict(relation.scenario),
         "dynamic_key": relation.dynamic_key,
         "target_raw_gas_by_key": {
             key: str(value) for key, value in sorted(expected_target.items())
@@ -6014,16 +6221,20 @@ def fit_opcode_relations(
         raise ValueError("formal relation self-control set is incomplete")
     if len(equations) != 98:
         raise ValueError(f"formal relation matrix requires 98 equations, got {len(equations)}")
-    if len(holdouts) != 12:
-        raise ValueError("formal dynamic holdout set is incomplete")
+    if len(holdouts) != 33:
+        raise ValueError("formal noncanonical dynamic observation set is incomplete")
     for key in manifest.dynamic_raw_gas_keys:
-        observed = [
-            relation.target_raw_gas_by_key[key]
+        observed = tuple(
+            (
+                relation.split,
+                relation.model_split,
+                tuple(sorted(relation.scenario.items())),
+            )
             for relation in manifest.opcode_relations
             if relation.dynamic_key == key
-        ]
-        if len(observed) != 3 or observed[1] < 2 * observed[0] or observed[2] < 4 * observed[0]:
-            raise ValueError(f"formal dynamic relation {key} fails actual 1x/2x/4x preflight")
+        )
+        if observed != DYNAMIC_RELATION_SCENARIO_MATRIX[key]:
+            raise ValueError(f"formal dynamic relation {key} differs from frozen scenario matrix")
 
     opcode_keys = tuple(
         f"opcode:0x{case.opcode:02x}"
@@ -6118,7 +6329,9 @@ def _validate_artifact_relation_rows(
         "relation_id",
         "key_id",
         "split",
+        "model_split",
         "scenario_id",
+        "relation_scenario",
         "dynamic_key",
         "target_raw_gas_by_key",
         "control_raw_gas_by_key",
@@ -6148,7 +6361,11 @@ def _validate_artifact_relation_rows(
         if (
             row.get("key_id") != relation.key_id
             or row.get("split") != relation.split
+            or row.get("model_split") != relation.model_split
             or row.get("scenario_id") != relation.scenario_id
+            or not _exact_json_equal(
+                row.get("relation_scenario"), dict(relation.scenario)
+            )
             or row.get("dynamic_key") != relation.dynamic_key
             or row.get("status") != "accepted"
         ):
@@ -6434,7 +6651,9 @@ def validate_opcode_relations_artifact(
         if not isinstance(row, Mapping) or set(row) != {
             "relation_id",
             "key_id",
+            "model_split",
             "scenario_id",
+            "relation_scenario",
             "status",
             "self_control",
             "exact_flat",
@@ -6459,7 +6678,11 @@ def validate_opcode_relations_artifact(
             ) from exc
         if (
             row.get("key_id") != relation.key_id
+            or row.get("model_split") != relation.model_split
             or row.get("scenario_id") != relation.scenario_id
+            or not _exact_json_equal(
+                row.get("relation_scenario"), dict(relation.scenario)
+            )
             or row.get("status") != "passed"
             or row.get("self_control") is not True
             or row.get("exact_flat") is not True
@@ -6500,8 +6723,8 @@ def validate_opcode_relations_artifact(
         for relation in manifest.opcode_relations
         if relation.split == "dynamic_holdout"
     ]
-    if len(holdout_relations) != 12:
-        raise ValueError("opcode relation manifest must define 12 dynamic holdouts")
+    if len(holdout_relations) != 33:
+        raise ValueError("opcode relation manifest must define 33 noncanonical dynamic rows")
     _validate_artifact_relation_rows(
         artifact.get("dynamic_holdouts"),
         holdout_relations,
@@ -11941,6 +12164,154 @@ def _validated_block_calibration_rows(
     return tuple(collapsed)
 
 
+def _dynamic_opcode_features(
+    dynamic_key: str, scenario: Mapping[str, Any]
+) -> dict[str, Fraction]:
+    """Derive the frozen semantic features for one dynamic opcode scenario."""
+    if dynamic_key not in DYNAMIC_OPCODE_FEATURE_ORDERS:
+        raise ValueError(f"unsupported dynamic opcode key: {dynamic_key}")
+    if not isinstance(scenario, Mapping):
+        raise ValueError("dynamic opcode scenario must be a mapping")
+
+    def exact_nonnegative_int(name: str) -> int:
+        value = scenario.get(name)
+        if type(value) is not int or value < 0:
+            raise ValueError(f"dynamic opcode scenario {name} must be a nonnegative integer")
+        return value
+
+    initial_words = exact_nonnegative_int("initial_memory_words")
+    if dynamic_key == "opcode:0x0a":
+        if set(scenario) != {"exponent_byte_length", "initial_memory_words"}:
+            raise ValueError("EXP dynamic opcode scenario fields differ from the frozen schema")
+        exponent_bytes = exact_nonnegative_int("exponent_byte_length")
+        if exponent_bytes <= 0:
+            raise ValueError("EXP exponent byte length must be positive")
+        values = (1, exponent_bytes, exponent_bytes * exponent_bytes)
+    elif dynamic_key == "opcode:0x20":
+        if set(scenario) != {"input_length", "initial_memory_words"}:
+            raise ValueError("KECCAK256 dynamic opcode scenario fields differ from the frozen schema")
+        input_length = exact_nonnegative_int("input_length")
+        input_words = (input_length + 31) // 32
+        values = (1, input_words, max(0, input_words - initial_words))
+    elif dynamic_key in {"opcode:0x51", "opcode:0x52", "opcode:0x53"}:
+        if set(scenario) != {"highest_touched_offset", "initial_memory_words"}:
+            raise ValueError("memory dynamic opcode scenario fields differ from the frozen schema")
+        offset = exact_nonnegative_int("highest_touched_offset")
+        access_bytes = 1 if dynamic_key == "opcode:0x53" else 32
+        touched_words = (offset + access_bytes + 31) // 32
+        values = (1, max(0, touched_words - initial_words))
+    else:
+        if set(scenario) != {"copy_length", "initial_memory_words"}:
+            raise ValueError("MCOPY dynamic opcode scenario fields differ from the frozen schema")
+        copy_length = exact_nonnegative_int("copy_length")
+        copy_words = (copy_length + 31) // 32
+        values = (1, copy_words, max(0, copy_words - initial_words))
+    return {
+        name: Fraction(value)
+        for name, value in zip(DYNAMIC_OPCODE_FEATURE_ORDERS[dynamic_key], values)
+    }
+
+
+def _dynamic_opcode_observations_from_relation_artifact(
+    manifest: Manifest,
+    affine_model: AffineOpcodeModel,
+    relation_artifact: Mapping[str, Any],
+    anchor_body_costs: Mapping[str, Decimal],
+) -> tuple[DynamicOpcodeObservation, ...]:
+    """Recover exact-scenario target body costs from validated signed relations."""
+    lab_multipliers = reconstruct_lab_multipliers(
+        affine_model, anchor_body_costs
+    )
+    dynamic_keys = set(manifest.dynamic_raw_gas_keys)
+    expected = {
+        relation.id: relation
+        for relation in manifest.opcode_relations
+        if relation.dynamic_key is not None
+    }
+    rows = [
+        *relation_artifact.get("equations", []),
+        *relation_artifact.get("dynamic_holdouts", []),
+    ]
+    actual_rows: dict[str, Mapping[str, Any]] = {}
+    for row in rows:
+        if not isinstance(row, Mapping) or row.get("dynamic_key") is None:
+            continue
+        relation_id = row.get("relation_id")
+        if not isinstance(relation_id, str) or relation_id in actual_rows:
+            raise ValueError("dynamic relation identity is missing or duplicated")
+        actual_rows[relation_id] = row
+    if set(actual_rows) != set(expected):
+        raise ValueError("dynamic relation identities differ from the frozen manifest")
+
+    observations = []
+    with localcontext(_OPCODE_DECIMAL_CONTEXT):
+        for relation_id, spec in expected.items():
+            row = actual_rows[relation_id]
+            required_identity = {
+                "split": spec.split,
+                "model_split": spec.model_split,
+                "scenario_id": spec.scenario_id,
+                "relation_scenario": dict(spec.scenario),
+                "dynamic_key": spec.dynamic_key,
+            }
+            if any(
+                not _exact_json_equal(row.get(field), value)
+                for field, value in required_identity.items()
+            ):
+                raise ValueError(
+                    f"dynamic relation identity or scenario differs: {relation_id}"
+                )
+            signed = row.get("signed_raw_gas_by_key")
+            if not isinstance(signed, Mapping):
+                raise ValueError("dynamic relation coefficient map is missing")
+            try:
+                coefficients = {str(key): Fraction(value) for key, value in signed.items()}
+            except (TypeError, ValueError, ZeroDivisionError) as error:
+                raise ValueError("dynamic relation coefficient map is invalid") from error
+            expected_coefficients = {
+                key: Fraction(value)
+                for key, value in spec.signed_raw_gas_by_key.items()
+            }
+            if coefficients != expected_coefficients:
+                raise ValueError(
+                    f"dynamic relation control references differ: {relation_id}"
+                )
+            dynamic_key = str(spec.dynamic_key)
+            dynamic_coefficient = coefficients.get(dynamic_key, Fraction(0))
+            if dynamic_coefficient <= 0:
+                raise ValueError("dynamic relation target coefficient must be positive")
+            reference = Decimal(0)
+            for key, coefficient in coefficients.items():
+                if key == dynamic_key:
+                    continue
+                if key in dynamic_keys or key not in lab_multipliers:
+                    raise ValueError(
+                        f"dynamic relation reference key must be static and present: {key}"
+                    )
+                reference += (
+                    Decimal(coefficient.numerator)
+                    / Decimal(coefficient.denominator)
+                    * lab_multipliers[key]
+                )
+            target_body_cost = _decimal(
+                row.get("slope_p"), label="dynamic relation slope"
+            ) - reference
+            if not target_body_cost.is_finite() or target_body_cost <= 0:
+                raise ValueError("dynamic target body cost must be positive and finite")
+            observations.append(
+                DynamicOpcodeObservation(
+                    dynamic_key=dynamic_key,
+                    scenario_id=spec.scenario_id,
+                    model_split=spec.model_split,
+                    features=MappingProxyType(
+                        _dynamic_opcode_features(dynamic_key, spec.scenario)
+                    ),
+                    target_body_cost=target_body_cost,
+                )
+            )
+    return tuple(observations)
+
+
 def _dynamic_observations_from_relation_artifact(
     relation_artifact: Mapping[str, Any],
 ) -> tuple[DynamicRelationObservation, ...]:
@@ -12002,9 +12373,12 @@ def fit_block_calibration_artifact(
     result = fit_block_calibration(
         affine_model, rows, tuple(Q_FORMULA), anchor_body_costs
     )
+    lab_body_multipliers = reconstruct_lab_multipliers(
+        affine_model, anchor_body_costs
+    )
     dynamic = validate_dynamic_holdouts(
         affine_model,
-        result.opcode_multipliers,
+        lab_body_multipliers,
         _dynamic_observations_from_relation_artifact(relation_artifact),
         tuple(manifest.dynamic_raw_gas_keys),
     )
@@ -12080,6 +12454,119 @@ def fit_block_calibration_artifact(
     return artifact
 
 
+@_isolated_decimal_context
+def fit_dynamic_opcode_models_artifact(
+    manifest: Manifest,
+    affine_model: AffineOpcodeModel,
+    relation_artifact: Mapping[str, Any],
+    anchor_probe_artifact: Mapping[str, Any],
+    anchor_probe_rows: Iterable[Mapping[str, Any]],
+    raw_rows: list[Mapping[str, Any]],
+    *,
+    response_metric: str = "prover_gas",
+) -> dict[str, Any]:
+    """Fit a content-addressed, non-candidate dynamic-opcode diagnostic."""
+    block_rows = _validated_block_calibration_rows(
+        manifest, relation_artifact, raw_rows
+    )
+    anchor_body_costs = validated_anchor_probe_costs(
+        anchor_probe_artifact, anchor_probe_rows, metric=response_metric
+    )
+    block_result = fit_block_calibration(
+        affine_model, block_rows, tuple(Q_FORMULA), anchor_body_costs
+    )
+    observations = _dynamic_opcode_observations_from_relation_artifact(
+        manifest, affine_model, relation_artifact, anchor_body_costs
+    )
+    feature_orders = {
+        key: DYNAMIC_OPCODE_FEATURE_ORDERS[key]
+        for key in manifest.dynamic_raw_gas_keys
+    }
+    transfer_params = block_result.transfer_params
+    evidence = fit_dynamic_opcode_models(
+        observations,
+        feature_orders,
+        body_scale=transfer_params["body_scale"],
+        common_overhead=transfer_params[
+            "common_opcode_overhead_per_operation"
+        ],
+    )
+    models = {
+        key: {
+            "status": item.status,
+            "feature_order": list(item.feature_names),
+            "exact_fit_rank": item.exact_rank,
+            "parameter_count": item.parameter_count,
+            "observation_count": item.observation_count,
+            "fit_count": item.fit_count,
+            "holdout_count": item.holdout_count,
+            "body_coefficients": _serialize_decimal_tree(item.body_coefficients),
+            "production_coefficients": _serialize_decimal_tree(
+                item.production_coefficients
+            ),
+            "fit_body_mape": _decimal_text(item.fit_body_mape),
+            "fit_body_max_ape": _decimal_text(item.fit_body_max_ape),
+            "holdout_body_max_ape": _decimal_text(item.holdout_body_max_ape),
+            "fit_production_mape": _decimal_text(item.fit_production_mape),
+            "fit_production_max_ape": _decimal_text(
+                item.fit_production_max_ape
+            ),
+            "holdout_production_max_ape": _decimal_text(
+                item.holdout_production_max_ape
+            ),
+            "quality_failures": list(item.quality_failures),
+            "exact_fit_matrix": _serialize_decimal_tree(
+                item.exact_fit_design_matrix
+            ),
+            "solver_column_scales": _serialize_decimal_tree(
+                item.solver_column_scales
+            ),
+            "solver_residual": _decimal_text(item.solver_residual),
+            "predictions": _serialize_decimal_tree(item.predictions),
+        }
+        for key, item in evidence.items()
+    }
+    artifact = {
+        "schema_version": 1,
+        "purpose": "dynamic_opcode_models",
+        "status": (
+            "supported"
+            if all(item.status == "supported" for item in evidence.values())
+            else "not_supported"
+        ),
+        "candidate_eligible": False,
+        "provenance": dict(relation_artifact["provenance"]),
+        "source_hashes": {
+            "relation_artifact_sha256": relation_artifact["artifact_sha256"],
+            "relation_raw_rows_sha256": relation_artifact["raw_rows_sha256"],
+            "anchor_probe_primary_sha256": anchor_probe_artifact[
+                "primary_artifact_sha256"
+            ],
+            "raw_block_rows_sha256": sha256_bytes(canonical_json(raw_rows)),
+        },
+        "anchor_body_cost_metric": response_metric,
+        "anchor_body_costs": _serialize_decimal_tree(anchor_body_costs),
+        "transfer_params": _serialize_decimal_tree(transfer_params),
+        "quality_gates": {
+            "fit_production_mape_max": "0.05",
+            "fit_production_max_ape_max": "0.10",
+            "holdout_production_max_ape_max": "0.10",
+        },
+        "feature_orders": {
+            key: list(names) for key, names in feature_orders.items()
+        },
+        "aggregate_exact_fit_rank": sum(
+            item.exact_rank for item in evidence.values()
+        ),
+        "aggregate_parameter_count": sum(
+            item.parameter_count for item in evidence.values()
+        ),
+        "models": models,
+    }
+    artifact["artifact_sha256"] = sha256_bytes(canonical_json(artifact))
+    return artifact
+
+
 def cmd_fit_block_calibration(args: argparse.Namespace) -> None:
     runs_path = _resolve_repo_path(args.runs, field_name="block_calibration_rows")
     calibration_run = runs_path.parent
@@ -12138,6 +12625,73 @@ def cmd_fit_block_calibration(args: argparse.Namespace) -> None:
     )
     _atomic_write_json(output, artifact)
     print(f"fit {len(artifact['parameter_order'])} block calibration parameter(s)")
+
+
+def cmd_fit_dynamic_opcode_models(args: argparse.Namespace) -> None:
+    runs_path = _resolve_repo_path(args.runs, field_name="block_calibration_rows")
+    calibration_run = runs_path.parent
+    if runs_path.name != "block-calibration-rows.jsonl":
+        raise ValueError("dynamic opcode models require canonical block calibration rows")
+    execution_identity = validate_calibration_execution_identity(calibration_run)
+    manifest, frozen_identity = verify_frozen_controlled_manifest(
+        calibration_run,
+        _resolve_repo_path(args.controlled_manifest, field_name="controlled_manifest"),
+    )
+    if not _exact_json_equal(execution_identity, frozen_identity):
+        raise ValueError("dynamic opcode model identity changed during validation")
+    relations_path = _canonical_run_artifact(
+        calibration_run,
+        _resolve_repo_path(args.relations, field_name="opcode_relations"),
+        "opcode-relations.json",
+    )
+    anchor_probe_path = _canonical_run_artifact(
+        calibration_run,
+        _resolve_repo_path(args.anchor_probe, field_name="anchor_probe"),
+        "anchor-probe-fit.json",
+    )
+    output = _canonical_run_artifact(
+        calibration_run,
+        _resolve_repo_path(args.out, field_name="dynamic_opcode_models"),
+        "dynamic-opcode-models.json",
+    )
+    relation_artifact = json.loads(relations_path.read_text())
+    anchor_probe_artifact = json.loads(anchor_probe_path.read_text())
+    _anchor_body_costs, anchor_probe_rows = load_validated_anchor_probe_run(
+        calibration_run, anchor_probe_artifact, execution_identity
+    )
+    expected_provenance = {
+        "calibration_id": calibration_run.name,
+        "calibration_identity_sha256": sha256_bytes(canonical_json(execution_identity)),
+        "implementation_revision": execution_identity["implementation_revision"],
+        "controlled_manifest_sha256": execution_identity[
+            "controlled_manifest_sha256"
+        ],
+        "controlled_manifest_rows_sha256": execution_identity[
+            "controlled_manifest_rows_sha256"
+        ],
+    }
+    formal_artifacts = load_terminal_formal_relation_artifacts(
+        calibration_run, manifest, expected_provenance
+    )
+    validate_opcode_relations_artifact(
+        manifest,
+        relation_artifact,
+        formal_artifacts["rows"],
+        expected_provenance,
+    )
+    artifact = fit_dynamic_opcode_models_artifact(
+        manifest,
+        _affine_model_from_validated_artifact(manifest, relation_artifact),
+        relation_artifact,
+        anchor_probe_artifact,
+        anchor_probe_rows,
+        list(iter_jsonl(runs_path)),
+    )
+    _atomic_write_json(output, artifact)
+    print(
+        f"fit {artifact['aggregate_parameter_count']} dynamic opcode parameter(s): "
+        f"{artifact['status']}"
+    )
 
 
 CONTROLLED_GENERATOR_ROUNDS = (8, 32, 128, 512, 2048)
@@ -14080,6 +14634,17 @@ def build_parser() -> argparse.ArgumentParser:
     fit_block.add_argument("--controlled-manifest", type=pathlib.Path, required=True)
     fit_block.add_argument("--out", type=pathlib.Path, required=True)
     fit_block.set_defaults(func=cmd_fit_block_calibration)
+
+    fit_dynamic = subcommands.add_parser(
+        "fit-dynamic-opcode-models",
+        help="fit and persist non-candidate dynamic opcode diagnostics",
+    )
+    fit_dynamic.add_argument("--relations", type=pathlib.Path, required=True)
+    fit_dynamic.add_argument("--anchor-probe", type=pathlib.Path, required=True)
+    fit_dynamic.add_argument("--runs", type=pathlib.Path, required=True)
+    fit_dynamic.add_argument("--controlled-manifest", type=pathlib.Path, required=True)
+    fit_dynamic.add_argument("--out", type=pathlib.Path, required=True)
+    fit_dynamic.set_defaults(func=cmd_fit_dynamic_opcode_models)
 
     candidate = subcommands.add_parser(
         "build-candidate", help="seal the controlled SP1 proverGas candidate"

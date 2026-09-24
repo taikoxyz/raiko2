@@ -149,6 +149,12 @@ it with a discovered or manually selected run directory.
   --relations "$CALIBRATION_RUN/opcode-relations.json" \
   --anchor-probe "$CALIBRATION_RUN/anchor-probe-fit.json" \
   --out "$CALIBRATION_RUN/block-calibration-rows.jsonl"
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py fit-dynamic-opcode-models \
+  --relations "$CALIBRATION_RUN/opcode-relations.json" \
+  --anchor-probe "$CALIBRATION_RUN/anchor-probe-fit.json" \
+  --runs "$CALIBRATION_RUN/block-calibration-rows.jsonl" \
+  --controlled-manifest experiments/opcode-gas/manifests/sp1-calibration-v1.toml \
+  --out "$CALIBRATION_RUN/dynamic-opcode-models.json"
 ~/.venv/bin/python experiments/opcode-gas/opcode_gas.py fit-block-calibration \
   --relations "$CALIBRATION_RUN/opcode-relations.json" \
   --anchor-probe "$CALIBRATION_RUN/anchor-probe-fit.json" \
@@ -157,8 +163,38 @@ it with a discovered or manually selected run directory.
   --out "$CALIBRATION_RUN/block-calibration.json"
 ```
 
+`fit-dynamic-opcode-models` is a non-candidate diagnostic. The first completed calibration,
+re-evaluated with anchor body costs divided by anchor raw gas in the opcode-lab unit system, showed
+that one scalar lab-body `proverGas / raw EVM gas` multiplier does not describe `EXP`, `KECCAK256`,
+`MLOAD`, `MSTORE`, `MSTORE8`, or `MCOPY` across their frozen scenarios. The command therefore
+recovers each target opcode's body cost from its signed target/control relation and fits a frozen
+semantic model:
+
+```text
+EXP        = beta_0 + beta_b * exponent_bytes + beta_b2 * exponent_bytes^2
+KECCAK256  = beta_0 + beta_w * input_words + beta_g * memory_growth_words
+MLOAD/...  = beta_0 + beta_g * memory_growth_words
+MCOPY      = beta_0 + beta_w * copy_words + beta_g * memory_growth_words
+
+production_cost = body_scale * body_cost + common_opcode_overhead
+```
+
+The 39-scenario matrix has aggregate exact rank 15. Fit rows and untouched holdouts are declared in
+the manifest before execution. Production-space fit MAPE must be at most 5%, and fit/holdout maximum
+APE must be at most 10%. A quality failure is preserved as `not_supported`; it does not abort the
+diagnostic artifact, modify a coefficient after seeing results, or enter candidate construction.
+`fit-block-calibration` deliberately retains the scalar lab-body dynamic holdout gate and therefore
+remains fail-closed until a separately reviewed promotion defines the production representation.
+A lab-body scalar pass would not by itself prove that one production per-raw-gas scalar is valid:
+the nonzero common per-operation overhead must also be represented explicitly when raw gas varies.
+
+`initial_memory_words` is executable fixture state, not descriptive metadata. Dynamic memory
+relations allocate exactly that many words with the fixed warmup before the measured opcode. This
+lets equal-size operations vary memory growth independently; changing only the manifest field would
+produce a falsely full-rank design matrix over identical executions.
+
 `run-relations` owns the frozen per-relation adaptive bounds `8, 32, 128, 512, 2048`. The initial
-bound-8 batch must contain the complete manifest relation set and pass the full dynamic 1x/2x/4x
+bound-8 batch must contain the complete manifest relation set and pass the full frozen dynamic
 preflight. Later rounds regenerate and execute only relations whose prior failure was limited to the
 frozen fit, signal, R2, residual, or checkpoint gates. Trace, repeat, provenance, raw-gas, schema,
 fixture, or identity failures abort instead of expanding. Each round is sealed in
@@ -182,8 +218,8 @@ residual, signal, or checkpoint baselining. The artifact reports
 `activation_gap_p = zero_delta_p - positive_fit_intercept_p`. A positive gap means count zero lies
 above the positive-count line's extrapolated intercept. `activation_gap_ratio` is
 `abs(activation_gap_p) / signal_p` when signal is positive. These fields and the tail evidence are
-part of formal relation artifact schema version 2; version-1 relation artifacts cannot enter the
-new candidate path.
+part of formal relation artifact schema version 3; version-1 and version-2 relation artifacts cannot
+enter the new candidate path. Version 3 additionally binds each dynamic row's `model_split`.
 
 Every selected relation round pre-generates and executes an `active_tail` count-one pair. Its target
 microprogram executes in the final slot; ordinary count one executes in the first slot. Their

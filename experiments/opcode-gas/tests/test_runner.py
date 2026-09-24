@@ -1110,12 +1110,13 @@ class RunnerTests(unittest.TestCase):
                 },
             )
 
-    def test_formal_dynamic_preflight_uses_executed_trace_totals_before_publish(self):
+    def test_formal_dynamic_preflight_uses_frozen_scenarios_and_executed_totals(self):
         rows = []
         for key in opcode_gas.DYNAMIC_RAW_GAS_KEYS:
-            for index, (split, total) in enumerate(
-                (("canonical", 10), ("dynamic_holdout", 20), ("dynamic_holdout", 40))
+            for index, (split, model_split, scenario) in enumerate(
+                opcode_gas.DYNAMIC_RELATION_SCENARIO_MATRIX[key]
             ):
+                total = 10
                 for repeat_index in range(3):
                     rows.append(
                         {
@@ -1123,7 +1124,10 @@ class RunnerTests(unittest.TestCase):
                             "dynamic_key": key,
                             "relation_id": f"{key}:scenario-{index}",
                             "relation_split": split,
+                            "model_split": model_split,
+                            "relation_scenario": dict(scenario),
                             "lane": "target",
+                            "target_raw_gas": total,
                             "diagnostic_count": 1,
                             "relation_placement": "active_prefix",
                             "relation_sample_id": "active_prefix:count-1",
@@ -1140,8 +1144,8 @@ class RunnerTests(unittest.TestCase):
         largest_relation_id = rows[-1]["relation_id"]
         for row in rows:
             if row["relation_id"] == largest_relation_id:
-                row["controlled_trace"]["executed_target_raw_gas"] = 39
-        with self.assertRaisesRegex(ValueError, "1x/2x/4x"):
+                row["relation_scenario"]["initial_memory_words"] += 1
+        with self.assertRaisesRegex(ValueError, "frozen scenario matrix"):
             opcode_gas.validate_formal_dynamic_raw_gas_preflight(rows)
 
     def test_raw_run_rejects_host_trace_that_does_not_match_case_identity(self):

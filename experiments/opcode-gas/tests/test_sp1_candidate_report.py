@@ -5,16 +5,18 @@ import sys
 import tempfile
 import types
 import unittest
+from collections import Counter
 from dataclasses import replace
 from unittest import mock
 from decimal import Decimal, getcontext, localcontext
+from fractions import Fraction
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "experiments" / "opcode-gas"))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 import opcode_gas
-from calibration_model import BlockCalibrationResult
+from calibration_model import AffineOpcodeModel, BlockCalibrationResult
 from test_manifest import CONTROLLED_SCHEDULE_KEYS, controlled_manifest_data
 from test_manifest import fixture_schedule
 
@@ -1964,11 +1966,15 @@ class FormalOpcodeRelationTests(unittest.TestCase):
 
         artifact = opcode_gas.fit_opcode_relations(manifest, rows)
 
-        self.assertEqual(artifact["schema_version"], 2)
+        self.assertEqual(artifact["schema_version"], 3)
         self.assertEqual(artifact["status"], "accepted")
         self.assertEqual(len(artifact["equations"]), 98)
         self.assertEqual(len(artifact["self_controls"]), 4)
-        self.assertEqual(len(artifact["dynamic_holdouts"]), 12)
+        self.assertEqual(len(artifact["dynamic_holdouts"]), 33)
+        self.assertEqual(
+            Counter(row["model_split"] for row in artifact["dynamic_holdouts"]),
+            Counter({"fit": 21, "holdout": 12}),
+        )
         self.assertEqual(artifact["affine_model"]["rank"], 98)
         self.assertEqual(artifact["affine_model"]["nullity"], 4)
         self.assertEqual(
@@ -2003,6 +2009,49 @@ class FormalOpcodeRelationTests(unittest.TestCase):
         opcode_gas.validate_opcode_relations_artifact(
             manifest, artifact, rows, formal_relation_provenance(rows)
         )
+
+    def test_relation_artifact_replays_model_split_and_exact_scenario_metadata(self):
+        manifest = formal_relation_manifest()
+        rows = formal_relation_rows(manifest)
+        artifact = opcode_gas.fit_opcode_relations(manifest, rows)
+        artifact_rows = [
+            *artifact["equations"],
+            *artifact["self_controls"],
+            *artifact["dynamic_holdouts"],
+        ]
+        by_id = {relation.id: relation for relation in manifest.opcode_relations}
+        self.assertEqual({row["relation_id"] for row in artifact_rows}, set(by_id))
+        for row in artifact_rows:
+            relation = by_id[row["relation_id"]]
+            self.assertEqual(row["model_split"], relation.model_split)
+            self.assertEqual(row["relation_scenario"], dict(relation.scenario))
+
+        mutations = []
+        missing_split = copy.deepcopy(artifact)
+        missing_split["equations"][0].pop("model_split")
+        mutations.append(missing_split)
+        wrong_scenario = copy.deepcopy(artifact)
+        wrong_scenario["dynamic_holdouts"][0]["relation_scenario"][
+            "initial_memory_words"
+        ] += 1
+        mutations.append(wrong_scenario)
+        for tampered in mutations:
+            tampered["artifact_sha256"] = opcode_gas.sha256_bytes(
+                opcode_gas.canonical_json(
+                    {
+                        key: value
+                        for key, value in tampered.items()
+                        if key != "artifact_sha256"
+                    }
+                )
+            )
+            with self.assertRaisesRegex(ValueError, "equations|dynamic holdouts|identity"):
+                opcode_gas.validate_opcode_relations_artifact(
+                    manifest,
+                    tampered,
+                    rows,
+                    formal_relation_provenance(rows),
+                )
 
     def test_rejects_signed_quality_trace_completeness_and_rank_failures(self):
         manifest = formal_relation_manifest()
@@ -2197,6 +2246,237 @@ class FormalOpcodeRelationTests(unittest.TestCase):
                 rows,
                 formal_relation_provenance(rows),
             )
+
+
+class DynamicOpcodeModelTests(unittest.TestCase):
+    def test_frozen_features_use_semantic_word_counts_and_have_expected_rank(self):
+        expected = {
+            "opcode:0x0a": (
+                {"exponent_byte_length": 4, "initial_memory_words": 0},
+                {"constant": Fraction(1), "exponent_bytes": Fraction(4), "exponent_bytes_squared": Fraction(16)},
+            ),
+            "opcode:0x20": (
+                {"input_length": 512, "initial_memory_words": 1},
+                {"constant": Fraction(1), "input_words": Fraction(16), "memory_growth_words": Fraction(15)},
+            ),
+            "opcode:0x51": (
+                {"highest_touched_offset": 256, "initial_memory_words": 1},
+                {"constant": Fraction(1), "memory_growth_words": Fraction(8)},
+            ),
+            "opcode:0x52": (
+                {"highest_touched_offset": 256, "initial_memory_words": 1},
+                {"constant": Fraction(1), "memory_growth_words": Fraction(8)},
+            ),
+            "opcode:0x53": (
+                {"highest_touched_offset": 256, "initial_memory_words": 1},
+                {"constant": Fraction(1), "memory_growth_words": Fraction(8)},
+            ),
+            "opcode:0x5e": (
+                {"copy_length": 512, "initial_memory_words": 1},
+                {"constant": Fraction(1), "copy_words": Fraction(16), "memory_growth_words": Fraction(15)},
+            ),
+        }
+        for key, (scenario, features) in expected.items():
+            with self.subTest(key=key):
+                self.assertEqual(opcode_gas._dynamic_opcode_features(key, scenario), features)
+                self.assertEqual(
+                    tuple(features), opcode_gas.DYNAMIC_OPCODE_FEATURE_ORDERS[key]
+                )
+
+        for key, scenario_rows in opcode_gas.DYNAMIC_RELATION_SCENARIO_MATRIX.items():
+            fit_matrix = [
+                list(opcode_gas._dynamic_opcode_features(key, dict(scenario)).values())
+                for _split, model_split, scenario in scenario_rows
+                if model_split == "fit"
+            ]
+            self.assertEqual(
+                opcode_gas.exact_rank(fit_matrix),
+                len(opcode_gas.DYNAMIC_OPCODE_FEATURE_ORDERS[key]),
+            )
+
+    def test_dynamic_observation_recovers_target_after_negative_static_control(self):
+        dynamic_key = "opcode:0x0a"
+        static_key = "opcode:0x50"
+        relation = types.SimpleNamespace(
+            id="dynamic-exp",
+            split="canonical",
+            model_split="fit",
+            scenario_id="exp-4",
+            scenario={"exponent_byte_length": 4, "initial_memory_words": 0},
+            dynamic_key=dynamic_key,
+            signed_raw_gas_by_key={dynamic_key: 210, static_key: -2},
+        )
+        manifest = types.SimpleNamespace(
+            dynamic_raw_gas_keys=(dynamic_key,), opcode_relations=(relation,)
+        )
+        model = AffineOpcodeModel(
+            opcode_keys=(static_key, dynamic_key),
+            anchor_keys=(static_key,),
+            rank=1,
+            nullity=1,
+            mu_zero={static_key: Decimal(0), dynamic_key: Decimal(0)},
+            anchor_basis={
+                static_key: {static_key: Fraction(1)},
+                dynamic_key: {static_key: Fraction(0)},
+            },
+        )
+        row = {
+            "relation_id": relation.id,
+            "split": relation.split,
+            "model_split": relation.model_split,
+            "scenario_id": relation.scenario_id,
+            "relation_scenario": dict(relation.scenario),
+            "dynamic_key": dynamic_key,
+            "signed_raw_gas_by_key": {dynamic_key: "210", static_key: "-2"},
+            "slope_p": "86",
+        }
+        artifact = {"equations": [row], "dynamic_holdouts": []}
+
+        observation = opcode_gas._dynamic_opcode_observations_from_relation_artifact(
+            manifest, model, artifact, {static_key: Decimal("3")}
+        )[0]
+
+        self.assertEqual(observation.target_body_cost, Decimal("89"))
+        self.assertEqual(
+            observation.features,
+            {"constant": Fraction(1), "exponent_bytes": Fraction(4), "exponent_bytes_squared": Fraction(16)},
+        )
+
+        mutations = (
+            ("scenario", {**row, "relation_scenario": {"exponent_byte_length": 8, "initial_memory_words": 0}}),
+            ("model_split", {**row, "model_split": "holdout"}),
+            ("static", {**row, "signed_raw_gas_by_key": {dynamic_key: "210", "opcode:0x20": "-1"}}),
+        )
+        for label, mutated in mutations:
+            with self.subTest(tamper=label), self.assertRaises(ValueError):
+                opcode_gas._dynamic_opcode_observations_from_relation_artifact(
+                    manifest,
+                    model,
+                    {"equations": [mutated], "dynamic_holdouts": []},
+                    {static_key: Decimal("3")},
+                )
+
+    def test_fit_dynamic_opcode_models_cli_is_executable(self):
+        args = opcode_gas.build_parser().parse_args(
+            [
+                "fit-dynamic-opcode-models",
+                "--relations", "run/opcode-relations.json",
+                "--anchor-probe", "run/anchor-probe-fit.json",
+                "--runs", "run/block-calibration-rows.jsonl",
+                "--controlled-manifest", "manifest.toml",
+                "--out", "run/dynamic-opcode-models.json",
+            ]
+        )
+        self.assertEqual(args.command, "fit-dynamic-opcode-models")
+        self.assertTrue(callable(args.func))
+
+    def test_dynamic_quality_failure_returns_content_addressed_diagnostic(self):
+        dynamic_key = "opcode:0x0a"
+        static_key = "opcode:0x50"
+        scenarios = (
+            ("canonical", "fit", "exp-1", 1, Decimal("12")),
+            ("dynamic_holdout", "fit", "exp-4", 4, Decimal("30")),
+            ("dynamic_holdout", "fit", "exp-8", 8, Decimal("82")),
+            ("dynamic_holdout", "holdout", "exp-2", 2, Decimal("500")),
+        )
+        specs = []
+        rows = []
+        for split, model_split, scenario_id, exponent_bytes, target in scenarios:
+            relation_id = f"dynamic-{scenario_id}"
+            scenario = {
+                "exponent_byte_length": exponent_bytes,
+                "initial_memory_words": 0,
+            }
+            signed = {dynamic_key: 10 + 50 * exponent_bytes, static_key: -2}
+            specs.append(
+                types.SimpleNamespace(
+                    id=relation_id,
+                    split=split,
+                    model_split=model_split,
+                    scenario_id=scenario_id,
+                    scenario=scenario,
+                    dynamic_key=dynamic_key,
+                    signed_raw_gas_by_key=signed,
+                )
+            )
+            rows.append(
+                {
+                    "relation_id": relation_id,
+                    "split": split,
+                    "model_split": model_split,
+                    "scenario_id": scenario_id,
+                    "relation_scenario": scenario,
+                    "dynamic_key": dynamic_key,
+                    "signed_raw_gas_by_key": {
+                        key: str(value) for key, value in signed.items()
+                    },
+                    "slope_p": str(target - Decimal("6")),
+                }
+            )
+        manifest = types.SimpleNamespace(
+            dynamic_raw_gas_keys=(dynamic_key,), opcode_relations=tuple(specs)
+        )
+        model = AffineOpcodeModel(
+            opcode_keys=(static_key, dynamic_key),
+            anchor_keys=(static_key,),
+            rank=1,
+            nullity=1,
+            mu_zero={static_key: Decimal(0), dynamic_key: Decimal(0)},
+            anchor_basis={
+                static_key: {static_key: Fraction(1)},
+                dynamic_key: {static_key: Fraction(0)},
+            },
+        )
+        relation_artifact = {
+            "purpose": opcode_gas.FORMAL_RELATION_PURPOSE,
+            "status": "accepted",
+            "artifact_sha256": "a" * 64,
+            "raw_rows_sha256": "b" * 64,
+            "provenance": {"calibration_id": "c" * 24},
+            "equations": [rows[0]],
+            "dynamic_holdouts": rows[1:],
+        }
+        block_result = types.SimpleNamespace(
+            transfer_params={
+                "body_scale": Decimal("1"),
+                "common_opcode_overhead_per_operation": Decimal("1000"),
+            }
+        )
+        with mock.patch.object(
+            opcode_gas, "_validated_block_calibration_rows", return_value=()
+        ), mock.patch.object(
+            opcode_gas,
+            "validated_anchor_probe_costs",
+            return_value={static_key: Decimal("3")},
+        ), mock.patch.object(
+            opcode_gas, "fit_block_calibration", return_value=block_result
+        ):
+            artifact = opcode_gas.fit_dynamic_opcode_models_artifact(
+                manifest,
+                model,
+                relation_artifact,
+                {"primary_artifact_sha256": "d" * 64},
+                [],
+                [{"raw": "block"}],
+            )
+
+        self.assertEqual(artifact["status"], "not_supported")
+        self.assertFalse(artifact["candidate_eligible"])
+        self.assertEqual(artifact["aggregate_parameter_count"], 3)
+        self.assertEqual(artifact["aggregate_exact_fit_rank"], 3)
+        self.assertEqual(artifact["models"][dynamic_key]["status"], "not_supported")
+        self.assertEqual(
+            artifact["models"][dynamic_key]["predictions"]["exp-2"]["model_split"],
+            "holdout",
+        )
+        self.assertEqual(
+            artifact["artifact_sha256"],
+            opcode_gas.sha256_bytes(
+                opcode_gas.canonical_json(
+                    {key: value for key, value in artifact.items() if key != "artifact_sha256"}
+                )
+            ),
+        )
 
 
 class CandidateConstructionTests(unittest.TestCase):
@@ -3053,6 +3333,10 @@ class CandidateConstructionTests(unittest.TestCase):
                 }
             )
         dynamic_rows = []
+        lab_multipliers = {
+            key: TEST_ANCHOR_BODY_COSTS[key] / Decimal(raw_gas[key])
+            for key in anchors
+        }
         for scenario_id, split, raw_units in (
             ("canonical", "canonical", 1),
             ("medium", "dynamic_holdout", 2),
@@ -3068,7 +3352,10 @@ class CandidateConstructionTests(unittest.TestCase):
                         anchors[0]: str(raw_units),
                         anchors[1]: "-1",
                     },
-                    "slope_p": str(raw_units * 10 - 12),
+                    "slope_p": str(
+                        Decimal(raw_units) * lab_multipliers[anchors[0]]
+                        - lab_multipliers[anchors[1]]
+                    ),
                 }
             )
         relation_artifact = {

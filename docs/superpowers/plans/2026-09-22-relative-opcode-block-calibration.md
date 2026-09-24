@@ -28,8 +28,9 @@ Rust, REVM/Alethia host tracing, SP1 `ExecutionReport::gas()`, TOML/JSON artifac
   `native_value_transfer` in that order.
 - The canonical 102-key raw-gas-weighted relation matrix must have rank 98; removing the four anchor
   columns must leave a full-rank 98-column system.
-- `EXP`, `KECCAK256`, `MLOAD`, `MSTORE`, `MSTORE8`, and `MCOPY` require frozen non-fitting dynamic
-  raw-gas holdouts.
+- `EXP`, `KECCAK256`, `MLOAD`, `MSTORE`, `MSTORE8`, and `MCOPY` retain frozen non-fitting scalar
+  holdouts for the candidate boundary and separately frozen fit/holdout rows for their structured
+  non-candidate diagnostics.
 - Use `Fraction` for relation/rank/basis algebra and `Decimal` with precision 80 for observations,
   fitting, prediction, APE, and serialization. Never convert a candidate value through `float`.
 - Candidate fitting consumes controlled fixtures only. `integration_smoke` and `final_validation`
@@ -349,11 +350,17 @@ IDs, and a relation whose target/reference raw-gas totals do not match its fixtu
 parser tests for `generate-relations`, `run-relations`, `fit-relations`, and the
 `prepare-calibration --run-path-file` machine-readable run handoff.
 
-Freeze three scenarios per dynamic key in this formal relation manifest. Use exponent byte lengths
-`1, 8, 32` for `EXP`; input lengths `32, 256, 1024` for `KECCAK256`; highest touched offsets
-`0x00, 0x0100, 0x1000` for `MLOAD`, `MSTORE`, and `MSTORE8`; and copy lengths
-`32, 256, 1024` for `MCOPY`. Each key has exactly one `canonical` scenario and two
-`dynamic_holdout` scenarios. Only the canonical scenario may contribute to `A`.
+Freeze the complete dynamic model matrix in the formal relation manifest. `EXP`, `KECCAK256`, and
+`MCOPY` each have five fit scenarios and two untouched model holdouts. `MLOAD`, `MSTORE`, and
+`MSTORE8` each have four fit scenarios and two untouched model holdouts. Every key retains exactly
+one `canonical` relation for `A`; the other 33 relations remain outside `A`. Bind `model_split` and
+the exact structured `relation_scenario` through the manifest, emitted fixtures, raw rows, adaptive
+decisions, and final relation artifact.
+
+For memory-sensitive scenarios, make `initial_memory_words` executable: the warmup must allocate
+the declared memory before the target operation. Tests must show that changing this field changes
+the bytecode and raw-gas expectation. A metadata-only initial-memory declaration is invalid because
+it cannot identify the memory-growth term.
 
 - [ ] **Step 2: Run focused tests and verify RED**
 
@@ -843,7 +850,7 @@ require the reduced slope matrix to retain rank two, and gate the omitted family
 production-slope APE rather than coefficient drift. Require every fixed/base leave-one-family-out
 matrix to retain rank four.
 
-- [ ] **Step 4: Implement dynamic raw-gas validation**
+- [ ] **Step 4: Preserve scalar fail-closed validation and add structured diagnostics**
 
 Create:
 
@@ -864,12 +871,45 @@ def validate_dynamic_holdouts(
 ) -> dict[str, Any]:
 ```
 
-For every dynamic key, require exactly one `canonical` and two `dynamic_holdout` observations. For
-every observation, require finite nonzero observed slope, predicted sign equality, relation APE at
-most 10%, and a nonzero coefficient for the declared dynamic key. Isolate the dynamic key from the
-signed equation to compute its implied multiplier and require it to be positive. For each key
-require `max(implied_mu) / min(implied_mu) - 1 <= 0.05`. This function returns evidence only and
-never modifies a multiplier.
+Reconstruct `mu_lab` from `anchor_body_cost / anchor_raw_gas`; do not compare opcode-lab slopes to
+the production multipliers produced after applying `body_scale` and common overhead. For every
+dynamic key, require exactly one `canonical` and at least one `dynamic_holdout`
+observation. For every observation, require finite nonzero observed slope, predicted sign equality,
+relation APE at most 10%, and a nonzero coefficient for the declared dynamic key. Isolate the
+dynamic key from the signed equation to compute its implied multiplier and require it to be
+positive. For each key require `max(implied_mu) / min(implied_mu) - 1 <= 0.05`. This function
+remains the candidate boundary: a failed lab-body scalar hypothesis prevents candidate sealing and
+never changes the multiplier. A future production representation must separately account for the
+common per-operation overhead; a lab-body scalar pass is not sufficient evidence for a production
+per-raw-gas scalar when raw gas varies.
+
+Add a separate `fit_dynamic_opcode_models` diagnostic over these frozen feature orders:
+
+```python
+DYNAMIC_OPCODE_FEATURE_ORDERS = {
+    "opcode:0x0a": ("constant", "exponent_bytes", "exponent_bytes_squared"),
+    "opcode:0x20": ("constant", "input_words", "memory_growth_words"),
+    "opcode:0x51": ("constant", "memory_growth_words"),
+    "opcode:0x52": ("constant", "memory_growth_words"),
+    "opcode:0x53": ("constant", "memory_growth_words"),
+    "opcode:0x5e": ("constant", "copy_words", "memory_growth_words"),
+}
+```
+
+Recover target body cost by removing the signed static-control contribution from each accepted
+relation slope. Require exact full column rank independently for every key; the aggregate rank and
+parameter count must both be 15. Fit with `Decimal`, never binary `float`, and transform to
+production units with the staged block fit:
+
+```text
+production_constant = body_scale * body_constant + common_opcode_overhead
+production_nonconstant = body_scale * body_nonconstant
+```
+
+Gate production-space fit MAPE at 5%, fit max APE at 10%, and untouched holdout max APE at 10%.
+Quality failures produce `status = not_supported` with complete evidence. Structural identity,
+rank, provenance, or numeric failures still raise. Serialize the result as the content-addressed,
+non-candidate `dynamic-opcode-models.json`; do not pass it to `build-candidate`.
 
 - [ ] **Step 5: Add `fit-block-calibration` and canonical serialization**
 
@@ -1162,9 +1202,15 @@ relation; do not change a threshold or scenario after seeing output.
 Confirm preflight reports exact relation rank 98, transfer rank two, and fixed/base rank four
 before the first production-guest SP1 execution. Preserve every raw row if a later gate fails.
 
-- [ ] **Step 4: Fit anchors, fixed/base costs, and dynamic holdouts**
+- [ ] **Step 4: Fit structured diagnostics, then test the lab-body scalar boundary**
 
 ```bash
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py fit-dynamic-opcode-models \
+  --relations "$CALIBRATION_RUN/opcode-relations.json" \
+  --anchor-probe "$CALIBRATION_RUN/anchor-probe-fit.json" \
+  --runs "$CALIBRATION_RUN/block-calibration-rows.jsonl" \
+  --controlled-manifest experiments/opcode-gas/manifests/sp1-calibration-v1.toml \
+  --out "$CALIBRATION_RUN/dynamic-opcode-models.json"
 ~/.venv/bin/python experiments/opcode-gas/opcode_gas.py fit-block-calibration \
   --relations "$CALIBRATION_RUN/opcode-relations.json" \
   --anchor-probe "$CALIBRATION_RUN/anchor-probe-fit.json" \
@@ -1173,8 +1219,13 @@ before the first production-guest SP1 execution. Preserve every raw row if a lat
   --out "$CALIBRATION_RUN/block-calibration.json"
 ```
 
-Require accepted fit/holdout/dynamic status, 102 positive opcode multipliers, four positive
-fixed/base costs, and the frozen residual/stability gates.
+Require `dynamic-opcode-models.json` to preserve all six per-key fits, exact ranks, production-space
+errors, and untouched holdouts even when a quality gate reports `not_supported`. The structured
+artifact is diagnostic only. `fit-block-calibration` retains the lab-body scalar dynamic gate; if
+it rejects
+the already falsified one-multiplier hypothesis, preserve that failure and do not proceed to
+candidate sealing. A future promotion task must choose and review the production representation
+before the remaining candidate steps become eligible.
 
 - [ ] **Step 5: Fit remaining precompile/fixed-event components and seal**
 

@@ -347,7 +347,7 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(len({row.row_id for row in startup}), 6)
         self.assertTrue(all(row.expected_features["proposal_startup"] == 1 for row in rows))
 
-    def test_v1_freezes_formal_relation_anchors_and_dynamic_scenario_triples(self):
+    def test_v1_freezes_formal_relation_anchors_and_dynamic_scenario_matrix(self):
         path = (
             ROOT
             / "experiments"
@@ -365,30 +365,63 @@ class ManifestTests(unittest.TestCase):
             if relation.dynamic_key is not None:
                 scenarios.setdefault(relation.dynamic_key, []).append(relation)
         self.assertEqual(set(scenarios), set(opcode_gas.DYNAMIC_RAW_GAS_KEYS))
-        for key, relations in scenarios.items():
-            with self.subTest(key=key):
-                self.assertEqual(len(relations), 3)
-                self.assertEqual(
-                    [relation.split for relation in relations],
-                    ["canonical", "dynamic_holdout", "dynamic_holdout"],
-                )
+        expected = {
+            "opcode:0x0a": [
+                ("canonical", "fit", {"exponent_byte_length": 1, "initial_memory_words": 0}),
+                ("dynamic_holdout", "fit", {"exponent_byte_length": 4, "initial_memory_words": 0}),
+                ("dynamic_holdout", "fit", {"exponent_byte_length": 8, "initial_memory_words": 0}),
+                ("dynamic_holdout", "fit", {"exponent_byte_length": 16, "initial_memory_words": 0}),
+                ("dynamic_holdout", "fit", {"exponent_byte_length": 32, "initial_memory_words": 0}),
+                ("dynamic_holdout", "holdout", {"exponent_byte_length": 2, "initial_memory_words": 0}),
+                ("dynamic_holdout", "holdout", {"exponent_byte_length": 24, "initial_memory_words": 0}),
+            ],
+            "opcode:0x20": [
+                ("canonical", "fit", {"input_length": 32, "initial_memory_words": 1}),
+                ("dynamic_holdout", "fit", {"input_length": 256, "initial_memory_words": 8}),
+                ("dynamic_holdout", "fit", {"input_length": 1024, "initial_memory_words": 32}),
+                ("dynamic_holdout", "fit", {"input_length": 256, "initial_memory_words": 1}),
+                ("dynamic_holdout", "fit", {"input_length": 1024, "initial_memory_words": 1}),
+                ("dynamic_holdout", "holdout", {"input_length": 512, "initial_memory_words": 16}),
+                ("dynamic_holdout", "holdout", {"input_length": 512, "initial_memory_words": 1}),
+            ],
+            "opcode:0x5e": [
+                ("canonical", "fit", {"copy_length": 32, "initial_memory_words": 1}),
+                ("dynamic_holdout", "fit", {"copy_length": 256, "initial_memory_words": 8}),
+                ("dynamic_holdout", "fit", {"copy_length": 1024, "initial_memory_words": 32}),
+                ("dynamic_holdout", "fit", {"copy_length": 256, "initial_memory_words": 1}),
+                ("dynamic_holdout", "fit", {"copy_length": 1024, "initial_memory_words": 1}),
+                ("dynamic_holdout", "holdout", {"copy_length": 512, "initial_memory_words": 16}),
+                ("dynamic_holdout", "holdout", {"copy_length": 512, "initial_memory_words": 1}),
+            ],
+        }
+        memory_scenarios = [
+            ("canonical", "fit", {"highest_touched_offset": 0, "initial_memory_words": 1}),
+            ("dynamic_holdout", "fit", {"highest_touched_offset": 256, "initial_memory_words": 1}),
+            ("dynamic_holdout", "fit", {"highest_touched_offset": 4096, "initial_memory_words": 1}),
+            ("dynamic_holdout", "fit", {"highest_touched_offset": 256, "initial_memory_words": 9}),
+            ("dynamic_holdout", "holdout", {"highest_touched_offset": 1024, "initial_memory_words": 1}),
+            ("dynamic_holdout", "holdout", {"highest_touched_offset": 4096, "initial_memory_words": 129}),
+        ]
+        for key in ("opcode:0x51", "opcode:0x52", "opcode:0x53"):
+            expected[key] = memory_scenarios
 
         self.assertEqual(
-            [relation.scenario["exponent_byte_length"] for relation in scenarios["opcode:0x0a"]],
-            [1, 8, 32],
+            {
+                key: [
+                    (relation.split, relation.model_split, dict(relation.scenario))
+                    for relation in relations
+                ]
+                for key, relations in scenarios.items()
+            },
+            expected,
         )
         self.assertEqual(
-            [relation.scenario["input_length"] for relation in scenarios["opcode:0x20"]],
-            [32, 256, 1024],
+            sum(relation.split == "canonical" for relations in scenarios.values() for relation in relations),
+            6,
         )
-        for key in ("opcode:0x51", "opcode:0x52", "opcode:0x53"):
-            self.assertEqual(
-                [relation.scenario["highest_touched_offset"] for relation in scenarios[key]],
-                [0, 0x0100, 0x1000],
-            )
         self.assertEqual(
-            [relation.scenario["copy_length"] for relation in scenarios["opcode:0x5e"]],
-            [32, 256, 1024],
+            sum(relation.split != "canonical" for relations in scenarios.values() for relation in relations),
+            33,
         )
 
     def test_formal_relation_manifest_rejects_anchor_dynamic_and_relation_contract_drift(self):
@@ -420,6 +453,16 @@ class ManifestTests(unittest.TestCase):
         wrong_units = deepcopy(base)
         wrong_units["opcode_relation_scenarios"][0]["target_raw_gas"] += 1
         mutations.append((wrong_units, "target raw-gas total"))
+        wrong_matrix = deepcopy(base)
+        wrong_matrix_row = next(
+            row
+            for row in wrong_matrix["opcode_relation_scenarios"]
+            if row["case_id"] == "keccak256"
+            and row["scenario"] == {"input_length": 256, "initial_memory_words": 1}
+        )
+        wrong_matrix_row["scenario"]["initial_memory_words"] = 2
+        wrong_matrix_row["target_raw_gas"] = 96
+        mutations.append((wrong_matrix, "frozen scenario matrix"))
 
         for data, message in mutations:
             with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):

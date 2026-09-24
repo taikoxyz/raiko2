@@ -79,6 +79,38 @@ class AffineOpcodeModel:
             return values
 
 
+def reconstruct_lab_multipliers(
+    affine_model: AffineOpcodeModel,
+    anchor_body_costs: Mapping[str, Decimal],
+) -> dict[str, Decimal]:
+    """Reconstruct lab cost per raw-gas unit from per-operation anchor costs."""
+    expected = set(affine_model.anchor_keys)
+    actual = set(anchor_body_costs)
+    if actual != expected:
+        missing = sorted(expected - actual)
+        extra = sorted(actual - expected)
+        raise ValueError(
+            "anchor body costs differ from the affine model: "
+            f"missing={missing!r}, extra={extra!r}"
+        )
+    with localcontext(_CALIBRATION_DECIMAL_CONTEXT):
+        anchor_multipliers = {}
+        for key in affine_model.anchor_keys:
+            if key not in _ANCHOR_RAW_GAS:
+                raise ValueError(f"anchor raw gas is not frozen: {key}")
+            value = anchor_body_costs[key]
+            if (
+                not isinstance(value, Decimal)
+                or not value.is_finite()
+                or value <= 0
+            ):
+                raise ValueError(
+                    f"anchor body cost must be a positive finite Decimal: {key}"
+                )
+            anchor_multipliers[key] = value / Decimal(_ANCHOR_RAW_GAS[key])
+        return affine_model.reconstruct_multipliers(anchor_multipliers)
+
+
 @dataclass(frozen=True)
 class BlockCalibrationRow:
     row_id: str
@@ -121,6 +153,307 @@ class DynamicRelationObservation:
     scenario_id: str
     split: str
     equation: RelationEquation
+
+
+@dataclass(frozen=True)
+class DynamicOpcodeObservation:
+    dynamic_key: str
+    scenario_id: str
+    model_split: str
+    features: Mapping[str, Fraction]
+    target_body_cost: Decimal
+
+
+@dataclass(frozen=True)
+class DynamicOpcodeFitEvidence:
+    dynamic_key: str
+    status: str
+    feature_names: tuple[str, ...]
+    exact_rank: int
+    parameter_count: int
+    observation_count: int
+    fit_count: int
+    holdout_count: int
+    body_coefficients: Mapping[str, Decimal]
+    production_coefficients: Mapping[str, Decimal]
+    fit_body_mape: Decimal
+    fit_body_max_ape: Decimal
+    holdout_body_max_ape: Decimal
+    fit_production_mape: Decimal
+    fit_production_max_ape: Decimal
+    holdout_production_max_ape: Decimal
+    quality_failures: tuple[str, ...]
+    exact_fit_design_matrix: tuple[tuple[Fraction, ...], ...]
+    solver_column_scales: tuple[Decimal, ...]
+    solver_residual: Decimal
+    predictions: Mapping[str, Mapping[str, Decimal | str]]
+
+
+def fit_dynamic_opcode_models(
+    observations: Sequence[DynamicOpcodeObservation],
+    feature_names_by_key: Mapping[str, tuple[str, ...]],
+    *,
+    body_scale: Decimal,
+    common_overhead: Decimal,
+) -> Mapping[str, DynamicOpcodeFitEvidence]:
+    """Fit independent dynamic-opcode body-cost models with frozen holdouts."""
+    if (
+        not isinstance(body_scale, Decimal)
+        or not body_scale.is_finite()
+        or body_scale <= 0
+    ):
+        raise ValueError("body_scale must be a positive finite Decimal")
+    if (
+        not isinstance(common_overhead, Decimal)
+        or not common_overhead.is_finite()
+        or common_overhead < 0
+    ):
+        raise ValueError("common_overhead must be a nonnegative finite Decimal")
+    if not feature_names_by_key:
+        raise ValueError("dynamic feature names must not be empty")
+
+    for dynamic_key in feature_names_by_key:
+        if not isinstance(dynamic_key, str) or not dynamic_key:
+            raise ValueError("dynamic key must be a nonempty string")
+    configured_keys = set(feature_names_by_key)
+    observed_keys = set()
+    for observation in observations:
+        if not isinstance(observation, DynamicOpcodeObservation):
+            raise ValueError("dynamic observation has an invalid type")
+        if not isinstance(observation.dynamic_key, str) or not observation.dynamic_key:
+            raise ValueError("dynamic key must be a nonempty string")
+        if not isinstance(observation.scenario_id, str) or not observation.scenario_id:
+            raise ValueError("dynamic scenario ID must be a nonempty string")
+        observed_keys.add(observation.dynamic_key)
+    if configured_keys != observed_keys:
+        raise ValueError(
+            "observed and configured dynamic keys differ: "
+            f"observed={sorted(observed_keys)!r}, "
+            f"configured={sorted(configured_keys)!r}"
+        )
+
+    evidence: dict[str, DynamicOpcodeFitEvidence] = {}
+    with localcontext(_CALIBRATION_DECIMAL_CONTEXT):
+        for dynamic_key, feature_names in feature_names_by_key.items():
+            if not isinstance(feature_names, tuple) or not feature_names:
+                raise ValueError(
+                    f"dynamic feature names for {dynamic_key} must be a nonempty tuple"
+                )
+            if any(not isinstance(name, str) or not name for name in feature_names):
+                raise ValueError("dynamic feature name must be a nonempty string")
+            _validate_unique(feature_names, "feature name")
+            if "constant" not in feature_names:
+                raise ValueError(
+                    f"dynamic feature names for {dynamic_key} must include constant"
+                )
+
+            key_observations = tuple(
+                observation
+                for observation in observations
+                if observation.dynamic_key == dynamic_key
+            )
+            _validate_unique(
+                (observation.scenario_id for observation in key_observations),
+                "dynamic scenario ID",
+            )
+            fit_rows = tuple(
+                observation
+                for observation in key_observations
+                if observation.model_split == "fit"
+            )
+            holdout_rows = tuple(
+                observation
+                for observation in key_observations
+                if observation.model_split == "holdout"
+            )
+            if any(
+                observation.model_split not in {"fit", "holdout"}
+                for observation in key_observations
+            ):
+                raise ValueError("dynamic model_split must be fit or holdout")
+            if not holdout_rows:
+                raise ValueError(
+                    f"dynamic key {dynamic_key} requires at least one holdout"
+                )
+
+            expected_features = set(feature_names)
+            for observation in key_observations:
+                if set(observation.features) != expected_features:
+                    raise ValueError(
+                        "dynamic observation feature set differs from frozen "
+                        "feature names: "
+                        f"{dynamic_key}/{observation.scenario_id}"
+                    )
+                for value in observation.features.values():
+                    if not isinstance(value, Fraction):
+                        raise ValueError("dynamic feature values must be Fractions")
+                if observation.features["constant"] != Fraction(1):
+                    raise ValueError(
+                        "dynamic constant feature must be exactly Fraction(1): "
+                        f"{dynamic_key}/{observation.scenario_id}"
+                    )
+                target = observation.target_body_cost
+                if (
+                    not isinstance(target, Decimal)
+                    or not target.is_finite()
+                    or target <= 0
+                ):
+                    raise ValueError(
+                        "dynamic target body cost must be a positive finite Decimal: "
+                        f"{dynamic_key}/{observation.scenario_id}"
+                    )
+
+            fit_matrix = [
+                [observation.features[name] for name in feature_names]
+                for observation in fit_rows
+            ]
+            fit_rank = exact_rank(fit_matrix)
+            parameter_count = len(feature_names)
+            if fit_rank != parameter_count:
+                raise ValueError(
+                    f"dynamic fit matrix exact rank for {dynamic_key} must equal "
+                    f"parameter count {parameter_count}, got {fit_rank}"
+                )
+            body_values, column_scales, solver_residual = (
+                _scaled_decimal_least_squares(
+                    fit_matrix,
+                    [observation.target_body_cost for observation in fit_rows],
+                )
+            )
+            if any(not value.is_finite() for value in body_values):
+                raise ValueError(
+                    f"dynamic body fit produced a nonfinite coefficient: {dynamic_key}"
+                )
+            body_coefficients = dict(zip(feature_names, body_values))
+            production_coefficients = {
+                name: (
+                    value * body_scale
+                    + (common_overhead if name == "constant" else Decimal(0))
+                )
+                for name, value in body_coefficients.items()
+            }
+            if any(
+                not value.is_finite() for value in production_coefficients.values()
+            ):
+                raise ValueError(
+                    "dynamic production conversion produced a nonfinite "
+                    f"coefficient: {dynamic_key}"
+                )
+
+            predictions: dict[str, dict[str, Decimal | str]] = {}
+            fit_body_apes: list[Decimal] = []
+            holdout_body_apes: list[Decimal] = []
+            fit_production_apes: list[Decimal] = []
+            holdout_production_apes: list[Decimal] = []
+            for observation in key_observations:
+                predicted_body = sum(
+                    (
+                        _decimal_from_fraction(observation.features[name])
+                        * body_coefficients[name]
+                        for name in feature_names
+                    ),
+                    Decimal(0),
+                )
+                actual_body = observation.target_body_cost
+                body_ape = abs(predicted_body - actual_body) / actual_body
+                actual_production = actual_body * body_scale + common_overhead
+                predicted_production = sum(
+                    (
+                        _decimal_from_fraction(observation.features[name])
+                        * production_coefficients[name]
+                        for name in feature_names
+                    ),
+                    Decimal(0),
+                )
+                production_ape = (
+                    abs(predicted_production - actual_production)
+                    / actual_production
+                )
+                if not all(
+                    value.is_finite()
+                    for value in (
+                        predicted_body,
+                        body_ape,
+                        actual_production,
+                        predicted_production,
+                        production_ape,
+                    )
+                ):
+                    raise ValueError(
+                        "dynamic prediction produced a nonfinite value: "
+                        f"{dynamic_key}/{observation.scenario_id}"
+                    )
+                predictions[observation.scenario_id] = {
+                    "model_split": observation.model_split,
+                    "actual_body_cost": actual_body,
+                    "predicted_body_cost": predicted_body,
+                    "body_ape": body_ape,
+                    "actual_production_cost": actual_production,
+                    "predicted_production_cost": predicted_production,
+                    "production_ape": production_ape,
+                }
+                if observation.model_split == "fit":
+                    fit_body_apes.append(body_ape)
+                    fit_production_apes.append(production_ape)
+                else:
+                    holdout_body_apes.append(body_ape)
+                    holdout_production_apes.append(production_ape)
+
+            fit_body_mape = sum(fit_body_apes, Decimal(0)) / Decimal(
+                len(fit_body_apes)
+            )
+            fit_body_max_ape = max(fit_body_apes)
+            holdout_body_max_ape = max(holdout_body_apes)
+            fit_production_mape = sum(
+                fit_production_apes, Decimal(0)
+            ) / Decimal(len(fit_production_apes))
+            fit_production_max_ape = max(fit_production_apes)
+            holdout_production_max_ape = max(holdout_production_apes)
+            quality_failures = tuple(
+                name
+                for name, failed in (
+                    ("fit_mape", fit_production_mape > Decimal("0.05")),
+                    ("fit_max_ape", fit_production_max_ape > Decimal("0.10")),
+                    (
+                        "holdout_max_ape",
+                        holdout_production_max_ape > Decimal("0.10"),
+                    ),
+                )
+                if failed
+            )
+            evidence[dynamic_key] = DynamicOpcodeFitEvidence(
+                dynamic_key=dynamic_key,
+                status="not_supported" if quality_failures else "supported",
+                feature_names=feature_names,
+                exact_rank=fit_rank,
+                parameter_count=parameter_count,
+                observation_count=len(key_observations),
+                fit_count=len(fit_rows),
+                holdout_count=len(holdout_rows),
+                body_coefficients=MappingProxyType(body_coefficients),
+                production_coefficients=MappingProxyType(
+                    production_coefficients
+                ),
+                fit_body_mape=fit_body_mape,
+                fit_body_max_ape=fit_body_max_ape,
+                holdout_body_max_ape=holdout_body_max_ape,
+                fit_production_mape=fit_production_mape,
+                fit_production_max_ape=fit_production_max_ape,
+                holdout_production_max_ape=holdout_production_max_ape,
+                quality_failures=quality_failures,
+                exact_fit_design_matrix=tuple(
+                    tuple(row) for row in fit_matrix
+                ),
+                solver_column_scales=tuple(column_scales),
+                solver_residual=solver_residual,
+                predictions=MappingProxyType(
+                    {
+                        scenario_id: MappingProxyType(row)
+                        for scenario_id, row in predictions.items()
+                    }
+                ),
+            )
+    return MappingProxyType(evidence)
 
 
 def fit_block_calibration(
@@ -370,12 +703,12 @@ def validate_dynamic_holdouts(
             ]
             splits = [item.split for item in observations]
             if (
-                len(observations) != 3
+                len(observations) < 2
                 or splits.count("canonical") != 1
-                or splits.count("dynamic_holdout") != 2
+                or splits.count("dynamic_holdout") != len(observations) - 1
             ):
                 raise ValueError(
-                    f"dynamic key {dynamic_key} requires one canonical and two dynamic holdouts"
+                    f"dynamic key {dynamic_key} requires one canonical and at least one dynamic holdout"
                 )
             _validate_unique(
                 (item.scenario_id for item in observations), "dynamic scenario ID"

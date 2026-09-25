@@ -42,6 +42,28 @@ class RelationEquation:
 
 
 @dataclass(frozen=True)
+class NonnegativeLeastSquaresResult:
+    solution: tuple[Decimal, ...]
+    active_zero_indices: tuple[int, ...]
+    residual: Decimal
+
+
+@dataclass(frozen=True)
+class NonnegativeOpcodeFitEvidence:
+    status: str
+    opcode_keys: tuple[str, ...]
+    anchor_keys: tuple[str, ...]
+    lab_body_per_raw_gas: Mapping[str, Decimal]
+    active_zero_keys: tuple[str, ...]
+    nonzero_relation_mape: Decimal
+    nonzero_relation_max_ape: Decimal
+    flat_relation_max_normalized_error: Decimal
+    residual: Decimal
+    predictions: Mapping[str, Mapping[str, Decimal | str]]
+    quality_failures: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class AffineOpcodeModel:
     opcode_keys: tuple[str, ...]
     anchor_keys: tuple[str, ...]
@@ -1660,12 +1682,275 @@ def _scaled_decimal_least_squares(
     return solution, scales, residual
 
 
+def nonnegative_decimal_least_squares(
+    exact_matrix: Sequence[Sequence[Fraction]], targets: Sequence[Decimal]
+) -> NonnegativeLeastSquaresResult:
+    """Fit a full-rank Decimal least-squares system subject to ``x >= 0``."""
+    if not exact_matrix or len(exact_matrix) != len(targets):
+        raise ValueError("least-squares matrix and target dimensions differ")
+    width = len(exact_matrix[0])
+    if width == 0 or any(len(row) != width for row in exact_matrix):
+        raise ValueError("least-squares matrix has invalid dimensions")
+    matrix = [
+        [_as_exact_fraction(value) for value in row] for row in exact_matrix
+    ]
+    if exact_rank(matrix) != width:
+        raise ValueError("nonnegative least-squares matrix is rank-deficient")
+    if any(
+        not isinstance(target, Decimal) or not target.is_finite()
+        for target in targets
+    ):
+        raise ValueError("nonnegative least-squares targets must be finite Decimals")
+
+    with localcontext(_CALIBRATION_DECIMAL_CONTEXT):
+        decimal_matrix = [
+            [_decimal_from_fraction(value) for value in row] for row in matrix
+        ]
+        solution = [Decimal(0) for _ in range(width)]
+        passive: set[int] = set()
+        maximum_iterations = 30 * width
+        iterations = 0
+
+        while True:
+            residual_vector = [
+                target
+                - sum(
+                    (cell * value for cell, value in zip(row, solution)),
+                    Decimal(0),
+                )
+                for row, target in zip(decimal_matrix, targets)
+            ]
+            dual = [
+                _dot(
+                    [row[column] for row in decimal_matrix], residual_vector
+                )
+                for column in range(width)
+            ]
+            entering = [
+                column
+                for column in range(width)
+                if column not in passive and dual[column] > 0
+            ]
+            if not entering:
+                residual = _vector_norm(
+                    [-value for value in residual_vector]
+                )
+                reported_solution = tuple(
+                    _round_decimal_significant(value, 60) for value in solution
+                )
+                return NonnegativeLeastSquaresResult(
+                    solution=reported_solution,
+                    active_zero_indices=tuple(
+                        column
+                        for column, value in enumerate(reported_solution)
+                        if value == 0
+                    ),
+                    residual=residual,
+                )
+
+            if iterations >= maximum_iterations:
+                raise ValueError("nonnegative least-squares iteration cap exceeded")
+            entering_column = max(entering, key=lambda column: dual[column])
+            passive.add(entering_column)
+            iterations += 1
+
+            while True:
+                passive_columns = tuple(sorted(passive))
+                passive_matrix = [
+                    [row[column] for column in passive_columns] for row in matrix
+                ]
+                passive_solution, _scales, _residual = _scaled_decimal_least_squares(
+                    passive_matrix, targets
+                )
+                candidate = [Decimal(0) for _ in range(width)]
+                for column, value in zip(passive_columns, passive_solution):
+                    candidate[column] = value
+                if all(candidate[column] > 0 for column in passive_columns):
+                    solution = candidate
+                    break
+
+                step = min(
+                    solution[column] / (solution[column] - candidate[column])
+                    for column in passive_columns
+                    if candidate[column] <= 0
+                )
+                solution = [
+                    current + step * (proposed - current)
+                    for current, proposed in zip(solution, candidate)
+                ]
+                for column in tuple(passive):
+                    if solution[column] <= 0:
+                        solution[column] = Decimal(0)
+                        passive.remove(column)
+                iterations += 1
+                if iterations > maximum_iterations:
+                    raise ValueError("nonnegative least-squares iteration cap exceeded")
+
+
+def fit_nonnegative_opcode_bodies(
+    equations: Sequence[RelationEquation],
+    opcode_keys: tuple[str, ...],
+    anchor_body_costs: Mapping[str, Decimal],
+) -> NonnegativeOpcodeFitEvidence:
+    """Fit absolute opcode bodies while preserving signed relative relations."""
+    _validate_unique(opcode_keys, "opcode key")
+    if not opcode_keys:
+        raise ValueError("opcode keys must not be empty")
+    if not equations:
+        raise ValueError("relation matrix must not be empty")
+    _validate_unique((equation.relation_id for equation in equations), "relation ID")
+
+    opcode_set = set(opcode_keys)
+    unknown_anchors = set(anchor_body_costs) - opcode_set
+    if unknown_anchors:
+        raise ValueError(f"unknown anchor key: {sorted(unknown_anchors)!r}")
+    unsupported_anchors = set(anchor_body_costs) - set(_ANCHOR_RAW_GAS)
+    if unsupported_anchors:
+        raise ValueError(
+            "anchor body cost is not a natural anchor: "
+            f"{sorted(unsupported_anchors)!r}"
+        )
+    for equation in equations:
+        _validate_equation(equation, opcode_set)
+
+    with localcontext(_CALIBRATION_DECIMAL_CONTEXT):
+        anchor_keys = tuple(
+            key for key in opcode_keys if key in anchor_body_costs
+        )
+        lab_body_per_raw_gas: dict[str, Decimal] = {}
+        for key in anchor_keys:
+            value = anchor_body_costs[key]
+            if (
+                not isinstance(value, Decimal)
+                or not value.is_finite()
+                or value <= 0
+            ):
+                raise ValueError(
+                    f"anchor body cost must be a positive finite Decimal: {key}"
+                )
+            lab_body_per_raw_gas[key] = value / Decimal(_ANCHOR_RAW_GAS[key])
+
+        non_anchor_keys = tuple(
+            key for key in opcode_keys if key not in anchor_body_costs
+        )
+        adjusted_targets = []
+        matrix = []
+        for equation in equations:
+            fixed_contribution = sum(
+                (
+                    _decimal_from_fraction(equation.coefficients.get(key, Fraction(0)))
+                    * lab_body_per_raw_gas[key]
+                    for key in anchor_keys
+                ),
+                Decimal(0),
+            )
+            adjusted_targets.append(equation.slope - fixed_contribution)
+            matrix.append(
+                [
+                    equation.coefficients.get(key, Fraction(0))
+                    for key in non_anchor_keys
+                ]
+            )
+
+        if non_anchor_keys:
+            fit = nonnegative_decimal_least_squares(matrix, adjusted_targets)
+            for key, value in zip(non_anchor_keys, fit.solution):
+                lab_body_per_raw_gas[key] = value
+            active_zero_keys = tuple(
+                non_anchor_keys[index] for index in fit.active_zero_indices
+            )
+        else:
+            active_zero_keys = ()
+
+        predictions: dict[str, Mapping[str, Decimal | str]] = {}
+        nonzero_apes = []
+        flat_errors = []
+        residual_terms = []
+        for equation in equations:
+            terms = [
+                _decimal_from_fraction(coefficient) * lab_body_per_raw_gas[key]
+                for key, coefficient in equation.coefficients.items()
+            ]
+            predicted = sum(terms, Decimal(0))
+            residual_terms.append(predicted - equation.slope)
+            if equation.slope == 0:
+                normalized_error = abs(predicted) / max(
+                    sum((abs(term) for term in terms), Decimal(0)), Decimal(1)
+                )
+                flat_errors.append(normalized_error)
+                predictions[equation.relation_id] = MappingProxyType(
+                    {
+                        "gate": "exact_flat",
+                        "observed_slope": equation.slope,
+                        "predicted_slope": predicted,
+                        "normalized_error": normalized_error,
+                    }
+                )
+            else:
+                ape = abs(predicted - equation.slope) / abs(equation.slope)
+                nonzero_apes.append(ape)
+                predictions[equation.relation_id] = MappingProxyType(
+                    {
+                        "gate": "nonzero",
+                        "observed_slope": equation.slope,
+                        "predicted_slope": predicted,
+                        "ape": ape,
+                    }
+                )
+
+        nonzero_relation_mape = (
+            sum(nonzero_apes, Decimal(0)) / Decimal(len(nonzero_apes))
+            if nonzero_apes
+            else Decimal(0)
+        )
+        nonzero_relation_max_ape = max(nonzero_apes, default=Decimal(0))
+        flat_relation_max_normalized_error = max(
+            flat_errors, default=Decimal(0)
+        )
+        quality_failures = tuple(
+            name
+            for name, failed in (
+                ("nonzero_relation_mape", nonzero_relation_mape > Decimal("0.05")),
+                (
+                    "nonzero_relation_max_ape",
+                    nonzero_relation_max_ape > Decimal("0.10"),
+                ),
+                (
+                    "flat_relation_max_normalized_error",
+                    flat_relation_max_normalized_error > Decimal("1e-30"),
+                ),
+            )
+            if failed
+        )
+        return NonnegativeOpcodeFitEvidence(
+            status="not_supported" if quality_failures else "supported",
+            opcode_keys=opcode_keys,
+            anchor_keys=anchor_keys,
+            lab_body_per_raw_gas=MappingProxyType(
+                {key: lab_body_per_raw_gas[key] for key in opcode_keys}
+            ),
+            active_zero_keys=active_zero_keys,
+            nonzero_relation_mape=nonzero_relation_mape,
+            nonzero_relation_max_ape=nonzero_relation_max_ape,
+            flat_relation_max_normalized_error=flat_relation_max_normalized_error,
+            residual=_vector_norm(residual_terms),
+            predictions=MappingProxyType(predictions),
+            quality_failures=quality_failures,
+        )
+
+
 def _dot(left: Sequence[Decimal], right: Sequence[Decimal]) -> Decimal:
     return sum((a * b for a, b in zip(left, right)), Decimal(0))
 
 
 def _vector_norm(vector: Sequence[Decimal]) -> Decimal:
     return _dot(vector, vector).sqrt()
+
+
+def _round_decimal_significant(value: Decimal, digits: int) -> Decimal:
+    if value == 0:
+        return Decimal(0)
+    return value.quantize(Decimal(1).scaleb(value.adjusted() - digits + 1))
 
 
 def exact_rank(matrix: Sequence[Sequence[Fraction]]) -> int:

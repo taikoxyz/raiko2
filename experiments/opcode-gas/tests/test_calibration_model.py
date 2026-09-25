@@ -20,7 +20,9 @@ from calibration_model import (
     exact_rank,
     fit_block_calibration,
     fit_dynamic_opcode_models,
+    fit_nonnegative_opcode_bodies,
     fit_structured_dynamic_opcode_models,
+    nonnegative_decimal_least_squares,
     validate_dynamic_holdouts,
 )
 
@@ -1252,6 +1254,81 @@ class CalibrationModelTests(unittest.TestCase):
         for rows, message in cases:
             with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
                 validate_dynamic_holdouts(model, multipliers, rows, (ANCHORS[0],))
+
+    def test_nonnegative_least_squares_refits_after_activating_zero_bound(self):
+        result = nonnegative_decimal_least_squares(
+            (
+                (Fraction(1), Fraction(0)),
+                (Fraction(0), Fraction(1)),
+                (Fraction(1), Fraction(1)),
+            ),
+            (Decimal("1"), Decimal("-1"), Decimal("0")),
+        )
+
+        self.assertEqual(result.solution, (Decimal("0.5"), Decimal("0")))
+        self.assertEqual(result.active_zero_indices, (1,))
+
+    def test_nonnegative_opcode_fit_preserves_fixed_anchor_body_cost(self):
+        result = fit_nonnegative_opcode_bodies(
+            equations=(
+                RelationEquation(
+                    relation_id="target-minus-anchor",
+                    coefficients={
+                        "opcode:0x01": Fraction(3),
+                        "opcode:0x50": Fraction(-2),
+                    },
+                    slope=Decimal("9"),
+                ),
+            ),
+            opcode_keys=("opcode:0x01", "opcode:0x50"),
+            anchor_body_costs={"opcode:0x50": Decimal("6")},
+        )
+
+        self.assertEqual(result.lab_body_per_raw_gas["opcode:0x50"], Decimal("3"))
+        self.assertEqual(result.lab_body_per_raw_gas["opcode:0x01"], Decimal("5"))
+
+    def test_nonnegative_opcode_fit_accepts_exact_flat_signed_relation(self):
+        result = fit_nonnegative_opcode_bodies(
+            equations=(
+                RelationEquation(
+                    relation_id="dup2-minus-dup1",
+                    coefficients={
+                        "opcode:0x80": Fraction(-3),
+                        "opcode:0x81": Fraction(3),
+                    },
+                    slope=Decimal("0"),
+                ),
+            ),
+            opcode_keys=("opcode:0x80", "opcode:0x81"),
+            anchor_body_costs={"opcode:0x80": Decimal("9")},
+        )
+
+        self.assertEqual(result.status, "supported")
+        self.assertEqual(result.lab_body_per_raw_gas["opcode:0x80"], Decimal("3"))
+        self.assertEqual(result.lab_body_per_raw_gas["opcode:0x81"], Decimal("3"))
+        self.assertEqual(result.flat_relation_max_normalized_error, Decimal("0"))
+
+    def test_nonnegative_opcode_fit_rejects_inconsistent_fixed_anchor_flat_relation(self):
+        result = fit_nonnegative_opcode_bodies(
+            equations=(
+                RelationEquation(
+                    relation_id="push0-minus-pop",
+                    coefficients={
+                        "opcode:0x50": Fraction(-2),
+                        "opcode:0x5f": Fraction(2),
+                    },
+                    slope=Decimal("0"),
+                ),
+            ),
+            opcode_keys=("opcode:0x50", "opcode:0x5f"),
+            anchor_body_costs={
+                "opcode:0x50": Decimal("4"),
+                "opcode:0x5f": Decimal("10"),
+            },
+        )
+
+        self.assertEqual(result.status, "not_supported")
+        self.assertIn("flat_relation_max_normalized_error", result.quality_failures)
 
     def test_exact_rank_and_affine_reconstruction(self):
         equations = (

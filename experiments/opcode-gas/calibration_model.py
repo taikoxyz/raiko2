@@ -1708,10 +1708,12 @@ def nonnegative_decimal_least_squares(
         ]
         solution = [Decimal(0) for _ in range(width)]
         passive: set[int] = set()
+        attempted_entries: set[tuple[tuple[int, ...], int]] = set()
         maximum_iterations = 30 * width
         iterations = 0
 
         while True:
+            passive_columns = tuple(sorted(passive))
             residual_vector = [
                 target
                 - sum(
@@ -1729,14 +1731,28 @@ def nonnegative_decimal_least_squares(
             entering = [
                 column
                 for column in range(width)
-                if column not in passive and dual[column] > 0
+                if (
+                    column not in passive
+                    and (passive_columns, column) not in attempted_entries
+                    and dual[column] > 0
+                )
             ]
             if not entering:
-                residual = _vector_norm(
-                    [-value for value in residual_vector]
-                )
                 reported_solution = tuple(
                     _round_decimal_significant(value, 60) for value in solution
+                )
+                residual = _vector_norm(
+                    [
+                        sum(
+                            (
+                                cell * value
+                                for cell, value in zip(row, reported_solution)
+                            ),
+                            Decimal(0),
+                        )
+                        - target
+                        for row, target in zip(decimal_matrix, targets)
+                    ]
                 )
                 return NonnegativeLeastSquaresResult(
                     solution=reported_solution,
@@ -1750,7 +1766,14 @@ def nonnegative_decimal_least_squares(
 
             if iterations >= maximum_iterations:
                 raise ValueError("nonnegative least-squares iteration cap exceeded")
-            entering_column = max(entering, key=lambda column: dual[column])
+            entering_column = max(
+                entering, key=lambda column: dual[column]
+            )
+            # A revisited passive set has the same Decimal QR solution. Retrying
+            # an earlier entry cannot make progress, even if its raw dual remains
+            # a Decimal-roundoff positive value.
+            attempted_entries.add((passive_columns, entering_column))
+            source_passive_columns = passive_columns
             passive.add(entering_column)
             iterations += 1
 
@@ -1769,22 +1792,37 @@ def nonnegative_decimal_least_squares(
                     solution = candidate
                     break
 
-                step = min(
-                    solution[column] / (solution[column] - candidate[column])
+                boundary_steps = tuple(
+                    (
+                        (
+                            Decimal(0)
+                            if solution[column] == 0
+                            else solution[column]
+                            / (solution[column] - candidate[column])
+                        ),
+                        column,
+                    )
                     for column in passive_columns
                     if candidate[column] <= 0
+                )
+                step = min(value for value, _column in boundary_steps)
+                blocking_columns = tuple(
+                    column
+                    for value, column in boundary_steps
+                    if value - step <= step.next_plus() - step
                 )
                 solution = [
                     current + step * (proposed - current)
                     for current, proposed in zip(solution, candidate)
                 ]
-                for column in tuple(passive):
-                    if solution[column] <= 0:
-                        solution[column] = Decimal(0)
-                        passive.remove(column)
+                for column in blocking_columns:
+                    solution[column] = Decimal(0)
+                    passive.remove(column)
                 iterations += 1
                 if iterations > maximum_iterations:
                     raise ValueError("nonnegative least-squares iteration cap exceeded")
+                if not passive or tuple(sorted(passive)) == source_passive_columns:
+                    break
 
 
 def fit_nonnegative_opcode_bodies(

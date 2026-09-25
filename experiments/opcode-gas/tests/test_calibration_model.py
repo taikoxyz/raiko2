@@ -1268,6 +1268,110 @@ class CalibrationModelTests(unittest.TestCase):
         self.assertEqual(result.solution, (Decimal("0.5"), Decimal("0")))
         self.assertEqual(result.active_zero_indices, (1,))
 
+    def test_nonnegative_least_squares_removes_inexact_boundary_coordinate(self):
+        result = nonnegative_decimal_least_squares(
+            (
+                (Fraction(1), Fraction(0)),
+                (Fraction(-4), Fraction(-3)),
+            ),
+            (Decimal("-3"), Decimal("-4")),
+        )
+
+        self.assertEqual(
+            result.solution,
+            (
+                Decimal("0"),
+                Decimal("1.33333333333333333333333333333333333333333333333333333333333"),
+            ),
+        )
+        self.assertEqual(result.active_zero_indices, (0,))
+
+    def test_nonnegative_least_squares_ignores_flat_kkt_dual_roundoff(self):
+        result = nonnegative_decimal_least_squares(
+            (
+                (Fraction(3), Fraction(1)),
+                (Fraction(0), Fraction(0)),
+                (Fraction(0), Fraction(1)),
+            ),
+            (Decimal("1"), Decimal("1"), Decimal("0")),
+        )
+
+        self.assertEqual(
+            result.solution,
+            (
+                Decimal("0.333333333333333333333333333333333333333333333333333333333333"),
+                Decimal("0"),
+            ),
+        )
+        self.assertEqual(result.active_zero_indices, (1,))
+
+    def test_nonnegative_least_squares_uses_passive_kkt_roundoff_bound(self):
+        result = nonnegative_decimal_least_squares(
+            (
+                (Fraction(4), Fraction(3)),
+                (Fraction(4), Fraction(5)),
+            ),
+            (Decimal("9"), Decimal("9")),
+        )
+
+        self.assertEqual(result.solution, (Decimal("2.25"), Decimal("0")))
+        self.assertEqual(result.active_zero_indices, (1,))
+
+    def test_nonnegative_least_squares_keeps_precision_edge_positive_dual(self):
+        result = nonnegative_decimal_least_squares(
+            (
+                (Fraction(3), Fraction(1)),
+                (Fraction(0), Fraction(1)),
+            ),
+            (Decimal("1"), Decimal("1e-79")),
+        )
+
+        self.assertEqual(result.solution[1], Decimal("1e-79"))
+        self.assertEqual(result.active_zero_indices, ())
+
+    def test_nonnegative_least_squares_terminates_repeated_decimal_state(self):
+        edge_target = Decimal("6." + "0" * 78 + "2")
+        result = nonnegative_decimal_least_squares(
+            (
+                (Fraction(5), Fraction(3)),
+                (Fraction(2), Fraction(4)),
+            ),
+            (edge_target, Decimal("8." + "0" * 78 + "2")),
+        )
+
+        self.assertEqual(result.solution, (Decimal("0"), Decimal("2")))
+        self.assertEqual(result.active_zero_indices, (0,))
+
+    def test_nonnegative_least_squares_restarts_after_empty_boundary(self):
+        result = nonnegative_decimal_least_squares(
+            (
+                (Fraction(-3),),
+                (Fraction(8),),
+                (Fraction(-7),),
+                (Fraction(4),),
+            ),
+            (
+                Decimal("-7." + "9" * 79),
+                Decimal("-2." + "9" * 79),
+                Decimal("4." + "0" * 78 + "2"),
+                Decimal("7." + "0" * 78 + "5"),
+            ),
+        )
+
+        self.assertEqual(result.solution, (Decimal("0"),))
+        self.assertEqual(result.active_zero_indices, (0,))
+
+    def test_nonnegative_least_squares_residual_matches_reported_solution(self):
+        result = nonnegative_decimal_least_squares(
+            ((Fraction(3),),), (Decimal("1"),)
+        )
+
+        with localcontext(calibration_model._CALIBRATION_DECIMAL_CONTEXT):
+            self.assertEqual(
+                result.residual,
+                abs(Decimal(3) * result.solution[0] - Decimal(1)),
+            )
+
     def test_nonnegative_opcode_fit_preserves_fixed_anchor_body_cost(self):
         result = fit_nonnegative_opcode_bodies(
             equations=(

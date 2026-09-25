@@ -251,10 +251,13 @@ not clamp individual negative reconstructions to zero or silently drop relations
 The sealed review-only core submodel has two explicit static exceptions. NOT (`0x19`) and JUMPDEST
 (`0x5b`) are dispatch-only: their opcode-specific body coefficients are fixed to zero and are not
 solver columns, but their events still pay `common_dispatch` exactly once. Relations containing
-either key are retained as declared-approximation evidence with observed slope, prediction,
-absolute residual, and ordinary diagnostic error. They do not enter the nonzero MAPE/maximum-APE or
-exact-flat admission gates. Unknown, anchor, duplicate, or unobserved dispatch-only keys invalidate
-the policy rather than silently widening it.
+either key remain source evidence. When every referenced opcode has a final typed model, schema-3
+replays the relation with its observed slope, prediction, absolute residual, and ordinary diagnostic
+error. A static opcode supported only by dispatch-dependent relations is instead explicit
+unsupported coverage; those relations retain their source identity and observed slope but do not
+fabricate a numeric prediction or residual. Numerically replayed declared approximations do not enter
+the nonzero MAPE/maximum-APE or exact-flat admission gates. Unknown, anchor, duplicate, or unobserved
+dispatch-only keys invalidate the policy rather than silently widening it.
 
 Structured dynamic models replace the static calculation for their opcode. They do not add a
 correction to an already dynamic total-raw-gas multiplier.

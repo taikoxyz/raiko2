@@ -15,12 +15,14 @@ import opcode_gas
 class DerivedCoreEvidenceTests(unittest.TestCase):
     """Exercise derived publication without requiring guest execution fixtures."""
 
-    source_revision = "a" * 40
+    source_revision = opcode_gas.git_head()
     derivation_revision = "b" * 40
 
-    def _source_run(self, root: pathlib.Path) -> tuple[pathlib.Path, dict]:
+    def _source_run(
+        self, root: pathlib.Path, *, implementation_revision: str | None = None
+    ) -> tuple[pathlib.Path, dict]:
         identity = {
-            "implementation_revision": self.source_revision,
+            "implementation_revision": implementation_revision or self.source_revision,
             "alethia_reth_revision": "c" * 40,
             "complete_schedule_sha256": "d" * 64,
             "controlled_manifest_sha256": "e" * 64,
@@ -94,6 +96,16 @@ class DerivedCoreEvidenceTests(unittest.TestCase):
         (source / "block-calibration-rows.jsonl").write_text('{"block": true}\n')
         return source, declaration
 
+    def _declared_anchor_fixture(
+        self, source: pathlib.Path
+    ) -> tuple[dict, pathlib.Path, str]:
+        relative = pathlib.Path("EXP/1/target/guest-input.json")
+        fixture_path = source / "generated" / "anchor-probe" / relative
+        fixture_path.parent.mkdir(parents=True)
+        fixture_path.write_text('{"fixture": true}\n')
+        source_relative = str(pathlib.Path("generated/anchor-probe") / relative)
+        return {"fixtures": [{"guest_input_path": str(relative)}]}, fixture_path, source_relative
+
     def _replay_values(self, declaration: dict) -> tuple[dict, dict, dict, dict]:
         relation = {
             "artifact_sha256": "4" * 64,
@@ -129,6 +141,7 @@ class DerivedCoreEvidenceTests(unittest.TestCase):
             fit_dynamic_opcode_models_artifact=mock.DEFAULT,
             build_core_opcode_submodel_artifact=mock.DEFAULT,
             validate_core_opcode_submodel_artifact=mock.DEFAULT,
+            _validated_anchor_probe_fixture_manifest=mock.DEFAULT,
         ), relation, anchor, dynamic or default_dynamic, core or default_core
 
     def _configure_replay(
@@ -160,6 +173,10 @@ class DerivedCoreEvidenceTests(unittest.TestCase):
         patched["fit_dynamic_opcode_models_artifact"].return_value = dynamic
         patched["build_core_opcode_submodel_artifact"].return_value = core
         patched["validate_core_opcode_submodel_artifact"].return_value = core
+        patched["_validated_anchor_probe_fixture_manifest"].return_value = (
+            {"fixtures": []},
+            {},
+        )
 
     def test_derives_historical_source_at_current_analysis_revision_without_execution(self):
         """A current analysis may derive only from a sealed historical identity."""
@@ -231,6 +248,113 @@ class DerivedCoreEvidenceTests(unittest.TestCase):
                 },
                 source_before,
             )
+
+    def test_envelope_hashes_each_anchor_fixture_consumed_by_validation(self):
+        """Every validated anchor guest input is bound in the source-file envelope."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            source, declaration = self._source_run(root)
+            anchor_manifest, fixture_path, source_relative = self._declared_anchor_fixture(
+                source
+            )
+            replay_patch, relation, anchor, dynamic, core = self._patch_replay(
+                declaration
+            )
+            with replay_patch as patched, mock.patch.object(
+                opcode_gas, "git_head", return_value=self.derivation_revision
+            ), mock.patch.object(opcode_gas, "git_worktree_status", return_value=""):
+                self._configure_replay(
+                    patched,
+                    source=source,
+                    declaration=declaration,
+                    relation=relation,
+                    anchor=anchor,
+                    dynamic=dynamic,
+                    core=core,
+                )
+                patched["_validated_anchor_probe_fixture_manifest"].return_value = (
+                    anchor_manifest,
+                    {},
+                )
+                result = opcode_gas.derive_core_opcode_submodel(
+                    source, root / "derivations"
+                )
+            envelope = json.loads(
+                (pathlib.Path(result["directory"]) / "derivation.json").read_text()
+            )
+            self.assertEqual(
+                envelope["source"]["source_hashes"]["source_files_sha256"][
+                    source_relative
+                ],
+                opcode_gas.sha256_file(fixture_path),
+            )
+
+    def test_anchor_fixture_mutation_after_validation_rejects_publication(self):
+        """A changed validated guest input is detected by the final source rehash."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            source, declaration = self._source_run(root)
+            anchor_manifest, fixture_path, _source_relative = self._declared_anchor_fixture(
+                source
+            )
+            replay_patch, relation, anchor, dynamic, core = self._patch_replay(
+                declaration
+            )
+            with replay_patch as patched, mock.patch.object(
+                opcode_gas, "git_head", return_value=self.derivation_revision
+            ), mock.patch.object(opcode_gas, "git_worktree_status", return_value=""):
+                self._configure_replay(
+                    patched,
+                    source=source,
+                    declaration=declaration,
+                    relation=relation,
+                    anchor=anchor,
+                    dynamic=dynamic,
+                    core=core,
+                )
+                patched["_validated_anchor_probe_fixture_manifest"].return_value = (
+                    anchor_manifest,
+                    {},
+                )
+
+                def mutate_anchor_fixture(*_args, **_kwargs):
+                    fixture_path.write_text('{"fixture": "mutated"}\n')
+                    return {"artifact_sha256": "a" * 64}
+
+                patched["fit_block_calibration_artifact"].side_effect = mutate_anchor_fixture
+                with self.assertRaisesRegex(ValueError, "source evidence changed"):
+                    opcode_gas.derive_core_opcode_submodel(
+                        source, root / "derivations"
+                    )
+            self.assertFalse((root / "derivations").exists())
+
+    def test_rejects_syntactically_valid_historical_revision_missing_locally(self):
+        """A historical identity must name a locally available commit object."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            source, declaration = self._source_run(
+                root, implementation_revision="0" * 40
+            )
+            replay_patch, relation, anchor, dynamic, core = self._patch_replay(
+                declaration
+            )
+            with replay_patch as patched, mock.patch.object(
+                opcode_gas, "git_head", return_value=self.derivation_revision
+            ), mock.patch.object(opcode_gas, "git_worktree_status", return_value=""):
+                self._configure_replay(
+                    patched,
+                    source=source,
+                    declaration=declaration,
+                    relation=relation,
+                    anchor=anchor,
+                    dynamic=dynamic,
+                    core=core,
+                )
+                with self.assertRaisesRegex(ValueError, "local commit"):
+                    opcode_gas.derive_core_opcode_submodel(
+                        source, root / "derivations"
+                    )
+            self.assertFalse((root / "derivations").exists())
 
     def test_rejects_every_material_source_validation_failure_without_publication(self):
         """A failed sealed-source check cannot leave a derived directory behind."""

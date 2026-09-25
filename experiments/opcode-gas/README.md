@@ -182,10 +182,12 @@ a guest, opens a proposal, or changes the source calibration directory.
   --out-root experiments/opcode-gas/derivations
 ```
 
-The command requires a clean analysis checkout, replays the source experiment and
-provenance identity, frozen manifest, all adaptive relation round hashes, accepted
-relation artifact, anchor fixture/raw/fit chain, and raw block rows. It publishes a
-new create-only directory `experiments/opcode-gas/derivations/<derivation-id>/` with
+The command requires a clean analysis checkout and a locally resolvable historical
+implementation commit. It replays the source experiment and provenance identity,
+frozen manifest, all adaptive relation round hashes, accepted relation artifact, every
+validated anchor guest-input byte and its fixture/raw/fit chain, and raw block rows.
+It rehashes that same exact source-file set at the end of replay. It publishes a new
+create-only directory `experiments/opcode-gas/derivations/<derivation-id>/` with
 `derivation.json`, `dynamic-opcode-models.json`, and `core-opcode-submodel.json` only
 after dynamic support and core exact replay both succeed. An unsupported dynamic result,
 static rank failure, or replay failure publishes no derivation directory or partial file.

@@ -21,7 +21,7 @@ from dataclasses import asdict, dataclass, field, replace
 from decimal import Context, Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
 from fractions import Fraction
 from types import MappingProxyType
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, Sequence
 
 from calibration_model import (
     AffineOpcodeModel,
@@ -9520,6 +9520,24 @@ def git_head(source_root: pathlib.Path = REPO_ROOT) -> str:
     return subprocess.run(["git", "rev-parse", "HEAD"], cwd=source_root, check=True, capture_output=True, text=True).stdout.strip()
 
 
+def git_has_local_commit(
+    revision: str, source_root: pathlib.Path = REPO_ROOT
+) -> bool:
+    """Return whether a validated revision resolves to a local commit object."""
+    if not _is_git_revision(revision):
+        return False
+    return (
+        subprocess.run(
+            ["git", "cat-file", "-e", f"{revision}^{{commit}}"],
+            cwd=source_root,
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        ).returncode
+        == 0
+    )
+
+
 def git_worktree_status(source_root: pathlib.Path = REPO_ROOT) -> str:
     return subprocess.run(["git", "status", "--porcelain"], cwd=source_root, check=True, capture_output=True, text=True).stdout
 
@@ -14120,6 +14138,8 @@ def _validated_historical_calibration_source(
     declaration = experiment_provenance_declaration(experiment)
     if declaration["calibration_id"] != source_run.name:
         raise ValueError("derived source calibration_id does not match directory")
+    if not git_has_local_commit(str(declaration["implementation_revision"])):
+        raise ValueError("derived source implementation revision is not a local commit")
     if json.loads(provenance_path.read_text()) != declaration:
         raise ValueError(
             "derived source persisted calibration provenance differs from identity"
@@ -14130,8 +14150,46 @@ def _validated_historical_calibration_source(
     return identity, declaration
 
 
+def _anchor_probe_fixture_source_paths(
+    source_run: pathlib.Path, manifest: Mapping[str, Any]
+) -> tuple[str, ...]:
+    """Return the exact contained guest-input paths from a validated anchor manifest."""
+    fixtures_dir = source_run / "generated" / "anchor-probe"
+    fixtures_root = fixtures_dir.resolve()
+    fixture_rows = manifest.get("fixtures")
+    if not isinstance(fixture_rows, list):
+        raise ValueError("derived source anchor fixture manifest is invalid")
+    source_paths: set[str] = set()
+    for fixture in fixture_rows:
+        if not isinstance(fixture, Mapping) or not isinstance(
+            fixture.get("guest_input_path"), str
+        ):
+            raise ValueError("derived source anchor fixture path is invalid")
+        relative = pathlib.Path(str(fixture["guest_input_path"]))
+        if (
+            relative.is_absolute()
+            or relative == pathlib.Path(".")
+            or ".." in relative.parts
+        ):
+            raise ValueError("derived source anchor fixture path is invalid")
+        candidate = fixtures_dir / relative
+        try:
+            resolved = candidate.resolve(strict=True)
+        except FileNotFoundError as error:
+            raise ValueError("derived source anchor fixture is missing") from error
+        if not resolved.is_relative_to(fixtures_root) or not resolved.is_file():
+            raise ValueError("derived source anchor fixture path escapes fixture root")
+        source_relative = str(pathlib.Path("generated") / "anchor-probe" / relative)
+        if source_relative in source_paths:
+            raise ValueError("derived source anchor fixture path is duplicated")
+        source_paths.add(source_relative)
+    return tuple(sorted(source_paths))
+
+
 def _derivation_source_file_hashes(
-    source_run: pathlib.Path, decisions: Mapping[str, Any]
+    source_run: pathlib.Path,
+    decisions: Mapping[str, Any],
+    anchor_fixture_paths: Sequence[str],
 ) -> dict[str, str]:
     """Hash every immutable file consumed by a core-opcode derivation."""
     relative_paths = [
@@ -14148,6 +14206,7 @@ def _derivation_source_file_hashes(
         "generated/anchor-probe/anchor-probe-manifest.json",
         "block-calibration-rows.jsonl",
     ]
+    relative_paths.extend(anchor_fixture_paths)
     rounds = decisions.get("rounds")
     if not isinstance(rounds, list):
         raise ValueError("derived source formal relation decisions are invalid")
@@ -14289,9 +14348,6 @@ def derive_core_opcode_submodel(
     formal = load_terminal_formal_relation_artifacts(
         source_run, manifest, relation_provenance
     )
-    source_files_before = _derivation_source_file_hashes(
-        source_run, formal["decisions"]
-    )
     relation_artifact = json.loads((source_run / "opcode-relations.json").read_text())
     validate_opcode_relations_artifact(
         manifest, relation_artifact, formal["rows"], relation_provenance
@@ -14299,6 +14355,26 @@ def derive_core_opcode_submodel(
     anchor_artifact = json.loads((source_run / "anchor-probe-fit.json").read_text())
     _anchor_body_costs, anchor_rows = load_validated_anchor_probe_run(
         source_run, anchor_artifact, source_identity
+    )
+    guest_artifacts = source_identity.get("guest_artifacts")
+    expected_elf = (
+        guest_artifacts.get("crates/guests/elf/sp1_opcode_lab.elf")
+        if isinstance(guest_artifacts, Mapping)
+        else None
+    )
+    if not _is_sha256(expected_elf):
+        raise ValueError("derived source calibration identity has no opcode-lab ELF")
+    anchor_manifest, _anchor_fixture_inventory = (
+        _validated_anchor_probe_fixture_manifest(
+            source_run / "generated" / "anchor-probe",
+            expected_elf_sha256=str(expected_elf),
+        )
+    )
+    anchor_fixture_paths = _anchor_probe_fixture_source_paths(
+        source_run, anchor_manifest
+    )
+    source_files_before = _derivation_source_file_hashes(
+        source_run, formal["decisions"], anchor_fixture_paths
     )
     block_rows = list(iter_jsonl(source_run / "block-calibration-rows.jsonl"))
     affine_model = _affine_model_from_validated_artifact(manifest, relation_artifact)
@@ -14363,7 +14439,7 @@ def derive_core_opcode_submodel(
     ):
         raise ValueError("derived source artifact hashes are invalid")
     if source_files_before != _derivation_source_file_hashes(
-        source_run, formal["decisions"]
+        source_run, formal["decisions"], anchor_fixture_paths
     ):
         raise ValueError("derived source evidence changed during replay")
 

@@ -414,10 +414,12 @@ schema-1 core artifacts are older formats; none of them is reinterpreted under t
 When an implementation correction changes only post-processing of immutable controlled evidence,
 it may be sealed as a separate `core_opcode_postprocess_derivation`, never by overwriting the
 source calibration run or relabeling its identity. The derivation binds the historical calibration
-identity/revision, frozen manifest, formal decision ledger and terminal raw rows, relation artifact,
-anchor fixture/raw/fit chain, block-row replay, and byte hashes for every consumed source file. It
-also binds the clean analysis revision and declared fitting basis that produced the new schema-4 and
-schema-3 outputs. A derived directory is create-only, remains `candidate_eligible=false`, and is not
+identity/revision (which must resolve to a local commit), frozen manifest, formal decision ledger and
+terminal raw rows, relation artifact, every validated anchor guest-input byte and its fixture/raw/fit
+chain, block-row replay, and byte hashes for every consumed source file. It rehashes that exact path
+set after replay. It also binds the clean analysis revision and declared fitting basis that produced
+the new schema-4 and schema-3 outputs. A derived directory is create-only, remains
+`candidate_eligible=false`, and is not
 a measurement run, a candidate component, or authorization to execute proposal validation. If the
 source replay, dynamic support, or static rank check fails, it publishes no derivation directory
 or partial artifact; it must never manufacture a core artifact.

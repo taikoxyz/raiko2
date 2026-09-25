@@ -249,11 +249,12 @@ that references that key is retained as source evidence but has the final outcom
 `unmeasured_unsupported`, with no invented numeric prediction or residual. All fully modeled
 relations, including `MLOAD - NOT`, are replayed numerically from the final typed registry.
 
-Relations containing either dispatch-only key retain their slopes, final typed-registry predictions,
-residuals, and diagnostic error, but cannot fit another static coefficient or enter the ordinary 5%
-MAPE, 10% maximum-APE, or exact-flat admission gates. Schema-3 core artifacts retain the static-fit
-diagnostics separately and serialize every relation prediction in the final typed registry's
-lab-body basis, after dynamic-model replacement.
+Relations containing either dispatch-only key remain source evidence but cannot fit another static
+coefficient or enter the ordinary 5% MAPE, 10% maximum-APE, or exact-flat admission gates. When all
+referenced opcodes are modeled, schema-3 records the final typed-registry prediction, residual, and
+diagnostic error. A relation whose static target has only dispatch-dependent evidence instead records
+the observed slope and explicit unsupported outcome without fabricating a prediction or residual.
+Schema-3 retains the static-fit diagnostics separately from this final-registry replay.
 
 The core inventory has 102 of the 150 named Unzen opcodes. A schema-3 artifact may explicitly omit
 a core key only under the zero-eligible-coefficient policy above; all other named opcodes outside the
@@ -290,24 +291,25 @@ changed.
 P1 basis correction: the preceding schema-2 core artifact is preserved historical evidence, not a
 current core model. It allowed a dispatch-containing equation to contribute to static NNLS and kept
 pre-replacement static predictions after typed dynamic models were installed. The sealed raw stream
-can be refit in memory under the declared-zero dynamic-control basis: the dynamic result remains
-`supported` with exact aggregate rank 14/14 (transient digest
-`6b2225662e4bd678d8a9e94983b5ebeccf173a92d358d5072604419c962dcfa8`). No run artifact was
-overwritten.
+was refit under the declared-zero dynamic-control basis through derivation
+`3e1d97c461cd2ef9a40e6a02`, produced by analysis revision `a99f8933`. The schema-4 dynamic result
+remains `supported` with exact aggregate rank 14/14 and digest
+`6b2225662e4bd678d8a9e94983b5ebeccf173a92d358d5072604419c962dcfa8`.
 
 The reduced static system has 90 non-anchor, non-dispatch columns and exact rank 89;
 `opcode:0x15` is the sole zero column. Its only rank-restoring relation,
 `opcode:0x15:canonical`, uses NOT and is therefore explicitly marked
-`only_dispatch_dependent_evidence`. The resulting transient schema-3 core build is
+`only_dispatch_dependent_evidence`. The resulting sealed schema-3 core build is
 `supported_core_submodel`, models 101/150 named opcodes, and has digest
 `900964c9e64af23c35e71d05f118c519d7b9dfee5263d201af7f850b9de8c964`.
 `opcode:0x15:canonical` is preserved as `unmeasured_unsupported`; the actual MLOAD-NOT final
 typed-registry prediction is `223.8117854914965440220973490660719690350`, versus observed
 `223.9341397849462365591397849462365591398` (absolute residual
-`0.1223542934496925370424358801645901048`). No run artifact was overwritten, and no guest
-execution, proposal row, production table, or configuration change was made for this correction.
-The corresponding derivation directory is intentionally not present until the
-create-only command above is run and independently reviewed.
+`0.1223542934496925370424358801645901048`). The derivation envelope digest is
+`b61fda990d258ea8dbb909572d0df8efb12adca0b14e8bb01bc8f2c437a33115`; it binds 70 directly
+hashed source files, including all 48 anchor GuestInputs. The historical run was not overwritten,
+and no guest execution, proposal row, production table, or configuration change was made for this
+correction.
 
 Fresh sealing run `ff00067694b841894e53c921`, frozen at implementation revision `26f899ea`,
 accepted all 170 formal relations after the frozen adaptive rounds. The independent nonnegative

@@ -799,3 +799,16 @@ network/proposal identity before invoking guest-launcher.
 - Add real proposal/app attribution so damage reports can show normal-workload `zk_util` percentiles
   and top opcode/precompile contributors, not only synthetic attack surfaces.
 - Keep SP1 `prover_gas` and RISC0 cycle budgets separate until a calibrated common cost unit exists.
+
+### Abandoned calibration incident: `cbc3b94abe5a18e53fc75f13`
+
+This directory is preserved as abandoned operational evidence, not a model or
+proposal conclusion. During the generator-max-128 relation round, the sealed
+ledger recorded raw SHA256
+`678f57f4d8714a0eb8964248fe783d6a566a89ffec7d4993335117993a6b75cd`, but a
+concurrent writer later overwrote the raw file with SHA256
+`7c7b1b29cd56bf5f73baede14feebe982c3dc03d8ea55a7a4f80dfb63f5d1b36`.
+The round result and ledger otherwise remain sealed, but their source hash
+mismatch makes the adaptive campaign invalid and unrecoverable through the
+normal resume command. No model was built, no production table or configuration
+changed, and no proposal row was opened.

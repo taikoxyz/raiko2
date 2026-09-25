@@ -2403,6 +2403,14 @@ def relation_matched_control_spec(
             target_post_suffix_padding=reference_program,
             control_post_suffix_padding=bytes([NOT_OPCODE]),
         )
+    dynamic_key = (
+        f"opcode:0x{case.opcode:02x}" if case.opcode is not None else None
+    )
+    if dynamic_key in DYNAMIC_RAW_GAS_KEYS:
+        if not scenario:
+            raise ValueError("dynamic relation scenario is required")
+        _dynamic_opcode_features(dynamic_key, scenario)
+        _dynamic_relation_target_raw_gas(case, scenario)
     base = matched_control_spec(case)
     if not scenario:
         return base

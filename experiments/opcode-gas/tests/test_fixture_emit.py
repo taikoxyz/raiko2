@@ -491,6 +491,86 @@ class FixtureEmitTests(unittest.TestCase):
                 first_programs[(initial_words, "control")][:warmup_len],
             )
 
+    def test_formal_exp_zero_fixture_validator_rejects_noncanonical_byte_lengths(self):
+        manifest = opcode_gas.load_manifest(
+            ROOT
+            / "experiments"
+            / "opcode-gas"
+            / "manifests"
+            / "sp1-calibration-v1.toml",
+            schedule=fixture_schedule(),
+        )
+        zero_relation = next(
+            relation
+            for relation in manifest.opcode_relations
+            if relation.id == "opcode:0x0a:exp-bytes-0"
+        )
+        manifest = replace(manifest, variants=[1], opcode_relations=(zero_relation,))
+        with tempfile.TemporaryDirectory() as tmp:
+            written = opcode_gas.generate_relation_cases(
+                manifest,
+                pathlib.Path(tmp),
+                provenance=diagnostic_provenance(),
+                generator_max_count=8,
+            )
+            rows = [opcode_gas.json.loads(path.read_text()) for path in written]
+
+        target = next(
+            row
+            for row in rows
+            if row["lane"] == "target"
+            and row["relation_placement"] == "active_prefix"
+            and row["diagnostic_count"] == 1
+        )
+        control = next(
+            row
+            for row in rows
+            if row["lane"] == "control"
+            and row["relation_placement"] == "active_prefix"
+            and row["diagnostic_count"] == 1
+        )
+        pair_spec = opcode_gas._matched_control_pair_spec(target, control)
+
+        for invalid_scenario in (
+            {"exponent_byte_length": 0.5, "initial_memory_words": 0},
+            {"exponent_byte_length": -0.5, "initial_memory_words": 0},
+            {"exponent_byte_length": False, "initial_memory_words": 0},
+            {"exponent_byte_length": "0", "initial_memory_words": 0},
+            {},
+        ):
+            with self.subTest(invalid_scenario=invalid_scenario):
+                invalid_pair_spec = dict(pair_spec)
+                invalid_pair_spec["workload"] = {
+                    **pair_spec["workload"],
+                    "relation_scenario": invalid_scenario,
+                }
+                invalid_pair_id = opcode_gas.sha256_bytes(
+                    opcode_gas.canonical_json(
+                        {
+                            "kind": "matched_control_pair",
+                            "pair_spec": invalid_pair_spec,
+                        }
+                    )
+                )
+                invalid_target = {
+                    **target,
+                    "relation_scenario": invalid_scenario,
+                    "pair_id": invalid_pair_id,
+                }
+                invalid_control = {
+                    **control,
+                    "relation_scenario": invalid_scenario,
+                    "pair_id": invalid_pair_id,
+                }
+
+                with self.assertRaisesRegex(
+                    ValueError, "EXP|dynamic (opcode|relation) scenario"
+                ):
+                    opcode_gas.validate_matched_control_fixture_pairs(
+                        [invalid_target, invalid_control],
+                        expected_purpose=opcode_gas.FORMAL_RELATION_PURPOSE,
+                    )
+
     def test_formal_relation_model_split_is_required_and_fail_closed(self):
         manifest = opcode_gas.load_manifest(
             ROOT

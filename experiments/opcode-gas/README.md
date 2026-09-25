@@ -155,6 +155,12 @@ it with a discovered or manually selected run directory.
   --runs "$CALIBRATION_RUN/block-calibration-rows.jsonl" \
   --controlled-manifest experiments/opcode-gas/manifests/sp1-calibration-v1.toml \
   --out "$CALIBRATION_RUN/dynamic-opcode-models.json"
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py build-core-opcode-submodel \
+  --calibration-run "$CALIBRATION_RUN" \
+  --controlled-manifest experiments/opcode-gas/manifests/sp1-calibration-v1.toml \
+  --relations "$CALIBRATION_RUN/opcode-relations.json" \
+  --dynamic-models "$CALIBRATION_RUN/dynamic-opcode-models.json" \
+  --out "$CALIBRATION_RUN/core-opcode-submodel.json"
 ~/.venv/bin/python experiments/opcode-gas/opcode_gas.py fit-block-calibration \
   --relations "$CALIBRATION_RUN/opcode-relations.json" \
   --anchor-probe "$CALIBRATION_RUN/anchor-probe-fit.json" \
@@ -186,6 +192,13 @@ MCOPY      = beta_0 + beta_w * copy_words + f_mem
 
 production_cost = body_scale * body_cost + common_opcode_overhead
 ```
+
+`build-core-opcode-submodel` independently replays the accepted relation and schema-3 dynamic
+evidence, fits nonnegative static opcode bodies, stores common dispatch exactly once, and replaces
+the six structured opcodes above with typed models. Its content-addressed output covers 102 of the
+150 named Unzen opcodes; the other 48 named opcodes remain explicitly unsupported. This is a
+partial, `candidate_eligible=false` artifact. It cannot open or participate in proposal validation;
+the remaining opcode families and higher estimator layers must be calibrated and sealed first.
 
 Run `25db29d91bd3311441fe8317` showed that the former linear 4-KiB page-count term fit its training
 rows (production MAPE 0.259%, maximum APE 1.103%) and passed the `0x0800` and `0x0fe0` holdouts, but

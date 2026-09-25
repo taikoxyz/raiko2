@@ -2550,6 +2550,28 @@ class DynamicOpcodeModelTests(unittest.TestCase):
         )
         self.assertFalse(hasattr(candidate, "dynamic_opcode_models"))
 
+    def test_build_core_opcode_submodel_cli_has_exact_source_arguments(self):
+        args = opcode_gas.build_parser().parse_args(
+            [
+                "build-core-opcode-submodel",
+                "--calibration-run", "run",
+                "--controlled-manifest", "manifest.toml",
+                "--relations", "run/opcode-relations.json",
+                "--dynamic-models", "run/dynamic-opcode-models.json",
+                "--out", "run/core-opcode-submodel.json",
+            ]
+        )
+
+        self.assertEqual(args.command, "build-core-opcode-submodel")
+        self.assertEqual(args.calibration_run, pathlib.Path("run"))
+        self.assertEqual(args.controlled_manifest, pathlib.Path("manifest.toml"))
+        self.assertEqual(args.relations, pathlib.Path("run/opcode-relations.json"))
+        self.assertEqual(
+            args.dynamic_models, pathlib.Path("run/dynamic-opcode-models.json")
+        )
+        self.assertEqual(args.out, pathlib.Path("run/core-opcode-submodel.json"))
+        self.assertTrue(callable(args.func))
+
     def test_dynamic_quality_failure_returns_content_addressed_diagnostic(self):
         dynamic_key = "opcode:0x0a"
         static_key = "opcode:0x50"

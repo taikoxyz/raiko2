@@ -31,9 +31,17 @@ from calibration_model import (
     derive_affine_opcode_model,
     exact_rank,
     fit_block_calibration,
+    fit_nonnegative_opcode_bodies,
     fit_structured_dynamic_opcode_models,
     reconstruct_lab_multipliers,
     validate_dynamic_holdouts,
+)
+from hierarchical_model import (
+    ModelKind,
+    ModelSpec,
+    OpcodeEvent,
+    OpcodeRegistry,
+    predict_opcode_event,
 )
 
 
@@ -12806,6 +12814,721 @@ def fit_dynamic_opcode_models_artifact(
     return artifact
 
 
+_CORE_OPCODE_SUBMODEL_SCHEMA_VERSION = 1
+_DYNAMIC_MODEL_EVIDENCE_FIELDS = frozenset(
+    {
+        "status",
+        "parameter_order",
+        "exact_fit_rank",
+        "parameter_count",
+        "observation_count",
+        "fit_count",
+        "holdout_count",
+        "body_coefficients",
+        "production_coefficients",
+        "fit_body_mape",
+        "fit_body_max_ape",
+        "holdout_body_max_ape",
+        "fit_production_mape",
+        "fit_production_max_ape",
+        "holdout_production_max_ape",
+        "quality_failures",
+        "exact_fit_matrix",
+        "solver_column_scales",
+        "solver_residual",
+        "predictions",
+    }
+)
+_SHARED_MEMORY_PARAMETER_ORDER = (
+    "opcode:0x51:constant",
+    "opcode:0x52:constant",
+    "opcode:0x53:constant",
+    "memory_growth_event",
+    "memory_evm_gas_delta",
+    "memory_4k_boundary_event",
+)
+_DYNAMIC_OPERATION_PARAMETER_ORDERS = MappingProxyType(
+    {
+        "opcode:0x0a": (
+            "constant",
+            "exponent_bytes",
+            "exponent_bytes_squared",
+        ),
+        "opcode:0x20": (
+            "constant",
+            "keccak_zero_length_event",
+            "keccak_permutations",
+        ),
+        "opcode:0x5e": ("constant", "copy_words"),
+    }
+)
+_DYNAMIC_REGISTRY_PARAMETER_NAMES = MappingProxyType(
+    {
+        "exponent_bytes": "exponent_byte",
+        "exponent_bytes_squared": "exponent_byte_sq",
+        "keccak_zero_length_event": "zero_length_event",
+        "keccak_permutations": "permutation",
+        "copy_words": "copy_words",
+        "constant": "constant",
+    }
+)
+_DYNAMIC_QUALITY_GATES = MappingProxyType(
+    {
+        "fit_production_mape_max": "0.05",
+        "fit_production_max_ape_max": "0.10",
+        "holdout_production_max_ape_max": "0.10",
+    }
+)
+
+
+def _canonical_artifact_decimal(
+    value: Any,
+    *,
+    label: str,
+    nonnegative: bool = False,
+    positive: bool = False,
+) -> Decimal:
+    parsed = _decimal(value, label=label)
+    if not isinstance(value, str) or _decimal_text(parsed) != value:
+        raise ValueError(f"{label} must be a canonical Decimal string")
+    if positive and parsed <= 0:
+        raise ValueError(f"{label} must be positive")
+    if nonnegative and parsed < 0:
+        raise ValueError(f"{label} must be nonnegative")
+    return parsed
+
+
+def _validate_dynamic_prediction_evidence(
+    evidence: Mapping[str, Any], *, label: str, operation_specific: bool
+) -> None:
+    predictions = evidence.get("predictions")
+    if (
+        not isinstance(predictions, Mapping)
+        or len(predictions) != evidence["observation_count"]
+    ):
+        raise ValueError(f"schema-3 {label} predictions count differs")
+    common_fields = {
+        "model_split",
+        "actual_body_cost",
+        "predicted_body_cost",
+        "body_ape",
+        "actual_production_cost",
+        "predicted_production_cost",
+        "production_ape",
+    }
+    expected_fields = common_fields | (
+        {"predicted_operation_body_cost", "shared_memory_body_cost"}
+        if operation_specific
+        else set()
+    )
+    split_counts = {"fit": 0, "holdout": 0}
+    for prediction_id, row in predictions.items():
+        if (
+            not isinstance(prediction_id, str)
+            or not prediction_id
+            or not isinstance(row, Mapping)
+            or set(row) != expected_fields
+            or row.get("model_split") not in split_counts
+        ):
+            raise ValueError(f"schema-3 {label} prediction evidence is invalid")
+        split_counts[str(row["model_split"])] += 1
+        for field in expected_fields - {"model_split"}:
+            value = _canonical_artifact_decimal(
+                row.get(field), label=f"schema-3 {label} prediction {field}"
+            )
+            if value < 0:
+                raise ValueError(
+                    f"schema-3 {label} prediction additive cost or APE is negative"
+                )
+    if split_counts != {
+        "fit": evidence["fit_count"],
+        "holdout": evidence["holdout_count"],
+    }:
+        raise ValueError(f"schema-3 {label} prediction splits differ")
+
+
+def _validate_dynamic_model_evidence(
+    evidence: Any,
+    *,
+    label: str,
+    parameter_order: tuple[str, ...],
+    body_scale: Decimal,
+    common_dispatch: Decimal,
+    operation_specific: bool,
+    signed_parameters: frozenset[str] = frozenset(),
+) -> dict[str, Decimal]:
+    if not isinstance(evidence, Mapping) or set(evidence) != _DYNAMIC_MODEL_EVIDENCE_FIELDS:
+        raise ValueError(f"schema-3 {label} evidence schema is invalid")
+    parameter_count = len(parameter_order)
+    integer_fields = (
+        "exact_fit_rank",
+        "parameter_count",
+        "observation_count",
+        "fit_count",
+        "holdout_count",
+    )
+    if (
+        evidence.get("status") != "supported"
+        or evidence.get("parameter_order") != list(parameter_order)
+        or any(type(evidence.get(field)) is not int for field in integer_fields)
+        or evidence.get("exact_fit_rank") != parameter_count
+        or evidence.get("parameter_count") != parameter_count
+        or evidence.get("fit_count", 0) < parameter_count
+        or evidence.get("holdout_count", 0) <= 0
+        or evidence.get("observation_count")
+        != evidence.get("fit_count", 0) + evidence.get("holdout_count", 0)
+        or evidence.get("quality_failures") != []
+    ):
+        raise ValueError(f"schema-3 {label} support/rank/count evidence is invalid")
+
+    body_raw = evidence.get("body_coefficients")
+    production_raw = evidence.get("production_coefficients")
+    if (
+        not isinstance(body_raw, Mapping)
+        or set(body_raw) != set(parameter_order)
+        or not isinstance(production_raw, Mapping)
+        or set(production_raw) != set(parameter_order)
+    ):
+        raise ValueError(f"schema-3 {label} coefficient schema is invalid")
+    body = {
+        name: _canonical_artifact_decimal(
+            body_raw[name],
+            label=f"schema-3 {label} body coefficient {name}",
+            nonnegative=name not in signed_parameters,
+        )
+        for name in parameter_order
+    }
+    production = {
+        name: _canonical_artifact_decimal(
+            production_raw[name],
+            label=f"schema-3 {label} production coefficient {name}",
+        )
+        for name in parameter_order
+    }
+    expected_production = {
+        name: value * body_scale
+        + (
+            common_dispatch
+            if name == "constant" or name.endswith(":constant")
+            else Decimal(0)
+        )
+        for name, value in body.items()
+    }
+    if production != expected_production:
+        raise ValueError(
+            f"schema-3 {label} production coefficients differ from body conversion"
+        )
+
+    quality_values = {}
+    for field in (
+        "fit_body_mape",
+        "fit_body_max_ape",
+        "holdout_body_max_ape",
+        "fit_production_mape",
+        "fit_production_max_ape",
+        "holdout_production_max_ape",
+        "solver_residual",
+    ):
+        quality_values[field] = _canonical_artifact_decimal(
+            evidence.get(field), label=f"schema-3 {label} {field}", nonnegative=True
+        )
+    if (
+        quality_values["fit_production_mape"] > Decimal("0.05")
+        or quality_values["fit_production_max_ape"] > Decimal("0.10")
+        or quality_values["holdout_production_max_ape"] > Decimal("0.10")
+    ):
+        raise ValueError(f"schema-3 {label} independent quality gate failed")
+    matrix = evidence.get("exact_fit_matrix")
+    if (
+        not isinstance(matrix, list)
+        or len(matrix) != evidence["fit_count"]
+        or any(not isinstance(row, list) or len(row) != parameter_count for row in matrix)
+    ):
+        raise ValueError(f"schema-3 {label} exact fit matrix is invalid")
+    exact_matrix = [
+        [_parse_fraction_text(value) for value in row] for row in matrix
+    ]
+    if exact_rank(exact_matrix) != parameter_count:
+        raise ValueError(f"schema-3 {label} exact rank differs from parameter count")
+    scales = evidence.get("solver_column_scales")
+    if not isinstance(scales, list) or len(scales) != parameter_count:
+        raise ValueError(f"schema-3 {label} solver column scales are invalid")
+    for value in scales:
+        _canonical_artifact_decimal(
+            value, label=f"schema-3 {label} solver column scale", positive=True
+        )
+    _validate_dynamic_prediction_evidence(
+        evidence, label=label, operation_specific=operation_specific
+    )
+    return body
+
+
+def _validate_schema3_dynamic_opcode_artifact(
+    relation_artifact: Mapping[str, Any], dynamic_artifact: Mapping[str, Any]
+) -> tuple[
+    dict[str, Decimal],
+    Decimal,
+    Decimal,
+    dict[str, Decimal],
+    dict[str, dict[str, Decimal]],
+]:
+    expected_fields = {
+        "schema_version",
+        "purpose",
+        "status",
+        "candidate_eligible",
+        "provenance",
+        "source_hashes",
+        "anchor_body_cost_metric",
+        "anchor_body_costs",
+        "transfer_params",
+        "quality_gates",
+        "feature_orders",
+        "shared_memory_model",
+        "aggregate_exact_fit_rank",
+        "aggregate_parameter_count",
+        "models",
+        "artifact_sha256",
+    }
+    _validate_content_addressed_artifact(dynamic_artifact, label="dynamic opcode models")
+    if (
+        set(dynamic_artifact) != expected_fields
+        or type(dynamic_artifact.get("schema_version")) is not int
+        or dynamic_artifact.get("schema_version") != 3
+        or dynamic_artifact.get("purpose") != "dynamic_opcode_models"
+        or dynamic_artifact.get("status") != "supported"
+        or dynamic_artifact.get("candidate_eligible") is not False
+        or dynamic_artifact.get("aggregate_exact_fit_rank") != 14
+        or dynamic_artifact.get("aggregate_parameter_count") != 14
+    ):
+        raise ValueError("schema-3 dynamic opcode artifact header/schema is invalid")
+    if (
+        not isinstance(dynamic_artifact.get("provenance"), Mapping)
+        or not _exact_json_equal(
+            dynamic_artifact.get("provenance"), relation_artifact.get("provenance")
+        )
+        or dynamic_artifact.get("anchor_body_cost_metric") != "prover_gas"
+        or not _exact_json_equal(
+            dynamic_artifact.get("quality_gates"), dict(_DYNAMIC_QUALITY_GATES)
+        )
+        or not _exact_json_equal(
+            dynamic_artifact.get("feature_orders"),
+            {
+                key: list(DYNAMIC_OPCODE_FEATURE_ORDERS[key])
+                for key in DYNAMIC_RAW_GAS_KEYS
+            },
+        )
+    ):
+        raise ValueError("schema-3 dynamic opcode artifact frozen metadata differs")
+    source_hashes = dynamic_artifact.get("source_hashes")
+    expected_source_keys = {
+        "relation_artifact_sha256",
+        "relation_raw_rows_sha256",
+        "anchor_probe_primary_sha256",
+        "raw_block_rows_sha256",
+    }
+    if (
+        not isinstance(source_hashes, Mapping)
+        or set(source_hashes) != expected_source_keys
+        or any(not _is_sha256(value) for value in source_hashes.values())
+        or source_hashes.get("relation_artifact_sha256")
+        != relation_artifact.get("artifact_sha256")
+        or source_hashes.get("relation_raw_rows_sha256")
+        != relation_artifact.get("raw_rows_sha256")
+    ):
+        raise ValueError("dynamic source relation hash agreement is invalid")
+
+    anchor_raw = dynamic_artifact.get("anchor_body_costs")
+    if not isinstance(anchor_raw, Mapping) or set(anchor_raw) != set(OPCODE_RELATION_ANCHORS):
+        raise ValueError("schema-3 dynamic anchor body cost schema is invalid")
+    anchor_body_costs = {
+        key: _canonical_artifact_decimal(
+            anchor_raw[key], label=f"schema-3 anchor body cost {key}", positive=True
+        )
+        for key in OPCODE_RELATION_ANCHORS
+    }
+    transfer = dynamic_artifact.get("transfer_params")
+    if not isinstance(transfer, Mapping) or set(transfer) != set(
+        BLOCK_CALIBRATION_TRANSFER_PARAMETERS
+    ):
+        raise ValueError("schema-3 dynamic transfer parameter schema is invalid")
+    body_scale = _canonical_artifact_decimal(
+        transfer["body_scale"], label="schema-3 body_scale", positive=True
+    )
+    common_dispatch = _canonical_artifact_decimal(
+        transfer["common_opcode_overhead_per_operation"],
+        label="schema-3 common opcode overhead",
+        nonnegative=True,
+    )
+    shared_body = _validate_dynamic_model_evidence(
+        dynamic_artifact.get("shared_memory_model"),
+        label="shared memory model",
+        parameter_order=_SHARED_MEMORY_PARAMETER_ORDER,
+        body_scale=body_scale,
+        common_dispatch=common_dispatch,
+        operation_specific=False,
+    )
+    models = dynamic_artifact.get("models")
+    if not isinstance(models, Mapping) or set(models) != set(
+        _DYNAMIC_OPERATION_PARAMETER_ORDERS
+    ):
+        raise ValueError("schema-3 dynamic operation model set is invalid")
+    model_bodies = {
+        key: _validate_dynamic_model_evidence(
+            models[key],
+            label=f"dynamic model {key}",
+            parameter_order=parameter_order,
+            body_scale=body_scale,
+            common_dispatch=common_dispatch,
+            operation_specific=True,
+            signed_parameters=(
+                frozenset({"keccak_zero_length_event"})
+                if key == "opcode:0x20"
+                else frozenset()
+            ),
+        )
+        for key, parameter_order in _DYNAMIC_OPERATION_PARAMETER_ORDERS.items()
+    }
+    return anchor_body_costs, body_scale, common_dispatch, shared_body, model_bodies
+
+
+def _core_opcode_keys(manifest: Manifest) -> tuple[str, ...]:
+    keys = tuple(
+        f"opcode:0x{case.opcode:02x}"
+        for case in manifest.cases
+        if case.kind == "opcode"
+        and case.opcode is not None
+        and case.opcode in PURE_OPCODE_DEFAULTS
+        and PURE_OPCODE_DEFAULTS[case.opcode][1] == case.template
+    )
+    expected = tuple(f"opcode:0x{opcode:02x}" for opcode in PURE_OPCODE_DEFAULTS)
+    if keys != expected or len(keys) != 102:
+        raise ValueError("core opcode manifest must contain the ordered 102-key inventory")
+    return keys
+
+
+def _core_relation_equations(
+    relation_artifact: Mapping[str, Any], opcode_keys: tuple[str, ...]
+) -> tuple[RelationEquation, ...]:
+    rows = relation_artifact.get("equations")
+    if not isinstance(rows, list) or not rows:
+        raise ValueError("accepted relation artifact has no equations")
+    equations = []
+    relation_ids = set()
+    for row in rows:
+        if not isinstance(row, Mapping):
+            raise ValueError("accepted relation equation is not an object")
+        relation_id = row.get("relation_id")
+        coefficients = row.get("signed_raw_gas_by_key")
+        if (
+            not isinstance(relation_id, str)
+            or not relation_id
+            or relation_id in relation_ids
+            or not isinstance(coefficients, Mapping)
+            or not coefficients
+        ):
+            raise ValueError("accepted relation equation identity/schema is invalid")
+        parsed_coefficients = {
+            str(key): _parse_fraction_text(value)
+            for key, value in coefficients.items()
+        }
+        if set(parsed_coefficients) - set(opcode_keys):
+            raise ValueError("accepted relation equation references an unknown opcode")
+        slope = _canonical_artifact_decimal(
+            row.get("slope_p"), label=f"accepted relation {relation_id} slope"
+        )
+        relation_ids.add(relation_id)
+        equations.append(RelationEquation(relation_id, parsed_coefficients, slope))
+    return tuple(equations)
+
+
+def _scaled_dynamic_parameters(
+    body: Mapping[str, Decimal], body_scale: Decimal
+) -> dict[str, Decimal]:
+    return {
+        _DYNAMIC_REGISTRY_PARAMETER_NAMES[name]: value * body_scale
+        for name, value in body.items()
+    }
+
+
+def _dynamic_probe_event(dynamic_key: str, scenario: Mapping[str, Any]) -> OpcodeEvent:
+    features = _dynamic_opcode_features(dynamic_key, scenario)
+
+    def exact_integer(name: str) -> int:
+        value = features[name]
+        if value.denominator != 1:
+            raise ValueError(f"dynamic source feature is not integral: {name}")
+        return value.numerator
+
+    opcode = int(dynamic_key.removeprefix("opcode:0x"), 16)
+    memory = {
+        name: exact_integer(name)
+        for name in (
+            "memory_growth_event",
+            "memory_evm_gas_delta",
+            "memory_4k_boundary_event",
+        )
+        if name in features
+    }
+    if dynamic_key == "opcode:0x0a":
+        return OpcodeEvent(
+            opcode=opcode,
+            exponent_byte_length=int(scenario["exponent_byte_length"]),
+        )
+    if dynamic_key == "opcode:0x20":
+        return OpcodeEvent(
+            opcode=opcode, input_length=int(scenario["input_length"]), **memory
+        )
+    if dynamic_key in {"opcode:0x51", "opcode:0x52", "opcode:0x53"}:
+        return OpcodeEvent(opcode=opcode, **memory)
+    if dynamic_key == "opcode:0x5e":
+        return OpcodeEvent(
+            opcode=opcode, copy_words=exact_integer("copy_words"), **memory
+        )
+    raise ValueError(f"unsupported dynamic source key: {dynamic_key}")
+
+
+def _serialize_opcode_registry(registry: OpcodeRegistry) -> dict[str, Any]:
+    return {
+        "common_dispatch": _decimal_text(registry.common_dispatch),
+        "invalid_model_id": registry.invalid_model_id,
+        "named_opcode_keys": [
+            f"opcode:0x{opcode:02x}" for opcode in sorted(registry.named_opcodes)
+        ],
+        "shared_memory_parameters": _serialize_decimal_tree(
+            registry.shared_memory_parameters
+        ),
+        "models": {
+            model_id: {
+                "kind": model.kind.value,
+                "parameters": _serialize_decimal_tree(model.parameters),
+            }
+            for model_id, model in registry.models.items()
+        },
+        "opcode_model_ids": list(registry.opcode_model_ids),
+    }
+
+
+@_isolated_decimal_context
+def build_core_opcode_submodel_artifact(
+    manifest: Manifest,
+    relation_artifact: Mapping[str, Any],
+    dynamic_artifact: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Purely build the replayable 102-opcode core submodel from sealed evidence."""
+    relation_sha256 = _validate_content_addressed_artifact(
+        relation_artifact, label="opcode relation"
+    )
+    if (
+        type(relation_artifact.get("schema_version")) is not int
+        or relation_artifact.get("schema_version")
+        != FORMAL_RELATION_ARTIFACT_SCHEMA_VERSION
+        or relation_artifact.get("purpose") != FORMAL_RELATION_PURPOSE
+        or relation_artifact.get("signal_kind") != FORMAL_RELATION_SIGNAL_KIND
+        or relation_artifact.get("status") != "accepted"
+        or not _is_sha256(relation_artifact.get("raw_rows_sha256"))
+        or not isinstance(relation_artifact.get("provenance"), Mapping)
+    ):
+        raise ValueError("core opcode relation artifact is not accepted schema-3 evidence")
+    (
+        anchor_body_costs,
+        body_scale,
+        common_dispatch,
+        shared_body,
+        dynamic_bodies,
+    ) = _validate_schema3_dynamic_opcode_artifact(
+        relation_artifact, dynamic_artifact
+    )
+    opcode_keys = _core_opcode_keys(manifest)
+    equations = _core_relation_equations(relation_artifact, opcode_keys)
+    fit = fit_nonnegative_opcode_bodies(
+        equations=equations,
+        opcode_keys=opcode_keys,
+        anchor_body_costs=anchor_body_costs,
+    )
+    if fit.status != "supported":
+        raise ValueError(
+            "nonnegative core opcode body fit is not supported: "
+            f"{list(fit.quality_failures)!r}"
+        )
+
+    invalid_model_id = "invalid"
+    models: dict[str, ModelSpec] = {
+        invalid_model_id: ModelSpec(
+            ModelKind.INVALID, {"constant": Decimal(0)}
+        )
+    }
+    dynamic_keys = set(DYNAMIC_RAW_GAS_KEYS)
+    for key in opcode_keys:
+        if key in dynamic_keys:
+            continue
+        models[key] = ModelSpec(
+            ModelKind.STATIC_RAW_GAS,
+            {
+                "body_per_raw_gas": fit.lab_body_per_raw_gas[key]
+                * body_scale
+            },
+        )
+    models["opcode:0x0a"] = ModelSpec(
+        ModelKind.EXP,
+        _scaled_dynamic_parameters(dynamic_bodies["opcode:0x0a"], body_scale),
+    )
+    models["opcode:0x20"] = ModelSpec(
+        ModelKind.KECCAK,
+        _scaled_dynamic_parameters(dynamic_bodies["opcode:0x20"], body_scale),
+    )
+    for key in ("opcode:0x51", "opcode:0x52", "opcode:0x53"):
+        models[key] = ModelSpec(
+            ModelKind.MEMORY_ACCESS,
+            {"constant": shared_body[f"{key}:constant"] * body_scale},
+        )
+    models["opcode:0x5e"] = ModelSpec(
+        ModelKind.MEMORY_COPY,
+        _scaled_dynamic_parameters(dynamic_bodies["opcode:0x5e"], body_scale),
+    )
+    named_opcodes = frozenset(UZEN_OPCODE_NAMES)
+    if len(named_opcodes) != 150:
+        raise ValueError("Unzen named opcode inventory must contain exactly 150 entries")
+    slots: list[str | None] = [invalid_model_id] * 256
+    for opcode in named_opcodes:
+        slots[opcode] = None
+    for key in opcode_keys:
+        slots[int(key.removeprefix("opcode:0x"), 16)] = key
+    registry = OpcodeRegistry(
+        common_dispatch=common_dispatch,
+        models=models,
+        opcode_model_ids=tuple(slots),
+        named_opcodes=named_opcodes,
+        invalid_model_id=invalid_model_id,
+        shared_memory_parameters={
+            name: shared_body[name] * body_scale
+            for name in (
+                "memory_growth_event",
+                "memory_evm_gas_delta",
+                "memory_4k_boundary_event",
+            )
+        },
+    )
+
+    dynamic_rows = [
+        row
+        for field in ("equations", "dynamic_holdouts")
+        for row in relation_artifact.get(field, [])
+        if isinstance(row, Mapping) and row.get("dynamic_key") is not None
+    ]
+    observed_dynamic_keys = {str(row.get("dynamic_key")) for row in dynamic_rows}
+    if observed_dynamic_keys != set(DYNAMIC_RAW_GAS_KEYS):
+        raise ValueError("dynamic source domain does not cover all six structured opcodes")
+    exp_zero_rows = [
+        row
+        for row in dynamic_rows
+        if row.get("dynamic_key") == "opcode:0x0a"
+        and isinstance(row.get("relation_scenario"), Mapping)
+        and row["relation_scenario"].get("exponent_byte_length") == 0
+    ]
+    if len(exp_zero_rows) != 1:
+        raise ValueError("exactly one EXP zero-byte source scenario is required")
+    exp_zero_row = exp_zero_rows[0]
+    exp_zero_scenario_id = exp_zero_row.get("scenario_id")
+    exp_zero_model_split = exp_zero_row.get("model_split")
+    exp_predictions = dynamic_artifact["models"]["opcode:0x0a"]["predictions"]
+    exp_zero_prediction = (
+        exp_predictions.get(exp_zero_scenario_id)
+        if isinstance(exp_zero_scenario_id, str)
+        else None
+    )
+    if not isinstance(exp_zero_prediction, Mapping):
+        raise ValueError("EXP zero-byte model prediction evidence is missing")
+    if (
+        exp_zero_model_split not in {"fit", "holdout"}
+        or exp_zero_prediction.get("model_split") != exp_zero_model_split
+    ):
+        raise ValueError("EXP zero-byte prediction model_split differs from relation")
+    exp_zero_evidence = False
+    for row in dynamic_rows:
+        dynamic_key = str(row.get("dynamic_key"))
+        scenario = row.get("relation_scenario")
+        if not isinstance(scenario, Mapping):
+            raise ValueError("dynamic source relation scenario is missing")
+        event = _dynamic_probe_event(dynamic_key, scenario)
+        predict_opcode_event(registry, event)
+        if dynamic_key == "opcode:0x0a" and event.exponent_byte_length == 0:
+            exp_zero_evidence = True
+    if not exp_zero_evidence:
+        raise ValueError("EXP zero-byte source evidence is required")
+
+    unsupported = sorted(named_opcodes - set(PURE_OPCODE_DEFAULTS))
+    if len(unsupported) != 48:
+        raise ValueError("core opcode unsupported named inventory must contain 48 entries")
+    dynamic_source_hashes = dynamic_artifact["source_hashes"]
+    artifact = {
+        "schema_version": _CORE_OPCODE_SUBMODEL_SCHEMA_VERSION,
+        "purpose": "core_opcode_submodel",
+        "status": "supported_core_submodel",
+        "candidate_eligible": False,
+        "provenance": dict(dynamic_artifact["provenance"]),
+        "source_hashes": {
+            "relation_artifact_sha256": relation_sha256,
+            "relation_raw_rows_sha256": relation_artifact["raw_rows_sha256"],
+            "dynamic_artifact_sha256": dynamic_artifact["artifact_sha256"],
+            "anchor_probe_primary_sha256": dynamic_source_hashes[
+                "anchor_probe_primary_sha256"
+            ],
+            "raw_block_rows_sha256": dynamic_source_hashes[
+                "raw_block_rows_sha256"
+            ],
+        },
+        "body_scale": _decimal_text(body_scale),
+        "fit_evidence": {
+            "status": fit.status,
+            "opcode_keys": list(fit.opcode_keys),
+            "anchor_keys": list(fit.anchor_keys),
+            "lab_body_per_raw_gas": _serialize_decimal_tree(
+                fit.lab_body_per_raw_gas
+            ),
+            "active_zero_keys": list(fit.active_zero_keys),
+            "nonzero_relation_mape": _decimal_text(fit.nonzero_relation_mape),
+            "nonzero_relation_max_ape": _decimal_text(
+                fit.nonzero_relation_max_ape
+            ),
+            "flat_relation_max_normalized_error": _decimal_text(
+                fit.flat_relation_max_normalized_error
+            ),
+            "residual": _decimal_text(fit.residual),
+            "predictions": _serialize_decimal_tree(fit.predictions),
+            "quality_failures": list(fit.quality_failures),
+        },
+        "registry": _serialize_opcode_registry(registry),
+        "named_opcode_count": len(named_opcodes),
+        "modeled_named_opcode_count": len(opcode_keys),
+        "unsupported_named_opcode_count": len(unsupported),
+        "unsupported_named_opcode_keys": [
+            f"opcode:0x{opcode:02x}" for opcode in unsupported
+        ],
+        "dynamic_source_probe_count": len(dynamic_rows),
+        "exp_zero_source_evidence": True,
+    }
+    artifact["artifact_sha256"] = sha256_bytes(canonical_json(artifact))
+    return artifact
+
+
+@_isolated_decimal_context
+def validate_core_opcode_submodel_artifact(
+    manifest: Manifest,
+    relation_artifact: Mapping[str, Any],
+    dynamic_artifact: Mapping[str, Any],
+    artifact: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Independently rebuild and compare the complete canonical core artifact."""
+    _validate_content_addressed_artifact(artifact, label="core opcode submodel")
+    replayed = build_core_opcode_submodel_artifact(
+        manifest, relation_artifact, dynamic_artifact
+    )
+    if not _exact_json_equal(artifact, replayed):
+        raise ValueError("core opcode submodel differs from exact source replay")
+    return replayed
+
+
 def cmd_fit_block_calibration(args: argparse.Namespace) -> None:
     runs_path = _resolve_repo_path(args.runs, field_name="block_calibration_rows")
     calibration_run = runs_path.parent
@@ -12930,6 +13653,101 @@ def cmd_fit_dynamic_opcode_models(args: argparse.Namespace) -> None:
     print(
         f"fit {artifact['aggregate_parameter_count']} dynamic opcode parameter(s): "
         f"{artifact['status']}"
+    )
+
+
+def cmd_build_core_opcode_submodel(args: argparse.Namespace) -> None:
+    calibration_run = _resolve_repo_path(
+        args.calibration_run, field_name="calibration_run"
+    )
+    execution_identity = validate_calibration_execution_identity(calibration_run)
+    manifest, frozen_identity = verify_frozen_controlled_manifest(
+        calibration_run,
+        _resolve_repo_path(
+            args.controlled_manifest, field_name="controlled_manifest"
+        ),
+    )
+    if not _exact_json_equal(execution_identity, frozen_identity):
+        raise ValueError("core opcode submodel identity changed during validation")
+    relation_path = _canonical_run_artifact(
+        calibration_run,
+        _resolve_repo_path(args.relations, field_name="opcode_relations"),
+        "opcode-relations.json",
+    )
+    dynamic_path = _canonical_run_artifact(
+        calibration_run,
+        _resolve_repo_path(args.dynamic_models, field_name="dynamic_opcode_models"),
+        "dynamic-opcode-models.json",
+    )
+    output = _canonical_run_artifact(
+        calibration_run,
+        _resolve_repo_path(args.out, field_name="core_opcode_submodel"),
+        "core-opcode-submodel.json",
+    )
+    relation_artifact = json.loads(relation_path.read_text())
+    dynamic_artifact = json.loads(dynamic_path.read_text())
+    expected_provenance = {
+        "calibration_id": calibration_run.name,
+        "calibration_identity_sha256": sha256_bytes(
+            canonical_json(execution_identity)
+        ),
+        "implementation_revision": execution_identity["implementation_revision"],
+        "controlled_manifest_sha256": execution_identity[
+            "controlled_manifest_sha256"
+        ],
+        "controlled_manifest_rows_sha256": execution_identity[
+            "controlled_manifest_rows_sha256"
+        ],
+    }
+    formal_artifacts = load_terminal_formal_relation_artifacts(
+        calibration_run, manifest, expected_provenance
+    )
+    validate_opcode_relations_artifact(
+        manifest,
+        relation_artifact,
+        formal_artifacts["rows"],
+        expected_provenance,
+    )
+    anchor_probe_path = calibration_run / "anchor-probe-fit.json"
+    block_rows_path = calibration_run / "block-calibration-rows.jsonl"
+    if not anchor_probe_path.is_file() or not block_rows_path.is_file():
+        raise ValueError("core opcode submodel source artifacts are missing")
+    anchor_probe_artifact = json.loads(anchor_probe_path.read_text())
+    _anchor_body_costs, anchor_probe_rows = load_validated_anchor_probe_run(
+        calibration_run, anchor_probe_artifact, execution_identity
+    )
+    replayed_dynamic = fit_dynamic_opcode_models_artifact(
+        manifest,
+        _affine_model_from_validated_artifact(manifest, relation_artifact),
+        relation_artifact,
+        anchor_probe_artifact,
+        anchor_probe_rows,
+        list(iter_jsonl(block_rows_path)),
+    )
+    if not _exact_json_equal(dynamic_artifact, replayed_dynamic):
+        raise ValueError(
+            "dynamic opcode artifact differs from exact calibration source replay"
+        )
+    artifact = build_core_opcode_submodel_artifact(
+        manifest, relation_artifact, dynamic_artifact
+    )
+    _atomic_write_json(output, artifact)
+    persisted = json.loads(output.read_text())
+    replayed = validate_core_opcode_submodel_artifact(
+        manifest, relation_artifact, dynamic_artifact, persisted
+    )
+    if (
+        canonical_json(persisted) != canonical_json(artifact)
+        or replayed["artifact_sha256"] != artifact["artifact_sha256"]
+    ):
+        raise ValueError(
+            "persisted core opcode submodel canonical payload or digest differs"
+        )
+    print(
+        "sealed core opcode submodel "
+        f"{artifact['artifact_sha256']} "
+        f"({artifact['modeled_named_opcode_count']}/"
+        f"{artifact['named_opcode_count']} named opcodes; non-candidate)"
     )
 
 
@@ -14884,6 +15702,23 @@ def build_parser() -> argparse.ArgumentParser:
     fit_dynamic.add_argument("--controlled-manifest", type=pathlib.Path, required=True)
     fit_dynamic.add_argument("--out", type=pathlib.Path, required=True)
     fit_dynamic.set_defaults(func=cmd_fit_dynamic_opcode_models)
+
+    core_submodel = subcommands.add_parser(
+        "build-core-opcode-submodel",
+        help="seal the replayable non-candidate 102-opcode core submodel",
+    )
+    core_submodel.add_argument(
+        "--calibration-run", type=pathlib.Path, required=True
+    )
+    core_submodel.add_argument(
+        "--controlled-manifest", type=pathlib.Path, required=True
+    )
+    core_submodel.add_argument("--relations", type=pathlib.Path, required=True)
+    core_submodel.add_argument(
+        "--dynamic-models", type=pathlib.Path, required=True
+    )
+    core_submodel.add_argument("--out", type=pathlib.Path, required=True)
+    core_submodel.set_defaults(func=cmd_build_core_opcode_submodel)
 
     candidate = subcommands.add_parser(
         "build-candidate", help="seal the controlled SP1 proverGas candidate"

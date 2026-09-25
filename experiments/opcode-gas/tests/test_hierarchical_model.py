@@ -1,5 +1,7 @@
+import copy
 import pathlib
 import sys
+import types
 import unittest
 from decimal import Decimal
 
@@ -7,6 +9,7 @@ from decimal import Decimal
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "experiments" / "opcode-gas"))
 
+import opcode_gas
 from hierarchical_model import (
     ModelKind,
     ModelSpec,
@@ -22,6 +25,260 @@ MEMORY_PARAMETERS = {
     "memory_evm_gas_delta": Decimal("3"),
     "memory_4k_boundary_event": Decimal("7"),
 }
+
+
+def _seal_artifact(payload):
+    payload = {
+        key: value for key, value in payload.items() if key != "artifact_sha256"
+    }
+    payload["artifact_sha256"] = opcode_gas.sha256_bytes(
+        opcode_gas.canonical_json(payload)
+    )
+    return payload
+
+
+def _core_submodel_sources():
+    def dynamic_evidence(parameter_order, body, production, *, shared=False):
+        parameter_count = len(parameter_order)
+        fit_count = parameter_count
+        holdout_count = 1
+        prediction = {
+            "model_split": "fit",
+            "actual_body_cost": "1",
+            "predicted_body_cost": "1",
+            "body_ape": "0",
+            "actual_production_cost": "9",
+            "predicted_production_cost": "9",
+            "production_ape": "0",
+        }
+        if not shared:
+            prediction.update(
+                predicted_operation_body_cost="1",
+                shared_memory_body_cost="0",
+            )
+        return {
+            "status": "supported",
+            "parameter_order": list(parameter_order),
+            "exact_fit_rank": parameter_count,
+            "parameter_count": parameter_count,
+            "observation_count": fit_count + holdout_count,
+            "fit_count": fit_count,
+            "holdout_count": holdout_count,
+            "body_coefficients": body,
+            "production_coefficients": production,
+            "fit_body_mape": "0",
+            "fit_body_max_ape": "0",
+            "holdout_body_max_ape": "0",
+            "fit_production_mape": "0",
+            "fit_production_max_ape": "0",
+            "holdout_production_max_ape": "0",
+            "quality_failures": [],
+            "exact_fit_matrix": [
+                ["1" if row == column else "0" for column in range(parameter_count)]
+                for row in range(fit_count)
+            ],
+            "solver_column_scales": ["1"] * parameter_count,
+            "solver_residual": "0",
+            "predictions": {
+                **{
+                    f"fit-{index}": dict(prediction)
+                    for index in range(fit_count)
+                },
+                "holdout": {**prediction, "model_split": "holdout"},
+            },
+        }
+
+    cases = tuple(
+        types.SimpleNamespace(
+            kind="opcode",
+            opcode=opcode,
+            template=template,
+        )
+        for opcode, (_scenario, template, _raw_gas) in sorted(
+            opcode_gas.PURE_OPCODE_DEFAULTS.items()
+        )
+    )
+    manifest = types.SimpleNamespace(
+        cases=cases,
+        opcode_relation_anchors=opcode_gas.OPCODE_RELATION_ANCHORS,
+        dynamic_raw_gas_keys=opcode_gas.DYNAMIC_RAW_GAS_KEYS,
+    )
+    anchor_costs = {
+        "opcode:0x50": "4",
+        "opcode:0x5f": "4",
+        "opcode:0x80": "6",
+        "opcode:0x90": "6",
+    }
+    equations = []
+    dynamic_scenarios = {
+        "opcode:0x0a": {
+            "exponent_byte_length": 1,
+            "initial_memory_words": 0,
+        },
+        "opcode:0x20": {"input_length": 32, "initial_memory_words": 0},
+        "opcode:0x51": {
+            "highest_touched_offset": 0,
+            "initial_memory_words": 0,
+        },
+        "opcode:0x52": {
+            "highest_touched_offset": 0,
+            "initial_memory_words": 0,
+        },
+        "opcode:0x53": {
+            "highest_touched_offset": 0,
+            "initial_memory_words": 0,
+        },
+        "opcode:0x5e": {"copy_length": 32, "initial_memory_words": 0},
+    }
+    for opcode in sorted(opcode_gas.PURE_OPCODE_DEFAULTS):
+        key = f"opcode:0x{opcode:02x}"
+        if key in opcode_gas.OPCODE_RELATION_ANCHORS:
+            continue
+        row = {
+            "relation_id": f"fit-{key}",
+            "signed_raw_gas_by_key": {key: "1"},
+            "slope_p": "2",
+            "dynamic_key": None,
+        }
+        if key in dynamic_scenarios:
+            row.update(
+                dynamic_key=key,
+                scenario_id=f"{key}-canonical",
+                relation_scenario=dynamic_scenarios[key],
+            )
+        equations.append(row)
+    dynamic_holdouts = [
+        {
+            "relation_id": "exp-zero",
+            "scenario_id": "exp-zero",
+            "dynamic_key": "opcode:0x0a",
+            "model_split": "fit",
+            "relation_scenario": {
+                "exponent_byte_length": 0,
+                "initial_memory_words": 0,
+            },
+        },
+        {
+            "relation_id": "keccak-zero",
+            "scenario_id": "keccak-zero",
+            "dynamic_key": "opcode:0x20",
+            "model_split": "fit",
+            "relation_scenario": {
+                "input_length": 0,
+                "initial_memory_words": 0,
+            },
+        },
+    ]
+    relation_artifact = _seal_artifact(
+        {
+            "schema_version": 3,
+            "purpose": opcode_gas.FORMAL_RELATION_PURPOSE,
+            "signal_kind": opcode_gas.FORMAL_RELATION_SIGNAL_KIND,
+            "status": "accepted",
+            "provenance": {"calibration_id": "literal-fixture"},
+            "raw_rows_sha256": "b" * 64,
+            "equations": equations,
+            "dynamic_holdouts": dynamic_holdouts,
+        }
+    )
+    dynamic_artifact = _seal_artifact(
+        {
+            "schema_version": 3,
+            "purpose": "dynamic_opcode_models",
+            "status": "supported",
+            "candidate_eligible": False,
+            "provenance": {"calibration_id": "literal-fixture"},
+            "source_hashes": {
+                "relation_artifact_sha256": relation_artifact["artifact_sha256"],
+                "relation_raw_rows_sha256": relation_artifact[
+                    "raw_rows_sha256"
+                ],
+                "anchor_probe_primary_sha256": "c" * 64,
+                "raw_block_rows_sha256": "d" * 64,
+            },
+            "anchor_body_cost_metric": "prover_gas",
+            "anchor_body_costs": anchor_costs,
+            "transfer_params": {
+                "body_scale": "2",
+                "common_opcode_overhead_per_operation": "7",
+            },
+            "quality_gates": {
+                "fit_production_mape_max": "0.05",
+                "fit_production_max_ape_max": "0.10",
+                "holdout_production_max_ape_max": "0.10",
+            },
+            "feature_orders": {
+                key: list(opcode_gas.DYNAMIC_OPCODE_FEATURE_ORDERS[key])
+                for key in opcode_gas.DYNAMIC_RAW_GAS_KEYS
+            },
+            "shared_memory_model": dynamic_evidence(
+                (
+                    "opcode:0x51:constant",
+                    "opcode:0x52:constant",
+                    "opcode:0x53:constant",
+                    "memory_growth_event",
+                    "memory_evm_gas_delta",
+                    "memory_4k_boundary_event",
+                ),
+                {
+                    "opcode:0x51:constant": "11",
+                    "opcode:0x52:constant": "12",
+                    "opcode:0x53:constant": "13",
+                    "memory_growth_event": "2",
+                    "memory_evm_gas_delta": "3",
+                    "memory_4k_boundary_event": "5",
+                },
+                {
+                    "opcode:0x51:constant": "29",
+                    "opcode:0x52:constant": "31",
+                    "opcode:0x53:constant": "33",
+                    "memory_growth_event": "4",
+                    "memory_evm_gas_delta": "6",
+                    "memory_4k_boundary_event": "10",
+                },
+                shared=True,
+            ),
+            "aggregate_exact_fit_rank": 14,
+            "aggregate_parameter_count": 14,
+            "models": {
+                "opcode:0x0a": dynamic_evidence(
+                    ("constant", "exponent_bytes", "exponent_bytes_squared"),
+                    {
+                        "constant": "10",
+                        "exponent_bytes": "2",
+                        "exponent_bytes_squared": "0",
+                    },
+                    {
+                        "constant": "27",
+                        "exponent_bytes": "4",
+                        "exponent_bytes_squared": "0",
+                    },
+                ),
+                "opcode:0x20": dynamic_evidence(
+                    ("constant", "keccak_zero_length_event", "keccak_permutations"),
+                    {
+                        "constant": "20",
+                        "keccak_zero_length_event": "-5",
+                        "keccak_permutations": "3",
+                    },
+                    {
+                        "constant": "47",
+                        "keccak_zero_length_event": "-10",
+                        "keccak_permutations": "6",
+                    },
+                ),
+                "opcode:0x5e": dynamic_evidence(
+                    ("constant", "copy_words"),
+                    {"constant": "8", "copy_words": "2"},
+                    {"constant": "23", "copy_words": "4"},
+                ),
+            },
+        }
+    )
+    exp_predictions = dynamic_artifact["models"]["opcode:0x0a"]["predictions"]
+    exp_predictions["exp-zero"] = exp_predictions.pop("fit-0")
+    dynamic_artifact = _seal_artifact(dynamic_artifact)
+    return manifest, relation_artifact, dynamic_artifact
 
 
 def registry_with(
@@ -317,6 +574,213 @@ class HierarchicalModelTests(unittest.TestCase):
     def test_predict_rejects_a_non_registry_input(self):
         with self.assertRaisesRegex(TypeError, "OpcodeRegistry"):
             predict_opcode_event("not a registry", OpcodeEvent(opcode=0x00))
+
+
+class CoreOpcodeSubmodelArtifactTests(unittest.TestCase):
+    def test_builds_102_of_150_named_unzen_opcodes_and_replays_exactly(self):
+        manifest, relation_artifact, dynamic_artifact = _core_submodel_sources()
+
+        artifact = opcode_gas.build_core_opcode_submodel_artifact(
+            manifest=manifest,
+            relation_artifact=relation_artifact,
+            dynamic_artifact=dynamic_artifact,
+        )
+
+        self.assertEqual(artifact["purpose"], "core_opcode_submodel")
+        self.assertEqual(artifact["status"], "supported_core_submodel")
+        self.assertFalse(artifact["candidate_eligible"])
+        self.assertEqual(artifact["named_opcode_count"], 150)
+        self.assertEqual(artifact["modeled_named_opcode_count"], 102)
+        self.assertEqual(artifact["unsupported_named_opcode_count"], 48)
+        self.assertIn("opcode:0x1e", artifact["unsupported_named_opcode_keys"])
+        self.assertEqual(
+            artifact["registry"]["models"]["opcode:0x01"]["parameters"],
+            {"body_per_raw_gas": "4"},
+        )
+        self.assertEqual(artifact["registry"]["common_dispatch"], "7")
+        self.assertEqual(
+            artifact["registry"]["models"]["opcode:0x0a"],
+            {
+                "kind": "exp",
+                "parameters": {
+                    "constant": "20",
+                    "exponent_byte": "4",
+                    "exponent_byte_sq": "0",
+                },
+            },
+        )
+        self.assertEqual(
+            artifact["registry"]["models"]["opcode:0x20"]["parameters"],
+            {
+                "constant": "40",
+                "zero_length_event": "-10",
+                "permutation": "6",
+            },
+        )
+        self.assertEqual(
+            artifact["registry"]["models"]["opcode:0x51"]["parameters"],
+            {"constant": "22"},
+        )
+        self.assertEqual(
+            artifact["registry"]["models"]["opcode:0x5e"]["parameters"],
+            {"constant": "16", "copy_words": "4"},
+        )
+        for dynamic_key in opcode_gas.DYNAMIC_RAW_GAS_KEYS:
+            self.assertNotEqual(
+                artifact["registry"]["models"][dynamic_key]["kind"],
+                "static_raw_gas",
+            )
+        self.assertEqual(
+            opcode_gas.validate_core_opcode_submodel_artifact(
+                manifest, relation_artifact, dynamic_artifact, artifact
+            ),
+            artifact,
+        )
+
+    def test_replay_rejects_mutated_sources_registry_and_digest(self):
+        manifest, relation_artifact, dynamic_artifact = _core_submodel_sources()
+        artifact = opcode_gas.build_core_opcode_submodel_artifact(
+            manifest, relation_artifact, dynamic_artifact
+        )
+        mutations = []
+
+        changed_relation = copy.deepcopy(artifact)
+        changed_relation["source_hashes"]["relation_artifact_sha256"] = "e" * 64
+        mutations.append(("relation source hash", _seal_artifact(changed_relation)))
+
+        changed_dynamic = copy.deepcopy(artifact)
+        changed_dynamic["source_hashes"]["dynamic_artifact_sha256"] = "f" * 64
+        mutations.append(("dynamic source hash", _seal_artifact(changed_dynamic)))
+
+        negative_static = copy.deepcopy(artifact)
+        negative_static["registry"]["models"]["opcode:0x01"]["parameters"][
+            "body_per_raw_gas"
+        ] = "-1"
+        mutations.append(("negative static body", _seal_artifact(negative_static)))
+
+        changed_dispatch = copy.deepcopy(artifact)
+        changed_dispatch["registry"]["common_dispatch"] = "8"
+        mutations.append(("changed common dispatch", _seal_artifact(changed_dispatch)))
+
+        named_invalid = copy.deepcopy(artifact)
+        named_invalid["registry"]["opcode_model_ids"][0x01] = "invalid"
+        mutations.append(("named opcode mapped to INVALID", _seal_artifact(named_invalid)))
+
+        for label, mutated in mutations:
+            with self.subTest(mutation=label), self.assertRaisesRegex(
+                ValueError, "exact source replay"
+            ):
+                opcode_gas.validate_core_opcode_submodel_artifact(
+                    manifest,
+                    relation_artifact,
+                    dynamic_artifact,
+                    mutated,
+                )
+
+        bad_digest = copy.deepcopy(artifact)
+        bad_digest["artifact_sha256"] = "0" * 64
+        with self.assertRaisesRegex(ValueError, "content hash"):
+            opcode_gas.validate_core_opcode_submodel_artifact(
+                manifest, relation_artifact, dynamic_artifact, bad_digest
+            )
+
+    def test_builder_rejects_dynamic_source_disagreement(self):
+        manifest, relation_artifact, dynamic_artifact = _core_submodel_sources()
+        dynamic_artifact["source_hashes"]["relation_artifact_sha256"] = "e" * 64
+        dynamic_artifact = _seal_artifact(dynamic_artifact)
+
+        with self.assertRaisesRegex(ValueError, "source.*relation|relation.*source"):
+            opcode_gas.build_core_opcode_submodel_artifact(
+                manifest, relation_artifact, dynamic_artifact
+            )
+
+    def test_builder_rejects_incomplete_schema_3_dynamic_evidence(self):
+        manifest, relation_artifact, dynamic_artifact = _core_submodel_sources()
+        del dynamic_artifact["aggregate_exact_fit_rank"]
+        dynamic_artifact = _seal_artifact(dynamic_artifact)
+
+        with self.assertRaisesRegex(ValueError, "schema-3|schema"):
+            opcode_gas.build_core_opcode_submodel_artifact(
+                manifest, relation_artifact, dynamic_artifact
+            )
+
+    def test_builder_independently_checks_dynamic_quality_rank_and_costs(self):
+        manifest, relation_artifact, dynamic_artifact = _core_submodel_sources()
+        mutations = []
+
+        failed_gate = copy.deepcopy(dynamic_artifact)
+        failed_gate["models"]["opcode:0x0a"]["fit_production_mape"] = "0.051"
+        mutations.append(("quality gate", _seal_artifact(failed_gate), "quality gate"))
+
+        rank_deficient = copy.deepcopy(dynamic_artifact)
+        matrix = rank_deficient["models"]["opcode:0x0a"]["exact_fit_matrix"]
+        matrix[1] = list(matrix[0])
+        mutations.append(("exact rank", _seal_artifact(rank_deficient), "exact rank"))
+
+        negative_cost = copy.deepcopy(dynamic_artifact)
+        negative_cost["models"]["opcode:0x0a"]["predictions"]["exp-zero"][
+            "predicted_operation_body_cost"
+        ] = "-1"
+        mutations.append(("negative cost", _seal_artifact(negative_cost), "negative"))
+
+        for label, mutated, message in mutations:
+            with self.subTest(mutation=label), self.assertRaisesRegex(
+                ValueError, message
+            ):
+                opcode_gas.build_core_opcode_submodel_artifact(
+                    manifest, relation_artifact, mutated
+                )
+
+    def test_builder_binds_unique_relation_exp_zero_to_model_prediction(self):
+        manifest, relation_artifact, dynamic_artifact = _core_submodel_sources()
+
+        missing = copy.deepcopy(dynamic_artifact)
+        predictions = missing["models"]["opcode:0x0a"]["predictions"]
+        predictions["different-zero"] = predictions.pop("exp-zero")
+        missing = _seal_artifact(missing)
+        with self.assertRaisesRegex(ValueError, "EXP zero.*prediction"):
+            opcode_gas.build_core_opcode_submodel_artifact(
+                manifest, relation_artifact, missing
+            )
+
+        wrong_split = copy.deepcopy(dynamic_artifact)
+        predictions = wrong_split["models"]["opcode:0x0a"]["predictions"]
+        predictions["exp-zero"]["model_split"] = "holdout"
+        predictions["holdout"]["model_split"] = "fit"
+        wrong_split = _seal_artifact(wrong_split)
+        with self.assertRaisesRegex(ValueError, "EXP zero.*model_split"):
+            opcode_gas.build_core_opcode_submodel_artifact(
+                manifest, relation_artifact, wrong_split
+            )
+
+    def test_builder_requires_zero_exp_evidence_from_relation_source(self):
+        manifest, relation_artifact, dynamic_artifact = _core_submodel_sources()
+        relation_artifact["dynamic_holdouts"] = []
+        relation_artifact = _seal_artifact(relation_artifact)
+        dynamic_artifact["source_hashes"]["relation_artifact_sha256"] = (
+            relation_artifact["artifact_sha256"]
+        )
+        dynamic_artifact = _seal_artifact(dynamic_artifact)
+
+        with self.assertRaisesRegex(ValueError, "EXP.*zero|zero.*EXP"):
+            opcode_gas.build_core_opcode_submodel_artifact(
+                manifest, relation_artifact, dynamic_artifact
+            )
+
+    def test_builder_rejects_negative_dynamic_prediction_in_source_domain(self):
+        manifest, relation_artifact, dynamic_artifact = _core_submodel_sources()
+        dynamic_artifact["models"]["opcode:0x20"]["body_coefficients"][
+            "keccak_zero_length_event"
+        ] = "-100"
+        dynamic_artifact["models"]["opcode:0x20"]["production_coefficients"][
+            "keccak_zero_length_event"
+        ] = "-200"
+        dynamic_artifact = _seal_artifact(dynamic_artifact)
+
+        with self.assertRaisesRegex(ValueError, "negative opcode prediction"):
+            opcode_gas.build_core_opcode_submodel_artifact(
+                manifest, relation_artifact, dynamic_artifact
+            )
 
 
 if __name__ == "__main__":

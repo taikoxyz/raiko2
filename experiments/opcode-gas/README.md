@@ -180,7 +180,10 @@ semantic model:
 f_mem     = beta_event * memory_growth_event
           + beta_evm * memory_evm_gas_delta
           + beta_boundary * memory_4k_boundary_event
-EXP        = beta_0 + beta_b * exponent_bytes + beta_b2 * exponent_bytes^2
+EXP_body   = small_bucket_body                                      if exponent_bytes <= 4
+           = max(small_bucket_body,
+                 beta_0 + beta_b * exponent_bytes
+                 + beta_b2 * exponent_bytes^2)                      otherwise
 keccak_permutations = 0 if input_length == 0 else floor(input_length / 136) + 1
 keccak_zero_length_event = 1 if input_length == 0 else 0
 KECCAK256  = beta_0 + beta_z * keccak_zero_length_event
@@ -193,16 +196,32 @@ MCOPY      = beta_0 + beta_w * copy_words + f_mem
 production_cost = body_scale * body_cost + common_opcode_overhead
 ```
 
-`build-core-opcode-submodel` independently replays the accepted relation and schema-3 dynamic
+`small_bucket_body` is the maximum measured body cost across the accepted EXP byte-length
+`0,1,2,4` rows. Those rows are declared conservative-approximation evidence, not polynomial fit
+rows. The quadratic is fit only at byte lengths `8,16,32`, validated at `24`, and floored by the
+bucket throughout the greater-than-four integer domain. The bucket may overpredict short exponents;
+it may never underpredict a measured short-exponent row.
+
+`build-core-opcode-submodel` independently replays the accepted relation and schema-4 dynamic
 evidence, fits nonnegative static opcode bodies, stores common dispatch exactly once, and replaces
-the six structured opcodes above with typed models. Its content-addressed output covers 102 of the
+the six structured opcodes above with typed models. `opcode:0x19` (NOT) and `opcode:0x5b`
+(JUMPDEST) are declared dispatch-only approximations: their opcode-specific bodies are fixed to
+zero outside the solver, while each event still pays `common_dispatch` once. Relations containing
+either key retain their slopes, predictions, residuals, and diagnostic error, but do not enter the
+ordinary 5% MAPE, 10% maximum-APE, or exact-flat admission gates. The schema-2 core artifact records
+the exact policy, affected relation IDs/count, and maximum absolute approximation residual.
+
+The content-addressed output covers 102 of the
 150 named Unzen opcodes; the other 48 named opcodes remain explicitly unsupported. This is a
 partial, `candidate_eligible=false` artifact. It cannot open or participate in proposal validation;
 the remaining opcode families and higher estimator layers must be calibrated and sealed first.
+Block-level validation must report the frequency-dependent residual from NOT, JUMPDEST, and the
+small-EXP bucket. A later fixed offset may not absorb or hide those approximation errors.
 
 Fresh sealing run `ff00067694b841894e53c921`, frozen at implementation revision `26f899ea`,
 accepted all 170 formal relations after the frozen adaptive rounds. The independent nonnegative
-static-body replay was `not_supported`: `opcode:0x19` and `opcode:0x5b` were active-zero keys,
+static-body replay under the old undeclared-approximation policy was `not_supported`:
+`opcode:0x19` and `opcode:0x5b` were active-zero keys,
 nonzero-relation MAPE was 1.2364%, and maximum APE was 56.6756%, failing the frozen maximum-error
 gate. The schema-3 dynamic fit was also `not_supported`. Its EXP zero-byte fit row had actual and
 predicted production costs 479.1089 and 155.5262 proverGas respectively, for 67.5385% APE; aggregate
@@ -211,10 +230,12 @@ KECCAK256, MCOPY, and the shared-memory model remained supported, but aggregate 
 failed closed. The dynamic evidence digest is
 `0bcce47c65dde637c7411ab5b815390fa8f73cca125069e823527c65f1fdd874`.
 
-The core-submodel command consequently failed closed with `schema-3 dynamic opcode artifact
-header/schema is invalid`; no `core-opcode-submodel.json` or core artifact SHA256 was emitted. This
-run is preserved as the single frozen `not_supported` result. Its thresholds, features, fixtures,
-and source revision were not tuned after observing the failure, and no replacement run was started.
+The then-current schema-1 core-submodel command consequently failed closed with `schema-3 dynamic
+opcode artifact header/schema is invalid`; no `core-opcode-submodel.json` or core artifact SHA256
+was emitted. This run is preserved unchanged as the single frozen `not_supported` result under the
+old policy. It is not relabeled by the schema-4/schema-2 addendum. Its thresholds, features,
+fixtures, and source revision were not tuned after observing the failure, and no replacement run
+was started.
 
 Run `25db29d91bd3311441fe8317` showed that the former linear 4-KiB page-count term fit its training
 rows (production MAPE 0.259%, maximum APE 1.103%) and passed the `0x0800` and `0x0fe0` holdouts, but

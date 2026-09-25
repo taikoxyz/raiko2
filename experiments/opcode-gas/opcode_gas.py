@@ -12740,7 +12740,7 @@ def fit_dynamic_opcode_models_artifact(
     )
 
     def evidence_payload(item: Any, parameter_order: tuple[str, ...]) -> dict[str, Any]:
-        return {
+        payload = {
             "status": item.status,
             "parameter_order": list(parameter_order),
             "exact_fit_rank": item.exact_rank,
@@ -12772,12 +12772,25 @@ def fit_dynamic_opcode_models_artifact(
             "solver_residual": _decimal_text(item.solver_residual),
             "predictions": _serialize_decimal_tree(item.predictions),
         }
+        if getattr(item, "small_bucket_body", None) is not None:
+            payload.update(
+                approximation_policy=dict(_EXP_APPROXIMATION_POLICY),
+                small_bucket_body=_decimal_text(item.small_bucket_body),
+                low_domain_count=item.low_domain_count,
+                low_domain_exponent_byte_lengths=list(
+                    item.low_domain_byte_lengths
+                ),
+                low_domain_predictions=_serialize_decimal_tree(
+                    item.low_domain_predictions
+                ),
+            )
+        return payload
     models = {
         key: evidence_payload(item, item.feature_names)
         for key, item in result.opcode_models.items()
     }
     artifact = {
-        "schema_version": 3,
+        "schema_version": _DYNAMIC_OPCODE_MODELS_SCHEMA_VERSION,
         "purpose": "dynamic_opcode_models",
         "status": result.status,
         "candidate_eligible": False,
@@ -12814,7 +12827,19 @@ def fit_dynamic_opcode_models_artifact(
     return artifact
 
 
-_CORE_OPCODE_SUBMODEL_SCHEMA_VERSION = 1
+_DYNAMIC_OPCODE_MODELS_SCHEMA_VERSION = 4
+_CORE_OPCODE_SUBMODEL_SCHEMA_VERSION = 2
+_CORE_DISPATCH_ONLY_KEYS = ("opcode:0x19", "opcode:0x5b")
+_EXP_APPROXIMATION_POLICY = MappingProxyType(
+    {
+        "kind": "conservative_small_exponent_bucket",
+        "small_domain_max_exponent_byte_length": 4,
+        "expected_low_domain_exponent_byte_lengths": [0, 1, 2, 4],
+        "polynomial_domain_min_exponent_byte_length": 5,
+        "polynomial_domain_max_exponent_byte_length": 32,
+        "large_domain_body_floor": "small_bucket_body",
+    }
+)
 _DYNAMIC_MODEL_EVIDENCE_FIELDS = frozenset(
     {
         "status",
@@ -12839,6 +12864,13 @@ _DYNAMIC_MODEL_EVIDENCE_FIELDS = frozenset(
         "predictions",
     }
 )
+_EXP_DYNAMIC_MODEL_EVIDENCE_FIELDS = _DYNAMIC_MODEL_EVIDENCE_FIELDS | {
+    "approximation_policy",
+    "small_bucket_body",
+    "low_domain_count",
+    "low_domain_exponent_byte_lengths",
+    "low_domain_predictions",
+}
 _SHARED_MEMORY_PARAMETER_ORDER = (
     "opcode:0x51:constant",
     "opcode:0x52:constant",
@@ -12864,6 +12896,7 @@ _DYNAMIC_OPERATION_PARAMETER_ORDERS = MappingProxyType(
 )
 _DYNAMIC_REGISTRY_PARAMETER_NAMES = MappingProxyType(
     {
+        "small_bucket_body": "small_bucket_body",
         "exponent_bytes": "exponent_byte",
         "exponent_bytes_squared": "exponent_byte_sq",
         "keccak_zero_length_event": "zero_length_event",
@@ -12905,13 +12938,16 @@ def _validate_dynamic_prediction_evidence(
     operation_specific: bool,
     body_scale: Decimal,
     common_dispatch: Decimal,
+    expected_prediction_count: int | None = None,
 ) -> dict[str, Decimal]:
     predictions = evidence.get("predictions")
+    if expected_prediction_count is None:
+        expected_prediction_count = evidence["observation_count"]
     if (
         not isinstance(predictions, Mapping)
-        or len(predictions) != evidence["observation_count"]
+        or len(predictions) != expected_prediction_count
     ):
-        raise ValueError(f"schema-3 {label} predictions count differs")
+        raise ValueError(f"schema-4 {label} predictions count differs")
     common_fields = {
         "model_split",
         "actual_body_cost",
@@ -12930,7 +12966,7 @@ def _validate_dynamic_prediction_evidence(
         not isinstance(prediction_id, str) or not prediction_id
         for prediction_id in predictions
     ):
-        raise ValueError(f"schema-3 {label} prediction evidence is invalid")
+        raise ValueError(f"schema-4 {label} prediction evidence is invalid")
     split_counts = {"fit": 0, "holdout": 0}
     body_apes = {"fit": [], "holdout": []}
     production_apes = {"fit": [], "holdout": []}
@@ -12940,17 +12976,17 @@ def _validate_dynamic_prediction_evidence(
             or set(row) != expected_fields
             or row.get("model_split") not in split_counts
         ):
-            raise ValueError(f"schema-3 {label} prediction evidence is invalid")
+            raise ValueError(f"schema-4 {label} prediction evidence is invalid")
         split = str(row["model_split"])
         split_counts[split] += 1
         values = {}
         for field in expected_fields - {"model_split"}:
             values[field] = _canonical_artifact_decimal(
-                row.get(field), label=f"schema-3 {label} prediction {field}"
+                row.get(field), label=f"schema-4 {label} prediction {field}"
             )
             if values[field] < 0:
                 raise ValueError(
-                    f"schema-3 {label} prediction additive cost or APE is negative"
+                    f"schema-4 {label} prediction additive cost or APE is negative"
                 )
         actual_body = values["actual_body_cost"]
         predicted_body = values["predicted_body_cost"]
@@ -12958,38 +12994,38 @@ def _validate_dynamic_prediction_evidence(
         predicted_production = values["predicted_production_cost"]
         if actual_body <= 0 or actual_production <= 0:
             raise ValueError(
-                f"schema-3 {label} prediction actual cost must be positive"
+                f"schema-4 {label} prediction actual cost must be positive"
             )
         if actual_production != actual_body * body_scale + common_dispatch:
             raise ValueError(
-                f"schema-3 {label} prediction actual production cost differs"
+                f"schema-4 {label} prediction actual production cost differs"
             )
         if predicted_production != predicted_body * body_scale + common_dispatch:
             raise ValueError(
-                f"schema-3 {label} prediction predicted production cost differs"
+                f"schema-4 {label} prediction predicted production cost differs"
             )
         if operation_specific and predicted_body != (
             values["predicted_operation_body_cost"]
             + values["shared_memory_body_cost"]
         ):
             raise ValueError(
-                f"schema-3 {label} prediction operation plus shared body differs"
+                f"schema-4 {label} prediction operation plus shared body differs"
             )
         body_ape = abs(predicted_body - actual_body) / actual_body
         production_ape = (
             abs(predicted_production - actual_production) / actual_production
         )
         if values["body_ape"] != body_ape:
-            raise ValueError(f"schema-3 {label} prediction body APE differs")
+            raise ValueError(f"schema-4 {label} prediction body APE differs")
         if values["production_ape"] != production_ape:
-            raise ValueError(f"schema-3 {label} prediction production APE differs")
+            raise ValueError(f"schema-4 {label} prediction production APE differs")
         body_apes[split].append(body_ape)
         production_apes[split].append(production_ape)
     if split_counts != {
         "fit": evidence["fit_count"],
         "holdout": evidence["holdout_count"],
     }:
-        raise ValueError(f"schema-3 {label} prediction splits differ")
+        raise ValueError(f"schema-4 {label} prediction splits differ")
     return {
         "fit_body_mape": sum(body_apes["fit"], Decimal(0))
         / Decimal(len(body_apes["fit"])),
@@ -13011,9 +13047,15 @@ def _validate_dynamic_model_evidence(
     common_dispatch: Decimal,
     operation_specific: bool,
     signed_parameters: frozenset[str] = frozenset(),
+    exp_approximation: bool = False,
 ) -> dict[str, Decimal]:
-    if not isinstance(evidence, Mapping) or set(evidence) != _DYNAMIC_MODEL_EVIDENCE_FIELDS:
-        raise ValueError(f"schema-3 {label} evidence schema is invalid")
+    expected_fields = (
+        _EXP_DYNAMIC_MODEL_EVIDENCE_FIELDS
+        if exp_approximation
+        else _DYNAMIC_MODEL_EVIDENCE_FIELDS
+    )
+    if not isinstance(evidence, Mapping) or set(evidence) != expected_fields:
+        raise ValueError(f"schema-4 {label} evidence schema is invalid")
     parameter_count = len(parameter_order)
     integer_fields = (
         "exact_fit_rank",
@@ -13031,10 +13073,12 @@ def _validate_dynamic_model_evidence(
         or evidence.get("fit_count", 0) < parameter_count
         or evidence.get("holdout_count", 0) <= 0
         or evidence.get("observation_count")
-        != evidence.get("fit_count", 0) + evidence.get("holdout_count", 0)
+        != evidence.get("fit_count", 0)
+        + evidence.get("holdout_count", 0)
+        + (evidence.get("low_domain_count", 0) if exp_approximation else 0)
         or evidence.get("quality_failures") != []
     ):
-        raise ValueError(f"schema-3 {label} support/rank/count evidence is invalid")
+        raise ValueError(f"schema-4 {label} support/rank/count evidence is invalid")
 
     body_raw = evidence.get("body_coefficients")
     production_raw = evidence.get("production_coefficients")
@@ -13044,11 +13088,11 @@ def _validate_dynamic_model_evidence(
         or not isinstance(production_raw, Mapping)
         or set(production_raw) != set(parameter_order)
     ):
-        raise ValueError(f"schema-3 {label} coefficient schema is invalid")
+        raise ValueError(f"schema-4 {label} coefficient schema is invalid")
     body = {
         name: _canonical_artifact_decimal(
             body_raw[name],
-            label=f"schema-3 {label} body coefficient {name}",
+            label=f"schema-4 {label} body coefficient {name}",
             nonnegative=name not in signed_parameters,
         )
         for name in parameter_order
@@ -13056,7 +13100,7 @@ def _validate_dynamic_model_evidence(
     production = {
         name: _canonical_artifact_decimal(
             production_raw[name],
-            label=f"schema-3 {label} production coefficient {name}",
+            label=f"schema-4 {label} production coefficient {name}",
         )
         for name in parameter_order
     }
@@ -13071,7 +13115,7 @@ def _validate_dynamic_model_evidence(
     }
     if production != expected_production:
         raise ValueError(
-            f"schema-3 {label} production coefficients differ from body conversion"
+            f"schema-4 {label} production coefficients differ from body conversion"
         )
 
     quality_values = {}
@@ -13085,32 +13129,32 @@ def _validate_dynamic_model_evidence(
         "solver_residual",
     ):
         quality_values[field] = _canonical_artifact_decimal(
-            evidence.get(field), label=f"schema-3 {label} {field}", nonnegative=True
+            evidence.get(field), label=f"schema-4 {label} {field}", nonnegative=True
         )
     if (
         quality_values["fit_production_mape"] > Decimal("0.05")
         or quality_values["fit_production_max_ape"] > Decimal("0.10")
         or quality_values["holdout_production_max_ape"] > Decimal("0.10")
     ):
-        raise ValueError(f"schema-3 {label} independent quality gate failed")
+        raise ValueError(f"schema-4 {label} independent quality gate failed")
     matrix = evidence.get("exact_fit_matrix")
     if (
         not isinstance(matrix, list)
         or len(matrix) != evidence["fit_count"]
         or any(not isinstance(row, list) or len(row) != parameter_count for row in matrix)
     ):
-        raise ValueError(f"schema-3 {label} exact fit matrix is invalid")
+        raise ValueError(f"schema-4 {label} exact fit matrix is invalid")
     exact_matrix = [
         [_parse_fraction_text(value) for value in row] for row in matrix
     ]
     if exact_rank(exact_matrix) != parameter_count:
-        raise ValueError(f"schema-3 {label} exact rank differs from parameter count")
+        raise ValueError(f"schema-4 {label} exact rank differs from parameter count")
     scales = evidence.get("solver_column_scales")
     if not isinstance(scales, list) or len(scales) != parameter_count:
-        raise ValueError(f"schema-3 {label} solver column scales are invalid")
+        raise ValueError(f"schema-4 {label} solver column scales are invalid")
     for value in scales:
         _canonical_artifact_decimal(
-            value, label=f"schema-3 {label} solver column scale", positive=True
+            value, label=f"schema-4 {label} solver column scale", positive=True
         )
     replayed_quality = _validate_dynamic_prediction_evidence(
         evidence,
@@ -13118,16 +13162,123 @@ def _validate_dynamic_model_evidence(
         operation_specific=operation_specific,
         body_scale=body_scale,
         common_dispatch=common_dispatch,
+        expected_prediction_count=(
+            evidence["fit_count"] + evidence["holdout_count"]
+            if exp_approximation
+            else None
+        ),
     )
     for field, expected in replayed_quality.items():
         if quality_values[field] != expected:
             raise ValueError(
-                f"schema-3 {label} aggregate {field} differs from predictions"
+                f"schema-4 {label} aggregate {field} differs from predictions"
             )
     return body
 
 
-def _validate_schema3_dynamic_opcode_artifact(
+def _validate_exp_approximation_evidence(
+    evidence: Mapping[str, Any],
+    body: Mapping[str, Decimal],
+    *,
+    body_scale: Decimal,
+    common_dispatch: Decimal,
+) -> Decimal:
+    if not _exact_json_equal(
+        evidence.get("approximation_policy"), dict(_EXP_APPROXIMATION_POLICY)
+    ):
+        raise ValueError("schema-4 EXP approximation policy differs")
+    bucket = _canonical_artifact_decimal(
+        evidence.get("small_bucket_body"),
+        label="schema-4 EXP small bucket body",
+        nonnegative=True,
+    )
+    if (
+        type(evidence.get("low_domain_count")) is not int
+        or evidence.get("low_domain_count") != 4
+        or evidence.get("low_domain_exponent_byte_lengths") != [0, 1, 2, 4]
+    ):
+        raise ValueError("schema-4 EXP low-domain policy evidence differs")
+    predictions = evidence.get("low_domain_predictions")
+    if not isinstance(predictions, Mapping) or len(predictions) != 4:
+        raise ValueError("schema-4 EXP low-domain predictions count differs")
+    expected_fields = {
+        "model_split",
+        "exponent_byte_length",
+        "actual_body_cost",
+        "predicted_body_cost",
+        "body_ape",
+        "actual_production_cost",
+        "predicted_production_cost",
+        "production_ape",
+        "overprediction",
+        "underprediction",
+    }
+    byte_lengths = []
+    actual_bodies = []
+    for scenario_id, row in predictions.items():
+        if (
+            not isinstance(scenario_id, str)
+            or not scenario_id
+            or not isinstance(row, Mapping)
+            or set(row) != expected_fields
+            or row.get("model_split") not in {"fit", "holdout"}
+            or type(row.get("exponent_byte_length")) is not int
+        ):
+            raise ValueError("schema-4 EXP low-domain prediction schema is invalid")
+        byte_length = row["exponent_byte_length"]
+        byte_lengths.append(byte_length)
+        values = {
+            field: _canonical_artifact_decimal(
+                row.get(field),
+                label=f"schema-4 EXP low-domain {field}",
+                nonnegative=True,
+            )
+            for field in expected_fields
+            - {"model_split", "exponent_byte_length"}
+        }
+        actual_body = values["actual_body_cost"]
+        predicted_body = values["predicted_body_cost"]
+        if actual_body <= 0 or predicted_body != bucket:
+            raise ValueError("schema-4 EXP small bucket prediction differs")
+        actual_production = actual_body * body_scale + common_dispatch
+        predicted_production = predicted_body * body_scale + common_dispatch
+        if (
+            values["actual_production_cost"] != actual_production
+            or values["predicted_production_cost"] != predicted_production
+            or values["body_ape"]
+            != abs(predicted_body - actual_body) / actual_body
+            or values["production_ape"]
+            != abs(predicted_production - actual_production) / actual_production
+            or values["overprediction"]
+            != max(predicted_body - actual_body, Decimal(0))
+            or values["underprediction"]
+            != max(actual_body - predicted_body, Decimal(0))
+        ):
+            raise ValueError("schema-4 EXP low-domain prediction arithmetic differs")
+        if values["underprediction"] != 0:
+            raise ValueError("schema-4 EXP low-domain underprediction is forbidden")
+        actual_bodies.append(actual_body)
+    if tuple(sorted(byte_lengths)) != (0, 1, 2, 4):
+        raise ValueError("schema-4 EXP low-domain byte lengths differ")
+    if bucket != max(actual_bodies):
+        raise ValueError("schema-4 EXP small bucket differs from measured maximum")
+
+    for byte_length in range(33):
+        exponent = Decimal(byte_length)
+        polynomial = (
+            body["constant"]
+            + body["exponent_bytes"] * exponent
+            + body["exponent_bytes_squared"] * exponent * exponent
+        )
+        prediction = bucket if byte_length <= 4 else max(bucket, polynomial)
+        if not prediction.is_finite() or prediction < 0:
+            raise ValueError(
+                "schema-4 EXP prediction is invalid in integer domain 0..=32"
+            )
+    return bucket
+
+
+def _validate_schema4_dynamic_opcode_artifact(
     relation_artifact: Mapping[str, Any], dynamic_artifact: Mapping[str, Any]
 ) -> tuple[
     dict[str, Decimal],
@@ -13158,14 +13309,15 @@ def _validate_schema3_dynamic_opcode_artifact(
     if (
         set(dynamic_artifact) != expected_fields
         or type(dynamic_artifact.get("schema_version")) is not int
-        or dynamic_artifact.get("schema_version") != 3
+        or dynamic_artifact.get("schema_version")
+        != _DYNAMIC_OPCODE_MODELS_SCHEMA_VERSION
         or dynamic_artifact.get("purpose") != "dynamic_opcode_models"
         or dynamic_artifact.get("status") != "supported"
         or dynamic_artifact.get("candidate_eligible") is not False
         or dynamic_artifact.get("aggregate_exact_fit_rank") != 14
         or dynamic_artifact.get("aggregate_parameter_count") != 14
     ):
-        raise ValueError("schema-3 dynamic opcode artifact header/schema is invalid")
+        raise ValueError("schema-4 dynamic opcode artifact header/schema is invalid")
     if (
         not isinstance(dynamic_artifact.get("provenance"), Mapping)
         or not _exact_json_equal(
@@ -13183,7 +13335,7 @@ def _validate_schema3_dynamic_opcode_artifact(
             },
         )
     ):
-        raise ValueError("schema-3 dynamic opcode artifact frozen metadata differs")
+        raise ValueError("schema-4 dynamic opcode artifact frozen metadata differs")
     source_hashes = dynamic_artifact.get("source_hashes")
     expected_source_keys = {
         "relation_artifact_sha256",
@@ -13204,10 +13356,10 @@ def _validate_schema3_dynamic_opcode_artifact(
 
     anchor_raw = dynamic_artifact.get("anchor_body_costs")
     if not isinstance(anchor_raw, Mapping) or set(anchor_raw) != set(OPCODE_RELATION_ANCHORS):
-        raise ValueError("schema-3 dynamic anchor body cost schema is invalid")
+        raise ValueError("schema-4 dynamic anchor body cost schema is invalid")
     anchor_body_costs = {
         key: _canonical_artifact_decimal(
-            anchor_raw[key], label=f"schema-3 anchor body cost {key}", positive=True
+            anchor_raw[key], label=f"schema-4 anchor body cost {key}", positive=True
         )
         for key in OPCODE_RELATION_ANCHORS
     }
@@ -13215,13 +13367,13 @@ def _validate_schema3_dynamic_opcode_artifact(
     if not isinstance(transfer, Mapping) or set(transfer) != set(
         BLOCK_CALIBRATION_TRANSFER_PARAMETERS
     ):
-        raise ValueError("schema-3 dynamic transfer parameter schema is invalid")
+        raise ValueError("schema-4 dynamic transfer parameter schema is invalid")
     body_scale = _canonical_artifact_decimal(
-        transfer["body_scale"], label="schema-3 body_scale", positive=True
+        transfer["body_scale"], label="schema-4 body_scale", positive=True
     )
     common_dispatch = _canonical_artifact_decimal(
         transfer["common_opcode_overhead_per_operation"],
-        label="schema-3 common opcode overhead",
+        label="schema-4 common opcode overhead",
         nonnegative=True,
     )
     shared_body = _validate_dynamic_model_evidence(
@@ -13236,9 +13388,10 @@ def _validate_schema3_dynamic_opcode_artifact(
     if not isinstance(models, Mapping) or set(models) != set(
         _DYNAMIC_OPERATION_PARAMETER_ORDERS
     ):
-        raise ValueError("schema-3 dynamic operation model set is invalid")
-    model_bodies = {
-        key: _validate_dynamic_model_evidence(
+        raise ValueError("schema-4 dynamic operation model set is invalid")
+    model_bodies = {}
+    for key, parameter_order in _DYNAMIC_OPERATION_PARAMETER_ORDERS.items():
+        body = _validate_dynamic_model_evidence(
             models[key],
             label=f"dynamic model {key}",
             parameter_order=parameter_order,
@@ -13246,13 +13399,24 @@ def _validate_schema3_dynamic_opcode_artifact(
             common_dispatch=common_dispatch,
             operation_specific=True,
             signed_parameters=(
-                frozenset({"keccak_zero_length_event"})
+                frozenset(
+                    {"constant", "exponent_bytes", "exponent_bytes_squared"}
+                )
+                if key == "opcode:0x0a"
+                else frozenset({"keccak_zero_length_event"})
                 if key == "opcode:0x20"
                 else frozenset()
             ),
+            exp_approximation=key == "opcode:0x0a",
         )
-        for key, parameter_order in _DYNAMIC_OPERATION_PARAMETER_ORDERS.items()
-    }
+        if key == "opcode:0x0a":
+            body["small_bucket_body"] = _validate_exp_approximation_evidence(
+                models[key],
+                body,
+                body_scale=body_scale,
+                common_dispatch=common_dispatch,
+            )
+        model_bodies[key] = body
     return anchor_body_costs, body_scale, common_dispatch, shared_body, model_bodies
 
 
@@ -13400,7 +13564,7 @@ def build_core_opcode_submodel_artifact(
         common_dispatch,
         shared_body,
         dynamic_bodies,
-    ) = _validate_schema3_dynamic_opcode_artifact(
+    ) = _validate_schema4_dynamic_opcode_artifact(
         relation_artifact, dynamic_artifact
     )
     opcode_keys = _core_opcode_keys(manifest)
@@ -13409,6 +13573,7 @@ def build_core_opcode_submodel_artifact(
         equations=equations,
         opcode_keys=opcode_keys,
         anchor_body_costs=anchor_body_costs,
+        dispatch_only_keys=_CORE_DISPATCH_ONLY_KEYS,
     )
     if fit.status != "supported":
         raise ValueError(
@@ -13483,32 +13648,64 @@ def build_core_opcode_submodel_artifact(
     observed_dynamic_keys = {str(row.get("dynamic_key")) for row in dynamic_rows}
     if observed_dynamic_keys != set(DYNAMIC_RAW_GAS_KEYS):
         raise ValueError("dynamic source domain does not cover all six structured opcodes")
-    exp_zero_rows = [
+    exp_rows = [
         row
         for row in dynamic_rows
         if row.get("dynamic_key") == "opcode:0x0a"
         and isinstance(row.get("relation_scenario"), Mapping)
-        and row["relation_scenario"].get("exponent_byte_length") == 0
     ]
-    if len(exp_zero_rows) != 1:
-        raise ValueError("exactly one EXP zero-byte source scenario is required")
-    exp_zero_row = exp_zero_rows[0]
-    exp_zero_scenario_id = exp_zero_row.get("scenario_id")
-    exp_zero_model_split = exp_zero_row.get("model_split")
-    exp_predictions = dynamic_artifact["models"]["opcode:0x0a"]["predictions"]
-    exp_zero_prediction = (
-        exp_predictions.get(exp_zero_scenario_id)
-        if isinstance(exp_zero_scenario_id, str)
-        else None
-    )
-    if not isinstance(exp_zero_prediction, Mapping):
-        raise ValueError("EXP zero-byte model prediction evidence is missing")
-    if (
-        exp_zero_model_split not in {"fit", "holdout"}
-        or exp_zero_prediction.get("model_split") != exp_zero_model_split
-    ):
-        raise ValueError("EXP zero-byte prediction model_split differs from relation")
-    exp_zero_evidence = False
+    exp_source_by_length = {}
+    for row in exp_rows:
+        byte_length = row["relation_scenario"].get("exponent_byte_length")
+        if type(byte_length) is not int or byte_length in exp_source_by_length:
+            raise ValueError("EXP source byte lengths are invalid or duplicated")
+        exp_source_by_length[byte_length] = row
+    if set(exp_source_by_length) != {0, 1, 2, 4, 8, 16, 24, 32}:
+        raise ValueError("EXP source domain differs from 0,1,2,4,8,16,24,32")
+    if {
+        byte_length
+        for byte_length, row in exp_source_by_length.items()
+        if byte_length > 4 and row.get("model_split") == "fit"
+    } != {8, 16, 32} or {
+        byte_length
+        for byte_length, row in exp_source_by_length.items()
+        if byte_length > 4 and row.get("model_split") == "holdout"
+    } != {24}:
+        raise ValueError("EXP greater-than-four fit/holdout split differs")
+    exp_model_evidence = dynamic_artifact["models"]["opcode:0x0a"]
+    exp_large_predictions = exp_model_evidence["predictions"]
+    exp_low_predictions = exp_model_evidence["low_domain_predictions"]
+    for byte_length, row in exp_source_by_length.items():
+        scenario_id = row.get("scenario_id")
+        prediction = (
+            exp_low_predictions.get(scenario_id)
+            if byte_length <= 4
+            else exp_large_predictions.get(scenario_id)
+        )
+        if not isinstance(prediction, Mapping):
+            raise ValueError("EXP source prediction evidence is missing")
+        if prediction.get("model_split") != row.get("model_split"):
+            raise ValueError("EXP prediction model_split differs from relation")
+        exponent = Decimal(byte_length)
+        expected_body = (
+            dynamic_bodies["opcode:0x0a"]["small_bucket_body"]
+            if byte_length <= 4
+            else max(
+                dynamic_bodies["opcode:0x0a"]["small_bucket_body"],
+                dynamic_bodies["opcode:0x0a"]["constant"]
+                + dynamic_bodies["opcode:0x0a"]["exponent_bytes"] * exponent
+                + dynamic_bodies["opcode:0x0a"]["exponent_bytes_squared"]
+                * exponent
+                * exponent,
+            )
+        )
+        predicted_body = _canonical_artifact_decimal(
+            prediction.get("predicted_body_cost"),
+            label="schema-4 EXP source predicted body cost",
+            nonnegative=True,
+        )
+        if predicted_body != expected_body:
+            raise ValueError("EXP source prediction differs from piecewise evaluator")
     for row in dynamic_rows:
         dynamic_key = str(row.get("dynamic_key"))
         scenario = row.get("relation_scenario")
@@ -13516,10 +13713,13 @@ def build_core_opcode_submodel_artifact(
             raise ValueError("dynamic source relation scenario is missing")
         event = _dynamic_probe_event(dynamic_key, scenario)
         predict_opcode_event(registry, event)
-        if dynamic_key == "opcode:0x0a" and event.exponent_byte_length == 0:
-            exp_zero_evidence = True
-    if not exp_zero_evidence:
-        raise ValueError("EXP zero-byte source evidence is required")
+    for byte_length in range(33):
+        predict_opcode_event(
+            registry,
+            OpcodeEvent(
+                opcode=0x0A, exponent_byte_length=byte_length
+            ),
+        )
 
     unsupported = sorted(named_opcodes - set(PURE_OPCODE_DEFAULTS))
     if len(unsupported) != 48:
@@ -13543,6 +13743,10 @@ def build_core_opcode_submodel_artifact(
             ],
         },
         "body_scale": _decimal_text(body_scale),
+        "approximation_policy": {
+            "dispatch_only_opcode_keys": list(_CORE_DISPATCH_ONLY_KEYS),
+            "exp": dict(_EXP_APPROXIMATION_POLICY),
+        },
         "fit_evidence": {
             "status": fit.status,
             "opcode_keys": list(fit.opcode_keys),
@@ -13551,6 +13755,14 @@ def build_core_opcode_submodel_artifact(
                 fit.lab_body_per_raw_gas
             ),
             "active_zero_keys": list(fit.active_zero_keys),
+            "dispatch_only_keys": list(fit.dispatch_only_keys),
+            "approximation_relation_ids": list(
+                fit.approximation_relation_ids
+            ),
+            "approximation_relation_count": fit.approximation_relation_count,
+            "maximum_absolute_approximation_residual": _decimal_text(
+                fit.maximum_absolute_approximation_residual
+            ),
             "nonzero_relation_mape": _decimal_text(fit.nonzero_relation_mape),
             "nonzero_relation_max_ape": _decimal_text(
                 fit.nonzero_relation_max_ape
@@ -13570,7 +13782,12 @@ def build_core_opcode_submodel_artifact(
             f"opcode:0x{opcode:02x}" for opcode in unsupported
         ],
         "dynamic_source_probe_count": len(dynamic_rows),
-        "exp_zero_source_evidence": True,
+        "exp_source_evidence": {
+            "low_domain_exponent_byte_lengths": [0, 1, 2, 4],
+            "polynomial_fit_exponent_byte_lengths": [8, 16, 32],
+            "polynomial_holdout_exponent_byte_lengths": [24],
+            "validated_integer_domain": {"minimum": 0, "maximum": 32},
+        },
     }
     artifact["artifact_sha256"] = sha256_bytes(canonical_json(artifact))
     return artifact

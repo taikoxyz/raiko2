@@ -55,6 +55,10 @@ class NonnegativeOpcodeFitEvidence:
     anchor_keys: tuple[str, ...]
     lab_body_per_raw_gas: Mapping[str, Decimal]
     active_zero_keys: tuple[str, ...]
+    dispatch_only_keys: tuple[str, ...]
+    approximation_relation_ids: tuple[str, ...]
+    approximation_relation_count: int
+    maximum_absolute_approximation_residual: Decimal
     nonzero_relation_mape: Decimal
     nonzero_relation_max_ape: Decimal
     flat_relation_max_normalized_error: Decimal
@@ -209,6 +213,12 @@ class DynamicOpcodeFitEvidence:
     solver_column_scales: tuple[Decimal, ...]
     solver_residual: Decimal
     predictions: Mapping[str, Mapping[str, Decimal | str]]
+    small_bucket_body: Decimal | None
+    low_domain_byte_lengths: tuple[int, ...]
+    low_domain_count: int
+    low_domain_predictions: Mapping[
+        str, Mapping[str, Decimal | int | str]
+    ]
 
 
 @dataclass(frozen=True)
@@ -549,6 +559,58 @@ def fit_structured_dynamic_opcode_models(
         ):
             key_rows = tuple(row for row in observations if row.dynamic_key == key)
             fit_rows = tuple(row for row in key_rows if row.model_split == "fit")
+            holdout_rows = tuple(
+                row for row in key_rows if row.model_split == "holdout"
+            )
+            low_domain_rows: tuple[DynamicOpcodeObservation, ...] = ()
+            low_domain_byte_lengths: tuple[int, ...] = ()
+            small_bucket_body: Decimal | None = None
+            if key == "opcode:0x0a":
+                def exponent_byte_length(row: DynamicOpcodeObservation) -> int:
+                    value = row.features["exponent_bytes"]
+                    if (
+                        value.denominator != 1
+                        or not 0 <= value <= 32
+                        or row.features["exponent_bytes_squared"] != value * value
+                    ):
+                        raise ValueError(
+                            "EXP exponent features must encode an integer byte length "
+                            "in 0..=32"
+                        )
+                    return value.numerator
+
+                low_domain_rows = tuple(
+                    row for row in key_rows if exponent_byte_length(row) <= 4
+                )
+                low_domain_byte_lengths = tuple(
+                    sorted(exponent_byte_length(row) for row in low_domain_rows)
+                )
+                if low_domain_byte_lengths != (0, 1, 2, 4):
+                    raise ValueError(
+                        "EXP low-domain byte lengths must be exactly 0, 1, 2, 4"
+                    )
+                small_bucket_body = max(
+                    row.target_body_cost for row in low_domain_rows
+                )
+                fit_rows = tuple(
+                    row
+                    for row in fit_rows
+                    if exponent_byte_length(row) > 4
+                )
+                holdout_rows = tuple(
+                    row
+                    for row in holdout_rows
+                    if exponent_byte_length(row) > 4
+                )
+                if tuple(
+                    sorted(exponent_byte_length(row) for row in fit_rows)
+                ) != (8, 16, 32) or tuple(
+                    sorted(exponent_byte_length(row) for row in holdout_rows)
+                ) != (24,):
+                    raise ValueError(
+                        "EXP greater-than-four fit/holdout byte lengths must be "
+                        "8,16,32/24"
+                    )
             matrix = [
                 [row.features[name] for name in feature_names] for row in fit_rows
             ]
@@ -581,7 +643,7 @@ def fit_structured_dynamic_opcode_models(
                 + (common_overhead if name == "constant" else Decimal(0))
                 for name, value in body_coefficients.items()
             }
-            operation_predictions = [
+            polynomial_predictions = [
                 sum(
                     (
                         _decimal_from_fraction(row.features[name])
@@ -592,6 +654,39 @@ def fit_structured_dynamic_opcode_models(
                 )
                 for row in key_rows
             ]
+            if key == "opcode:0x0a":
+                if small_bucket_body is None:
+                    raise ValueError("EXP small bucket body is missing")
+                if small_bucket_body < 0:
+                    raise ValueError("EXP small bucket body must be nonnegative")
+                operation_predictions = [
+                    (
+                        small_bucket_body
+                        if exponent_byte_length(row) <= 4
+                        else max(small_bucket_body, polynomial)
+                    )
+                    for row, polynomial in zip(key_rows, polynomial_predictions)
+                ]
+                for byte_length in range(33):
+                    exponent = Decimal(byte_length)
+                    polynomial = (
+                        body_coefficients["constant"]
+                        + body_coefficients["exponent_bytes"] * exponent
+                        + body_coefficients["exponent_bytes_squared"]
+                        * exponent
+                        * exponent
+                    )
+                    prediction = (
+                        small_bucket_body
+                        if byte_length <= 4
+                        else max(small_bucket_body, polynomial)
+                    )
+                    if not prediction.is_finite() or prediction < 0:
+                        raise ValueError(
+                            "EXP prediction must be finite and nonnegative for 0..=32"
+                        )
+            else:
+                operation_predictions = polynomial_predictions
             shared_costs = [
                 Decimal(0) if key == "opcode:0x0a" else shared_memory_cost(row)
                 for row in key_rows
@@ -600,6 +695,18 @@ def fit_structured_dynamic_opcode_models(
                 operation + shared
                 for operation, shared in zip(operation_predictions, shared_costs)
             ]
+            prediction_rows = (
+                tuple(
+                    row
+                    for row in key_rows
+                    if exponent_byte_length(row) > 4
+                )
+                if key == "opcode:0x0a"
+                else key_rows
+            )
+            prediction_indices = tuple(
+                index for index, row in enumerate(key_rows) if row in prediction_rows
+            )
             (
                 predictions,
                 fit_body_mape,
@@ -609,25 +716,67 @@ def fit_structured_dynamic_opcode_models(
                 fit_production_max,
                 holdout_production_max,
             ) = _dynamic_prediction_evidence(
-                key_rows,
-                total_predictions,
+                prediction_rows,
+                tuple(total_predictions[index] for index in prediction_indices),
                 body_scale=body_scale,
                 common_overhead=common_overhead,
-                prediction_ids=tuple(row.scenario_id for row in key_rows),
+                prediction_ids=tuple(row.scenario_id for row in prediction_rows),
                 extras=tuple(
                     {
-                        "predicted_operation_body_cost": operation,
-                        "shared_memory_body_cost": shared,
+                        "predicted_operation_body_cost": operation_predictions[index],
+                        "shared_memory_body_cost": shared_costs[index],
                     }
-                    for operation, shared in zip(
-                        operation_predictions, shared_costs
-                    )
+                    for index in prediction_indices
                 ),
+            )
+            low_domain_predictions: dict[
+                str, Mapping[str, Decimal | int | str]
+            ] = {}
+            if key == "opcode:0x0a":
+                for row in low_domain_rows:
+                    byte_length = exponent_byte_length(row)
+                    actual_body = row.target_body_cost
+                    predicted_body = small_bucket_body
+                    body_ape = abs(predicted_body - actual_body) / actual_body
+                    actual_production = actual_body * body_scale + common_overhead
+                    predicted_production = (
+                        predicted_body * body_scale + common_overhead
+                    )
+                    production_ape = (
+                        abs(predicted_production - actual_production)
+                        / actual_production
+                    )
+                    low_domain_predictions[row.scenario_id] = MappingProxyType(
+                        {
+                            "model_split": row.model_split,
+                            "exponent_byte_length": byte_length,
+                            "actual_body_cost": actual_body,
+                            "predicted_body_cost": predicted_body,
+                            "body_ape": body_ape,
+                            "actual_production_cost": actual_production,
+                            "predicted_production_cost": predicted_production,
+                            "production_ape": production_ape,
+                            "overprediction": max(
+                                predicted_body - actual_body, Decimal(0)
+                            ),
+                            "underprediction": max(
+                                actual_body - predicted_body, Decimal(0)
+                            ),
+                        }
+                    )
+            low_domain_underprediction = any(
+                row["underprediction"] > 0
+                for row in low_domain_predictions.values()
             )
             failures = tuple(
                 dict.fromkeys(
                     (
                         *operation_target_failures,
+                        *(
+                            ("small_bucket_underprediction",)
+                            if low_domain_underprediction
+                            else ()
+                        ),
                         *_dynamic_quality_failures(
                             fit_production_mape,
                             fit_production_max,
@@ -644,7 +793,7 @@ def fit_structured_dynamic_opcode_models(
                 parameter_count=len(feature_names),
                 observation_count=len(key_rows),
                 fit_count=len(fit_rows),
-                holdout_count=len(key_rows) - len(fit_rows),
+                holdout_count=len(holdout_rows),
                 body_coefficients=MappingProxyType(body_coefficients),
                 production_coefficients=MappingProxyType(production_coefficients),
                 fit_body_mape=fit_body_mape,
@@ -658,6 +807,12 @@ def fit_structured_dynamic_opcode_models(
                 solver_column_scales=tuple(scales),
                 solver_residual=residual,
                 predictions=predictions,
+                small_bucket_body=small_bucket_body,
+                low_domain_byte_lengths=low_domain_byte_lengths,
+                low_domain_count=len(low_domain_rows),
+                low_domain_predictions=MappingProxyType(
+                    low_domain_predictions
+                ),
             )
         aggregate_rank = memory_rank + sum(
             model.exact_rank for model in opcode_models.values()
@@ -942,6 +1097,10 @@ def fit_dynamic_opcode_models(
                         for scenario_id, row in predictions.items()
                     }
                 ),
+                small_bucket_body=None,
+                low_domain_byte_lengths=(),
+                low_domain_count=0,
+                low_domain_predictions=MappingProxyType({}),
             )
     return MappingProxyType(evidence)
 
@@ -1834,6 +1993,7 @@ def fit_nonnegative_opcode_bodies(
     equations: Sequence[RelationEquation],
     opcode_keys: tuple[str, ...],
     anchor_body_costs: Mapping[str, Decimal],
+    dispatch_only_keys: tuple[str, ...] = (),
 ) -> NonnegativeOpcodeFitEvidence:
     """Fit absolute opcode bodies while preserving signed relative relations."""
     _validate_unique(opcode_keys, "opcode key")
@@ -1844,6 +2004,14 @@ def fit_nonnegative_opcode_bodies(
     _validate_unique((equation.relation_id for equation in equations), "relation ID")
 
     opcode_set = set(opcode_keys)
+    if not isinstance(dispatch_only_keys, tuple):
+        raise ValueError("dispatch-only keys must be an ordered tuple")
+    _validate_unique(dispatch_only_keys, "dispatch-only key")
+    unknown_dispatch_only = set(dispatch_only_keys) - opcode_set
+    if unknown_dispatch_only:
+        raise ValueError(
+            f"unknown dispatch-only key: {sorted(unknown_dispatch_only)!r}"
+        )
     unknown_anchors = set(anchor_body_costs) - opcode_set
     if unknown_anchors:
         raise ValueError(f"unknown anchor key: {sorted(unknown_anchors)!r}")
@@ -1853,8 +2021,21 @@ def fit_nonnegative_opcode_bodies(
             "anchor body cost is not a natural anchor: "
             f"{sorted(unsupported_anchors)!r}"
         )
+    dispatch_anchor_overlap = set(dispatch_only_keys) & set(anchor_body_costs)
+    if dispatch_anchor_overlap:
+        raise ValueError(
+            "dispatch-only key must not be an anchor: "
+            f"{sorted(dispatch_anchor_overlap)!r}"
+        )
     for equation in equations:
         _validate_equation(equation, opcode_set)
+    absent_dispatch_only = set(dispatch_only_keys) - {
+        key for equation in equations for key in equation.coefficients
+    }
+    if absent_dispatch_only:
+        raise ValueError(
+            f"absent dispatch-only key: {sorted(absent_dispatch_only)!r}"
+        )
 
     with localcontext(_CALIBRATION_DECIMAL_CONTEXT):
         anchor_keys = tuple(
@@ -1873,8 +2054,13 @@ def fit_nonnegative_opcode_bodies(
                 )
             lab_body_per_raw_gas[key] = value / Decimal(_ANCHOR_RAW_GAS[key])
 
+        for key in dispatch_only_keys:
+            lab_body_per_raw_gas[key] = Decimal(0)
+
         non_anchor_keys = tuple(
-            key for key in opcode_keys if key not in anchor_body_costs
+            key
+            for key in opcode_keys
+            if key not in anchor_body_costs and key not in dispatch_only_keys
         )
         adjusted_targets = []
         matrix = []
@@ -1909,13 +2095,44 @@ def fit_nonnegative_opcode_bodies(
         nonzero_apes = []
         flat_errors = []
         residual_terms = []
+        approximation_relation_ids = []
+        approximation_residuals = []
+        dispatch_only_set = set(dispatch_only_keys)
         for equation in equations:
             terms = [
                 _decimal_from_fraction(coefficient) * lab_body_per_raw_gas[key]
                 for key, coefficient in equation.coefficients.items()
             ]
             predicted = sum(terms, Decimal(0))
-            residual_terms.append(predicted - equation.slope)
+            residual = predicted - equation.slope
+            absolute_residual = abs(residual)
+            residual_terms.append(residual)
+            if set(equation.coefficients) & dispatch_only_set:
+                approximation_relation_ids.append(equation.relation_id)
+                approximation_residuals.append(absolute_residual)
+                diagnostic = (
+                    {
+                        "ape": absolute_residual / abs(equation.slope),
+                    }
+                    if equation.slope != 0
+                    else {
+                        "normalized_error": absolute_residual
+                        / max(
+                            sum((abs(term) for term in terms), Decimal(0)),
+                            Decimal(1),
+                        )
+                    }
+                )
+                predictions[equation.relation_id] = MappingProxyType(
+                    {
+                        "gate": "declared_approximation",
+                        "observed_slope": equation.slope,
+                        "predicted_slope": predicted,
+                        "absolute_residual": absolute_residual,
+                        **diagnostic,
+                    }
+                )
+                continue
             if equation.slope == 0:
                 normalized_error = abs(predicted) / max(
                     sum((abs(term) for term in terms), Decimal(0)), Decimal(1)
@@ -1973,6 +2190,12 @@ def fit_nonnegative_opcode_bodies(
                 {key: lab_body_per_raw_gas[key] for key in opcode_keys}
             ),
             active_zero_keys=active_zero_keys,
+            dispatch_only_keys=dispatch_only_keys,
+            approximation_relation_ids=tuple(approximation_relation_ids),
+            approximation_relation_count=len(approximation_relation_ids),
+            maximum_absolute_approximation_residual=max(
+                approximation_residuals, default=Decimal(0)
+            ),
             nonzero_relation_mape=nonzero_relation_mape,
             nonzero_relation_max_ape=nonzero_relation_max_ape,
             flat_relation_max_normalized_error=flat_relation_max_normalized_error,

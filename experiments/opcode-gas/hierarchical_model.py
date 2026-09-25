@@ -33,7 +33,12 @@ _MODEL_PARAMETER_KEYS = MappingProxyType(
     {
         ModelKind.STATIC_RAW_GAS: frozenset({"body_per_raw_gas"}),
         ModelKind.EXP: frozenset(
-            {"constant", "exponent_byte", "exponent_byte_sq"}
+            {
+                "small_bucket_body",
+                "constant",
+                "exponent_byte",
+                "exponent_byte_sq",
+            }
         ),
         ModelKind.KECCAK: frozenset(
             {"constant", "zero_length_event", "permutation"}
@@ -193,7 +198,12 @@ def _validate_model_spec(model_id: str, spec: ModelSpec) -> None:
         )
     for key, value in spec.parameters.items():
         _validate_decimal(f"model {model_id!r} parameter {key}", value)
-        if spec.kind is ModelKind.KECCAK and key == "zero_length_event":
+        if (
+            spec.kind is ModelKind.KECCAK and key == "zero_length_event"
+        ) or (
+            spec.kind is ModelKind.EXP
+            and key in {"constant", "exponent_byte", "exponent_byte_sq"}
+        ):
             continue
         _validate_nonnegative(
             f"model {model_id!r} parameter {key}", value
@@ -209,6 +219,8 @@ def _validate_features(kind: ModelKind, event: OpcodeEvent) -> None:
         _reject_memory(event)
     elif kind is ModelKind.EXP:
         _require(event, "exponent_byte_length")
+        if event.exponent_byte_length > 32:
+            raise ValueError("exponent_byte_length must be in range 0..=32")
         _reject_optional(event, "raw_gas")
         _reject_optional(event, "input_length")
         _reject_optional(event, "copy_words")
@@ -248,11 +260,14 @@ def _predict_body(
         return parameters["body_per_raw_gas"] * Decimal(event.raw_gas)
     if model.kind is ModelKind.EXP:
         exponent_bytes = Decimal(event.exponent_byte_length)
-        return (
+        if event.exponent_byte_length <= 4:
+            return parameters["small_bucket_body"]
+        polynomial = (
             parameters["constant"]
             + parameters["exponent_byte"] * exponent_bytes
             + parameters["exponent_byte_sq"] * exponent_bytes * exponent_bytes
         )
+        return max(parameters["small_bucket_body"], polynomial)
     if model.kind is ModelKind.KECCAK:
         permutations = (
             0

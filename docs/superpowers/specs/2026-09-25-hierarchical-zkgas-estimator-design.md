@@ -248,6 +248,14 @@ accepted relation system remains evidence, not an exact positivity guarantee. Th
 must fit a nonnegative approximation and report relation, anchor, fit, and holdout residuals. It may
 not clamp individual negative reconstructions to zero or silently drop relations.
 
+The sealed review-only core submodel has two explicit static exceptions. NOT (`0x19`) and JUMPDEST
+(`0x5b`) are dispatch-only: their opcode-specific body coefficients are fixed to zero and are not
+solver columns, but their events still pay `common_dispatch` exactly once. Relations containing
+either key are retained as declared-approximation evidence with observed slope, prediction,
+absolute residual, and ordinary diagnostic error. They do not enter the nonzero MAPE/maximum-APE or
+exact-flat admission gates. Unknown, anchor, duplicate, or unobserved dispatch-only keys invalidate
+the policy rather than silently widening it.
+
 Structured dynamic models replace the static calculation for their opcode. They do not add a
 correction to an already dynamic total-raw-gas multiplier.
 
@@ -260,7 +268,8 @@ f_mem(old_words, new_words) =
   + c * memory_4k_boundary_event
 ```
 
-The current structured model has fourteen production-space parameters:
+The current structured fit has fourteen polynomial/shared production-space parameters, plus one
+declared non-fitted EXP bucket parameter:
 
 ```text
 shared f_mem                                      3
@@ -270,14 +279,20 @@ MLOAD/MSTORE/MSTORE8 constants                   3
 MCOPY: constant, copy_words                      2
                                                    --
                                                    14
+EXP short-exponent conservative bucket             1 declared approximation
 ```
 
 KECCAK uses zero permutations for empty input and `floor(input_length / 136) + 1` otherwise, plus
 the frozen zero-length term and shared `f_mem`. MCOPY adds copied words and `f_mem`. MLOAD, MSTORE,
-and MSTORE8 have separate bases and share `f_mem`. EXP has no memory term. The accepted EXP rows
-cover exponent byte lengths 1 through 32; exponent byte length zero is a required new controlled
-case before candidate promotion. Keep the three-term model only if that point passes without a
-negative prediction. Otherwise add and validate an explicit zero-exponent branch.
+and MSTORE8 have separate bases and share `f_mem`. EXP has no memory term. EXP byte lengths
+`0,1,2,4` share a conservative body-space bucket equal to the maximum measured target body among
+those rows. The quadratic is fit only from byte lengths `8,16,32` and retains byte length `24` as
+its greater-than-four holdout. At evaluation, byte lengths through four use the bucket; larger byte
+lengths use the maximum of the bucket and quadratic. Low-domain rows remain visible with APE,
+overprediction, and underprediction evidence but do not enter polynomial error aggregates. Missing
+byte length four, a changed low-domain set, or any measured low-domain underprediction fails closed.
+All integer byte lengths `0..=32` must produce finite, nonnegative predictions under the exact same
+piecewise evaluator used for artifact replay.
 
 Physically additive scales and costs, such as common dispatch, raw-gas body scales, shared-memory
 costs, and final per-event predictions, must be nonnegative. A contrast or branch-adjustment
@@ -332,6 +347,11 @@ An operation whose isolated signal is below the frozen measurement floor may use
 bounded approximation if its maximum controlled contribution is explicitly reported. Tiny signal
 does not authorize a negative coefficient or a hidden higher-scope offset.
 
+These approximations trade exact per-event attribution for a replayable conservative boundary.
+Block-level validation must therefore measure their frequency-dependent residuals explicitly. A
+fixed transaction, block, proposal, or other later-layer offset may not hide the accumulated NOT,
+JUMPDEST, or short-EXP residual.
+
 ## Controlled Identification, Not Scenario Pricing
 
 SP1 gas estimation yields one total `proverGas` observation, while the host-native trace supplies
@@ -384,6 +404,8 @@ The SP1 instruction-count bridge remains outside this digest. Building or changi
 
 The current accepted opcode artifacts may be sealed as a `core_opcode_submodel` for provenance, but
 that seal does not satisfy the full-candidate barrier and cannot open final proposal validation.
+Schema-4 dynamic evidence and schema-2 core artifacts encode the declared approximation policy;
+schema-3 dynamic evidence and schema-1 core artifacts are not reinterpreted under this policy.
 
 ## Completeness And Failure Rules
 

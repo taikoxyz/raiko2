@@ -2756,7 +2756,7 @@ class DynamicOpcodeModelTests(unittest.TestCase):
             )
 
         self.assertEqual(artifact["status"], "not_supported")
-        self.assertEqual(artifact["schema_version"], 3)
+        self.assertEqual(artifact["schema_version"], 4)
         self.assertFalse(artifact["candidate_eligible"])
         self.assertEqual(
             artifact["feature_orders"]["opcode:0x20"],

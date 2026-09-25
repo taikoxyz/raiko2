@@ -256,9 +256,17 @@ class CalibrationModelTests(unittest.TestCase):
                     )
                 )
 
-        for index, (split, exponent_bytes) in enumerate(
-            (("fit", 1), ("fit", 4), ("fit", 8), ("holdout", 2))
-        ):
+        exp_rows = (
+            ("fit", 0, Decimal("40")),
+            ("fit", 1, Decimal("43")),
+            ("fit", 2, Decimal("50")),
+            ("fit", 4, Decimal("60")),
+            ("fit", 8, Decimal(7 + 2 * 8 + 3 * 8**2)),
+            ("fit", 16, Decimal(7 + 2 * 16 + 3 * 16**2)),
+            ("holdout", 24, Decimal(7 + 2 * 24 + 3 * 24**2)),
+            ("fit", 32, Decimal(7 + 2 * 32 + 3 * 32**2)),
+        )
+        for index, (split, exponent_bytes, target) in enumerate(exp_rows):
             observations.append(
                 DynamicOpcodeObservation(
                     "opcode:0x0a",
@@ -269,7 +277,7 @@ class CalibrationModelTests(unittest.TestCase):
                         "exponent_bytes": Fraction(exponent_bytes),
                         "exponent_bytes_squared": Fraction(exponent_bytes**2),
                     },
-                    Decimal(7 + 2 * exponent_bytes + 3 * exponent_bytes**2),
+                    target,
                 )
             )
         return tuple(observations)
@@ -340,6 +348,62 @@ class CalibrationModelTests(unittest.TestCase):
             self.assertLessEqual(
                 abs(memory.production_coefficients[name] - expected),
                 Decimal("1e-60"),
+            )
+
+        exp = result.opcode_models["opcode:0x0a"]
+        self.assertEqual(exp.small_bucket_body, Decimal("60"))
+        self.assertEqual(exp.low_domain_byte_lengths, (0, 1, 2, 4))
+        self.assertEqual(exp.fit_count, 3)
+        self.assertEqual(exp.holdout_count, 1)
+        self.assertEqual(exp.low_domain_count, 4)
+        self.assertEqual(
+            {
+                prediction["predicted_body_cost"]
+                for prediction in exp.low_domain_predictions.values()
+            },
+            {Decimal("60")},
+        )
+
+    def test_structured_exp_large_holdout_failure_still_blocks_support(self):
+        observations = list(self._structured_dynamic_observations())
+        index = next(
+            index
+            for index, row in enumerate(observations)
+            if row.dynamic_key == "opcode:0x0a" and row.model_split == "holdout"
+        )
+        observations[index] = DynamicOpcodeObservation(
+            **{
+                **observations[index].__dict__,
+                "target_body_cost": observations[index].target_body_cost
+                * Decimal("2"),
+            }
+        )
+
+        result = fit_structured_dynamic_opcode_models(
+            observations,
+            body_scale=Decimal("2"),
+            common_overhead=Decimal("11"),
+        )
+
+        exp = result.opcode_models["opcode:0x0a"]
+        self.assertEqual(exp.status, "not_supported")
+        self.assertIn("holdout_max_ape", exp.quality_failures)
+
+    def test_structured_exp_requires_exact_low_domain(self):
+        observations = tuple(
+            row
+            for row in self._structured_dynamic_observations()
+            if not (
+                row.dynamic_key == "opcode:0x0a"
+                and row.features["exponent_bytes"] == Fraction(4)
+            )
+        )
+
+        with self.assertRaisesRegex(ValueError, "low-domain.*0, 1, 2, 4"):
+            fit_structured_dynamic_opcode_models(
+                observations,
+                body_scale=Decimal("2"),
+                common_overhead=Decimal("11"),
             )
 
     def test_dynamic_prediction_aggregates_use_prediction_id_order(self):
@@ -1493,6 +1557,92 @@ class CalibrationModelTests(unittest.TestCase):
 
         self.assertEqual(result.status, "not_supported")
         self.assertIn("flat_relation_max_normalized_error", result.quality_failures)
+
+    def test_declared_dispatch_only_body_is_fixed_zero_and_residual_is_diagnostic(self):
+        result = fit_nonnegative_opcode_bodies(
+            equations=(
+                RelationEquation(
+                    relation_id="not",
+                    coefficients={"opcode:0x19": Fraction(1)},
+                    slope=Decimal("1000"),
+                ),
+                RelationEquation(
+                    relation_id="add",
+                    coefficients={"opcode:0x01": Fraction(1)},
+                    slope=Decimal("2"),
+                ),
+            ),
+            opcode_keys=("opcode:0x01", "opcode:0x19"),
+            anchor_body_costs={},
+            dispatch_only_keys=("opcode:0x19",),
+        )
+
+        self.assertEqual(result.status, "supported")
+        self.assertEqual(result.lab_body_per_raw_gas["opcode:0x19"], Decimal(0))
+        self.assertEqual(result.dispatch_only_keys, ("opcode:0x19",))
+        self.assertEqual(result.approximation_relation_ids, ("not",))
+        self.assertEqual(result.approximation_relation_count, 1)
+        self.assertEqual(
+            result.maximum_absolute_approximation_residual, Decimal("1000")
+        )
+        self.assertEqual(
+            result.predictions["not"]["gate"],
+            "declared_approximation",
+        )
+        self.assertEqual(
+            result.predictions["not"]["absolute_residual"],
+            Decimal("1000"),
+        )
+
+    def test_ordinary_relation_residual_still_blocks_support(self):
+        result = fit_nonnegative_opcode_bodies(
+            equations=(
+                RelationEquation(
+                    relation_id="ordinary-a",
+                    coefficients={"opcode:0x01": Fraction(1)},
+                    slope=Decimal("1000"),
+                ),
+                RelationEquation(
+                    relation_id="ordinary-b",
+                    coefficients={"opcode:0x01": Fraction(1)},
+                    slope=Decimal("2"),
+                ),
+                RelationEquation(
+                    relation_id="not",
+                    coefficients={"opcode:0x19": Fraction(1)},
+                    slope=Decimal("1"),
+                ),
+            ),
+            opcode_keys=("opcode:0x01", "opcode:0x19"),
+            anchor_body_costs={},
+            dispatch_only_keys=("opcode:0x19",),
+        )
+
+        self.assertEqual(result.status, "not_supported")
+        self.assertIn("nonzero_relation_max_ape", result.quality_failures)
+
+    def test_rejects_malformed_dispatch_only_policy(self):
+        equation = RelationEquation(
+            relation_id="add",
+            coefficients={"opcode:0x01": Fraction(1)},
+            slope=Decimal("2"),
+        )
+        cases = (
+            (("opcode:0xff",), {}, "unknown dispatch-only"),
+            (("opcode:0x50",), {"opcode:0x50": Decimal("4")}, "anchor"),
+            (("opcode:0x19", "opcode:0x19"), {}, "duplicate dispatch-only"),
+            (("opcode:0x19",), {}, "absent dispatch-only"),
+        )
+        for dispatch_only_keys, anchors, message in cases:
+            with self.subTest(
+                dispatch_only_keys=dispatch_only_keys
+            ), self.assertRaisesRegex(ValueError, message):
+                fit_nonnegative_opcode_bodies(
+                    equations=(equation,),
+                    opcode_keys=("opcode:0x01", "opcode:0x19", "opcode:0x50"),
+                    anchor_body_costs=anchors,
+                    dispatch_only_keys=dispatch_only_keys,
+                )
 
     def test_exact_rank_and_affine_reconstruction(self):
         equations = (

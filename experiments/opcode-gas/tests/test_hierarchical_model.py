@@ -88,6 +88,88 @@ def _core_submodel_sources():
             },
         }
 
+    def exp_evidence():
+        def prediction(split, body):
+            production = body * 2 + 7
+            return {
+                "model_split": split,
+                "actual_body_cost": str(body),
+                "predicted_body_cost": str(body),
+                "body_ape": "0",
+                "actual_production_cost": str(production),
+                "predicted_production_cost": str(production),
+                "production_ape": "0",
+                "predicted_operation_body_cost": str(body),
+                "shared_memory_body_cost": "0",
+            }
+
+        low_predictions = {}
+        for byte_length in (0, 1, 2, 4):
+            row = prediction("fit", 20)
+            row.pop("predicted_operation_body_cost")
+            row.pop("shared_memory_body_cost")
+            low_predictions[f"exp-low-{byte_length}"] = {
+                **row,
+                "exponent_byte_length": byte_length,
+                "overprediction": "0",
+                "underprediction": "0",
+            }
+        return {
+            "status": "supported",
+            "parameter_order": [
+                "constant",
+                "exponent_bytes",
+                "exponent_bytes_squared",
+            ],
+            "exact_fit_rank": 3,
+            "parameter_count": 3,
+            "observation_count": 8,
+            "fit_count": 3,
+            "holdout_count": 1,
+            "body_coefficients": {
+                "constant": "10",
+                "exponent_bytes": "2",
+                "exponent_bytes_squared": "0",
+            },
+            "production_coefficients": {
+                "constant": "27",
+                "exponent_bytes": "4",
+                "exponent_bytes_squared": "0",
+            },
+            "fit_body_mape": "0",
+            "fit_body_max_ape": "0",
+            "holdout_body_max_ape": "0",
+            "fit_production_mape": "0",
+            "fit_production_max_ape": "0",
+            "holdout_production_max_ape": "0",
+            "quality_failures": [],
+            "exact_fit_matrix": [
+                ["1", "8", "64"],
+                ["1", "16", "256"],
+                ["1", "32", "1024"],
+            ],
+            "solver_column_scales": ["1", "1", "1"],
+            "solver_residual": "0",
+            "predictions": {
+                "exp-large-8": prediction("fit", 26),
+                "exp-large-16": prediction("fit", 42),
+                "exp-large-32": prediction("fit", 74),
+                "exp-large-24": prediction("holdout", 58),
+            },
+            "approximation_policy": {
+                "kind": "conservative_small_exponent_bucket",
+                "small_domain_max_exponent_byte_length": 4,
+                "expected_low_domain_exponent_byte_lengths": [0, 1, 2, 4],
+                "polynomial_domain_min_exponent_byte_length": 5,
+                "polynomial_domain_max_exponent_byte_length": 32,
+                "large_domain_body_floor": "small_bucket_body",
+            },
+            "small_bucket_body": "20",
+            "low_domain_count": 4,
+            "low_domain_exponent_byte_lengths": [0, 1, 2, 4],
+            "low_domain_predictions": low_predictions,
+        }
+
     cases = tuple(
         types.SimpleNamespace(
             kind="opcode",
@@ -146,18 +228,48 @@ def _core_submodel_sources():
                 scenario_id=f"{key}-canonical",
                 relation_scenario=dynamic_scenarios[key],
             )
+        if key == "opcode:0x0a":
+            row.update(
+                slope_p="26",
+                scenario_id="exp-large-8",
+                model_split="fit",
+                relation_scenario={
+                    "exponent_byte_length": 8,
+                    "initial_memory_words": 0,
+                },
+            )
         equations.append(row)
     dynamic_holdouts = [
-        {
-            "relation_id": "exp-zero",
-            "scenario_id": "exp-zero",
-            "dynamic_key": "opcode:0x0a",
-            "model_split": "fit",
-            "relation_scenario": {
-                "exponent_byte_length": 0,
-                "initial_memory_words": 0,
-            },
-        },
+        *[
+            {
+                "relation_id": f"exp-low-{byte_length}",
+                "scenario_id": f"exp-low-{byte_length}",
+                "dynamic_key": "opcode:0x0a",
+                "model_split": "fit",
+                "signed_raw_gas_by_key": {"opcode:0x0a": "1"},
+                "slope_p": "20",
+                "relation_scenario": {
+                    "exponent_byte_length": byte_length,
+                    "initial_memory_words": 0,
+                },
+            }
+            for byte_length in (0, 1, 2, 4)
+        ],
+        *[
+            {
+                "relation_id": f"exp-large-{byte_length}",
+                "scenario_id": f"exp-large-{byte_length}",
+                "dynamic_key": "opcode:0x0a",
+                "model_split": split,
+                "signed_raw_gas_by_key": {"opcode:0x0a": "1"},
+                "slope_p": str(10 + 2 * byte_length),
+                "relation_scenario": {
+                    "exponent_byte_length": byte_length,
+                    "initial_memory_words": 0,
+                },
+            }
+            for byte_length, split in ((16, "fit"), (24, "holdout"), (32, "fit"))
+        ],
         {
             "relation_id": "keccak-zero",
             "scenario_id": "keccak-zero",
@@ -183,7 +295,7 @@ def _core_submodel_sources():
     )
     dynamic_artifact = _seal_artifact(
         {
-            "schema_version": 3,
+            "schema_version": 4,
             "purpose": "dynamic_opcode_models",
             "status": "supported",
             "candidate_eligible": False,
@@ -241,19 +353,7 @@ def _core_submodel_sources():
             "aggregate_exact_fit_rank": 14,
             "aggregate_parameter_count": 14,
             "models": {
-                "opcode:0x0a": dynamic_evidence(
-                    ("constant", "exponent_bytes", "exponent_bytes_squared"),
-                    {
-                        "constant": "10",
-                        "exponent_bytes": "2",
-                        "exponent_bytes_squared": "0",
-                    },
-                    {
-                        "constant": "27",
-                        "exponent_bytes": "4",
-                        "exponent_bytes_squared": "0",
-                    },
-                ),
+                "opcode:0x0a": exp_evidence(),
                 "opcode:0x20": dynamic_evidence(
                     ("constant", "keccak_zero_length_event", "keccak_permutations"),
                     {
@@ -275,8 +375,6 @@ def _core_submodel_sources():
             },
         }
     )
-    exp_predictions = dynamic_artifact["models"]["opcode:0x0a"]["predictions"]
-    exp_predictions["exp-zero"] = exp_predictions.pop("fit-0")
     dynamic_artifact = _seal_artifact(dynamic_artifact)
     return manifest, relation_artifact, dynamic_artifact
 
@@ -356,6 +454,64 @@ class HierarchicalModelTests(unittest.TestCase):
             Decimal("22"),
         )
         self.assertIsNone(validate_core_registry(registry))
+
+    def test_declared_dispatch_only_opcodes_add_common_dispatch_exactly_once(self):
+        for opcode in (0x19, 0x5B):
+            with self.subTest(opcode=opcode):
+                registry = registry_with(
+                    common_dispatch="7",
+                    opcode=opcode,
+                    kind="static_raw_gas",
+                    params={"body_per_raw_gas": "0"},
+                )
+
+                self.assertEqual(
+                    predict_opcode_event(
+                        registry, OpcodeEvent(opcode=opcode, raw_gas=3)
+                    ),
+                    Decimal("7"),
+                )
+
+    def test_exp_uses_small_bucket_then_floored_polynomial_with_one_dispatch(self):
+        registry = registry_with_exp(
+            common_dispatch="7",
+            params={
+                "small_bucket_body": "20",
+                "constant": "-10",
+                "exponent_byte": "2",
+                "exponent_byte_sq": "0",
+            },
+        )
+
+        for exponent_bytes in (0, 1, 2, 4, 5):
+            with self.subTest(exponent_bytes=exponent_bytes):
+                self.assertEqual(
+                    predict_opcode_event(
+                        registry,
+                        OpcodeEvent(
+                            opcode=0x0A,
+                            exponent_byte_length=exponent_bytes,
+                        ),
+                    ),
+                    Decimal("27"),
+                )
+
+    def test_exp_rejects_exponent_byte_length_outside_evm_domain(self):
+        registry = registry_with_exp(
+            common_dispatch="7",
+            params={
+                "small_bucket_body": "20",
+                "constant": "0",
+                "exponent_byte": "2",
+                "exponent_byte_sq": "1",
+            },
+        )
+
+        with self.assertRaisesRegex(ValueError, "0..=32"):
+            predict_opcode_event(
+                registry,
+                OpcodeEvent(opcode=0x0A, exponent_byte_length=33),
+            )
 
     def test_keccak_signed_empty_adjustment_must_leave_nonnegative_prediction(self):
         registry = registry_with_keccak(
@@ -587,6 +743,7 @@ class CoreOpcodeSubmodelArtifactTests(unittest.TestCase):
         )
 
         self.assertEqual(artifact["purpose"], "core_opcode_submodel")
+        self.assertEqual(artifact["schema_version"], 2)
         self.assertEqual(artifact["status"], "supported_core_submodel")
         self.assertFalse(artifact["candidate_eligible"])
         self.assertEqual(artifact["named_opcode_count"], 150)
@@ -599,10 +756,24 @@ class CoreOpcodeSubmodelArtifactTests(unittest.TestCase):
         )
         self.assertEqual(artifact["registry"]["common_dispatch"], "7")
         self.assertEqual(
+            artifact["approximation_policy"]["dispatch_only_opcode_keys"],
+            ["opcode:0x19", "opcode:0x5b"],
+        )
+        self.assertEqual(
+            artifact["fit_evidence"]["dispatch_only_keys"],
+            ["opcode:0x19", "opcode:0x5b"],
+        )
+        for key in ("opcode:0x19", "opcode:0x5b"):
+            self.assertEqual(
+                artifact["registry"]["models"][key]["parameters"],
+                {"body_per_raw_gas": "0"},
+            )
+        self.assertEqual(
             artifact["registry"]["models"]["opcode:0x0a"],
             {
                 "kind": "exp",
                 "parameters": {
+                    "small_bucket_body": "40",
                     "constant": "20",
                     "exponent_byte": "4",
                     "exponent_byte_sq": "0",
@@ -666,6 +837,30 @@ class CoreOpcodeSubmodelArtifactTests(unittest.TestCase):
         named_invalid["registry"]["opcode_model_ids"][0x01] = "invalid"
         mutations.append(("named opcode mapped to INVALID", _seal_artifact(named_invalid)))
 
+        changed_bucket = copy.deepcopy(artifact)
+        changed_bucket["registry"]["models"]["opcode:0x0a"]["parameters"][
+            "small_bucket_body"
+        ] = "41"
+        mutations.append(("EXP bucket", _seal_artifact(changed_bucket)))
+
+        nonzero_dispatch_only = copy.deepcopy(artifact)
+        nonzero_dispatch_only["registry"]["models"]["opcode:0x19"][
+            "parameters"
+        ]["body_per_raw_gas"] = "1"
+        mutations.append(
+            ("nonzero dispatch-only body", _seal_artifact(nonzero_dispatch_only))
+        )
+
+        changed_policy = copy.deepcopy(artifact)
+        changed_policy["approximation_policy"]["dispatch_only_opcode_keys"] = [
+            "opcode:0x19"
+        ]
+        mutations.append(("approximation policy", _seal_artifact(changed_policy)))
+
+        old_schema = copy.deepcopy(artifact)
+        old_schema["schema_version"] = 1
+        mutations.append(("old core schema", _seal_artifact(old_schema)))
+
         for label, mutated in mutations:
             with self.subTest(mutation=label), self.assertRaisesRegex(
                 ValueError, "exact source replay"
@@ -694,15 +889,62 @@ class CoreOpcodeSubmodelArtifactTests(unittest.TestCase):
                 manifest, relation_artifact, dynamic_artifact
             )
 
-    def test_builder_rejects_incomplete_schema_3_dynamic_evidence(self):
+    def test_builder_rejects_incomplete_schema_4_dynamic_evidence(self):
         manifest, relation_artifact, dynamic_artifact = _core_submodel_sources()
         del dynamic_artifact["aggregate_exact_fit_rank"]
         dynamic_artifact = _seal_artifact(dynamic_artifact)
 
-        with self.assertRaisesRegex(ValueError, "schema-3|schema"):
+        with self.assertRaisesRegex(ValueError, "schema-4|schema"):
             opcode_gas.build_core_opcode_submodel_artifact(
                 manifest, relation_artifact, dynamic_artifact
             )
+
+    def test_builder_rejects_schema_3_dynamic_evidence(self):
+        manifest, relation_artifact, dynamic_artifact = _core_submodel_sources()
+        dynamic_artifact["schema_version"] = 3
+        dynamic_artifact = _seal_artifact(dynamic_artifact)
+
+        with self.assertRaisesRegex(ValueError, "schema-4|schema"):
+            opcode_gas.build_core_opcode_submodel_artifact(
+                manifest, relation_artifact, dynamic_artifact
+            )
+
+    def test_builder_rejects_mutated_exp_bucket_policy_and_underprediction(self):
+        manifest, relation_artifact, dynamic_artifact = _core_submodel_sources()
+        mutations = []
+
+        changed_bucket = copy.deepcopy(dynamic_artifact)
+        changed_bucket["models"]["opcode:0x0a"]["small_bucket_body"] = "19"
+        mutations.append(("bucket", _seal_artifact(changed_bucket), "bucket"))
+
+        changed_policy = copy.deepcopy(dynamic_artifact)
+        changed_policy["models"]["opcode:0x0a"]["approximation_policy"][
+            "small_domain_max_exponent_byte_length"
+        ] = 3
+        mutations.append(("policy", _seal_artifact(changed_policy), "policy"))
+
+        underprediction = copy.deepcopy(dynamic_artifact)
+        row = underprediction["models"]["opcode:0x0a"][
+            "low_domain_predictions"
+        ]["exp-low-2"]
+        row.update(
+            actual_body_cost="21",
+            actual_production_cost="49",
+            body_ape="0.047619047619047619047619047619047619047619047619047619047619047619047619047619048",
+            production_ape="0.040816326530612244897959183673469387755102040816326530612244897959183673469387755",
+            underprediction="1",
+        )
+        mutations.append(
+            ("underprediction", _seal_artifact(underprediction), "underprediction")
+        )
+
+        for label, mutated, message in mutations:
+            with self.subTest(mutation=label), self.assertRaisesRegex(
+                ValueError, message
+            ):
+                opcode_gas.build_core_opcode_submodel_artifact(
+                    manifest, relation_artifact, mutated
+                )
 
     def test_builder_independently_checks_dynamic_quality_rank_and_costs(self):
         manifest, relation_artifact, dynamic_artifact = _core_submodel_sources()
@@ -718,7 +960,7 @@ class CoreOpcodeSubmodelArtifactTests(unittest.TestCase):
         mutations.append(("exact rank", _seal_artifact(rank_deficient), "exact rank"))
 
         negative_cost = copy.deepcopy(dynamic_artifact)
-        negative_cost["models"]["opcode:0x0a"]["predictions"]["exp-zero"][
+        negative_cost["models"]["opcode:0x0a"]["predictions"]["exp-large-8"][
             "predicted_operation_body_cost"
         ] = "-1"
         mutations.append(("negative cost", _seal_artifact(negative_cost), "negative"))
@@ -736,10 +978,11 @@ class CoreOpcodeSubmodelArtifactTests(unittest.TestCase):
         mutations = []
 
         stale_apes = copy.deepcopy(dynamic_artifact)
-        row = stale_apes["models"]["opcode:0x0a"]["predictions"]["exp-zero"]
+        row = stale_apes["models"]["opcode:0x0a"]["predictions"]["exp-large-8"]
         row.update(
             actual_body_cost="100",
             predicted_body_cost="1",
+            predicted_operation_body_cost="1",
             actual_production_cost="207",
             predicted_production_cost="9",
         )
@@ -747,7 +990,7 @@ class CoreOpcodeSubmodelArtifactTests(unittest.TestCase):
 
         zero_actual = copy.deepcopy(dynamic_artifact)
         zero_actual_row = zero_actual["models"]["opcode:0x0a"]["predictions"][
-            "exp-zero"
+            "exp-large-8"
         ]
         zero_actual_row.update(
             actual_body_cost="0",
@@ -762,7 +1005,7 @@ class CoreOpcodeSubmodelArtifactTests(unittest.TestCase):
         )
 
         stale_production_ape = copy.deepcopy(dynamic_artifact)
-        stale_production_ape["models"]["opcode:0x0a"]["predictions"]["exp-zero"][
+        stale_production_ape["models"]["opcode:0x0a"]["predictions"]["exp-large-8"][
             "production_ape"
         ] = "0.01"
         mutations.append(
@@ -774,7 +1017,7 @@ class CoreOpcodeSubmodelArtifactTests(unittest.TestCase):
         )
 
         bad_production = copy.deepcopy(dynamic_artifact)
-        bad_production["models"]["opcode:0x0a"]["predictions"]["exp-zero"][
+        bad_production["models"]["opcode:0x0a"]["predictions"]["exp-large-8"][
             "actual_production_cost"
         ] = "10"
         mutations.append(
@@ -786,7 +1029,7 @@ class CoreOpcodeSubmodelArtifactTests(unittest.TestCase):
         )
 
         bad_operation_sum = copy.deepcopy(dynamic_artifact)
-        bad_operation_sum["models"]["opcode:0x0a"]["predictions"]["exp-zero"][
+        bad_operation_sum["models"]["opcode:0x0a"]["predictions"]["exp-large-8"][
             "predicted_operation_body_cost"
         ] = "2"
         mutations.append(
@@ -819,38 +1062,43 @@ class CoreOpcodeSubmodelArtifactTests(unittest.TestCase):
                     manifest, relation_artifact, mutated
                 )
 
-    def test_builder_binds_unique_relation_exp_zero_to_model_prediction(self):
+    def test_builder_binds_exp_source_rows_to_model_predictions(self):
         manifest, relation_artifact, dynamic_artifact = _core_submodel_sources()
 
         missing = copy.deepcopy(dynamic_artifact)
-        predictions = missing["models"]["opcode:0x0a"]["predictions"]
-        predictions["different-zero"] = predictions.pop("exp-zero")
+        predictions = missing["models"]["opcode:0x0a"]["low_domain_predictions"]
+        predictions["different-zero"] = predictions.pop("exp-low-0")
         missing = _seal_artifact(missing)
-        with self.assertRaisesRegex(ValueError, "EXP zero.*prediction"):
+        with self.assertRaisesRegex(ValueError, "EXP source prediction"):
             opcode_gas.build_core_opcode_submodel_artifact(
                 manifest, relation_artifact, missing
             )
 
         wrong_split = copy.deepcopy(dynamic_artifact)
-        predictions = wrong_split["models"]["opcode:0x0a"]["predictions"]
-        predictions["exp-zero"]["model_split"] = "holdout"
-        predictions["holdout"]["model_split"] = "fit"
+        predictions = wrong_split["models"]["opcode:0x0a"][
+            "low_domain_predictions"
+        ]
+        predictions["exp-low-0"]["model_split"] = "holdout"
         wrong_split = _seal_artifact(wrong_split)
-        with self.assertRaisesRegex(ValueError, "EXP zero.*model_split"):
+        with self.assertRaisesRegex(ValueError, "EXP prediction model_split"):
             opcode_gas.build_core_opcode_submodel_artifact(
                 manifest, relation_artifact, wrong_split
             )
 
     def test_builder_requires_zero_exp_evidence_from_relation_source(self):
         manifest, relation_artifact, dynamic_artifact = _core_submodel_sources()
-        relation_artifact["dynamic_holdouts"] = []
+        relation_artifact["dynamic_holdouts"] = [
+            row
+            for row in relation_artifact["dynamic_holdouts"]
+            if row.get("scenario_id") != "exp-low-0"
+        ]
         relation_artifact = _seal_artifact(relation_artifact)
         dynamic_artifact["source_hashes"]["relation_artifact_sha256"] = (
             relation_artifact["artifact_sha256"]
         )
         dynamic_artifact = _seal_artifact(dynamic_artifact)
 
-        with self.assertRaisesRegex(ValueError, "EXP.*zero|zero.*EXP"):
+        with self.assertRaisesRegex(ValueError, "EXP source domain"):
             opcode_gas.build_core_opcode_submodel_artifact(
                 manifest, relation_artifact, dynamic_artifact
             )

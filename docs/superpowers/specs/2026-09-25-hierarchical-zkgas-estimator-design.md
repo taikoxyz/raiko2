@@ -404,8 +404,9 @@ The SP1 instruction-count bridge remains outside this digest. Building or changi
 
 The current accepted opcode artifacts may be sealed as a `core_opcode_submodel` for provenance, but
 that seal does not satisfy the full-candidate barrier and cannot open final proposal validation.
-Schema-4 dynamic evidence and schema-2 core artifacts encode the declared approximation policy;
-schema-3 dynamic evidence and schema-1 core artifacts are not reinterpreted under this policy.
+Schema-4 dynamic evidence and schema-3 core artifacts encode the declared approximation policy.
+Schema-2 core artifacts are pre-P1 historical evidence, while schema-3 dynamic evidence and
+schema-1 core artifacts are older formats; none of them is reinterpreted under the current policy.
 
 ## Completeness And Failure Rules
 

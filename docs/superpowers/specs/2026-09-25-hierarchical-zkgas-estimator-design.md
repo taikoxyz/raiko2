@@ -274,7 +274,16 @@ MCOPY: constant, copy_words                      2
 
 KECCAK uses zero permutations for empty input and `floor(input_length / 136) + 1` otherwise, plus
 the frozen zero-length term and shared `f_mem`. MCOPY adds copied words and `f_mem`. MLOAD, MSTORE,
-and MSTORE8 have separate bases and share `f_mem`. EXP has no memory term.
+and MSTORE8 have separate bases and share `f_mem`. EXP has no memory term. The accepted EXP rows
+cover exponent byte lengths 1 through 32; exponent byte length zero is a required new controlled
+case before candidate promotion. Keep the three-term model only if that point passes without a
+negative prediction. Otherwise add and validate an explicit zero-exponent branch.
+
+Physically additive scales and costs, such as common dispatch, raw-gas body scales, shared-memory
+costs, and final per-event predictions, must be nonnegative. A contrast or branch-adjustment
+coefficient may be signed when its basis is not an independently charged component. For example,
+the KECCAK zero-length adjustment may subtract from its nonempty-path constant, but the resulting
+empty-input event prediction must remain nonnegative.
 
 ## Remaining Opcode Families
 
@@ -384,7 +393,8 @@ The full candidate may be sealed only when:
 - undefined opcode bytes map to the common INVALID model;
 - every active precompile and declared spawn event has exactly one owner;
 - memory expansion, child execution, state access, and system work are not double charged;
-- all required coefficients and predictions are finite and nonnegative;
+- all required coefficients are finite, every physically additive coefficient is nonnegative, and
+  every in-domain event prediction is nonnegative;
 - every layer passes its controlled fit and holdout gates;
 - no proposal-purpose row participated in calibration or model selection; and
 - candidate replay exactly reproduces every component digest and controlled prediction.

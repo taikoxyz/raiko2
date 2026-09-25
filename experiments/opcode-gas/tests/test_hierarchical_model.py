@@ -731,6 +731,94 @@ class CoreOpcodeSubmodelArtifactTests(unittest.TestCase):
                     manifest, relation_artifact, mutated
                 )
 
+    def test_builder_recomputes_dynamic_prediction_arithmetic_and_aggregates(self):
+        manifest, relation_artifact, dynamic_artifact = _core_submodel_sources()
+        mutations = []
+
+        stale_apes = copy.deepcopy(dynamic_artifact)
+        row = stale_apes["models"]["opcode:0x0a"]["predictions"]["exp-zero"]
+        row.update(
+            actual_body_cost="100",
+            predicted_body_cost="1",
+            actual_production_cost="207",
+            predicted_production_cost="9",
+        )
+        mutations.append(("row APE", _seal_artifact(stale_apes), "body APE"))
+
+        zero_actual = copy.deepcopy(dynamic_artifact)
+        zero_actual_row = zero_actual["models"]["opcode:0x0a"]["predictions"][
+            "exp-zero"
+        ]
+        zero_actual_row.update(
+            actual_body_cost="0",
+            actual_production_cost="7",
+        )
+        mutations.append(
+            (
+                "zero actual denominator",
+                _seal_artifact(zero_actual),
+                "must be positive",
+            )
+        )
+
+        stale_production_ape = copy.deepcopy(dynamic_artifact)
+        stale_production_ape["models"]["opcode:0x0a"]["predictions"]["exp-zero"][
+            "production_ape"
+        ] = "0.01"
+        mutations.append(
+            (
+                "production APE",
+                _seal_artifact(stale_production_ape),
+                "production APE",
+            )
+        )
+
+        bad_production = copy.deepcopy(dynamic_artifact)
+        bad_production["models"]["opcode:0x0a"]["predictions"]["exp-zero"][
+            "actual_production_cost"
+        ] = "10"
+        mutations.append(
+            (
+                "production conversion",
+                _seal_artifact(bad_production),
+                "production cost",
+            )
+        )
+
+        bad_operation_sum = copy.deepcopy(dynamic_artifact)
+        bad_operation_sum["models"]["opcode:0x0a"]["predictions"]["exp-zero"][
+            "predicted_operation_body_cost"
+        ] = "2"
+        mutations.append(
+            (
+                "operation plus shared",
+                _seal_artifact(bad_operation_sum),
+                "operation.*shared",
+            )
+        )
+
+        for field in (
+            "fit_body_mape",
+            "fit_body_max_ape",
+            "holdout_body_max_ape",
+            "fit_production_mape",
+            "fit_production_max_ape",
+            "holdout_production_max_ape",
+        ):
+            aggregate_drift = copy.deepcopy(dynamic_artifact)
+            aggregate_drift["models"]["opcode:0x0a"][field] = "0.01"
+            mutations.append(
+                (f"aggregate {field}", _seal_artifact(aggregate_drift), "aggregate")
+            )
+
+        for label, mutated, message in mutations:
+            with self.subTest(mutation=label), self.assertRaisesRegex(
+                ValueError, message
+            ):
+                opcode_gas.build_core_opcode_submodel_artifact(
+                    manifest, relation_artifact, mutated
+                )
+
     def test_builder_binds_unique_relation_exp_zero_to_model_prediction(self):
         manifest, relation_artifact, dynamic_artifact = _core_submodel_sources()
 

@@ -342,6 +342,66 @@ class CalibrationModelTests(unittest.TestCase):
                 Decimal("1e-60"),
             )
 
+    def test_dynamic_prediction_aggregates_use_prediction_id_order(self):
+        observations = (
+            DynamicOpcodeObservation(
+                "opcode:0x0a",
+                "large",
+                "fit",
+                {"constant": Fraction(1)},
+                Decimal(1),
+            ),
+            DynamicOpcodeObservation(
+                "opcode:0x0a",
+                "small-a",
+                "fit",
+                {"constant": Fraction(1)},
+                Decimal(1),
+            ),
+            DynamicOpcodeObservation(
+                "opcode:0x0a",
+                "small-b",
+                "fit",
+                {"constant": Fraction(1)},
+                Decimal(1),
+            ),
+            DynamicOpcodeObservation(
+                "opcode:0x0a",
+                "holdout",
+                "holdout",
+                {"constant": Fraction(1)},
+                Decimal(1),
+            ),
+        )
+        predicted_body_costs = (
+            Decimal("1e80"),
+            Decimal(5),
+            Decimal(5),
+            Decimal(1),
+        )
+        prediction_ids = ("z-large", "a-small", "b-small", "h-holdout")
+        reordered = (1, 2, 0, 3)
+
+        with localcontext(calibration_model._CALIBRATION_DECIMAL_CONTEXT):
+            original = calibration_model._dynamic_prediction_evidence(
+                observations,
+                predicted_body_costs,
+                body_scale=Decimal(1),
+                common_overhead=Decimal(0),
+                prediction_ids=prediction_ids,
+            )
+            permuted = calibration_model._dynamic_prediction_evidence(
+                tuple(observations[index] for index in reordered),
+                tuple(predicted_body_costs[index] for index in reordered),
+                body_scale=Decimal(1),
+                common_overhead=Decimal(0),
+                prediction_ids=tuple(
+                    prediction_ids[index] for index in reordered
+                ),
+            )
+
+        self.assertEqual(original[1:], permuted[1:])
+
     def test_structured_dynamic_fit_rejects_rank_deficient_shared_memory(self):
         observations = tuple(
             DynamicOpcodeObservation(

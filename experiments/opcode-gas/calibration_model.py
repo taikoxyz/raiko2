@@ -328,6 +328,7 @@ def _dynamic_prediction_evidence(
     holdout_body_apes = []
     fit_production_apes = []
     holdout_production_apes = []
+    aggregate_rows = []
     for observation, predicted_body, prediction_id, extra in zip(
         observations, predicted_body_costs, prediction_ids, extra_rows
     ):
@@ -363,7 +364,11 @@ def _dynamic_prediction_evidence(
                 **extra,
             }
         )
-        if observation.model_split == "fit":
+        aggregate_rows.append(
+            (prediction_id, observation.model_split, body_ape, production_ape)
+        )
+    for _, model_split, body_ape, production_ape in sorted(aggregate_rows):
+        if model_split == "fit":
             fit_body_apes.append(body_ape)
             fit_production_apes.append(production_ape)
         else:

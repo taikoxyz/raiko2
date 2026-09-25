@@ -12899,8 +12899,13 @@ def _canonical_artifact_decimal(
 
 
 def _validate_dynamic_prediction_evidence(
-    evidence: Mapping[str, Any], *, label: str, operation_specific: bool
-) -> None:
+    evidence: Mapping[str, Any],
+    *,
+    label: str,
+    operation_specific: bool,
+    body_scale: Decimal,
+    common_dispatch: Decimal,
+) -> dict[str, Decimal]:
     predictions = evidence.get("predictions")
     if (
         not isinstance(predictions, Mapping)
@@ -12921,30 +12926,80 @@ def _validate_dynamic_prediction_evidence(
         if operation_specific
         else set()
     )
+    if any(
+        not isinstance(prediction_id, str) or not prediction_id
+        for prediction_id in predictions
+    ):
+        raise ValueError(f"schema-3 {label} prediction evidence is invalid")
     split_counts = {"fit": 0, "holdout": 0}
-    for prediction_id, row in predictions.items():
+    body_apes = {"fit": [], "holdout": []}
+    production_apes = {"fit": [], "holdout": []}
+    for prediction_id, row in sorted(predictions.items()):
         if (
-            not isinstance(prediction_id, str)
-            or not prediction_id
-            or not isinstance(row, Mapping)
+            not isinstance(row, Mapping)
             or set(row) != expected_fields
             or row.get("model_split") not in split_counts
         ):
             raise ValueError(f"schema-3 {label} prediction evidence is invalid")
-        split_counts[str(row["model_split"])] += 1
+        split = str(row["model_split"])
+        split_counts[split] += 1
+        values = {}
         for field in expected_fields - {"model_split"}:
-            value = _canonical_artifact_decimal(
+            values[field] = _canonical_artifact_decimal(
                 row.get(field), label=f"schema-3 {label} prediction {field}"
             )
-            if value < 0:
+            if values[field] < 0:
                 raise ValueError(
                     f"schema-3 {label} prediction additive cost or APE is negative"
                 )
+        actual_body = values["actual_body_cost"]
+        predicted_body = values["predicted_body_cost"]
+        actual_production = values["actual_production_cost"]
+        predicted_production = values["predicted_production_cost"]
+        if actual_body <= 0 or actual_production <= 0:
+            raise ValueError(
+                f"schema-3 {label} prediction actual cost must be positive"
+            )
+        if actual_production != actual_body * body_scale + common_dispatch:
+            raise ValueError(
+                f"schema-3 {label} prediction actual production cost differs"
+            )
+        if predicted_production != predicted_body * body_scale + common_dispatch:
+            raise ValueError(
+                f"schema-3 {label} prediction predicted production cost differs"
+            )
+        if operation_specific and predicted_body != (
+            values["predicted_operation_body_cost"]
+            + values["shared_memory_body_cost"]
+        ):
+            raise ValueError(
+                f"schema-3 {label} prediction operation plus shared body differs"
+            )
+        body_ape = abs(predicted_body - actual_body) / actual_body
+        production_ape = (
+            abs(predicted_production - actual_production) / actual_production
+        )
+        if values["body_ape"] != body_ape:
+            raise ValueError(f"schema-3 {label} prediction body APE differs")
+        if values["production_ape"] != production_ape:
+            raise ValueError(f"schema-3 {label} prediction production APE differs")
+        body_apes[split].append(body_ape)
+        production_apes[split].append(production_ape)
     if split_counts != {
         "fit": evidence["fit_count"],
         "holdout": evidence["holdout_count"],
     }:
         raise ValueError(f"schema-3 {label} prediction splits differ")
+    return {
+        "fit_body_mape": sum(body_apes["fit"], Decimal(0))
+        / Decimal(len(body_apes["fit"])),
+        "fit_body_max_ape": max(body_apes["fit"]),
+        "holdout_body_max_ape": max(body_apes["holdout"]),
+        "fit_production_mape": sum(production_apes["fit"], Decimal(0))
+        / Decimal(len(production_apes["fit"])),
+        "fit_production_max_ape": max(production_apes["fit"]),
+        "holdout_production_max_ape": max(production_apes["holdout"]),
+    }
 
 
 def _validate_dynamic_model_evidence(
@@ -13057,9 +13112,18 @@ def _validate_dynamic_model_evidence(
         _canonical_artifact_decimal(
             value, label=f"schema-3 {label} solver column scale", positive=True
         )
-    _validate_dynamic_prediction_evidence(
-        evidence, label=label, operation_specific=operation_specific
+    replayed_quality = _validate_dynamic_prediction_evidence(
+        evidence,
+        label=label,
+        operation_specific=operation_specific,
+        body_scale=body_scale,
+        common_dispatch=common_dispatch,
     )
+    for field, expected in replayed_quality.items():
+        if quality_values[field] != expected:
+            raise ValueError(
+                f"schema-3 {label} aggregate {field} differs from predictions"
+            )
     return body
 
 

@@ -218,6 +218,29 @@ the remaining opcode families and higher estimator layers must be calibrated and
 Block-level validation must report the frequency-dependent residual from NOT, JUMPDEST, and the
 small-EXP bucket. A later fixed offset may not absorb or hide those approximation errors.
 
+Fresh sealing run `09ebb08d76d3f461086b0cf4`, frozen at implementation revision
+`09cced01`, accepted all 170 terminal relations. Its canonical accepted stream has 8,124 raw
+execution rows; the five adaptive rounds executed 6,120, 4,608, 2,400, 1,368, and 1,008 rows at
+bounds 8, 32, 128, 512, and 2048 respectively. The ordinary static relations were accepted with
+MAPE `1.519e-60` and maximum APE `2.433e-59`. Four declared approximation relations have maximum
+absolute residual `17.3626393645827`; NOT (`opcode:0x19`) and JUMPDEST (`opcode:0x5b`) remain the
+two dispatch-only keys.
+
+The schema-4 dynamic artifact is `supported` (14 parameters/exact rank 14): EXP fit MAPE/max APE
+are effectively zero and its holdout maximum APE is `0.006415%`; KECCAK256 is
+`0.534789%`/`1.378295%`/`0.675443%` (fit MAPE/fit max/holdout max), and MCOPY is
+`3.235224%`/`8.117928%`/`0.616077%`. EXP's conservative small bucket is body
+`2375.1768915483163` and production `2703.2768343220275`; across byte lengths 0, 1, 2, and 4 it
+has maximum overprediction `1963.6428571428571` and zero underprediction. The artifact digest is
+`fb750c6427b8ebb57264be19500edac8617f06356a42e3881d7eea2399e43689`.
+
+The schema-2 core artifact is `supported_core_submodel`, replays exactly, and has artifact digest
+`e0a358ece713056e075c2d5b131d6c9c029db6e3fdd982bbfd075e65f6accf10` (file SHA256
+`833617e238ff2ba63f0cd25b8af312900c288d805d078931c5a3212f5551fe05`). It models 102 of
+150 named opcodes and leaves 48 explicitly unsupported, so it is
+`candidate_eligible=false`. No proposal row was opened and no production table or configuration
+changed.
+
 Fresh sealing run `ff00067694b841894e53c921`, frozen at implementation revision `26f899ea`,
 accepted all 170 formal relations after the frozen adaptive rounds. The independent nonnegative
 static-body replay under the old undeclared-approximation policy was `not_supported`:

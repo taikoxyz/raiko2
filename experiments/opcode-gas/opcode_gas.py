@@ -12529,27 +12529,13 @@ def _dynamic_opcode_observations_from_relation_artifact(
                     f"dynamic relation control references differ: {relation_id}"
                 )
             dynamic_key = str(spec.dynamic_key)
-            dynamic_coefficient = coefficients.get(dynamic_key, Fraction(0))
-            if dynamic_coefficient <= 0:
-                raise ValueError("dynamic relation target coefficient must be positive")
-            reference = Decimal(0)
-            for key, coefficient in coefficients.items():
-                if key == dynamic_key:
-                    continue
-                if key in dynamic_keys or key not in lab_multipliers:
-                    raise ValueError(
-                        f"dynamic relation reference key must be static and present: {key}"
-                    )
-                reference += (
-                    Decimal(coefficient.numerator)
-                    / Decimal(coefficient.denominator)
-                    * lab_multipliers[key]
-                )
-            target_body_cost = _decimal(
-                row.get("slope_p"), label="dynamic relation slope"
-            ) - reference
-            if not target_body_cost.is_finite() or target_body_cost <= 0:
-                raise ValueError("dynamic target body cost must be positive and finite")
+            target_body_cost = _dynamic_target_body_cost_from_relation(
+                row=row,
+                dynamic_key=dynamic_key,
+                coefficients=coefficients,
+                dynamic_keys=dynamic_keys,
+                lab_multipliers=lab_multipliers,
+            )
             observations.append(
                 DynamicOpcodeObservation(
                     dynamic_key=dynamic_key,
@@ -12562,6 +12548,39 @@ def _dynamic_opcode_observations_from_relation_artifact(
                 )
             )
     return tuple(observations)
+
+
+def _dynamic_target_body_cost_from_relation(
+    *,
+    row: Mapping[str, Any],
+    dynamic_key: str,
+    coefficients: Mapping[str, Fraction],
+    dynamic_keys: set[str],
+    lab_multipliers: Mapping[str, Decimal],
+) -> Decimal:
+    """Derive one dynamic target from its signed relation and static controls."""
+    dynamic_coefficient = coefficients.get(dynamic_key, Fraction(0))
+    if dynamic_coefficient <= 0:
+        raise ValueError("dynamic relation target coefficient must be positive")
+    reference = Decimal(0)
+    for key, coefficient in coefficients.items():
+        if key == dynamic_key:
+            continue
+        if key in dynamic_keys or key not in lab_multipliers:
+            raise ValueError(
+                f"dynamic relation reference key must be static and present: {key}"
+            )
+        reference += (
+            Decimal(coefficient.numerator)
+            / Decimal(coefficient.denominator)
+            * lab_multipliers[key]
+        )
+    target_body_cost = _decimal(
+        row.get("slope_p"), label="dynamic relation slope"
+    ) - reference
+    if not target_body_cost.is_finite() or target_body_cost <= 0:
+        raise ValueError("dynamic target body cost must be positive and finite")
+    return target_body_cost
 
 
 def _dynamic_observations_from_relation_artifact(
@@ -13567,6 +13586,10 @@ def build_core_opcode_submodel_artifact(
     ) = _validate_schema4_dynamic_opcode_artifact(
         relation_artifact, dynamic_artifact
     )
+    source_lab_multipliers = reconstruct_lab_multipliers(
+        _affine_model_from_validated_artifact(manifest, relation_artifact),
+        anchor_body_costs,
+    )
     opcode_keys = _core_opcode_keys(manifest)
     equations = _core_relation_equations(relation_artifact, opcode_keys)
     fit = fit_nonnegative_opcode_bodies(
@@ -13686,6 +13709,31 @@ def build_core_opcode_submodel_artifact(
             raise ValueError("EXP source prediction evidence is missing")
         if prediction.get("model_split") != row.get("model_split"):
             raise ValueError("EXP prediction model_split differs from relation")
+        signed = row.get("signed_raw_gas_by_key")
+        if not isinstance(signed, Mapping):
+            raise ValueError("EXP source relation coefficient map is missing")
+        try:
+            coefficients = {
+                str(key): Fraction(value) for key, value in signed.items()
+            }
+        except (TypeError, ValueError, ZeroDivisionError) as error:
+            raise ValueError("EXP source relation coefficient map is invalid") from error
+        relation_actual_body = _dynamic_target_body_cost_from_relation(
+            row=row,
+            dynamic_key="opcode:0x0a",
+            coefficients=coefficients,
+            dynamic_keys=dynamic_keys,
+            lab_multipliers=source_lab_multipliers,
+        )
+        artifact_actual_body = _canonical_artifact_decimal(
+            prediction.get("actual_body_cost"),
+            label="schema-4 EXP source actual body cost",
+            nonnegative=True,
+        )
+        if artifact_actual_body != relation_actual_body:
+            raise ValueError(
+                "EXP actual body cost differs from relation-derived source"
+            )
         exponent = Decimal(byte_length)
         expected_body = (
             dynamic_bodies["opcode:0x0a"]["small_bucket_body"]

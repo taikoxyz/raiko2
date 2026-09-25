@@ -946,6 +946,30 @@ class CoreOpcodeSubmodelArtifactTests(unittest.TestCase):
                     manifest, relation_artifact, mutated
                 )
 
+    def test_builder_rejects_coherently_resealed_exp_low_domain_evidence(self):
+        manifest, relation_artifact, dynamic_artifact = _core_submodel_sources()
+        exp_evidence = dynamic_artifact["models"]["opcode:0x0a"]
+        exp_evidence["small_bucket_body"] = "21"
+        for prediction in exp_evidence["low_domain_predictions"].values():
+            prediction.update(
+                actual_body_cost="21",
+                predicted_body_cost="21",
+                body_ape="0",
+                actual_production_cost="49",
+                predicted_production_cost="49",
+                production_ape="0",
+                overprediction="0",
+                underprediction="0",
+            )
+        dynamic_artifact = _seal_artifact(dynamic_artifact)
+
+        with self.assertRaisesRegex(
+            ValueError, "actual body cost differs from relation-derived source"
+        ):
+            opcode_gas.build_core_opcode_submodel_artifact(
+                manifest, relation_artifact, dynamic_artifact
+            )
+
     def test_builder_independently_checks_dynamic_quality_rank_and_costs(self):
         manifest, relation_artifact, dynamic_artifact = _core_submodel_sources()
         mutations = []

@@ -14378,14 +14378,6 @@ def derive_core_opcode_submodel(
     )
     block_rows = list(iter_jsonl(source_run / "block-calibration-rows.jsonl"))
     affine_model = _affine_model_from_validated_artifact(manifest, relation_artifact)
-    block_artifact = fit_block_calibration_artifact(
-        manifest,
-        affine_model,
-        relation_artifact,
-        anchor_artifact,
-        anchor_rows,
-        block_rows,
-    )
     dynamic_artifact = fit_dynamic_opcode_models_artifact(
         manifest,
         affine_model,
@@ -14429,7 +14421,6 @@ def derive_core_opcode_submodel(
             "primary_artifact_sha256"
         ),
         "raw_block_rows_sha256": sha256_bytes(canonical_json(block_rows)),
-        "replayed_block_calibration_sha256": block_artifact.get("artifact_sha256"),
         "source_files_sha256": source_files_before,
     }
     if any(

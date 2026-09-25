@@ -249,6 +249,41 @@ class DerivedCoreEvidenceTests(unittest.TestCase):
                 source_before,
             )
 
+    def test_declared_zero_dynamic_replay_does_not_invoke_legacy_block_artifact(self):
+        """Schema-4 replay must not apply legacy positive-multiplier holdouts."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            source, declaration = self._source_run(root)
+            replay_patch, relation, anchor, dynamic, core = self._patch_replay(
+                declaration
+            )
+            with replay_patch as patched, mock.patch.object(
+                opcode_gas, "git_head", return_value=self.derivation_revision
+            ), mock.patch.object(opcode_gas, "git_worktree_status", return_value=""):
+                self._configure_replay(
+                    patched,
+                    source=source,
+                    declaration=declaration,
+                    relation=relation,
+                    anchor=anchor,
+                    dynamic=dynamic,
+                    core=core,
+                )
+                patched["fit_block_calibration_artifact"].side_effect = ValueError(
+                    "opcode multiplier must be positive and finite: opcode:0x19"
+                )
+                result = opcode_gas.derive_core_opcode_submodel(
+                    source, root / "derivations"
+                )
+                self.assertFalse(patched["fit_block_calibration_artifact"].called)
+            envelope = json.loads(
+                (pathlib.Path(result["directory"]) / "derivation.json").read_text()
+            )
+            self.assertNotIn(
+                "replayed_block_calibration_sha256",
+                envelope["source"]["source_hashes"],
+            )
+
     def test_envelope_hashes_each_anchor_fixture_consumed_by_validation(self):
         """Every validated anchor guest input is bound in the source-file envelope."""
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -319,9 +354,11 @@ class DerivedCoreEvidenceTests(unittest.TestCase):
 
                 def mutate_anchor_fixture(*_args, **_kwargs):
                     fixture_path.write_text('{"fixture": "mutated"}\n')
-                    return {"artifact_sha256": "a" * 64}
+                    return dynamic
 
-                patched["fit_block_calibration_artifact"].side_effect = mutate_anchor_fixture
+                patched["fit_dynamic_opcode_models_artifact"].side_effect = (
+                    mutate_anchor_fixture
+                )
                 with self.assertRaisesRegex(ValueError, "source evidence changed"):
                     opcode_gas.derive_core_opcode_submodel(
                         source, root / "derivations"
@@ -393,7 +430,7 @@ class DerivedCoreEvidenceTests(unittest.TestCase):
                             "formal decision ledger": "load_terminal_formal_relation_artifacts",
                             "relation artifact": "validate_opcode_relations_artifact",
                             "anchor evidence": "load_validated_anchor_probe_run",
-                            "block rows": "fit_block_calibration_artifact",
+                            "block rows": "fit_dynamic_opcode_models_artifact",
                         }[category]
                         patched[target].side_effect = failure
                         with self.assertRaisesRegex(ValueError, category):

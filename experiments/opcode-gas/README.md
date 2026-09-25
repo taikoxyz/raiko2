@@ -186,6 +186,9 @@ The command requires a clean analysis checkout and a locally resolvable historic
 implementation commit. It replays the source experiment and provenance identity,
 frozen manifest, all adaptive relation round hashes, accepted relation artifact, every
 validated anchor guest-input byte and its fixture/raw/fit chain, and raw block rows.
+`fit-dynamic-opcode-models` semantically validates those block rows and fits the
+transfer parameters; the derivation does not replay or claim a legacy block-calibration
+artifact, whose positive-multiplier holdouts are incompatible with declared-zero controls.
 It rehashes that same exact source-file set at the end of replay. It publishes a new
 create-only directory `experiments/opcode-gas/derivations/<derivation-id>/` with
 `derivation.json`, `dynamic-opcode-models.json`, and `core-opcode-submodel.json` only

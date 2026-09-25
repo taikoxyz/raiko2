@@ -411,6 +411,17 @@ Schema-4 dynamic evidence and schema-3 core artifacts encode the declared approx
 Schema-2 core artifacts are pre-P1 historical evidence, while schema-3 dynamic evidence and
 schema-1 core artifacts are older formats; none of them is reinterpreted under the current policy.
 
+When an implementation correction changes only post-processing of immutable controlled evidence,
+it may be sealed as a separate `core_opcode_postprocess_derivation`, never by overwriting the
+source calibration run or relabeling its identity. The derivation binds the historical calibration
+identity/revision, frozen manifest, formal decision ledger and terminal raw rows, relation artifact,
+anchor fixture/raw/fit chain, block-row replay, and byte hashes for every consumed source file. It
+also binds the clean analysis revision and declared fitting basis that produced the new schema-4 and
+schema-3 outputs. A derived directory is create-only, remains `candidate_eligible=false`, and is not
+a measurement run, a candidate component, or authorization to execute proposal validation. If the
+source replay, dynamic support, or static rank check fails, it publishes no derivation directory
+or partial artifact; it must never manufacture a core artifact.
+
 ## Completeness And Failure Rules
 
 The full candidate may be sealed only when:

@@ -169,6 +169,32 @@ it with a discovered or manually selected run directory.
   --out "$CALIBRATION_RUN/block-calibration.json"
 ```
 
+### Corrected evidence derivation
+
+`derive-core-opcode-submodel` is the only supported way to persist a corrected
+schema-4 dynamic artifact and schema-3 core artifact from an immutable historical
+run. It is a CPU-only post-processing replay: it never generates fixtures, launches
+a guest, opens a proposal, or changes the source calibration directory.
+
+```bash
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py derive-core-opcode-submodel \
+  --source-run experiments/opcode-gas/runs/09ebb08d76d3f461086b0cf4 \
+  --out-root experiments/opcode-gas/derivations
+```
+
+The command requires a clean analysis checkout, replays the source experiment and
+provenance identity, frozen manifest, all adaptive relation round hashes, accepted
+relation artifact, anchor fixture/raw/fit chain, and raw block rows. It publishes a
+new create-only directory `experiments/opcode-gas/derivations/<derivation-id>/` with
+`derivation.json`, `dynamic-opcode-models.json`, and `core-opcode-submodel.json` only
+after dynamic support and core exact replay both succeed. An unsupported dynamic result,
+static rank failure, or replay failure publishes no derivation directory or partial file.
+The envelope binds the old calibration ID and revision separately from the current clean
+derivation revision, all source byte and semantic hashes, and the output content/file
+hashes. It is always
+`candidate_eligible=false`; a derivation is not a new calibration identity and cannot
+be used for a candidate or proposal command.
+
 `fit-dynamic-opcode-models` is a non-candidate diagnostic. The first completed calibration,
 re-evaluated with anchor body costs divided by anchor raw gas in the opcode-lab unit system, showed
 that one scalar lab-body `proverGas / raw EVM gas` multiplier does not describe `EXP`, `KECCAK256`,
@@ -275,6 +301,8 @@ typed-registry prediction is `223.8117854914965440220973490660719690350`, versus
 `223.9341397849462365591397849462365591398` (absolute residual
 `0.1223542934496925370424358801645901048`). No run artifact was overwritten, and no guest
 execution, proposal row, production table, or configuration change was made for this correction.
+The corresponding derivation directory is intentionally not present until the
+create-only command above is run and independently reviewed.
 
 Fresh sealing run `ff00067694b841894e53c921`, frozen at implementation revision `26f899ea`,
 accepted all 170 formal relations after the frozen adaptive rounds. The independent nonnegative

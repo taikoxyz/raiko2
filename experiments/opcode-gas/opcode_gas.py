@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import pathlib
+import shutil
 import statistics
 import stat
 import subprocess
@@ -4996,7 +4997,8 @@ def write_damage_markdown_report(
 FINAL_CORPUS_FIXTURE_DIR = REPO_ROOT / "tests/fixtures/risc0-zkgas/2026-09-02-m2-aggregation-direct-v3"
 GENERATED_EXPERIMENT_PREFIXES = (
     "experiments/opcode-gas/corpora/", "experiments/opcode-gas/manifests/proposals/",
-    "experiments/opcode-gas/runs/", "experiments/opcode-gas/validations/",
+    "experiments/opcode-gas/runs/", "experiments/opcode-gas/derivations/",
+    "experiments/opcode-gas/validations/",
 )
 Q_FORMULA = ["proposal_startup", "block_base", "tx_base", "native_value_transfer"]
 BLOCK_CALIBRATION_TRANSFER_PARAMETERS = [
@@ -14102,6 +14104,320 @@ def validate_core_opcode_submodel_artifact(
     return replayed
 
 
+_CORE_OPCODE_DERIVATION_SCHEMA_VERSION = 1
+_CORE_OPCODE_DERIVATION_PURPOSE = "core_opcode_postprocess_derivation"
+
+
+def _validated_historical_calibration_source(
+    source_run: pathlib.Path,
+) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
+    """Validate immutable source identity without treating it as current execution."""
+    experiment_path = source_run / "experiment.json"
+    provenance_path = source_run / "provenance.json"
+    if not experiment_path.is_file() or not provenance_path.is_file():
+        raise ValueError("derived source run is missing experiment provenance")
+    experiment = json.loads(experiment_path.read_text())
+    declaration = experiment_provenance_declaration(experiment)
+    if declaration["calibration_id"] != source_run.name:
+        raise ValueError("derived source calibration_id does not match directory")
+    if json.loads(provenance_path.read_text()) != declaration:
+        raise ValueError(
+            "derived source persisted calibration provenance differs from identity"
+        )
+    identity = experiment.get("calibration_identity")
+    if not isinstance(identity, Mapping):
+        raise ValueError("derived source calibration identity is missing")
+    return identity, declaration
+
+
+def _derivation_source_file_hashes(
+    source_run: pathlib.Path, decisions: Mapping[str, Any]
+) -> dict[str, str]:
+    """Hash every immutable file consumed by a core-opcode derivation."""
+    relative_paths = [
+        "experiment.json",
+        "provenance.json",
+        "controlled-manifest.toml",
+        "controlled-manifest.sha256",
+        "formal-relation-decisions.json",
+        "formal-relation-decisions.sha256",
+        "raw/formal-relations.jsonl",
+        "opcode-relations.json",
+        "anchor-probe-fit.json",
+        "raw/anchor-probe.jsonl",
+        "generated/anchor-probe/anchor-probe-manifest.json",
+        "block-calibration-rows.jsonl",
+    ]
+    rounds = decisions.get("rounds")
+    if not isinstance(rounds, list):
+        raise ValueError("derived source formal relation decisions are invalid")
+    for record in rounds:
+        if not isinstance(record, Mapping):
+            raise ValueError("derived source formal relation round is invalid")
+        for field in ("raw_runs", "result"):
+            relative = record.get(field)
+            candidate = pathlib.Path(relative) if isinstance(relative, str) else None
+            if (
+                candidate is None
+                or candidate.is_absolute()
+                or candidate == pathlib.Path(".")
+                or ".." in candidate.parts
+            ):
+                raise ValueError("derived source formal relation path is invalid")
+            relative_paths.append(str(candidate))
+    hashes = {}
+    for relative in sorted(set(relative_paths)):
+        path = source_run / relative
+        if not path.is_file():
+            raise ValueError(f"derived source file is missing: {relative}")
+        hashes[relative] = sha256_file(path)
+    return hashes
+
+
+def _derivation_identity(
+    *,
+    source_declaration: Mapping[str, Any],
+    source_hashes: Mapping[str, Any],
+    derivation_revision: str,
+) -> dict[str, Any]:
+    if not _is_git_revision(derivation_revision):
+        raise ValueError("derivation revision is invalid")
+    return {
+        "schema_version": _CORE_OPCODE_DERIVATION_SCHEMA_VERSION,
+        "purpose": _CORE_OPCODE_DERIVATION_PURPOSE,
+        "derivation_revision": derivation_revision,
+        "algorithm": {
+            "dynamic_schema_version": _DYNAMIC_OPCODE_MODELS_SCHEMA_VERSION,
+            "core_schema_version": _CORE_OPCODE_SUBMODEL_SCHEMA_VERSION,
+            "static_fit_basis": "exclude_structured_dynamic_and_dispatch_containing",
+            "dynamic_dispatch_only_body": "declared_zero",
+            "relation_prediction_basis": _FINAL_TYPED_REGISTRY_LAB_BODY_BASIS,
+            "partial_coverage_reason": _ONLY_DISPATCH_DEPENDENT_EVIDENCE,
+        },
+        "source": {
+            "calibration_id": source_declaration["calibration_id"],
+            "calibration_identity_sha256": source_declaration[
+                "calibration_identity_sha256"
+            ],
+            "implementation_revision": source_declaration[
+                "implementation_revision"
+            ],
+            "controlled_manifest_sha256": source_declaration[
+                "controlled_manifest_sha256"
+            ],
+            "controlled_manifest_rows_sha256": source_declaration[
+                "controlled_manifest_rows_sha256"
+            ],
+            "source_hashes": _serialize_decimal_tree(source_hashes),
+        },
+    }
+
+
+def _write_derivation_json(path: pathlib.Path, value: Mapping[str, Any]) -> None:
+    path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
+    with path.open("rb") as input_file:
+        os.fsync(input_file.fileno())
+
+
+def _fsync_directory(path: pathlib.Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _publish_core_opcode_derivation(
+    *,
+    out_root: pathlib.Path,
+    derivation_id: str,
+    dynamic_artifact: Mapping[str, Any],
+    core_artifact: Mapping[str, Any],
+    envelope: Mapping[str, Any],
+) -> pathlib.Path:
+    """Publish a complete content-addressed derivation directory exactly once."""
+    out_root.mkdir(parents=True, exist_ok=True)
+    target = out_root / derivation_id
+    lock_path = out_root / f".{derivation_id}.lock"
+    lock_descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    temporary: pathlib.Path | None = None
+    try:
+        fcntl.flock(lock_descriptor, fcntl.LOCK_EX)
+        if target.exists():
+            raise ValueError(f"derivation directory already exists: {target}")
+        temporary = pathlib.Path(
+            tempfile.mkdtemp(prefix=f".{derivation_id}.", dir=out_root)
+        )
+        _write_derivation_json(temporary / "dynamic-opcode-models.json", dynamic_artifact)
+        _write_derivation_json(temporary / "core-opcode-submodel.json", core_artifact)
+        _write_derivation_json(temporary / "derivation.json", envelope)
+        _fsync_directory(temporary)
+        os.rename(temporary, target)
+        temporary = None
+        _fsync_directory(out_root)
+        return target
+    finally:
+        if temporary is not None and temporary.exists():
+            shutil.rmtree(temporary)
+        os.close(lock_descriptor)
+
+
+@_isolated_decimal_context
+def derive_core_opcode_submodel(
+    source_run: pathlib.Path, out_root: pathlib.Path
+) -> dict[str, Any]:
+    """Derive non-candidate dynamic/core evidence from one immutable source run."""
+    source_run = source_run.resolve()
+    out_root = out_root.resolve()
+    if out_root.is_relative_to(source_run) or out_root.is_relative_to(
+        source_run.parent
+    ):
+        raise ValueError(
+            "derivation output must be outside the immutable source run and runs root"
+        )
+    assert_generated_paths_only(git_worktree_status())
+    derivation_revision = git_head()
+    source_identity, source_declaration = _validated_historical_calibration_source(
+        source_run
+    )
+    manifest, frozen_identity = verify_frozen_controlled_manifest(
+        source_run, source_run / "controlled-manifest.toml"
+    )
+    if not _exact_json_equal(source_identity, frozen_identity):
+        raise ValueError("derived source frozen manifest identity differs from experiment")
+    relation_provenance = _candidate_relation_provenance(source_run, source_identity)
+    formal = load_terminal_formal_relation_artifacts(
+        source_run, manifest, relation_provenance
+    )
+    source_files_before = _derivation_source_file_hashes(
+        source_run, formal["decisions"]
+    )
+    relation_artifact = json.loads((source_run / "opcode-relations.json").read_text())
+    validate_opcode_relations_artifact(
+        manifest, relation_artifact, formal["rows"], relation_provenance
+    )
+    anchor_artifact = json.loads((source_run / "anchor-probe-fit.json").read_text())
+    _anchor_body_costs, anchor_rows = load_validated_anchor_probe_run(
+        source_run, anchor_artifact, source_identity
+    )
+    block_rows = list(iter_jsonl(source_run / "block-calibration-rows.jsonl"))
+    affine_model = _affine_model_from_validated_artifact(manifest, relation_artifact)
+    block_artifact = fit_block_calibration_artifact(
+        manifest,
+        affine_model,
+        relation_artifact,
+        anchor_artifact,
+        anchor_rows,
+        block_rows,
+    )
+    dynamic_artifact = fit_dynamic_opcode_models_artifact(
+        manifest,
+        affine_model,
+        relation_artifact,
+        anchor_artifact,
+        anchor_rows,
+        block_rows,
+    )
+    if dynamic_artifact.get("candidate_eligible") is not False:
+        raise ValueError("derived dynamic opcode artifact must remain non-candidate")
+    if not _is_sha256(dynamic_artifact.get("artifact_sha256")):
+        raise ValueError("derived dynamic opcode artifact has no content hash")
+
+    if dynamic_artifact.get("status") == "not_supported":
+        raise ValueError("derived dynamic opcode artifact is not supported")
+    if dynamic_artifact.get("status") != "supported":
+        raise ValueError("derived dynamic opcode artifact has invalid status")
+    core_artifact = build_core_opcode_submodel_artifact(
+        manifest, relation_artifact, dynamic_artifact
+    )
+    if (
+        core_artifact.get("status") != "supported_core_submodel"
+        or core_artifact.get("candidate_eligible") is not False
+        or not _is_sha256(core_artifact.get("artifact_sha256"))
+    ):
+        raise ValueError("derived core opcode artifact is not a supported non-candidate")
+    replayed = validate_core_opcode_submodel_artifact(
+        manifest, relation_artifact, dynamic_artifact, core_artifact
+    )
+    if not _exact_json_equal(core_artifact, replayed):
+        raise ValueError("derived core opcode artifact differs from exact replay")
+
+    source_hashes = {
+        "formal_relation_decisions_sha256": formal[
+            "formal_relation_decisions_sha256"
+        ],
+        "relation_artifact_sha256": relation_artifact.get("artifact_sha256"),
+        "relation_raw_rows_sha256": relation_artifact.get("raw_rows_sha256"),
+        "anchor_probe_artifact_sha256": anchor_artifact.get("artifact_sha256"),
+        "anchor_probe_primary_sha256": anchor_artifact.get(
+            "primary_artifact_sha256"
+        ),
+        "raw_block_rows_sha256": sha256_bytes(canonical_json(block_rows)),
+        "replayed_block_calibration_sha256": block_artifact.get("artifact_sha256"),
+        "source_files_sha256": source_files_before,
+    }
+    if any(
+        not _is_sha256(value)
+        for key, value in source_hashes.items()
+        if key != "source_files_sha256"
+    ):
+        raise ValueError("derived source artifact hashes are invalid")
+    if source_files_before != _derivation_source_file_hashes(
+        source_run, formal["decisions"]
+    ):
+        raise ValueError("derived source evidence changed during replay")
+
+    identity = _derivation_identity(
+        source_declaration=source_declaration,
+        source_hashes=source_hashes,
+        derivation_revision=derivation_revision,
+    )
+    derivation_id = sha256_bytes(canonical_json(identity))[:24]
+    with tempfile.TemporaryDirectory(prefix=f".{derivation_id}.envelope.") as scratch:
+        scratch_path = pathlib.Path(scratch)
+        _write_derivation_json(scratch_path / "dynamic-opcode-models.json", dynamic_artifact)
+        output_hashes = {
+            "dynamic_artifact_sha256": dynamic_artifact["artifact_sha256"],
+            "dynamic_file_sha256": sha256_file(
+                scratch_path / "dynamic-opcode-models.json"
+            ),
+        }
+        _write_derivation_json(scratch_path / "core-opcode-submodel.json", core_artifact)
+        output_hashes.update(
+            {
+                "core_artifact_sha256": core_artifact["artifact_sha256"],
+                "core_file_sha256": sha256_file(
+                    scratch_path / "core-opcode-submodel.json"
+                ),
+            }
+        )
+    envelope = {
+        "schema_version": _CORE_OPCODE_DERIVATION_SCHEMA_VERSION,
+        "purpose": _CORE_OPCODE_DERIVATION_PURPOSE,
+        "derivation_id": derivation_id,
+        "status": "supported_core_submodel",
+        "candidate_eligible": False,
+        "derivation_identity": identity,
+        "source": identity["source"],
+        "output_hashes": output_hashes,
+    }
+    envelope["artifact_sha256"] = sha256_bytes(canonical_json(envelope))
+    directory = _publish_core_opcode_derivation(
+        out_root=out_root,
+        derivation_id=derivation_id,
+        dynamic_artifact=dynamic_artifact,
+        core_artifact=core_artifact,
+        envelope=envelope,
+    )
+    return {
+        "derivation_id": derivation_id,
+        "directory": str(directory),
+        "status": "supported_core_submodel",
+        "dynamic_artifact_sha256": dynamic_artifact["artifact_sha256"],
+        "core_artifact_sha256": core_artifact["artifact_sha256"],
+    }
+
+
 def cmd_fit_block_calibration(args: argparse.Namespace) -> None:
     runs_path = _resolve_repo_path(args.runs, field_name="block_calibration_rows")
     calibration_run = runs_path.parent
@@ -14321,6 +14637,18 @@ def cmd_build_core_opcode_submodel(args: argparse.Namespace) -> None:
         f"{artifact['artifact_sha256']} "
         f"({artifact['modeled_named_opcode_count']}/"
         f"{artifact['named_opcode_count']} named opcodes; non-candidate)"
+    )
+
+
+def cmd_derive_core_opcode_submodel(args: argparse.Namespace) -> None:
+    result = derive_core_opcode_submodel(
+        _resolve_repo_path(args.source_run, field_name="source_calibration_run"),
+        _resolve_repo_path(args.out_root, field_name="derivation_output_root"),
+    )
+    print(
+        "sealed core opcode derivation "
+        f"{result['derivation_id']} ({result['status']}; "
+        f"{result['directory']})"
     )
 
 
@@ -16292,6 +16620,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     core_submodel.add_argument("--out", type=pathlib.Path, required=True)
     core_submodel.set_defaults(func=cmd_build_core_opcode_submodel)
+
+    derived_core = subcommands.add_parser(
+        "derive-core-opcode-submodel",
+        help="derive non-candidate schema-4/schema-3 evidence from a sealed source run",
+    )
+    derived_core.add_argument("--source-run", type=pathlib.Path, required=True)
+    derived_core.add_argument("--out-root", type=pathlib.Path, required=True)
+    derived_core.set_defaults(func=cmd_derive_core_opcode_submodel)
 
     candidate = subcommands.add_parser(
         "build-candidate", help="seal the controlled SP1 proverGas candidate"

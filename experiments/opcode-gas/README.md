@@ -204,21 +204,36 @@ it may never underpredict a measured short-exponent row.
 
 `build-core-opcode-submodel` independently replays the accepted relation and schema-4 dynamic
 evidence, fits nonnegative static opcode bodies, stores common dispatch exactly once, and replaces
-the six structured opcodes above with typed models. `opcode:0x19` (NOT) and `opcode:0x5b`
-(JUMPDEST) are declared dispatch-only approximations: their opcode-specific bodies are fixed to
-zero outside the solver, while each event still pays `common_dispatch` once. Relations containing
-either key retain their slopes, predictions, residuals, and diagnostic error, but do not enter the
-ordinary 5% MAPE, 10% maximum-APE, or exact-flat admission gates. The schema-2 core artifact records
-the exact policy, affected relation IDs/count, and maximum absolute approximation residual.
+the six structured opcodes above with typed models. Its static NNLS basis contains only equations
+with neither a structured-dynamic opcode nor `opcode:0x19` (NOT) or `opcode:0x5b` (JUMPDEST).
+Those two keys are declared dispatch-only approximations: their opcode-specific bodies are fixed to
+zero, while each event still pays `common_dispatch` once. A dynamic target/control relation may use
+one of them only as that declared zero-body control; it must never deconvolve the old affine body
+estimate. The solver fails closed if the reduced static system loses rank.
 
-The content-addressed output covers 102 of the
-150 named Unzen opcodes; the other 48 named opcodes remain explicitly unsupported. This is a
-partial, `candidate_eligible=false` artifact. It cannot open or participate in proposal validation;
-the remaining opcode families and higher estimator layers must be calibrated and sealed first.
+Schema-3 permits one explicit partial-coverage outcome: a non-anchor, non-dispatch static key may
+be marked `only_dispatch_dependent_evidence` only when it has a zero coefficient in every eligible
+ordinary equation. It is then unsupported rather than assigned a coefficient. Any accepted relation
+that references that key is retained as source evidence but has the final outcome
+`unmeasured_unsupported`, with no invented numeric prediction or residual. All fully modeled
+relations, including `MLOAD - NOT`, are replayed numerically from the final typed registry.
+
+Relations containing either dispatch-only key retain their slopes, final typed-registry predictions,
+residuals, and diagnostic error, but cannot fit another static coefficient or enter the ordinary 5%
+MAPE, 10% maximum-APE, or exact-flat admission gates. Schema-3 core artifacts retain the static-fit
+diagnostics separately and serialize every relation prediction in the final typed registry's
+lab-body basis, after dynamic-model replacement.
+
+The core inventory has 102 of the 150 named Unzen opcodes. A schema-3 artifact may explicitly omit
+a core key only under the zero-eligible-coefficient policy above; all other named opcodes outside the
+core inventory remain explicitly unsupported. This is a partial, `candidate_eligible=false` artifact.
+It cannot open or participate in proposal validation; the remaining opcode families and higher
+estimator layers must be calibrated and sealed first.
 Block-level validation must report the frequency-dependent residual from NOT, JUMPDEST, and the
 small-EXP bucket. A later fixed offset may not absorb or hide those approximation errors.
 
-Fresh sealing run `09ebb08d76d3f461086b0cf4`, frozen at implementation revision
+Historical pre-P1 sealing record (superseded model representation): run
+`09ebb08d76d3f461086b0cf4`, frozen at implementation revision
 `09cced01`, accepted all 170 terminal relations. Its canonical accepted stream has 8,124 raw
 execution rows; the five adaptive rounds executed 6,120, 4,608, 2,400, 1,368, and 1,008 rows at
 bounds 8, 32, 128, 512, and 2048 respectively. The ordinary static relations were accepted with
@@ -226,7 +241,7 @@ MAPE `1.519e-60` and maximum APE `2.433e-59`. Four declared approximation relati
 absolute residual `17.3626393645827`; NOT (`opcode:0x19`) and JUMPDEST (`opcode:0x5b`) remain the
 two dispatch-only keys.
 
-The schema-4 dynamic artifact is `supported` (14 parameters/exact rank 14): EXP fit MAPE/max APE
+The historical pre-P1 schema-4 dynamic artifact was `supported` (14 parameters/exact rank 14): EXP fit MAPE/max APE
 are effectively zero and its holdout maximum APE is `0.006415%`; KECCAK256 is
 `0.534789%`/`1.378295%`/`0.675443%` (fit MAPE/fit max/holdout max), and MCOPY is
 `3.235224%`/`8.117928%`/`0.616077%`. EXP's conservative small bucket is body
@@ -234,12 +249,32 @@ are effectively zero and its holdout maximum APE is `0.006415%`; KECCAK256 is
 has maximum overprediction `1963.6428571428571` and zero underprediction. The artifact digest is
 `fb750c6427b8ebb57264be19500edac8617f06356a42e3881d7eea2399e43689`.
 
-The schema-2 core artifact is `supported_core_submodel`, replays exactly, and has artifact digest
+The superseded pre-P1 schema-2 core artifact was `supported_core_submodel`, replayed exactly, and has artifact digest
 `e0a358ece713056e075c2d5b131d6c9c029db6e3fdd982bbfd075e65f6accf10` (file SHA256
 `833617e238ff2ba63f0cd25b8af312900c288d805d078931c5a3212f5551fe05`). It models 102 of
 150 named opcodes and leaves 48 explicitly unsupported, so it is
 `candidate_eligible=false`. No proposal row was opened and no production table or configuration
 changed.
+
+P1 basis correction: the preceding schema-2 core artifact is preserved historical evidence, not a
+current core model. It allowed a dispatch-containing equation to contribute to static NNLS and kept
+pre-replacement static predictions after typed dynamic models were installed. The sealed raw stream
+can be refit in memory under the declared-zero dynamic-control basis: the dynamic result remains
+`supported` with exact aggregate rank 14/14 (transient digest
+`6b2225662e4bd678d8a9e94983b5ebeccf173a92d358d5072604419c962dcfa8`). No run artifact was
+overwritten.
+
+The reduced static system has 90 non-anchor, non-dispatch columns and exact rank 89;
+`opcode:0x15` is the sole zero column. Its only rank-restoring relation,
+`opcode:0x15:canonical`, uses NOT and is therefore explicitly marked
+`only_dispatch_dependent_evidence`. The resulting transient schema-3 core build is
+`supported_core_submodel`, models 101/150 named opcodes, and has digest
+`900964c9e64af23c35e71d05f118c519d7b9dfee5263d201af7f850b9de8c964`.
+`opcode:0x15:canonical` is preserved as `unmeasured_unsupported`; the actual MLOAD-NOT final
+typed-registry prediction is `223.8117854914965440220973490660719690350`, versus observed
+`223.9341397849462365591397849462365591398` (absolute residual
+`0.1223542934496925370424358801645901048`). No run artifact was overwritten, and no guest
+execution, proposal row, production table, or configuration change was made for this correction.
 
 Fresh sealing run `ff00067694b841894e53c921`, frozen at implementation revision `26f899ea`,
 accepted all 170 formal relations after the frozen adaptive rounds. The independent nonnegative

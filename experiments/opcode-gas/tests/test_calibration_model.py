@@ -1594,6 +1594,39 @@ class CalibrationModelTests(unittest.TestCase):
             Decimal("1000"),
         )
 
+    def test_dispatch_only_mixed_relation_cannot_transfer_cost_into_target_fit(self):
+        result = fit_nonnegative_opcode_bodies(
+            equations=(
+                RelationEquation(
+                    relation_id="target-clean",
+                    coefficients={"opcode:0x01": Fraction(1)},
+                    slope=Decimal("2"),
+                ),
+                RelationEquation(
+                    relation_id="target-minus-not",
+                    coefficients={
+                        "opcode:0x01": Fraction(1),
+                        "opcode:0x19": Fraction(-1),
+                    },
+                    slope=Decimal("100"),
+                ),
+            ),
+            opcode_keys=("opcode:0x01", "opcode:0x19"),
+            anchor_body_costs={},
+            dispatch_only_keys=("opcode:0x19",),
+        )
+
+        self.assertEqual(result.status, "supported")
+        self.assertEqual(result.lab_body_per_raw_gas["opcode:0x01"], Decimal("2"))
+        self.assertEqual(
+            result.predictions["target-minus-not"]["gate"],
+            "declared_approximation",
+        )
+        self.assertEqual(
+            result.predictions["target-minus-not"]["absolute_residual"],
+            Decimal("98"),
+        )
+
     def test_ordinary_relation_residual_still_blocks_support(self):
         result = fit_nonnegative_opcode_bodies(
             equations=(

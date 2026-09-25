@@ -4,6 +4,7 @@ import sys
 import types
 import unittest
 from decimal import Decimal
+from fractions import Fraction
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
@@ -733,6 +734,21 @@ class HierarchicalModelTests(unittest.TestCase):
 
 
 class CoreOpcodeSubmodelArtifactTests(unittest.TestCase):
+    def test_dynamic_dispatch_only_control_uses_declared_zero_body(self):
+        target_body = opcode_gas._dynamic_target_body_cost_from_relation(
+            row={"slope_p": "11"},
+            dynamic_key="opcode:0x51",
+            coefficients={
+                "opcode:0x51": Fraction(3),
+                "opcode:0x19": Fraction(-3),
+            },
+            dynamic_keys={"opcode:0x51"},
+            lab_multipliers={"opcode:0x19": Decimal("7")},
+            dispatch_only_keys=("opcode:0x19",),
+        )
+
+        self.assertEqual(target_body, Decimal("11"))
+
     def test_builds_102_of_150_named_unzen_opcodes_and_replays_exactly(self):
         manifest, relation_artifact, dynamic_artifact = _core_submodel_sources()
 
@@ -743,7 +759,7 @@ class CoreOpcodeSubmodelArtifactTests(unittest.TestCase):
         )
 
         self.assertEqual(artifact["purpose"], "core_opcode_submodel")
-        self.assertEqual(artifact["schema_version"], 2)
+        self.assertEqual(artifact["schema_version"], 3)
         self.assertEqual(artifact["status"], "supported_core_submodel")
         self.assertFalse(artifact["candidate_eligible"])
         self.assertEqual(artifact["named_opcode_count"], 150)
@@ -807,6 +823,108 @@ class CoreOpcodeSubmodelArtifactTests(unittest.TestCase):
             ),
             artifact,
         )
+
+    def test_relation_predictions_replay_from_final_typed_registry(self):
+        manifest, relation_artifact, dynamic_artifact = _core_submodel_sources()
+        mload_relation = next(
+            row
+            for row in relation_artifact["equations"]
+            if row["relation_id"] == "fit-opcode:0x51"
+        )
+        mload_relation.update(
+            signed_raw_gas_by_key={
+                "opcode:0x51": "3",
+                "opcode:0x19": "-3",
+            },
+            slope_p="2",
+        )
+        relation_artifact = _seal_artifact(relation_artifact)
+        dynamic_artifact["source_hashes"]["relation_artifact_sha256"] = (
+            relation_artifact["artifact_sha256"]
+        )
+        dynamic_artifact = _seal_artifact(dynamic_artifact)
+
+        artifact = opcode_gas.build_core_opcode_submodel_artifact(
+            manifest, relation_artifact, dynamic_artifact
+        )
+
+        predictions = artifact["fit_evidence"]["predictions"]
+        self.assertEqual(
+            set(predictions),
+            {row["relation_id"] for row in relation_artifact["equations"]},
+        )
+        self.assertEqual(
+            predictions["fit-opcode:0x51"],
+            {
+                "basis": "final_typed_registry_lab_body",
+                "gate": "declared_approximation",
+                "observed_slope": "2",
+                "predicted_slope": "22",
+                "absolute_residual": "20",
+                "ape": "10",
+            },
+        )
+
+    def test_builder_marks_dispatch_only_dependent_static_key_unmeasured(self):
+        manifest, relation_artifact, dynamic_artifact = _core_submodel_sources()
+        static_relation = next(
+            row
+            for row in relation_artifact["equations"]
+            if row["relation_id"] == "fit-opcode:0x15"
+        )
+        static_relation["signed_raw_gas_by_key"] = {
+            "opcode:0x15": "1",
+            "opcode:0x19": "-1",
+        }
+        relation_artifact = _seal_artifact(relation_artifact)
+        dynamic_artifact["source_hashes"]["relation_artifact_sha256"] = (
+            relation_artifact["artifact_sha256"]
+        )
+        dynamic_artifact = _seal_artifact(dynamic_artifact)
+
+        artifact = opcode_gas.build_core_opcode_submodel_artifact(
+            manifest, relation_artifact, dynamic_artifact
+        )
+
+        self.assertEqual(artifact["modeled_named_opcode_count"], 101)
+        self.assertEqual(artifact["unsupported_named_opcode_count"], 49)
+        self.assertEqual(
+            artifact["unsupported_opcode_reasons"]["opcode:0x15"],
+            "only_dispatch_dependent_evidence",
+        )
+        self.assertEqual(
+            artifact["fit_evidence"]["predictions"]["fit-opcode:0x15"],
+            {
+                "basis": "final_typed_registry_lab_body",
+                "outcome": "unmeasured_unsupported",
+                "observed_slope": "2",
+                "unsupported_opcode_keys": ["opcode:0x15"],
+                "unsupported_reason": "only_dispatch_dependent_evidence",
+            },
+        )
+
+    def test_builder_fails_closed_when_identifiable_static_columns_lose_rank(self):
+        manifest, relation_artifact, dynamic_artifact = _core_submodel_sources()
+        for relation_id in ("fit-opcode:0x02", "fit-opcode:0x03"):
+            relation = next(
+                row
+                for row in relation_artifact["equations"]
+                if row["relation_id"] == relation_id
+            )
+            relation["signed_raw_gas_by_key"] = {
+                "opcode:0x02": "1",
+                "opcode:0x03": "1",
+            }
+        with self.assertRaisesRegex(
+            ValueError, "core static relation basis is rank-deficient"
+        ):
+            opcode_gas._core_static_fit_projection(
+                opcode_gas._core_opcode_keys(manifest),
+                opcode_gas._core_relation_equations(
+                    relation_artifact,
+                    opcode_gas._core_opcode_keys(manifest),
+                ),
+            )
 
     def test_replay_rejects_mutated_sources_registry_and_digest(self):
         manifest, relation_artifact, dynamic_artifact = _core_submodel_sources()

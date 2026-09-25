@@ -12469,8 +12469,10 @@ def _dynamic_opcode_observations_from_relation_artifact(
     affine_model: AffineOpcodeModel,
     relation_artifact: Mapping[str, Any],
     anchor_body_costs: Mapping[str, Decimal],
+    *,
+    dispatch_only_keys: tuple[str, ...] = (),
 ) -> tuple[DynamicOpcodeObservation, ...]:
-    """Recover exact-scenario target body costs from validated signed relations."""
+    """Recover exact-scenario target bodies under the declared static basis."""
     lab_multipliers = reconstruct_lab_multipliers(
         affine_model, anchor_body_costs
     )
@@ -12535,6 +12537,7 @@ def _dynamic_opcode_observations_from_relation_artifact(
                 coefficients=coefficients,
                 dynamic_keys=dynamic_keys,
                 lab_multipliers=lab_multipliers,
+                dispatch_only_keys=dispatch_only_keys,
             )
             observations.append(
                 DynamicOpcodeObservation(
@@ -12557,14 +12560,18 @@ def _dynamic_target_body_cost_from_relation(
     coefficients: Mapping[str, Fraction],
     dynamic_keys: set[str],
     lab_multipliers: Mapping[str, Decimal],
+    dispatch_only_keys: tuple[str, ...] = (),
 ) -> Decimal:
     """Derive one dynamic target from its signed relation and static controls."""
     dynamic_coefficient = coefficients.get(dynamic_key, Fraction(0))
     if dynamic_coefficient <= 0:
         raise ValueError("dynamic relation target coefficient must be positive")
+    dispatch_only_set = set(dispatch_only_keys)
     reference = Decimal(0)
     for key, coefficient in coefficients.items():
         if key == dynamic_key:
+            continue
+        if key in dispatch_only_set:
             continue
         if key in dynamic_keys or key not in lab_multipliers:
             raise ValueError(
@@ -12747,7 +12754,11 @@ def fit_dynamic_opcode_models_artifact(
         affine_model, block_rows, tuple(Q_FORMULA), anchor_body_costs
     )
     observations = _dynamic_opcode_observations_from_relation_artifact(
-        manifest, affine_model, relation_artifact, anchor_body_costs
+        manifest,
+        affine_model,
+        relation_artifact,
+        anchor_body_costs,
+        dispatch_only_keys=_CORE_DISPATCH_ONLY_KEYS,
     )
     transfer_params = block_result.transfer_params
     result = fit_structured_dynamic_opcode_models(
@@ -12847,8 +12858,10 @@ def fit_dynamic_opcode_models_artifact(
 
 
 _DYNAMIC_OPCODE_MODELS_SCHEMA_VERSION = 4
-_CORE_OPCODE_SUBMODEL_SCHEMA_VERSION = 2
+_CORE_OPCODE_SUBMODEL_SCHEMA_VERSION = 3
 _CORE_DISPATCH_ONLY_KEYS = ("opcode:0x19", "opcode:0x5b")
+_FINAL_TYPED_REGISTRY_LAB_BODY_BASIS = "final_typed_registry_lab_body"
+_ONLY_DISPATCH_DEPENDENT_EVIDENCE = "only_dispatch_dependent_evidence"
 _EXP_APPROXIMATION_POLICY = MappingProxyType(
     {
         "kind": "conservative_small_exponent_bucket",
@@ -13489,6 +13502,72 @@ def _core_relation_equations(
     return tuple(equations)
 
 
+def _core_static_fit_projection(
+    opcode_keys: tuple[str, ...], equations: tuple[RelationEquation, ...]
+) -> tuple[tuple[str, ...], tuple[RelationEquation, ...], dict[str, str]]:
+    """Select the declared static basis and explicit unmeasured coverage."""
+    dynamic_keys = set(DYNAMIC_RAW_GAS_KEYS)
+    dispatch_only_set = set(_CORE_DISPATCH_ONLY_KEYS)
+    static_opcode_keys = tuple(
+        key for key in opcode_keys if key not in dynamic_keys
+    )
+    static_equations = tuple(
+        equation
+        for equation in equations
+        if not set(equation.coefficients) & dynamic_keys
+    )
+    if not static_equations:
+        raise ValueError("core static relation basis has no non-dynamic equations")
+    ordinary_static_equations = tuple(
+        equation
+        for equation in static_equations
+        if not set(equation.coefficients) & dispatch_only_set
+    )
+    anchored_static_keys = set(OPCODE_RELATION_ANCHORS)
+    unsupported_opcode_reasons = {
+        key: _ONLY_DISPATCH_DEPENDENT_EVIDENCE
+        for key in static_opcode_keys
+        if key not in anchored_static_keys
+        and key not in dispatch_only_set
+        and not any(
+            equation.coefficients.get(key, Fraction(0))
+            for equation in ordinary_static_equations
+        )
+    }
+    fitted_static_opcode_keys = tuple(
+        key for key in static_opcode_keys if key not in unsupported_opcode_reasons
+    )
+    fitted_static_equations = tuple(
+        equation
+        for equation in static_equations
+        if not set(equation.coefficients) & set(unsupported_opcode_reasons)
+    )
+    fitted_ordinary_equations = tuple(
+        equation
+        for equation in fitted_static_equations
+        if not set(equation.coefficients) & dispatch_only_set
+    )
+    fitted_columns = tuple(
+        key
+        for key in fitted_static_opcode_keys
+        if key not in anchored_static_keys and key not in dispatch_only_set
+    )
+    matrix = [
+        [equation.coefficients.get(key, Fraction(0)) for key in fitted_columns]
+        for equation in fitted_ordinary_equations
+    ]
+    if exact_rank(matrix) != len(fitted_columns):
+        raise ValueError(
+            "core static relation basis is rank-deficient after excluding "
+            "dynamic and dispatch-only equations"
+        )
+    return (
+        fitted_static_opcode_keys,
+        fitted_static_equations,
+        unsupported_opcode_reasons,
+    )
+
+
 def _scaled_dynamic_parameters(
     body: Mapping[str, Decimal], body_scale: Decimal
 ) -> dict[str, Decimal]:
@@ -13535,6 +13614,128 @@ def _dynamic_probe_event(dynamic_key: str, scenario: Mapping[str, Any]) -> Opcod
     raise ValueError(f"unsupported dynamic source key: {dynamic_key}")
 
 
+def _final_registry_relation_predictions(
+    *,
+    relation_artifact: Mapping[str, Any],
+    equations: tuple[RelationEquation, ...],
+    registry: OpcodeRegistry,
+    body_scale: Decimal,
+    dispatch_only_keys: tuple[str, ...],
+    unsupported_opcode_reasons: Mapping[str, str],
+) -> dict[str, dict[str, Any]]:
+    """Replay every relation in the lab-body basis of the final typed registry."""
+    rows = relation_artifact.get("equations")
+    if not isinstance(rows, list) or len(rows) != len(equations):
+        raise ValueError("core relation rows differ from parsed equations")
+    rows_by_id = {}
+    for row in rows:
+        if not isinstance(row, Mapping) or not isinstance(
+            row.get("relation_id"), str
+        ):
+            raise ValueError("core relation row identity is invalid")
+        relation_id = str(row["relation_id"])
+        if relation_id in rows_by_id:
+            raise ValueError("core relation row identity is duplicated")
+        rows_by_id[relation_id] = row
+    if set(rows_by_id) != {equation.relation_id for equation in equations}:
+        raise ValueError("core relation rows differ from parsed relation identities")
+
+    dynamic_keys = set(DYNAMIC_RAW_GAS_KEYS)
+    dispatch_only_set = set(dispatch_only_keys)
+    unsupported_keys = set(unsupported_opcode_reasons)
+    predictions = {}
+    with localcontext(_OPCODE_DECIMAL_CONTEXT):
+        for equation in equations:
+            row = rows_by_id[equation.relation_id]
+            unmeasured_keys = tuple(
+                key
+                for key in equation.coefficients
+                if key in unsupported_keys
+            )
+            if unmeasured_keys:
+                if any(
+                    unsupported_opcode_reasons[key]
+                    != _ONLY_DISPATCH_DEPENDENT_EVIDENCE
+                    for key in unmeasured_keys
+                ):
+                    raise ValueError("core unsupported opcode reason is invalid")
+                predictions[equation.relation_id] = {
+                    "basis": _FINAL_TYPED_REGISTRY_LAB_BODY_BASIS,
+                    "outcome": "unmeasured_unsupported",
+                    "observed_slope": equation.slope,
+                    "unsupported_opcode_keys": list(unmeasured_keys),
+                    "unsupported_reason": _ONLY_DISPATCH_DEPENDENT_EVIDENCE,
+                }
+                continue
+            dynamic_key = row.get("dynamic_key")
+            if dynamic_key is not None:
+                if not isinstance(dynamic_key, str) or dynamic_key not in dynamic_keys:
+                    raise ValueError("core dynamic relation key is invalid")
+                scenario = row.get("relation_scenario")
+                if not isinstance(scenario, Mapping):
+                    raise ValueError("core dynamic relation scenario is missing")
+                dynamic_coefficient = equation.coefficients.get(
+                    dynamic_key, Fraction(0)
+                )
+                if dynamic_coefficient <= 0:
+                    raise ValueError(
+                        "core dynamic relation target coefficient must be positive"
+                    )
+                dynamic_body = (
+                    predict_opcode_event(
+                        registry, _dynamic_probe_event(dynamic_key, scenario)
+                    )
+                    - registry.common_dispatch
+                ) / body_scale
+                terms = [dynamic_body]
+            else:
+                terms = []
+
+            for key, coefficient in equation.coefficients.items():
+                if key == dynamic_key:
+                    continue
+                if key in dynamic_keys:
+                    raise ValueError(
+                        "core relation dynamic controls are not supported"
+                    )
+                model = registry.models.get(key)
+                if model is None or model.kind != ModelKind.STATIC_RAW_GAS:
+                    raise ValueError(
+                        f"core relation static registry model is missing: {key}"
+                    )
+                body_per_raw_gas = model.parameters["body_per_raw_gas"] / body_scale
+                terms.append(
+                    Decimal(coefficient.numerator)
+                    / Decimal(coefficient.denominator)
+                    * body_per_raw_gas
+                )
+
+            predicted = sum(terms, Decimal(0))
+            residual = predicted - equation.slope
+            absolute_residual = abs(residual)
+            row_prediction: dict[str, Decimal | str] = {
+                "basis": _FINAL_TYPED_REGISTRY_LAB_BODY_BASIS,
+                "gate": (
+                    "declared_approximation"
+                    if set(equation.coefficients) & dispatch_only_set
+                    else "exact_flat"
+                    if equation.slope == 0
+                    else "nonzero"
+                ),
+                "observed_slope": equation.slope,
+                "predicted_slope": predicted,
+                "absolute_residual": absolute_residual,
+            }
+            if equation.slope == 0:
+                row_prediction["normalized_error"] = absolute_residual / max(
+                    sum((abs(term) for term in terms), Decimal(0)), Decimal(1)
+                )
+            else:
+                row_prediction["ape"] = absolute_residual / abs(equation.slope)
+            predictions[equation.relation_id] = row_prediction
+    return predictions
+
+
 def _serialize_opcode_registry(registry: OpcodeRegistry) -> dict[str, Any]:
     return {
         "common_dispatch": _decimal_text(registry.common_dispatch),
@@ -13562,7 +13763,7 @@ def build_core_opcode_submodel_artifact(
     relation_artifact: Mapping[str, Any],
     dynamic_artifact: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Purely build the replayable 102-opcode core submodel from sealed evidence."""
+    """Purely build the replayable core-opcode submodel from sealed evidence."""
     relation_sha256 = _validate_content_addressed_artifact(
         relation_artifact, label="opcode relation"
     )
@@ -13592,9 +13793,17 @@ def build_core_opcode_submodel_artifact(
     )
     opcode_keys = _core_opcode_keys(manifest)
     equations = _core_relation_equations(relation_artifact, opcode_keys)
+    dynamic_keys = set(DYNAMIC_RAW_GAS_KEYS)
+    (
+        fitted_static_opcode_keys,
+        fitted_static_equations,
+        unsupported_opcode_reasons,
+    ) = _core_static_fit_projection(
+        opcode_keys, equations
+    )
     fit = fit_nonnegative_opcode_bodies(
-        equations=equations,
-        opcode_keys=opcode_keys,
+        equations=fitted_static_equations,
+        opcode_keys=fitted_static_opcode_keys,
         anchor_body_costs=anchor_body_costs,
         dispatch_only_keys=_CORE_DISPATCH_ONLY_KEYS,
     )
@@ -13610,10 +13819,7 @@ def build_core_opcode_submodel_artifact(
             ModelKind.INVALID, {"constant": Decimal(0)}
         )
     }
-    dynamic_keys = set(DYNAMIC_RAW_GAS_KEYS)
-    for key in opcode_keys:
-        if key in dynamic_keys:
-            continue
+    for key in fitted_static_opcode_keys:
         models[key] = ModelSpec(
             ModelKind.STATIC_RAW_GAS,
             {
@@ -13644,7 +13850,10 @@ def build_core_opcode_submodel_artifact(
     slots: list[str | None] = [invalid_model_id] * 256
     for opcode in named_opcodes:
         slots[opcode] = None
-    for key in opcode_keys:
+    modeled_opcode_keys = tuple(
+        key for key in opcode_keys if key not in unsupported_opcode_reasons
+    )
+    for key in modeled_opcode_keys:
         slots[int(key.removeprefix("opcode:0x"), 16)] = key
     registry = OpcodeRegistry(
         common_dispatch=common_dispatch,
@@ -13660,6 +13869,14 @@ def build_core_opcode_submodel_artifact(
                 "memory_4k_boundary_event",
             )
         },
+    )
+    final_relation_predictions = _final_registry_relation_predictions(
+        relation_artifact=relation_artifact,
+        equations=equations,
+        registry=registry,
+        body_scale=body_scale,
+        dispatch_only_keys=_CORE_DISPATCH_ONLY_KEYS,
+        unsupported_opcode_reasons=unsupported_opcode_reasons,
     )
 
     dynamic_rows = [
@@ -13769,9 +13986,19 @@ def build_core_opcode_submodel_artifact(
             ),
         )
 
-    unsupported = sorted(named_opcodes - set(PURE_OPCODE_DEFAULTS))
-    if len(unsupported) != 48:
-        raise ValueError("core opcode unsupported named inventory must contain 48 entries")
+    expected_scope_unsupported = named_opcodes - set(PURE_OPCODE_DEFAULTS)
+    unsupported = sorted(
+        expected_scope_unsupported
+        | {
+            int(key.removeprefix("opcode:0x"), 16)
+            for key in unsupported_opcode_reasons
+        }
+    )
+    if set(unsupported) - expected_scope_unsupported != {
+        int(key.removeprefix("opcode:0x"), 16)
+        for key in unsupported_opcode_reasons
+    }:
+        raise ValueError("core opcode unsupported inventory differs from evidence")
     dynamic_source_hashes = dynamic_artifact["source_hashes"]
     artifact = {
         "schema_version": _CORE_OPCODE_SUBMODEL_SCHEMA_VERSION,
@@ -13793,9 +14020,15 @@ def build_core_opcode_submodel_artifact(
         "body_scale": _decimal_text(body_scale),
         "approximation_policy": {
             "dispatch_only_opcode_keys": list(_CORE_DISPATCH_ONLY_KEYS),
+            "unsupported_static_opcode_reason": _ONLY_DISPATCH_DEPENDENT_EVIDENCE,
             "exp": dict(_EXP_APPROXIMATION_POLICY),
         },
         "fit_evidence": {
+            "basis": {
+                "static_fit": "non_dispatch_lab_body_per_raw_gas",
+                "dynamic_target": "declared_dispatch_only_zero_body",
+                "relation_predictions": _FINAL_TYPED_REGISTRY_LAB_BODY_BASIS,
+            },
             "status": fit.status,
             "opcode_keys": list(fit.opcode_keys),
             "anchor_keys": list(fit.anchor_keys),
@@ -13804,6 +14037,9 @@ def build_core_opcode_submodel_artifact(
             ),
             "active_zero_keys": list(fit.active_zero_keys),
             "dispatch_only_keys": list(fit.dispatch_only_keys),
+            "unsupported_static_opcode_reasons": dict(
+                unsupported_opcode_reasons
+            ),
             "approximation_relation_ids": list(
                 fit.approximation_relation_ids
             ),
@@ -13819,16 +14055,24 @@ def build_core_opcode_submodel_artifact(
                 fit.flat_relation_max_normalized_error
             ),
             "residual": _decimal_text(fit.residual),
-            "predictions": _serialize_decimal_tree(fit.predictions),
+            "static_fit_predictions": _serialize_decimal_tree(fit.predictions),
+            "predictions": _serialize_decimal_tree(final_relation_predictions),
             "quality_failures": list(fit.quality_failures),
         },
         "registry": _serialize_opcode_registry(registry),
         "named_opcode_count": len(named_opcodes),
-        "modeled_named_opcode_count": len(opcode_keys),
+        "modeled_named_opcode_count": len(modeled_opcode_keys),
         "unsupported_named_opcode_count": len(unsupported),
         "unsupported_named_opcode_keys": [
             f"opcode:0x{opcode:02x}" for opcode in unsupported
         ],
+        "unsupported_opcode_reasons": {
+            **{
+                f"opcode:0x{opcode:02x}": "outside_core_opcode_scope"
+                for opcode in sorted(expected_scope_unsupported)
+            },
+            **unsupported_opcode_reasons,
+        },
         "dynamic_source_probe_count": len(dynamic_rows),
         "exp_source_evidence": {
             "low_domain_exponent_byte_lengths": [0, 1, 2, 4],

@@ -2062,9 +2062,20 @@ def fit_nonnegative_opcode_bodies(
             for key in opcode_keys
             if key not in anchor_body_costs and key not in dispatch_only_keys
         )
+        dispatch_only_set = set(dispatch_only_keys)
+        fitted_equations = tuple(
+            equation
+            for equation in equations
+            if not set(equation.coefficients) & dispatch_only_set
+        )
+        if not fitted_equations:
+            raise ValueError(
+                "dispatch-only policy leaves no ordinary equations for opcode fitting"
+            )
+
         adjusted_targets = []
         matrix = []
-        for equation in equations:
+        for equation in fitted_equations:
             fixed_contribution = sum(
                 (
                     _decimal_from_fraction(equation.coefficients.get(key, Fraction(0)))
@@ -2097,7 +2108,6 @@ def fit_nonnegative_opcode_bodies(
         residual_terms = []
         approximation_relation_ids = []
         approximation_residuals = []
-        dispatch_only_set = set(dispatch_only_keys)
         for equation in equations:
             terms = [
                 _decimal_from_fraction(coefficient) * lab_body_per_raw_gas[key]

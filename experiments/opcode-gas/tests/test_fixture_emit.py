@@ -310,7 +310,7 @@ class FixtureEmitTests(unittest.TestCase):
                 for row, path in zip(rows, written)
             }
 
-        self.assertEqual(len(rows), 28)
+        self.assertEqual(len(rows), 32)
         self.assertEqual({row["purpose"] for row in rows}, {"formal_opcode_relation"})
         self.assertEqual({row["diagnostic_only"] for row in rows}, {False})
         self.assertEqual({row["signal_kind"] for row in rows}, {"signed_raw_gas_relation"})
@@ -325,11 +325,12 @@ class FixtureEmitTests(unittest.TestCase):
         )
         self.assertEqual(
             [row["target_raw_gas"] for row in targets],
-            [60, 110, 210, 410, 810, 1210, 1610],
+            [10, 60, 110, 210, 410, 810, 1210, 1610],
         )
         self.assertEqual(
             [row["target_raw_gas_by_key"] for row in targets],
             [
+                {"opcode:0x0a": "10"},
                 {"opcode:0x0a": "60"},
                 {"opcode:0x0a": "110"},
                 {"opcode:0x0a": "210"},
@@ -338,6 +339,40 @@ class FixtureEmitTests(unittest.TestCase):
                 {"opcode:0x0a": "1210"},
                 {"opcode:0x0a": "1610"},
             ],
+        )
+        zero_byte_relations = [
+            relation
+            for relation in exp_relations
+            if relation.scenario["exponent_byte_length"] == 0
+        ]
+        self.assertEqual(len(zero_byte_relations), 1)
+        self.assertEqual(zero_byte_relations[0].model_split, "fit")
+        zero_target_rows = [
+            row for row in rows if row["relation_id"] == "opcode:0x0a:exp-bytes-0"
+        ]
+        self.assertEqual(len(zero_target_rows), 4)
+        for target, control in zip(zero_target_rows[::2], zero_target_rows[1::2]):
+            self.assertEqual(target["lane"], "target")
+            self.assertEqual(control["lane"], "control")
+            self.assertEqual(target["fixed_bytecode_len"], control["fixed_bytecode_len"])
+            self.assertEqual(len(target["bytecode"]), len(control["bytecode"]))
+        zero_target = next(
+            row
+            for row in zero_target_rows
+            if row["lane"] == "target"
+            and row["relation_placement"] == "active_prefix"
+            and row["diagnostic_count"] == 1
+        )
+        zero_program = opcode_gas.decode_fixed_microprograms(
+            bytes.fromhex(zero_target["bytecode"].removeprefix("0x"))
+        )[0]
+        self.assertEqual(
+            zero_program,
+            b"\x7f"
+            + bytes(32)
+            + b"\x7f"
+            + (2).to_bytes(32, "big")
+            + b"\x0a\x00",
         )
         self.assertEqual(
             {row["control_raw_gas_by_key"]["opcode:0x50"] for row in rows},
@@ -366,7 +401,7 @@ class FixtureEmitTests(unittest.TestCase):
             expected_purpose=opcode_gas.FORMAL_RELATION_PURPOSE,
             guest_inputs=inputs,
         )
-        self.assertEqual(len(pairs), 14)
+        self.assertEqual(len(pairs), 16)
         altered = [dict(row) for row in rows]
         first_relation_id = altered[0]["relation_id"]
         for row in altered:

@@ -117,6 +117,11 @@ _DYNAMIC_RELATION_SCENARIO_MATRIX = {
         (
             "dynamic_holdout",
             "fit",
+            (("exponent_byte_length", 0), ("initial_memory_words", 0)),
+        ),
+        (
+            "dynamic_holdout",
+            "fit",
             (("exponent_byte_length", 4), ("initial_memory_words", 0)),
         ),
         (
@@ -2305,7 +2310,7 @@ def _dynamic_relation_target_raw_gas(
         raise ValueError("dynamic relation initial_memory_words must be nonnegative")
     if case.template == "stack_exp":
         byte_length = scenario.get("exponent_byte_length")
-        if type(byte_length) is not int or byte_length not in {1, 2, 4, 8, 16, 24, 32}:
+        if type(byte_length) is not int or byte_length not in {0, 1, 2, 4, 8, 16, 24, 32}:
             raise ValueError("EXP relation has invalid exponent byte length")
         return 10 + 50 * int(byte_length)
     if case.template == "keccak_32":
@@ -2403,7 +2408,7 @@ def relation_matched_control_spec(
         return base
     if case.template == "stack_exp":
         byte_length = int(scenario["exponent_byte_length"])
-        exponent = 1 << (8 * (byte_length - 1))
+        exponent = 0 if byte_length == 0 else 1 << (8 * (byte_length - 1))
         operands = (exponent, 2)
         setup = b"".join(_fixed_push(value, target_opcode=case.opcode or 0) for value in operands)
     elif case.template == "keccak_32":
@@ -12410,8 +12415,6 @@ def _dynamic_opcode_features(
         if set(scenario) != {"exponent_byte_length", "initial_memory_words"}:
             raise ValueError("EXP dynamic opcode scenario fields differ from the frozen schema")
         exponent_bytes = exact_nonnegative_int("exponent_byte_length")
-        if exponent_bytes <= 0:
-            raise ValueError("EXP exponent byte length must be positive")
         values = (1, exponent_bytes, exponent_bytes * exponent_bytes)
     elif dynamic_key == "opcode:0x20":
         if set(scenario) != {"input_length", "initial_memory_words"}:

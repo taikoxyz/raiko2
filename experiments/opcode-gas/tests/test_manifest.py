@@ -368,6 +368,7 @@ class ManifestTests(unittest.TestCase):
         expected = {
             "opcode:0x0a": [
                 ("canonical", "fit", {"exponent_byte_length": 1, "initial_memory_words": 0}),
+                ("dynamic_holdout", "fit", {"exponent_byte_length": 0, "initial_memory_words": 0}),
                 ("dynamic_holdout", "fit", {"exponent_byte_length": 4, "initial_memory_words": 0}),
                 ("dynamic_holdout", "fit", {"exponent_byte_length": 8, "initial_memory_words": 0}),
                 ("dynamic_holdout", "fit", {"exponent_byte_length": 16, "initial_memory_words": 0}),
@@ -447,7 +448,7 @@ class ManifestTests(unittest.TestCase):
         )
         self.assertEqual(
             sum(relation.split != "canonical" for relations in scenarios.values() for relation in relations),
-            67,
+            68,
         )
 
     def test_formal_relation_manifest_rejects_anchor_dynamic_and_relation_contract_drift(self):

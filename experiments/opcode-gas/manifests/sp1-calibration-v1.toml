@@ -160,6 +160,17 @@ target_raw_gas = 60
 reference_raw_gas_total = 2
 
 [[opcode_relation_scenarios]]
+id = "opcode:0x0a:exp-bytes-0"
+case_id = "exp"
+key_id = "opcode:0x0a"
+split = "dynamic_holdout"
+model_split = "fit"
+scenario_id = "exp-bytes-0"
+scenario = { exponent_byte_length = 0, initial_memory_words = 0 }
+target_raw_gas = 10
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
 id = "opcode:0x0a:exp-bytes-4"
 case_id = "exp"
 key_id = "opcode:0x0a"

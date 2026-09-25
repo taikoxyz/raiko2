@@ -1996,10 +1996,10 @@ class FormalOpcodeRelationTests(unittest.TestCase):
         self.assertEqual(artifact["status"], "accepted")
         self.assertEqual(len(artifact["equations"]), 98)
         self.assertEqual(len(artifact["self_controls"]), 4)
-        self.assertEqual(len(artifact["dynamic_holdouts"]), 67)
+        self.assertEqual(len(artifact["dynamic_holdouts"]), 68)
         self.assertEqual(
             Counter(row["model_split"] for row in artifact["dynamic_holdouts"]),
-            Counter({"fit": 41, "holdout": 26}),
+            Counter({"fit": 42, "holdout": 26}),
         )
         self.assertEqual(artifact["affine_model"]["rank"], 98)
         self.assertEqual(artifact["affine_model"]["nullity"], 4)
@@ -2080,7 +2080,7 @@ class FormalOpcodeRelationTests(unittest.TestCase):
             )
 
         self.assertEqual(len(artifact["equations"]), 98)
-        self.assertEqual(len(artifact["dynamic_holdouts"]), 68)
+        self.assertEqual(len(artifact["dynamic_holdouts"]), 69)
         self.assertEqual(artifact["affine_model"]["rank"], 98)
 
     def test_relation_artifact_replays_model_split_and_exact_scenario_metadata(self):
@@ -2322,6 +2322,24 @@ class FormalOpcodeRelationTests(unittest.TestCase):
 
 
 class DynamicOpcodeModelTests(unittest.TestCase):
+    def test_exp_zero_byte_length_has_zero_operand_features_and_raw_gas(self):
+        manifest = formal_relation_manifest()
+        exp_case = next(case for case in manifest.cases if case.template == "stack_exp")
+        scenario = {"exponent_byte_length": 0, "initial_memory_words": 0}
+
+        self.assertEqual(
+            opcode_gas._dynamic_relation_target_raw_gas(exp_case, scenario),
+            10,
+        )
+        self.assertEqual(
+            opcode_gas._dynamic_opcode_features("opcode:0x0a", scenario),
+            {
+                "constant": Fraction(1),
+                "exponent_bytes": Fraction(0),
+                "exponent_bytes_squared": Fraction(0),
+            },
+        )
+
     def test_frozen_features_use_semantic_word_counts_and_have_expected_rank(self):
         expected = {
             "opcode:0x0a": (

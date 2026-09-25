@@ -200,6 +200,22 @@ the six structured opcodes above with typed models. Its content-addressed output
 partial, `candidate_eligible=false` artifact. It cannot open or participate in proposal validation;
 the remaining opcode families and higher estimator layers must be calibrated and sealed first.
 
+Fresh sealing run `ff00067694b841894e53c921`, frozen at implementation revision `26f899ea`,
+accepted all 170 formal relations after the frozen adaptive rounds. The independent nonnegative
+static-body replay was `not_supported`: `opcode:0x19` and `opcode:0x5b` were active-zero keys,
+nonzero-relation MAPE was 1.2364%, and maximum APE was 56.6756%, failing the frozen maximum-error
+gate. The schema-3 dynamic fit was also `not_supported`. Its EXP zero-byte fit row had actual and
+predicted production costs 479.1089 and 155.5262 proverGas respectively, for 67.5385% APE; aggregate
+EXP fit MAPE, fit maximum APE, and holdout maximum APE were 20.4370%, 67.5385%, and 18.1747%.
+KECCAK256, MCOPY, and the shared-memory model remained supported, but aggregate support correctly
+failed closed. The dynamic evidence digest is
+`0bcce47c65dde637c7411ab5b815390fa8f73cca125069e823527c65f1fdd874`.
+
+The core-submodel command consequently failed closed with `schema-3 dynamic opcode artifact
+header/schema is invalid`; no `core-opcode-submodel.json` or core artifact SHA256 was emitted. This
+run is preserved as the single frozen `not_supported` result. Its thresholds, features, fixtures,
+and source revision were not tuned after observing the failure, and no replacement run was started.
+
 Run `25db29d91bd3311441fe8317` showed that the former linear 4-KiB page-count term fit its training
 rows (production MAPE 0.259%, maximum APE 1.103%) and passed the `0x0800` and `0x0fe0` holdouts, but
 overpredicted `0x2000` by about 42% for all three memory opcodes. Replacing the count with the binary

@@ -388,7 +388,7 @@ pub fn controlled_block_row_id(spec: &ControlledBlockRowSpec) -> Result<String> 
 fn controlled_overhead_workload_spec(
     fixture: &ControlledOverheadFixture,
 ) -> Result<ControlledOverheadWorkloadSpec> {
-    let guest_input_canonical = serde_json::to_vec(&fixture.guest_input)?;
+    let guest_input_canonical = bincode::serialize(&fixture.guest_input)?;
     Ok(ControlledOverheadWorkloadSpec {
         schema_version: 2,
         overhead_key_id: fixture.overhead_key_id.clone(),

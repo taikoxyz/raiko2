@@ -1003,6 +1003,59 @@ fn required_overhead_fixtures_reconstruct_through_the_production_proposal_path()
 }
 
 #[test]
+fn controlled_overhead_identity_uses_the_backend_guest_input_serialization() {
+    let fixtures = build_required_overhead_fixtures(2).expect("build controlled overhead fixtures");
+    let observations = validate_required_overhead_fixtures(&fixtures)
+        .expect("real executor observations must match declared overhead deltas");
+    let fixture = fixtures.first().expect("at least one overhead fixture");
+    let observation = observations
+        .first()
+        .expect("at least one overhead observation");
+    let guest_input_bincode =
+        bincode::serialize(&fixture.guest_input).expect("serialize GuestInput");
+    let expected_input_sha256 = alloy_primitives::hex::encode(Sha256::digest(&guest_input_bincode));
+
+    assert_eq!(
+        observation.workload_spec.guest_input_canonical_sha256,
+        expected_input_sha256
+    );
+    assert_eq!(observation.backend_input_sha256, expected_input_sha256);
+    assert_eq!(
+        observation.guest_input_sha256.trim_start_matches("0x"),
+        expected_input_sha256
+    );
+    assert_eq!(
+        observation.guest_input_bincode_length,
+        guest_input_bincode.len()
+    );
+
+    let workload_identity = BTreeMap::from([
+        ("kind", json!("controlled")),
+        (
+            "workload_spec",
+            serde_json::to_value(&observation.workload_spec).expect("serialize workload spec"),
+        ),
+    ]);
+    let expected_workload_id = alloy_primitives::hex::encode(Sha256::digest(
+        serde_json::to_vec(&workload_identity).expect("serialize workload identity"),
+    ));
+    assert_eq!(observation.workload_id, expected_workload_id);
+    assert_eq!(
+        controlled_overhead_workload_id(fixture).expect("derive workload ID"),
+        expected_workload_id
+    );
+
+    let rebuilt = build_required_overhead_fixtures(2).expect("rebuild overhead fixtures");
+    let rebuilt_observations =
+        validate_required_overhead_fixtures(&rebuilt).expect("rebuild real executor observations");
+    assert_eq!(
+        bincode::serialize(&rebuilt.first().unwrap().guest_input).unwrap(),
+        guest_input_bincode
+    );
+    assert_eq!(rebuilt_observations.first(), Some(observation));
+}
+
+#[test]
 fn controlled_operation_units_preserve_event_count_and_exclude_synthetic_eof_stop() {
     let fixtures = build_required_overhead_fixtures(2).expect("build controlled overhead fixtures");
     let observations = validate_required_overhead_fixtures(&fixtures)

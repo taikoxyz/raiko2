@@ -21045,6 +21045,9 @@ _HIGHER_LAYER_SEALED_FILES = (
     "state-holdout-evidence.json",
     "higher-layer-calibration.json",
 )
+_HIGHER_LAYER_STATE_REJECTION_REASONS = frozenset(
+    {"state_holdout_subprocess_failure", "state_holdout_io_failure"}
+)
 
 
 def _higher_layer_canonical_path(
@@ -21681,8 +21684,8 @@ def _validate_higher_layer_state_row(
             "reasons",
         } or (
             not isinstance(row.get("reasons"), list)
-            or not row["reasons"]
-            or any(not isinstance(reason, str) or not reason for reason in row["reasons"])
+            or len(row["reasons"]) != 1
+            or row["reasons"][0] not in _HIGHER_LAYER_STATE_REJECTION_REASONS
         ):
             raise ValueError("higher-layer rejected state row is malformed")
         return {}
@@ -21821,17 +21824,6 @@ def _validate_higher_layer_state_row(
         or not isinstance(observation.get("public_output"), str)
         or not isinstance(observation.get("actual_final_state_root"), str)
         or not isinstance(ledger, Mapping)
-        or any(
-            not isinstance(key, str)
-            or not isinstance(delta, Mapping)
-            or set(delta) != {"pricing_basis", "units", "event_count"}
-            or delta.get("pricing_basis") != "raw_gas_slope"
-            or type(delta.get("units")) is not int
-            or type(delta.get("event_count")) is not int
-            or delta.get("units", -1) < 0
-            or delta.get("event_count", -1) < 0
-            for key, delta in ledger.items()
-        )
         or not isinstance(diagnostics, Mapping)
         or set(diagnostics) != diagnostic_fields
         or any(type(value) is not int or value < 0 for value in diagnostics.values())
@@ -21839,6 +21831,27 @@ def _validate_higher_layer_state_row(
         != row.get("guest_input_bincode_length")
     ):
         raise ValueError("higher-layer state operation or diagnostic evidence is missing")
+    for key, delta in ledger.items():
+        if not isinstance(key, str) or not key or key != key.strip():
+            raise ValueError(
+                "higher-layer state operation key must be a canonical nonempty string"
+            )
+        if (
+            not isinstance(delta, Mapping)
+            or set(delta) != {"pricing_basis", "units", "event_count"}
+            or delta.get("pricing_basis") != "raw_gas_slope"
+            or type(delta.get("units")) is not int
+            or type(delta.get("event_count")) is not int
+        ):
+            raise ValueError("higher-layer state operation delta fields differ")
+        units = delta["units"]
+        event_count = delta["event_count"]
+        if units < 0 or event_count < 0:
+            raise ValueError("higher-layer state operation counts must be nonnegative")
+        if units == 0 and event_count == 0:
+            raise ValueError("higher-layer state operation delta must omit a zero row")
+        if units > (1 << 63) - 1 or event_count > (1 << 63) - 1:
+            raise ValueError("higher-layer state operation counts exceed i64")
     return observation
 
 
@@ -22257,6 +22270,8 @@ def run_higher_layer_state_holdouts(
                         if isinstance(error, subprocess.SubprocessError)
                         else "state_holdout_io_failure"
                     )
+                    if reason not in _HIGHER_LAYER_STATE_REJECTION_REASONS:
+                        raise AssertionError("unknown state holdout rejection reason")
                     for lane in ("control", "target"):
                         rows.append(
                             {
@@ -22482,11 +22497,19 @@ def _require_portable_higher_layer_value(value: Any) -> None:
         tokens = value.translate(
             str.maketrans({character: " " for character in "\"'()[]{}<>,;="})
         ).split()
+        uri_tokens = value.translate(
+            str.maketrans(
+                {character: " " for character in "\"'()[]{}<>,;=:"}
+            )
+        ).split()
         if any(
             pathlib.PurePosixPath(token).is_absolute()
             or pathlib.PureWindowsPath(token).is_absolute()
             or token.startswith("~")
             for token in tokens
+        ) or any(
+            pathlib.PurePosixPath(token).is_absolute() or token.startswith("~")
+            for token in uri_tokens
         ):
             raise ValueError("higher-layer sealed evidence contains a non-portable path")
 
@@ -22823,8 +22846,10 @@ def seal_higher_layer_calibration(
         temporary_path = None
         published = True
         _fsync_directory(out_root)
-        _atomic_write_bytes(
-            pathlib.Path(derivation_path_file), (str(target) + "\n").encode()
+        write_run_path_file(
+            pathlib.Path(derivation_path_file),
+            target,
+            durable_identity_name="identity.json",
         )
         return target
     except BaseException:

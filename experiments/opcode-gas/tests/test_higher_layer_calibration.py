@@ -1423,7 +1423,7 @@ class HigherLayerTask5StateVerdictTests(unittest.TestCase):
             {
                 **rejected_identity,
                 "status": "rejected",
-                "reasons": ["execution_failure"],
+                "reasons": ["state_holdout_io_failure"],
             }
         )
         inconclusive = self.evaluate(rejected_rows)
@@ -1487,6 +1487,42 @@ class HigherLayerTask5StateVerdictTests(unittest.TestCase):
         for expected, mutate in mutations.items():
             rows = self.rows()
             mutate(rows[0])
+            with self.subTest(expected=expected), self.assertRaisesRegex(
+                ValueError, expected
+            ):
+                self.evaluate(rows)
+
+    def test_malformed_operation_ledgers_raise_instead_of_becoming_inconclusive(self):
+        malformed = {
+            "nonempty": {
+                "": {
+                    "pricing_basis": "raw_gas_slope",
+                    "units": 1,
+                    "event_count": 1,
+                }
+            },
+            "zero row": {
+                "opcode:0x5f": {
+                    "pricing_basis": "raw_gas_slope",
+                    "units": 0,
+                    "event_count": 0,
+                }
+            },
+            "i64": {
+                "opcode:0x5f": {
+                    "pricing_basis": "raw_gas_slope",
+                    "units": 1 << 63,
+                    "event_count": 1,
+                }
+            },
+        }
+        for expected, ledger in malformed.items():
+            rows = self.rows()
+            for row in rows:
+                if row["pair_id"] == "witness_topology_1":
+                    row["observation"]["actual_raw_gas_by_key"] = copy.deepcopy(
+                        ledger
+                    )
             with self.subTest(expected=expected), self.assertRaisesRegex(
                 ValueError, expected
             ):
@@ -1895,6 +1931,7 @@ class HigherLayerTask5StateVerdictTests(unittest.TestCase):
             run.mkdir()
             output = root / "sealed"
             path_file = root / "derivation-path"
+            path_file.touch()
             destination = opcode_gas.seal_higher_layer_calibration(
                 run,
                 output,
@@ -1940,6 +1977,32 @@ class HigherLayerTask5StateVerdictTests(unittest.TestCase):
                     verifier=lambda _path: verified,
                 )
             self.assertEqual(list(failing_output.iterdir()), [])
+
+            for label, prepare_handoff, expected in (
+                (
+                    "nonempty",
+                    lambda path: path.write_text("occupied\n"),
+                    "non-empty",
+                ),
+                (
+                    "symlink",
+                    lambda path: path.symlink_to(root / "empty-external"),
+                    "cannot be claimed",
+                ),
+            ):
+                with self.subTest(handoff=label):
+                    (root / "empty-external").touch(exist_ok=True)
+                    handoff = root / f"{label}-handoff"
+                    prepare_handoff(handoff)
+                    rejected_output = root / f"{label}-output"
+                    with self.assertRaisesRegex(ValueError, expected):
+                        opcode_gas.seal_higher_layer_calibration(
+                            run,
+                            rejected_output,
+                            handoff,
+                            verifier=lambda _path: verified,
+                        )
+                    self.assertEqual(list(rejected_output.iterdir()), [])
 
     def test_seal_rejects_absolute_user_specific_persisted_path(self):
         verified = self.verified_bundle()
@@ -2026,6 +2089,28 @@ class HigherLayerTask5StateVerdictTests(unittest.TestCase):
                     source_validator=validate_source,
                 )
 
+            rejected_rows = copy.deepcopy(rows)
+            rejected = rejected_rows[0]
+            rejected_identity = {
+                key: rejected[key]
+                for key in (
+                    "schema_version",
+                    "calibration_run_id",
+                    "pair_id",
+                    "lane",
+                    "repeat_index",
+                    "spec",
+                )
+            }
+            rejected.clear()
+            rejected.update(
+                {
+                    **rejected_identity,
+                    "status": "rejected",
+                    "reasons": ["state_holdout_io_failure"],
+                }
+            )
+            rejected_final = self.evaluate(rejected_rows)
             tamper_cases = {
                 "source": lambda overhead, state, final: overhead["fixed_costs"][
                     "source"
@@ -2046,6 +2131,25 @@ class HigherLayerTask5StateVerdictTests(unittest.TestCase):
                 "diagnostic": lambda overhead, state, final: state["rows"][0][
                     "observation"
                 ]["actual_diagnostics"].__setitem__("witness_node_count", 99),
+                "rejected URI": lambda overhead, state, final: (
+                    state["rows"][0].clear(),
+                    state["rows"][0].update(
+                        {
+                            "schema_version": 1,
+                            "calibration_run_id": CALIBRATION_ID,
+                            "pair_id": "witness_topology_1",
+                            "lane": "control",
+                            "repeat_index": 0,
+                            "status": "rejected",
+                            "spec": self.pair_spec(self.manifest.state_holdouts[0]),
+                            "reasons": [
+                                "failed:file:///home/sample_user/private-input.json"
+                            ],
+                        }
+                    ),
+                    final.clear(),
+                    final.update(copy.deepcopy(rejected_final)),
+                ),
                 "verdict": lambda overhead, state, final: final[
                     "coarse_state_trie"
                 ].__setitem__("status", "needs_state_split"),

@@ -445,8 +445,8 @@ git commit -m "feat(zkgas): add controlled state holdouts"
 **Interfaces:**
 - Consumes: clean implementation revision, higher-layer manifest, operation coverage, Osaka core,
   launcher, and production SP1 proposal ELF.
-- Produces: an ignored immutable run directory containing identity, raw overhead rounds, decisions,
-  and raw state holdout rows.
+- Produces: an ignored immutable run directory containing identity, raw overhead rounds, and round
+  decisions. State holdout execution remains closed until Task 5 seals the fixed costs.
 
 - [ ] **Step 1: Write failing prepare/run identity tests**
 
@@ -498,11 +498,12 @@ Do not copy its target/control construction or SP1 invocation loop. Execute roun
 fitting that round, run 32 only for `checkpoint_generator_bound` or `exhausted_sweep`; run 128 under
 the same rule. Any other failure terminates the campaign with preserved raw evidence.
 
-- [ ] **Step 5: Run state holdouts only after fixed costs seal**
+- [ ] **Step 5: Enforce the fixed-cost gate**
 
-Execute all six state pairs through `controlled-state-holdout`, three repeats per lane. Persist exact
-workload spec, GuestInput hash, execution row ID, proverGas, public output, final state root,
-operation ledger, four-term feature counts, and diagnostics. Do not fit or select a state feature.
+Terminate `run-higher-layer-calibration` after the bounded overhead rounds and their immutable
+decision ledger. Add a regression test proving this command cannot execute or create a state-holdout
+raw file. State holdouts open only through the Task 5 command after an accepted fixed-cost artifact
+exists.
 
 - [ ] **Step 6: Document the supported command flow**
 
@@ -542,9 +543,11 @@ git commit -m "feat(zkgas): add bounded higher-layer campaign"
 **Files:**
 - Modify: `experiments/opcode-gas/opcode_gas.py`
 - Modify: `experiments/opcode-gas/tests/test_higher_layer_calibration.py`
+- Modify: `experiments/opcode-gas/README.md`
 
 **Interfaces:**
-- Consumes: immutable raw overhead and state-holdout evidence.
+- Consumes: immutable raw overhead evidence; after fixed-cost acceptance, creates and consumes the
+  immutable state-holdout evidence.
 - Produces: `fit_higher_layer_calibration(run: pathlib.Path) -> Mapping[str, Any]` with fixed costs,
   predictions, coverage, and one of `coarse_model_accepted`, `needs_state_split`, or `inconclusive`.
 
@@ -594,24 +597,33 @@ Reuse `evaluate_controlled_sweep` for non-startup overheads. Replace its operati
 the exact frozen resolver from Task 2. Residualize `native_value_transfer` by `tx_base`, and
 `proposal_startup` by the accepted lower-level terms. Average the two startup residual cases only
 after their maximum/minimum spread is `<= 5%`. Expose this through
-`fit-higher-layer-calibration --run RUN`; the command writes only the canonical result path inside
-that run and rejects a differing pre-existing result.
+`fit-higher-layer-fixed-costs --run RUN`; the command writes only the canonical fixed-cost artifact
+inside that run and rejects a differing pre-existing result.
 
-- [ ] **Step 5: Implement state holdout evaluation**
+- [ ] **Step 5: Implement gated state holdout execution**
+
+Add `run-higher-layer-state-holdouts --run RUN`. It refuses to start unless the canonical fixed-cost
+artifact is accepted and its source hashes match the run identity. Execute all six pairs through
+`controlled-state-holdout`, three repeats per lane. Persist exact workload spec, GuestInput hash,
+execution row ID, proverGas, public output, final state root, operation ledger, four-term feature
+counts, and diagnostics. Do not fit or select a state feature.
+
+- [ ] **Step 6: Implement state holdout evaluation**
 
 Validate target/control identity before opening proverGas. Require identical `Q_formula` counts and
 operation costs for each state pair. Compute total predictions, total APE, predicted delta, observed
 delta, and effect ratio with `Decimal`. Holdout results may set only the coarse-state status; they
-cannot rewrite the fixed costs, selected rounds, thresholds, or source identities.
+cannot rewrite the fixed costs, selected rounds, thresholds, or source identities. Expose this as
+`finalize-higher-layer-calibration --run RUN`, which requires all six complete pairs.
 
-- [ ] **Step 6: Implement exact artifact replay**
+- [ ] **Step 7: Implement exact artifact replay**
 
 Add `verify-higher-layer-calibration --run-path-file PATH`. It reconstructs fixtures without SP1
 execution, checks every GuestInput hash, replays fitting from raw observations, and requires exact
 equality with the persisted result. Reject copied results, missing raw rows, duplicate execution
 IDs, edited diagnostics, changed source files, symlinks, and any absolute/user-specific path.
 
-- [ ] **Step 7: Implement create-only sealing**
+- [ ] **Step 8: Implement create-only sealing**
 
 Add `seal-higher-layer-calibration --run RUN --out-root ROOT
 --derivation-path-file PATH`. It must invoke the same verifier, derive the 24-hex derivation ID from
@@ -619,7 +631,13 @@ the canonical sealed identity, reject an existing destination, and atomically pu
 four files declared in this plan. Add tests for partial-write cleanup, existing-destination
 rejection, changed raw evidence, and byte-identical replay from the four-file package.
 
-- [ ] **Step 8: Run focused and complete Python tests**
+- [ ] **Step 9: Document the gated command order**
+
+Extend the README sequence with `fit-higher-layer-fixed-costs`, then
+`run-higher-layer-state-holdouts`, then `finalize-higher-layer-calibration`, followed by verification.
+State clearly that changing this order is rejected and that holdouts never modify the fixed artifact.
+
+- [ ] **Step 10: Run focused and complete Python tests**
 
 Run:
 
@@ -633,11 +651,12 @@ env PYTHONDONTWRITEBYTECODE=1 ~/.venv/bin/python -m unittest discover \
 
 Expected: PASS with only the existing explicitly opt-in skip.
 
-- [ ] **Step 9: Commit Task 5**
+- [ ] **Step 11: Commit Task 5**
 
 ```bash
 git add experiments/opcode-gas/opcode_gas.py \
-  experiments/opcode-gas/tests/test_higher_layer_calibration.py
+  experiments/opcode-gas/tests/test_higher_layer_calibration.py \
+  experiments/opcode-gas/README.md
 git commit -m "feat(zkgas): fit higher-layer fixed costs"
 ```
 
@@ -668,9 +687,9 @@ Expected: build PASS and a clean tracked worktree before preparation.
 
 - [ ] **Step 2: Prepare and run the campaign**
 
-Run the README command sequence. Preserve the exact run path emitted by
+Run the README preparation and overhead command sequence. Preserve the exact run path emitted by
 `prepare-higher-layer-calibration`; do not select the newest directory. Let the bounded controller
-stop at the first passing overhead round, then run all six state holdout pairs.
+stop at the first passing overhead round. Confirm no state-holdout raw file exists yet.
 
 - [ ] **Step 3: Fit and inspect before sealing**
 
@@ -678,7 +697,11 @@ Run:
 
 ```bash
 ~/.venv/bin/python experiments/opcode-gas/opcode_gas.py \
-  fit-higher-layer-calibration --run "$HIGHER_LAYER_RUN"
+  fit-higher-layer-fixed-costs --run "$HIGHER_LAYER_RUN"
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py \
+  run-higher-layer-state-holdouts --run "$HIGHER_LAYER_RUN"
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py \
+  finalize-higher-layer-calibration --run "$HIGHER_LAYER_RUN"
 ~/.venv/bin/python experiments/opcode-gas/opcode_gas.py \
   verify-higher-layer-calibration --run-path-file "$RUN_PATH_FILE"
 ```

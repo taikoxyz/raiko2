@@ -7,21 +7,21 @@ use alloy_consensus::Transaction as _;
 use alloy_primitives::{Address, B256};
 use controlled_workload::{
     ControlledBlockRowSpec, ControlledBlockSplit, ControlledExecutionIdentity, ControlledFootprint,
-    ControlledLane, ControlledOverheadLane, ControlledProgram, ControlledTrace,
-    ControlledWorkloadSpec, PairedPrecompileShape, build_controlled_block_fixture,
+    ControlledLane, ControlledOperationUnits, ControlledOverheadLane, ControlledProgram,
+    ControlledTrace, ControlledWorkloadSpec, PairedPrecompileShape, build_controlled_block_fixture,
     build_controlled_block_fixture_with_extra_prestate_account_for_test,
     build_required_overhead_fixtures, controlled_block_row_id, controlled_execution_row_id,
     controlled_overhead_workload_id, controlled_precompile_workload_spec, controlled_workload_id,
-    observe_controlled_block_fixture, trace_precompile_workload, trace_revm_opcode_workload,
-    validate_controlled_block_fixture, validate_fixed_footprint, validate_precompile_pair,
-    validate_required_overhead_fixtures,
+    observe_controlled_block_fixture, operation_units_delta, trace_precompile_workload,
+    trace_revm_opcode_workload, validate_controlled_block_fixture, validate_fixed_footprint,
+    validate_precompile_pair, validate_required_overhead_fixtures,
 };
 use raiko2_primitives::{
     OpcodeLabInput, PrecompileLabInput, PrecompileLabLane, SupportedChainSpecs,
     chain_spec::{ForkCondition, ForkId, TaikoFork},
 };
 use raiko2_protocol_shasta::libhash::hash_proposal;
-use raiko2_zkgas_trace::ProposalTraceStatus;
+use raiko2_zkgas_trace::{PricingBasis, ProposalTraceStatus};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
@@ -728,6 +728,7 @@ fn required_overhead_fixtures_reconstruct_through_the_production_proposal_path()
                     "opcode:0x5f": {
                         "pricing_basis": "raw_gas_slope",
                         "units": 4,
+                        "event_count": 2,
                     }
                 }),
                 "two PUSH0 events consume two raw-gas units each; zero-gas implicit STOP is omitted",
@@ -767,6 +768,133 @@ fn required_overhead_fixtures_reconstruct_through_the_production_proposal_path()
             )
         });
     }
+}
+
+#[test]
+fn controlled_operation_units_preserve_event_count_and_exclude_synthetic_eof_stop() {
+    let fixtures = build_required_overhead_fixtures(2).expect("build controlled overhead fixtures");
+    let observations = validate_required_overhead_fixtures(&fixtures)
+        .expect("real executor observations must match declared overhead deltas");
+    let contract = observations
+        .iter()
+        .find(|observation| {
+            observation.case_id == "tx_base_minimal_contract_call"
+                && observation.lane == ControlledOverheadLane::Target
+        })
+        .expect("minimal contract target observation");
+    let push0 = contract
+        .observed_operation_deltas
+        .get("opcode:0x5f")
+        .expect("retained PUSH0 pricing row");
+
+    assert_eq!(push0.pricing_basis, PricingBasis::RawGasSlope);
+    assert_eq!(push0.units, 2 * push0.event_count);
+    assert_eq!(push0.event_count, 2);
+    assert_eq!(contract.workload_spec.schema_version, 2);
+    assert!(
+        !contract
+            .absolute_operation_pricing_units
+            .contains_key("opcode:0x00"),
+        "synthetic zero-pricing-unit EOF STOP must stay outside the canonical pricing ledger",
+    );
+    assert!(
+        !contract
+            .observed_operation_deltas
+            .contains_key("opcode:0x00")
+    );
+}
+
+fn operation_units(
+    pricing_basis: PricingBasis,
+    units: i64,
+    event_count: i64,
+) -> ControlledOperationUnits {
+    ControlledOperationUnits {
+        pricing_basis,
+        units,
+        event_count,
+    }
+}
+
+#[test]
+fn operation_units_delta_subtracts_units_and_events_independently() {
+    let target = BTreeMap::from([(
+        "opcode:0x5f".into(),
+        operation_units(PricingBasis::RawGasSlope, 10, 5),
+    )]);
+    let control = BTreeMap::from([(
+        "opcode:0x5f".into(),
+        operation_units(PricingBasis::RawGasSlope, 4, 2),
+    )]);
+
+    assert_eq!(
+        operation_units_delta(&target, &control).expect("positive delta"),
+        BTreeMap::from([(
+            "opcode:0x5f".into(),
+            operation_units(PricingBasis::RawGasSlope, 6, 3),
+        )]),
+    );
+    assert_eq!(
+        operation_units_delta(&control, &target).expect("negative delta"),
+        BTreeMap::from([(
+            "opcode:0x5f".into(),
+            operation_units(PricingBasis::RawGasSlope, -6, -3),
+        )]),
+    );
+    assert!(
+        operation_units_delta(&target, &target)
+            .expect("zero delta")
+            .is_empty()
+    );
+}
+
+#[test]
+fn operation_units_delta_retains_a_key_when_only_one_component_is_zero() {
+    let target = BTreeMap::from([(
+        "opcode:0x5f".into(),
+        operation_units(PricingBasis::RawGasSlope, 4, 3),
+    )]);
+    let control = BTreeMap::from([(
+        "opcode:0x5f".into(),
+        operation_units(PricingBasis::RawGasSlope, 4, 1),
+    )]);
+
+    assert_eq!(
+        operation_units_delta(&target, &control).expect("event-only delta"),
+        BTreeMap::from([(
+            "opcode:0x5f".into(),
+            operation_units(PricingBasis::RawGasSlope, 0, 2),
+        )]),
+    );
+}
+
+#[test]
+fn operation_units_delta_rejects_basis_changes_and_event_count_overflow() {
+    let raw = BTreeMap::from([(
+        "operation".into(),
+        operation_units(PricingBasis::RawGasSlope, 1, i64::MAX),
+    )]);
+    let fixed = BTreeMap::from([(
+        "operation".into(),
+        operation_units(PricingBasis::FixedPerEvent, 1, 1),
+    )]);
+    assert!(
+        operation_units_delta(&raw, &fixed)
+            .expect_err("one key cannot change pricing basis")
+            .to_string()
+            .contains("changes pricing basis")
+    );
+
+    let negative_one = BTreeMap::from([(
+        "operation".into(),
+        operation_units(PricingBasis::RawGasSlope, 0, -1),
+    )]);
+    assert!(
+        operation_units_delta(&raw, &negative_one)
+            .expect_err("event-count subtraction must be checked")
+            .to_string()
+            .contains("event count overflow")
+    );
 }
 
 #[test]

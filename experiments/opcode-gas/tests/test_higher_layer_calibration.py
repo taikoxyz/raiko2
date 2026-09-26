@@ -4,6 +4,7 @@ import pathlib
 import sys
 import tempfile
 import unittest
+from decimal import Decimal, localcontext
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
@@ -212,6 +213,122 @@ class HigherLayerManifestTests(unittest.TestCase):
         for mutate in mutations:
             with self.subTest(mutate=mutate):
                 self.assert_rejected(mutate, "unknown fields|differs")
+
+
+class StaticOperationDeltaTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        manifest = opcode_gas.load_higher_layer_manifest(MANIFEST_PATH)
+        cls.coverage = json.loads(
+            (ROOT / manifest.operation_coverage_ref["path"]).read_text()
+        )
+        cls.core = json.loads((ROOT / manifest.augmented_core_ref["path"]).read_text())
+
+    def test_resolves_exact_dispatch_and_raw_gas_body_terms(self):
+        delta = {
+            "pricing_basis": "raw_gas_slope",
+            "units": 8,
+            "event_count": 4,
+        }
+        with localcontext(opcode_gas._OPCODE_DECIMAL_CONTEXT):
+            expected = (
+                Decimal(delta["event_count"])
+                * Decimal(self.core["registry"]["common_dispatch"])
+                + Decimal(delta["units"])
+                * Decimal(self.core["body_scale"])
+                * Decimal(
+                    self.core["registry"]["models"]["opcode:0x5f"]["parameters"]
+                    ["body_per_raw_gas"]
+                )
+            )
+            negative_expected = -expected
+
+        self.assertEqual(
+            opcode_gas.resolve_static_operation_delta(
+                self.core, self.coverage, "opcode:0x5f", delta
+            ),
+            expected,
+        )
+        self.assertEqual(
+            opcode_gas.resolve_static_operation_delta(
+                self.core,
+                self.coverage,
+                "opcode:0x5f",
+                {**delta, "units": -8, "event_count": -4},
+            ),
+            negative_expected,
+        )
+
+    def test_rejects_missing_event_count_wrong_basis_and_impossible_signs(self):
+        valid = {
+            "pricing_basis": "raw_gas_slope",
+            "units": 2,
+            "event_count": 1,
+        }
+        invalid = (
+            ({key: value for key, value in valid.items() if key != "event_count"}, "event_count"),
+            ({**valid, "pricing_basis": "fixed_per_event"}, "pricing basis"),
+            ({**valid, "event_count": -1}, "sign"),
+            ({**valid, "units": -2}, "sign"),
+        )
+        for delta, expected in invalid:
+            with self.subTest(delta=delta), self.assertRaisesRegex(ValueError, expected):
+                opcode_gas.resolve_static_operation_delta(
+                    self.core, self.coverage, "opcode:0x5f", delta
+                )
+
+    def test_resolves_measured_dispatch_only_static_operation(self):
+        delta = {
+            "pricing_basis": "raw_gas_slope",
+            "units": 3,
+            "event_count": 1,
+        }
+
+        self.assertEqual(
+            opcode_gas.resolve_static_operation_delta(
+                self.core, self.coverage, "opcode:0x19", delta
+            ),
+            Decimal(self.core["registry"]["common_dispatch"]),
+        )
+
+    def test_rejects_non_static_unmeasured_wrapper_and_absent_coverage(self):
+        delta = {
+            "pricing_basis": "raw_gas_slope",
+            "units": 2,
+            "event_count": 1,
+        }
+        rejected = (
+            ("opcode:0x0a", "static_raw_gas"),
+            ("opcode:0x00", "static_raw_gas"),
+            ("precompile:0x01", "static_raw_gas"),
+            ("opcode:0xf1:spawned", "coverage"),
+            ("opcode:0xaa:absent", "coverage"),
+        )
+        for key, expected in rejected:
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, expected):
+                opcode_gas.resolve_static_operation_delta(
+                    self.core, self.coverage, key, delta
+                )
+
+    def test_rejects_inputs_other_than_the_exact_pinned_coverage_and_core(self):
+        delta = {
+            "pricing_basis": "raw_gas_slope",
+            "units": 2,
+            "event_count": 1,
+        }
+        changed_coverage = copy.deepcopy(self.coverage)
+        changed_coverage["artifact_sha256"] = "0" * 64
+        changed_core = copy.deepcopy(self.core)
+        changed_core["artifact_sha256"] = "0" * 64
+
+        with self.assertRaisesRegex(ValueError, "pinned operation coverage"):
+            opcode_gas.resolve_static_operation_delta(
+                self.core, changed_coverage, "opcode:0x5f", delta
+            )
+        with self.assertRaisesRegex(ValueError, "pinned augmented core"):
+            opcode_gas.resolve_static_operation_delta(
+                changed_core, self.coverage, "opcode:0x5f", delta
+            )
 
 
 if __name__ == "__main__":

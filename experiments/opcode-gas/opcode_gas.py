@@ -6271,6 +6271,107 @@ def load_higher_layer_manifest(path: pathlib.Path) -> HigherLayerManifest:
     )
 
 
+def _require_pinned_operation_artifact(
+    artifact: Mapping[str, Any], *, expected_sha256: str, label: str
+) -> None:
+    if (
+        not isinstance(artifact, Mapping)
+        or artifact.get("artifact_sha256") != expected_sha256
+    ):
+        raise ValueError(f"{label} is not the exact pinned artifact")
+    try:
+        _validate_content_addressed_artifact(artifact, label=label)
+    except ValueError as error:
+        raise ValueError(f"{label} is not the exact pinned artifact") from error
+
+
+@_isolated_decimal_context
+def resolve_static_operation_delta(
+    core: Mapping[str, Any],
+    coverage: Mapping[str, Any],
+    key: str,
+    delta: Mapping[str, Any],
+) -> Decimal:
+    """Resolve one measured static operation delta against the frozen Osaka core."""
+    _require_pinned_operation_artifact(
+        coverage,
+        expected_sha256=_HIGHER_LAYER_OPERATION_COVERAGE_REF["artifact_sha256"],
+        label="pinned operation coverage",
+    )
+    _require_pinned_operation_artifact(
+        core,
+        expected_sha256=_HIGHER_LAYER_AUGMENTED_CORE_REF["artifact_sha256"],
+        label="pinned augmented core",
+    )
+
+    if not isinstance(key, str) or not key:
+        raise ValueError("operation key must be a nonempty string")
+    rows = coverage.get("execution_coverage")
+    if not isinstance(rows, list) or len(rows) != 168:
+        raise ValueError("pinned operation coverage must contain exactly 168 rows")
+    matching = [row for row in rows if isinstance(row, Mapping) and row.get("key") == key]
+    if len(matching) != 1:
+        raise ValueError(f"operation key is absent from frozen coverage: {key}")
+    row = matching[0]
+    if row.get("classification") != "static_raw_gas" or row.get("model_status") != "measured":
+        raise ValueError(f"operation key is not measured static_raw_gas coverage: {key}")
+    expected_ref = {
+        "artifact_sha256": _HIGHER_LAYER_AUGMENTED_CORE_REF["artifact_sha256"],
+        "model_id": key,
+        "model_kind": "static_raw_gas",
+        "path": _HIGHER_LAYER_AUGMENTED_CORE_REF["path"],
+    }
+    if not _exact_json_equal(row.get("artifact_ref"), expected_ref):
+        raise ValueError(f"operation coverage does not bind the pinned static model: {key}")
+
+    required_delta_fields = {"pricing_basis", "units", "event_count"}
+    if not isinstance(delta, Mapping) or set(delta) != required_delta_fields:
+        raise ValueError(
+            "controlled operation delta must declare exactly pricing_basis, units, and event_count"
+        )
+    if delta["pricing_basis"] != "raw_gas_slope":
+        raise ValueError("controlled operation delta has the wrong pricing basis")
+    units = delta["units"]
+    event_count = delta["event_count"]
+    if (
+        isinstance(units, bool)
+        or not isinstance(units, int)
+        or isinstance(event_count, bool)
+        or not isinstance(event_count, int)
+    ):
+        raise ValueError("controlled operation units and event_count must be integers")
+    if units == 0 and event_count == 0:
+        raise ValueError("controlled operation delta must omit a zero row")
+    if units * event_count < 0:
+        raise ValueError("controlled operation delta has inconsistent signs")
+
+    registry = core.get("registry")
+    models = registry.get("models") if isinstance(registry, Mapping) else None
+    model = models.get(key) if isinstance(models, Mapping) else None
+    if not isinstance(model, Mapping) or model.get("kind") != "static_raw_gas":
+        raise ValueError(f"pinned augmented core lacks a static model: {key}")
+    parameters = model.get("parameters")
+    if not isinstance(parameters, Mapping) or set(parameters) != {"body_per_raw_gas"}:
+        raise ValueError(f"pinned augmented core has invalid static parameters: {key}")
+    common_dispatch = _canonical_artifact_decimal(
+        registry.get("common_dispatch"),
+        label="pinned common dispatch",
+        positive=True,
+    )
+    body_scale = _canonical_artifact_decimal(
+        core.get("body_scale"), label="pinned body scale", positive=True
+    )
+    body_per_raw_gas = _canonical_artifact_decimal(
+        parameters.get("body_per_raw_gas"),
+        label=f"pinned static body {key}",
+        nonnegative=True,
+    )
+    return (
+        Decimal(event_count) * common_dispatch
+        + Decimal(units) * body_scale * body_per_raw_gas
+    )
+
+
 def damage_report(
     *,
     fit_path: pathlib.Path,
@@ -18124,15 +18225,35 @@ def _stable_operation_deltas(
         raise ValueError(f"controlled overhead {field_name} changed across repeats")
     result = {}
     for key, value in values[0].items():
-        if not isinstance(value, Mapping):
-            raise ValueError("controlled operation delta must declare basis and units")
+        if not isinstance(value, Mapping) or set(value) != {
+            "pricing_basis",
+            "units",
+            "event_count",
+        }:
+            raise ValueError(
+                "controlled operation delta must declare exactly pricing_basis, units, and event_count"
+            )
         basis = value.get("pricing_basis")
         if basis not in {"raw_gas_slope", "fixed_per_event"}:
             raise ValueError("controlled operation delta has unknown pricing basis")
         units = value.get("units")
-        if isinstance(units, bool) or not isinstance(units, int) or units == 0:
-            raise ValueError("controlled operation delta units must be a nonzero integer")
-        result[str(key)] = {"pricing_basis": basis, "units": units}
+        event_count = value.get("event_count")
+        if (
+            isinstance(units, bool)
+            or not isinstance(units, int)
+            or isinstance(event_count, bool)
+            or not isinstance(event_count, int)
+        ):
+            raise ValueError("controlled operation units and event_count must be integers")
+        if units == 0 and event_count == 0:
+            raise ValueError("controlled operation delta must omit a zero row")
+        if units * event_count < 0:
+            raise ValueError("controlled operation delta has inconsistent signs")
+        result[str(key)] = {
+            "pricing_basis": basis,
+            "units": units,
+            "event_count": event_count,
+        }
     return result
 
 

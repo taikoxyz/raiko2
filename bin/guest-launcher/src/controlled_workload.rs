@@ -169,6 +169,7 @@ pub enum ControlledOverheadLane {
 pub struct ControlledOperationUnits {
     pub pricing_basis: PricingBasis,
     pub units: i64,
+    pub event_count: i64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -309,7 +310,7 @@ fn controlled_overhead_workload_spec(
 ) -> Result<ControlledOverheadWorkloadSpec> {
     let guest_input_canonical = serde_json::to_vec(&fixture.guest_input)?;
     Ok(ControlledOverheadWorkloadSpec {
-        schema_version: 1,
+        schema_version: 2,
         overhead_key_id: fixture.overhead_key_id.clone(),
         case_id: fixture.case_id.clone(),
         lane: fixture.lane,
@@ -412,6 +413,7 @@ fn absolute_transaction_operation_units(
             let entry = absolute.entry(key).or_insert(ControlledOperationUnits {
                 pricing_basis,
                 units: 0,
+                event_count: 0,
             });
             if entry.pricing_basis != pricing_basis {
                 bail!("one measurement identity has multiple pricing bases");
@@ -420,6 +422,10 @@ fn absolute_transaction_operation_units(
                 .units
                 .checked_add(units)
                 .ok_or_else(|| anyhow::anyhow!("controlled operation pricing units overflow"))?;
+            entry.event_count = entry
+                .event_count
+                .checked_add(1)
+                .ok_or_else(|| anyhow::anyhow!("controlled operation event count overflow"))?;
         }
     }
     Ok(absolute)
@@ -515,7 +521,7 @@ fn observe_overhead_fixture(
     })
 }
 
-fn operation_units_delta(
+pub(crate) fn operation_units_delta(
     target: &BTreeMap<String, ControlledOperationUnits>,
     control: &BTreeMap<String, ControlledOperationUnits>,
 ) -> Result<BTreeMap<String, ControlledOperationUnits>> {
@@ -538,13 +544,30 @@ fn operation_units_delta(
                 (_, Some(control)) => control.pricing_basis,
                 (None, None) => unreachable!(),
             };
-            let units = target_value.map(|value| value.units).unwrap_or_default()
-                - control_value.map(|value| value.units).unwrap_or_default();
-            (units != 0).then_some(Ok((
+            let units = target_value
+                .map(|value| value.units)
+                .unwrap_or_default()
+                .checked_sub(control_value.map(|value| value.units).unwrap_or_default())
+                .ok_or_else(|| anyhow::anyhow!("controlled operation pricing units overflow"));
+            let event_count = target_value
+                .map(|value| value.event_count)
+                .unwrap_or_default()
+                .checked_sub(
+                    control_value
+                        .map(|value| value.event_count)
+                        .unwrap_or_default(),
+                )
+                .ok_or_else(|| anyhow::anyhow!("controlled operation event count overflow"));
+            let (units, event_count) = match (units, event_count) {
+                (Ok(units), Ok(event_count)) => (units, event_count),
+                (Err(error), _) | (_, Err(error)) => return Some(Err(error)),
+            };
+            (units != 0 || event_count != 0).then_some(Ok((
                 key,
                 ControlledOperationUnits {
                     pricing_basis,
                     units,
+                    event_count,
                 },
             )))
         })
@@ -1659,6 +1682,7 @@ pub fn build_required_overhead_fixtures(
             ControlledOperationUnits {
                 pricing_basis: PricingBasis::RawGasSlope,
                 units: push0_units,
+                event_count: count_delta,
             },
         )])
     };

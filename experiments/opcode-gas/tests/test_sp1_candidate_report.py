@@ -3163,6 +3163,7 @@ class CandidateConstructionTests(unittest.TestCase):
                                     "opcode:0x01": {
                                         "pricing_basis": "raw_gas_slope",
                                         "units": 2 * count,
+                                        "event_count": count,
                                     }
                                 }
                                 if lane == "target" and count
@@ -3215,6 +3216,23 @@ class CandidateConstructionTests(unittest.TestCase):
             unavailable[1]["secondary_unavailable_reason"],
             "unresidualized_dependencies",
         )
+
+    def test_controlled_operation_delta_requires_measured_event_count(self):
+        rows = [
+            {
+                "observed_operation_deltas": {
+                    "opcode:0x01": {
+                        "pricing_basis": "raw_gas_slope",
+                        "units": 2,
+                    }
+                }
+            }
+        ]
+
+        with self.assertRaisesRegex(ValueError, "event_count"):
+            opcode_gas._stable_operation_deltas(
+                rows, "observed_operation_deltas"
+            )
 
     def test_controlled_overhead_fit_residualizes_all_four_required_terms(self):
         rows = []

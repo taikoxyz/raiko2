@@ -13,6 +13,27 @@ sys.path.insert(0, str(ROOT / "experiments" / "opcode-gas"))
 import opcode_gas
 
 
+TEST_VERSION_IDENTITY = {
+    "taiko_fork": "Unzen",
+    "production_schedule": "UNZEN_ZK_GAS_SCHEDULE",
+    "ethereum_upgrade": "Fusaka",
+    "revm_spec_id": "OSAKA",
+    "proving_backend": "sp1",
+    "primary_metric": "proverGas",
+}
+
+
+def versioned_schedule():
+    return opcode_gas.UnzenSchedule(
+        opcode_multipliers={},
+        precompile_multipliers={},
+        version_identity={
+            key: TEST_VERSION_IDENTITY[key]
+            for key in opcode_gas.EXPORTED_VERSION_IDENTITY_FIELDS
+        },
+    )
+
+
 def write_execution_identity(root):
     revision = "a" * 40
     artifact = root / "sp1-test.elf"
@@ -45,6 +66,7 @@ def write_execution_identity(root):
         "out_of_fit_checkpoint": {"mapping": opcode_gas.OUT_OF_FIT_CHECKPOINTS},
         "quality_gates": {"checkpoint_ape_max": 0.10},
         "bridge": {"model": "through_origin_equal_key_median"},
+        "version_identity": dict(TEST_VERSION_IDENTITY),
     }
     calibration_id = opcode_gas.sha256_bytes(opcode_gas.canonical_json(identity))[:24]
     run = root / calibration_id
@@ -1723,6 +1745,8 @@ class RunnerTests(unittest.TestCase):
                 opcode_gas, "git_head", return_value=revision
             ), mock.patch.object(
                 opcode_gas, "git_worktree_status", return_value=""
+            ), mock.patch.object(
+                opcode_gas, "current_uzen_schedule", return_value=versioned_schedule()
             ), mock.patch.object(
                 opcode_gas, "verify_frozen_controlled_manifest",
                 return_value=(None, {

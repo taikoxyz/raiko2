@@ -31,6 +31,12 @@ class InventoryTests(unittest.TestCase):
         completed = mock.Mock(
             stdout=opcode_gas.json.dumps(
                 {
+                    "version_identity": {
+                        "taiko_fork": "Unzen",
+                        "production_schedule": "UNZEN_ZK_GAS_SCHEDULE",
+                        "ethereum_upgrade": "Fusaka",
+                        "revm_spec_id": "OSAKA",
+                    },
                     "block_limit": 100000000,
                     "failsafe_multiplier": 65535,
                     "opcodes": opcodes,
@@ -71,6 +77,7 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(schedule.opcode_multipliers[0x01], 7)
         self.assertEqual(len(schedule.opcode_multipliers), 256)
         self.assertEqual(schedule.precompile_multipliers, {0x100: 9})
+        self.assertEqual(schedule.version_identity["revm_spec_id"], "OSAKA")
         with self.assertRaises(TypeError):
             schedule.opcode_multipliers[0x02] = 11
 
@@ -256,7 +263,7 @@ class InventoryTests(unittest.TestCase):
         by_key = {(row.kind, row.identifier): row for row in rows}
 
         self.assertEqual(by_key[("opcode", "0x1e")].name, "clz")
-        self.assertEqual(by_key[("opcode", "0x1e")].status, "unsupported_by_experiment")
+        self.assertEqual(by_key[("opcode", "0x1e")].status, "planned_pure_opcode")
         self.assertEqual(by_key[("precompile", "0x100")].name, "p256verify")
         self.assertEqual(
             by_key[("precompile", "0x100")].status,

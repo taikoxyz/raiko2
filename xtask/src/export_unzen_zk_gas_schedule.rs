@@ -1,5 +1,6 @@
 use alethia_reth_evm::zk_gas::{schedule::FAILSAFE_MULTIPLIER, unzen::UNZEN_ZK_GAS_SCHEDULE};
 use anyhow::{Context, Result, ensure};
+use raiko2_primitives::chain_spec::TaikoFork;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
@@ -13,6 +14,15 @@ struct ScheduleExport {
     schedule_sha256: String,
     spawn_estimates: SpawnEstimates,
     tx_intrinsic_zk_gas: u64,
+    version_identity: VersionIdentity,
+}
+
+#[derive(Serialize, Clone)]
+struct VersionIdentity {
+    taiko_fork: TaikoFork,
+    production_schedule: &'static str,
+    ethereum_upgrade: &'static str,
+    revm_spec_id: String,
 }
 
 #[derive(Serialize, Clone)]
@@ -92,6 +102,12 @@ fn build_schedule_export() -> Result<ScheduleExport> {
         schedule_sha256: String::new(),
         spawn_estimates,
         tx_intrinsic_zk_gas: UNZEN_ZK_GAS_SCHEDULE.tx_intrinsic_zk_gas,
+        version_identity: VersionIdentity {
+            taiko_fork: TaikoFork::Unzen,
+            production_schedule: "UNZEN_ZK_GAS_SCHEDULE",
+            ethereum_upgrade: "Fusaka",
+            revm_spec_id: format!("{:?}", TaikoFork::Unzen.revm_spec_id()),
+        },
     };
     output.schedule_sha256 = schedule_sha256(&output)?;
     Ok(output)
@@ -226,6 +242,29 @@ mod tests {
         changed.block_limit += 1;
         assert_ne!(canonical, serde_json::to_vec(&changed).unwrap());
         assert_ne!(output.schedule_sha256, schedule_sha256(&changed).unwrap());
+    }
+
+    #[test]
+    fn export_binds_unzen_fusaka_to_the_shared_osaka_runtime_mapping() {
+        let output = build_schedule_export().unwrap();
+        let exported = serde_json::to_value(output).unwrap();
+
+        assert_eq!(
+            exported["version_identity"],
+            serde_json::json!({
+                "taiko_fork": "Unzen",
+                "production_schedule": "UNZEN_ZK_GAS_SCHEDULE",
+                "ethereum_upgrade": "Fusaka",
+                "revm_spec_id": "OSAKA",
+            })
+        );
+        assert_eq!(
+            exported["version_identity"]["revm_spec_id"],
+            format!(
+                "{:?}",
+                raiko2_primitives::chain_spec::TaikoFork::Unzen.revm_spec_id()
+            )
+        );
     }
 
     #[test]

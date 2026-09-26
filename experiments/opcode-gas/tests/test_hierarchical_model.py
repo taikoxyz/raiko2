@@ -749,7 +749,7 @@ class CoreOpcodeSubmodelArtifactTests(unittest.TestCase):
 
         self.assertEqual(target_body, Decimal("11"))
 
-    def test_builds_102_of_150_named_unzen_opcodes_and_replays_exactly(self):
+    def test_builds_103_of_150_named_unzen_opcodes_and_replays_exactly(self):
         manifest, relation_artifact, dynamic_artifact = _core_submodel_sources()
 
         artifact = opcode_gas.build_core_opcode_submodel_artifact(
@@ -763,9 +763,9 @@ class CoreOpcodeSubmodelArtifactTests(unittest.TestCase):
         self.assertEqual(artifact["status"], "supported_core_submodel")
         self.assertFalse(artifact["candidate_eligible"])
         self.assertEqual(artifact["named_opcode_count"], 150)
-        self.assertEqual(artifact["modeled_named_opcode_count"], 102)
-        self.assertEqual(artifact["unsupported_named_opcode_count"], 48)
-        self.assertIn("opcode:0x1e", artifact["unsupported_named_opcode_keys"])
+        self.assertEqual(artifact["modeled_named_opcode_count"], 103)
+        self.assertEqual(artifact["unsupported_named_opcode_count"], 47)
+        self.assertNotIn("opcode:0x1e", artifact["unsupported_named_opcode_keys"])
         self.assertEqual(
             artifact["registry"]["models"]["opcode:0x01"]["parameters"],
             {"body_per_raw_gas": "4"},
@@ -886,8 +886,8 @@ class CoreOpcodeSubmodelArtifactTests(unittest.TestCase):
             manifest, relation_artifact, dynamic_artifact
         )
 
-        self.assertEqual(artifact["modeled_named_opcode_count"], 101)
-        self.assertEqual(artifact["unsupported_named_opcode_count"], 49)
+        self.assertEqual(artifact["modeled_named_opcode_count"], 102)
+        self.assertEqual(artifact["unsupported_named_opcode_count"], 48)
         self.assertEqual(
             artifact["unsupported_opcode_reasons"]["opcode:0x15"],
             "only_dispatch_dependent_evidence",

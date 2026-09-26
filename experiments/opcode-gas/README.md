@@ -256,11 +256,16 @@ diagnostic error. A relation whose static target has only dispatch-dependent evi
 the observed slope and explicit unsupported outcome without fabricating a prediction or residual.
 Schema-3 retains the static-fit diagnostics separately from this final-registry replay.
 
-The core inventory has 102 of the 150 named Unzen opcodes. A schema-3 artifact may explicitly omit
+The core inventory has 103 of the 150 named Unzen opcodes. A schema-3 artifact may explicitly omit
 a core key only under the zero-eligible-coefficient policy above; all other named opcodes outside the
 core inventory remain explicitly unsupported. This is a partial, `candidate_eligible=false` artifact.
 It cannot open or participate in proposal validation; the remaining opcode families and higher
 estimator layers must be calibrated and sealed first.
+
+The existing Prague-derived 101-supported core coefficients remain the sealed historical baseline
+and are reused unchanged. The Osaka follow-up samples only ISZERO and CLZ; an augmented artifact must
+bind both the baseline and this supplemental evidence without claiming a full 103-key resample.
+
 Block-level validation must report the frequency-dependent residual from NOT, JUMPDEST, and the
 small-EXP bucket. A later fixed offset may not absorb or hide those approximation errors.
 
@@ -571,7 +576,8 @@ hashes, and execution identity are all bound into each pair. Validation reconstr
 GuestInput bytecode rather than trusting metadata labels.
 
 These reports contain contextual relative signals. Binary and EXP cases currently report
-`OP - POP`; unary cases report `OP - NOT`, so NOT's self-control delta is intentionally zero. The
+`OP - POP`. ISZERO and CLZ use one-op SWAP1 controls with the same two-item stack shape and final
+stack height, while other unary cases report `OP - NOT`; NOT's self-control delta is intentionally zero. The
 `zero` profile additionally supports `MLOAD - NOT`, `KECCAK32 - POP`, `DUPn - DUP1`,
 `SWAPn - SWAP1`, and `PC/MSIZE/GAS - PUSH0`; PUSH0 is its own self-control. DUP1, SWAP1, and PUSH0
 self-control pairs also intentionally have identical target/control bytecode and zero delta. These
@@ -747,7 +753,7 @@ workload. Use it as a fast smoke signal and regression anchor, not as evidence t
 slope is the exact cost of real EVM execution.
 
 The `revm-opcode-lab` guest runs the same `OpcodeLabInput.bytecode` through revm with a fixed
-Prague/mainnet benchmark transaction and empty benchmark database. This adds real revm transaction
+Osaka/mainnet benchmark transaction and empty benchmark database. This adds real revm transaction
 execution, interpreter dispatch, stack, memory, and gas semantics while still removing
 block/proposal noise. It is the current primary candidate for opcode coefficient tuning. Do not
 replace it with a lower-level direct interpreter call unless there is a specific measurement bug:
@@ -759,9 +765,9 @@ or CALL/CREATE wrapper semantics, including arithmetic, comparison, bitwise, sta
 control-flow, and memory-copy templates.
 
 The precompile-lab guest supports direct body measurements for the active Unzen precompiles with
-existing fixed deterministic input templates. CLZ (`0x1e`) and p256 (`0x100`) are listed by
-`inventory` as `unsupported_by_experiment`; this change does not add guest implementations or
-fixtures for them. These are direct body calls, not `STATICCALL` dispatch measurements.
+existing fixed deterministic input templates. CLZ (`0x1e`) is now covered by the Osaka revm opcode
+lab; p256 (`0x100`) remains `unsupported_by_experiment`. These are direct body calls, not
+`STATICCALL` dispatch measurements.
 `STATICCALL` wrapper cost, warm/cold account access, precompile argument sweeps, stateful opcodes,
 and full block execution are TODOs for later suites.
 
@@ -827,6 +833,13 @@ manifest before measurement. It creates an immutable bridge manifest alongside
 the calibration directory; the bridge may later be sealed as `insufficient_data`
 without changing the primary `proverGas` candidate.
 
+The calibration identity also preserves the version axes separately: Taiko fork
+`Unzen`, production schedule `UNZEN_ZK_GAS_SCHEDULE`, Ethereum upgrade vocabulary
+`Fusaka`, REVM execution spec `OSAKA`, proving backend `sp1`, and primary metric
+`proverGas`. The exporter derives `OSAKA` from the same `TaikoFork::Unzen` mapping
+used by runtime chain selection. Changing or omitting any axis changes the
+calibration ID and rejects execution against that frozen run.
+
 `prepare-corpus` selects the fixed 60-row V1 validation corpus (40 Hoodi, 20
 Mainnet) from the two checked-in 2026-09-02 fixture files before it contacts an
 RPC endpoint. It accepts only network-qualified RPC, chain-spec hash, and
@@ -883,7 +896,7 @@ frozen final 60 rows, and binds the exact GuestInput bytes and embedded
 network/proposal identity before invoking guest-launcher.
 
 - Add a Taiko/reth-context revm lab that keeps the `revm-opcode-lab` execution path but uses Taiko
-  fork config, block env, and realistic tx env instead of fixed Prague/mainnet benchmark defaults.
+  fork config, block env, and realistic tx env instead of fixed Osaka/mainnet benchmark defaults.
 - Add stateful benchmark databases for account/storage opcodes, including warm/cold dimensions and
   representative account/storage distributions.
 - Add CALL/CREATE wrapper scenarios that separate spawn/no-spawn estimates, call depth, value

@@ -1,6 +1,7 @@
 import hashlib
 import json
 import pathlib
+import shutil
 import sys
 import tarfile
 import tempfile
@@ -16,10 +17,32 @@ import opcode_gas
 
 FIXTURES = ROOT / "tests/fixtures/risc0-zkgas/2026-09-02-m2-aggregation-direct-v3"
 
+EXPORTED_VERSION_IDENTITY = {
+    "taiko_fork": "Unzen",
+    "production_schedule": "UNZEN_ZK_GAS_SCHEDULE",
+    "ethereum_upgrade": "Fusaka",
+    "revm_spec_id": "OSAKA",
+}
+
+CALIBRATION_VERSION_IDENTITY = {
+    **EXPORTED_VERSION_IDENTITY,
+    "proving_backend": "sp1",
+    "primary_metric": "proverGas",
+}
+
+
+def versioned_schedule():
+    return opcode_gas.UnzenSchedule(
+        opcode_multipliers={},
+        precompile_multipliers={},
+        version_identity=EXPORTED_VERSION_IDENTITY,
+    )
+
 
 class RunManifestTests(unittest.TestCase):
     def test_complete_schedule_has_all_opcode_identities_and_hashes_every_field(self):
         raw = {
+            "version_identity": EXPORTED_VERSION_IDENTITY,
             "block_limit": 100,
             "tx_intrinsic_zk_gas": 3,
             "failsafe_multiplier": 65535,
@@ -36,6 +59,7 @@ class RunManifestTests(unittest.TestCase):
         self.assertTrue(schedule.opcode_explicit[1])
         self.assertFalse(schedule.opcode_explicit[2])
         self.assertEqual(schedule.precompile_fallback_multiplier, 65535)
+        self.assertEqual(dict(schedule.version_identity), EXPORTED_VERSION_IDENTITY)
         baseline = opcode_gas.schedule_sha256(schedule)
         changed = opcode_gas.parse_complete_uzen_schedule({**raw, "block_limit": 101})
         self.assertNotEqual(baseline, opcode_gas.schedule_sha256(changed))
@@ -382,7 +406,7 @@ class RunManifestTests(unittest.TestCase):
                 'q_formula = ["proposal_startup", "block_base", "tx_base", "native_value_transfer"]\n'
                 'bridge_key_ids = ["opcode:0x01", "proposal_startup", "block_base", "tx_base", "native_value_transfer"]\n'
             )
-            with mock.patch.object(opcode_gas, "git_worktree_status", return_value=""), mock.patch.object(
+            with mock.patch.object(opcode_gas, "current_uzen_schedule", return_value=versioned_schedule()), mock.patch.object(opcode_gas, "git_worktree_status", return_value=""), mock.patch.object(
                 opcode_gas, "git_head", return_value="a" * 40
             ), mock.patch.object(opcode_gas, "_rust_version", return_value="rustc test"), mock.patch.object(
                 opcode_gas, "_locked_package_version", return_value="6.3.0"
@@ -395,6 +419,7 @@ class RunManifestTests(unittest.TestCase):
                     complete_schedule_hash="b" * 64,
                 )
         identity = experiment["calibration_identity"]
+        self.assertEqual(identity["version_identity"], CALIBRATION_VERSION_IDENTITY)
         self.assertEqual(identity["rust_version"], "rustc test")
         self.assertEqual(identity["sp1_sdk_version"], "6.3.0")
         self.assertEqual(identity["q_formula"], opcode_gas.Q_FORMULA)
@@ -414,6 +439,100 @@ class RunManifestTests(unittest.TestCase):
             identity["sp1_execution_parameters"]["gas_estimator"],
             {"gas_trace_chunk_threshold": 134_217_728, "gas_trace_chunk_slots": 2},
         )
+
+    def test_each_version_axis_changes_calibration_id_and_run_validation_rejects_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            controlled = root / "controlled.toml"
+            launcher = root / "guest-launcher"
+            launcher.write_bytes(b"test guest launcher")
+            controlled.write_text(
+                'normalization_reference_key = "opcode:0x01"\n'
+                'q_formula = ["proposal_startup", "block_base", "tx_base", "native_value_transfer"]\n'
+                'bridge_key_ids = ["opcode:0x01", "proposal_startup", "block_base", "tx_base", "native_value_transfer"]\n'
+            )
+            schedule = versioned_schedule()
+            with mock.patch.object(
+                opcode_gas, "current_uzen_schedule", return_value=schedule
+            ), mock.patch.object(
+                opcode_gas, "git_worktree_status", return_value=""
+            ), mock.patch.object(
+                opcode_gas, "git_head", return_value="a" * 40
+            ), mock.patch.object(
+                opcode_gas, "_rust_version", return_value="rustc test"
+            ), mock.patch.object(
+                opcode_gas, "_locked_package_version", return_value="6.3.0"
+            ):
+                experiment = opcode_gas.prepare_calibration(
+                    root,
+                    controlled,
+                    guest_launcher=launcher,
+                    implementation_revision="a" * 40,
+                    complete_schedule_hash="b" * 64,
+                )
+
+            source_run = root / "runs" / experiment["calibration_id"]
+            for relative in experiment["guest_artifacts"]:
+                source = ROOT / relative
+                destination = root / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(source.read_bytes())
+            for field in CALIBRATION_VERSION_IDENTITY:
+                with self.subTest(field=field):
+                    changed = json.loads(json.dumps(experiment))
+                    changed_identity = changed["calibration_identity"]
+                    changed_identity["version_identity"][field] += "-changed"
+                    if field == "primary_metric":
+                        changed_identity["primary_metric"] += "-changed"
+                        changed["primary_metric"] += "-changed"
+                    changed_id = opcode_gas.sha256_bytes(
+                        opcode_gas.canonical_json(changed_identity)
+                    )[:24]
+                    self.assertNotEqual(changed_id, experiment["calibration_id"])
+                    changed["calibration_id"] = changed_id
+                    changed_run = root / "runs" / changed_id
+                    shutil.copytree(source_run, changed_run)
+                    (changed_run / "experiment.json").write_text(json.dumps(changed))
+                    (changed_run / "provenance.json").write_text(
+                        json.dumps(opcode_gas.experiment_provenance_declaration(changed))
+                    )
+                    with mock.patch.object(
+                        opcode_gas, "REPO_ROOT", root
+                    ), mock.patch.object(
+                        opcode_gas, "current_uzen_schedule", return_value=schedule
+                    ), mock.patch.object(
+                        opcode_gas, "git_head", return_value="a" * 40
+                    ), mock.patch.object(
+                        opcode_gas, "git_worktree_status", return_value=""
+                    ):
+                        with self.assertRaisesRegex(ValueError, "version identity"):
+                            opcode_gas.validate_calibration_execution_identity(
+                                changed_run
+                            )
+
+            missing = json.loads(json.dumps(experiment))
+            del missing["calibration_identity"]["version_identity"]
+            missing_id = opcode_gas.sha256_bytes(
+                opcode_gas.canonical_json(missing["calibration_identity"])
+            )[:24]
+            missing["calibration_id"] = missing_id
+            missing_run = root / "runs" / missing_id
+            shutil.copytree(source_run, missing_run)
+            (missing_run / "experiment.json").write_text(json.dumps(missing))
+            (missing_run / "provenance.json").write_text(
+                json.dumps(opcode_gas.experiment_provenance_declaration(missing))
+            )
+            with mock.patch.object(
+                opcode_gas, "REPO_ROOT", root
+            ), mock.patch.object(
+                opcode_gas, "current_uzen_schedule", return_value=schedule
+            ), mock.patch.object(
+                opcode_gas, "git_head", return_value="a" * 40
+            ), mock.patch.object(
+                opcode_gas, "git_worktree_status", return_value=""
+            ):
+                with self.assertRaisesRegex(ValueError, "version identity"):
+                    opcode_gas.validate_calibration_execution_identity(missing_run)
 
     def test_publish_corpus_rejects_remote_size_that_does_not_match_local_archive(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -928,6 +1047,7 @@ def write_controlled_run(root, revision="a" * 40):
         "out_of_fit_checkpoint": {"mapping": opcode_gas.OUT_OF_FIT_CHECKPOINTS},
         "quality_gates": {"checkpoint_ape_max": 0.10},
         "bridge": {"model": "through_origin_equal_key_median"},
+        "version_identity": dict(CALIBRATION_VERSION_IDENTITY),
     }
     calibration_id = opcode_gas.sha256_bytes(opcode_gas.canonical_json(identity))[:24]
     run = root / "runs" / calibration_id

@@ -360,6 +360,15 @@ impl TaikoFork {
             _ => Err(format!("unknown Taiko fork: {value}")),
         }
     }
+
+    /// Returns the REVM execution specification used by this Taiko fork.
+    #[must_use]
+    pub const fn revm_spec_id(self) -> SpecId {
+        match self {
+            Self::Unzen => SpecId::OSAKA,
+            _ => SpecId::SHANGHAI,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -372,8 +381,7 @@ impl ForkId {
     const fn as_spec_id(self) -> SpecId {
         match self {
             Self::Standard(spec_id) => spec_id,
-            Self::Taiko(TaikoFork::Unzen) => SpecId::OSAKA,
-            Self::Taiko(_) => SpecId::SHANGHAI,
+            Self::Taiko(fork) => fork.revm_spec_id(),
         }
     }
 
@@ -1140,6 +1148,15 @@ mod tests {
 
     #[cfg(feature = "chain-spec-json")]
     const HOODI_UNZEN_TIMESTAMP: u64 = 1_781_787_600;
+
+    #[test]
+    fn unzen_uses_the_shared_osaka_revm_spec_mapping() {
+        assert_eq!(TaikoFork::Unzen.revm_spec_id(), SpecId::OSAKA);
+        assert_eq!(
+            ForkId::Taiko(TaikoFork::Unzen).as_spec_id(),
+            TaikoFork::Unzen.revm_spec_id()
+        );
+    }
 
     #[cfg(feature = "chain-spec-json")]
     fn mainnet_shasta_timestamp() -> u64 {

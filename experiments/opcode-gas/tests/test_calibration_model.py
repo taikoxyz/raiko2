@@ -1823,7 +1823,7 @@ class CalibrationModelTests(unittest.TestCase):
 
         self.assertEqual(exact_rank(((large, large + 1), (large + 1, large + 2))), 2)
 
-    def test_current_matched_controls_have_rank_98_with_natural_anchors(self):
+    def test_current_matched_controls_have_rank_99_with_natural_anchors(self):
         cases = tuple(
             opcode_gas.CaseSpec(
                 name=f"opcode:0x{opcode:02x}",
@@ -1881,9 +1881,9 @@ class CalibrationModelTests(unittest.TestCase):
             anchor_keys=("opcode:0x50", "opcode:0x5f", "opcode:0x80", "opcode:0x90"),
         )
 
-        self.assertEqual(len(opcode_keys), 102)
-        self.assertEqual(len(equations), 98)
-        self.assertEqual(exact_rank(coefficient_rows), 98)
+        self.assertEqual(len(opcode_keys), 103)
+        self.assertEqual(len(equations), 99)
+        self.assertEqual(exact_rank(coefficient_rows), 99)
         self.assertEqual(
             model.anchor_keys,
             ("opcode:0x50", "opcode:0x5f", "opcode:0x80", "opcode:0x90"),

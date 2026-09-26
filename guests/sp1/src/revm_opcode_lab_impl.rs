@@ -6,7 +6,7 @@ use revm::{
 pub fn execute_revm_bytecode(bytecode: &[u8], gas_limit: u64) -> u64 {
     let bytecode = Bytecode::new_legacy(bytecode.to_vec().into());
     let ctx = Context::mainnet()
-        .modify_cfg_chained(|cfg| cfg.set_spec_and_mainnet_gas_params(SpecId::PRAGUE))
+        .modify_cfg_chained(|cfg| cfg.set_spec_and_mainnet_gas_params(SpecId::OSAKA))
         .with_db(BenchmarkDB::new_bytecode(bytecode));
     let mut evm = ctx.build_mainnet();
     let result = evm

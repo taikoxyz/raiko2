@@ -16,6 +16,12 @@ def fixture_schedule():
     return opcode_gas.UnzenSchedule(
         opcode_multipliers={opcode: 1 for opcode in opcode_gas.UZEN_OPCODE_NAMES},
         precompile_multipliers={address: 1 for address in opcode_gas.UZEN_PRECOMPILE_NAMES},
+        version_identity={
+            "taiko_fork": "Unzen",
+            "production_schedule": "UNZEN_ZK_GAS_SCHEDULE",
+            "ethereum_upgrade": "Fusaka",
+            "revm_spec_id": "OSAKA",
+        },
     )
 
 
@@ -576,6 +582,43 @@ class ManifestTests(unittest.TestCase):
             changed_features["startup_minimal_one_no_code_tx"],
             ("proposal_startup", "block_base", "tx_base"),
         )
+
+    def test_materialized_v1_orders_clz_in_the_core_manifest_contract(self):
+        path = (
+            ROOT
+            / "experiments"
+            / "opcode-gas"
+            / "manifests"
+            / "sp1-calibration-v1.toml"
+        )
+        manifest = opcode_gas.load_manifest(path, schedule=fixture_schedule())
+
+        self.assertEqual(
+            opcode_gas.PURE_OPCODE_DEFAULTS[0x1E],
+            ("bitwise", "stack_unary", 5),
+        )
+        case_opcodes = [
+            case.opcode for case in manifest.cases if case.kind == "opcode"
+        ]
+        measurement_opcodes = [
+            key.event_match.opcode
+            for key in manifest.measurement_keys
+            if key.event_match.component == "opcode"
+        ]
+        bridge_opcodes = [
+            int(key.removeprefix("opcode:0x"), 16)
+            for key in manifest.bridge_key_ids
+            if key.startswith("opcode:0x")
+        ]
+        for opcodes in (case_opcodes, measurement_opcodes, bridge_opcodes):
+            self.assertEqual(
+                opcodes[opcodes.index(0x1D) : opcodes.index(0x20) + 1],
+                [0x1D, 0x1E, 0x20],
+            )
+        clz_case = next(case for case in manifest.cases if case.opcode == 0x1E)
+        self.assertEqual(clz_case.name, "clz")
+        self.assertEqual(clz_case.target_raw_gas, 5)
+        self.assertEqual(len(opcode_gas.PURE_OPCODE_DEFAULTS), 103)
 
     def test_v1_rejects_any_system_operation_ownership_except_block_base(self):
         data = controlled_manifest_data()

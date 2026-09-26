@@ -783,7 +783,8 @@ class FixtureEmitTests(unittest.TestCase):
         expected_operands = {
             0x01: [7, 3],
             0x0A: [3, 5],
-            0x15: [7],
+            0x15: [1, 7],
+            0x1E: [1, 7],
         }
         for opcode, operands in expected_operands.items():
             with self.subTest(
@@ -917,10 +918,9 @@ class FixtureEmitTests(unittest.TestCase):
                 opcode_gas.default_opcode_case(0x01), "unknown"
             )
 
-    def test_matched_control_exp_uses_pop_and_unary_uses_not_reference(self):
+    def test_matched_control_exp_uses_pop_and_not_keeps_not_reference(self):
         for opcode, relation, control_opcode, target_count, control_count in [
             (0x0A, "OP-POP", 0x50, 2, 8),
-            (0x15, "OP-NOT", 0x19, 2, 8),
             (0x19, "OP-NOT", 0x19, 8, 8),
         ]:
             with self.subTest(opcode=f"0x{opcode:02x}"), tempfile.TemporaryDirectory() as tmp:
@@ -994,6 +994,88 @@ class FixtureEmitTests(unittest.TestCase):
                     )
                     if opcode == 0x19:
                         self.assertEqual(target_programs, control_programs)
+
+    def test_iszero_and_clz_use_one_opcode_swap1_controls(self):
+        expected_signed = {
+            0x15: {"opcode:0x15": 3, "opcode:0x90": -3},
+            0x1E: {"opcode:0x1e": 5, "opcode:0x90": -3},
+        }
+        manifest = opcode_gas.load_manifest(
+            ROOT
+            / "experiments"
+            / "opcode-gas"
+            / "manifests"
+            / "sp1-calibration-v1.toml",
+            schedule=fixture_schedule(),
+        )
+        relation_by_opcode = {
+            int(relation.key_id.removeprefix("opcode:0x"), 16): relation
+            for relation in manifest.opcode_relations
+            if relation.key_id in {"opcode:0x15", "opcode:0x1e"}
+        }
+
+        for opcode in (0x15, 0x1E):
+            with self.subTest(opcode=f"0x{opcode:02x}"):
+                case = opcode_gas.default_opcode_case(opcode)
+                spec = opcode_gas.matched_control_spec(case)
+                self.assertFalse(spec.compound)
+                self.assertEqual(spec.reference_opcode, 0x90)
+                self.assertEqual(spec.reference_raw_gas, 3)
+                self.assertEqual(spec.final_stack_height, 2)
+                self.assertEqual(spec.operands, (1, 2))
+
+                _, target, control, target_input, control_input = (
+                    emit_matched_control_pair(opcode)
+                )
+                self.assertNotIn("target_program", target)
+                self.assertNotIn("target_program", control)
+                target_slots = opcode_gas.decode_fixed_microprograms(
+                    bytes.fromhex(target_input["bytecode"][2:])
+                )
+                control_slots = opcode_gas.decode_fixed_microprograms(
+                    bytes.fromhex(control_input["bytecode"][2:])
+                )
+                self.assertEqual(target_slots[0][:-2], control_slots[0][:-2])
+                self.assertEqual(target_slots[0][-2:], bytes([opcode, 0x00]))
+                self.assertEqual(control_slots[0][-2:], b"\x90\x00")
+                self.assertEqual(len(target_slots[0]), len(control_slots[0]))
+                self.assertEqual(target["final_stack_height"], 2)
+                self.assertEqual(control["final_stack_height"], 2)
+
+                relation = relation_by_opcode[opcode]
+                self.assertEqual(
+                    dict(relation.signed_raw_gas_by_key), expected_signed[opcode]
+                )
+                self.assertNotIn("opcode:0x19", relation.signed_raw_gas_by_key)
+
+                relation_manifest = replace(
+                    manifest, variants=[1], opcode_relations=(relation,)
+                )
+                with tempfile.TemporaryDirectory() as tmp:
+                    written = opcode_gas.generate_relation_cases(
+                        relation_manifest,
+                        pathlib.Path(tmp),
+                        provenance=diagnostic_provenance(),
+                        generator_max_count=8,
+                    )
+                    rows = [
+                        opcode_gas.json.loads(path.read_text()) for path in written
+                    ]
+                active = next(
+                    row
+                    for row in rows
+                    if row["lane"] == "target"
+                    and row["relation_placement"] == "active_prefix"
+                    and row["diagnostic_count"] == 1
+                )
+                self.assertEqual(
+                    {
+                        key: int(value)
+                        for key, value in active["signed_raw_gas_by_key"].items()
+                    },
+                    expected_signed[opcode],
+                )
+                self.assertEqual(active["target_count"], 1)
 
     def test_matched_control_additional_families_reuse_exact_fixed_setup(self):
         cases = [

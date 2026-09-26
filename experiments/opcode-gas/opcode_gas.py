@@ -634,6 +634,7 @@ class UnzenSchedule:
     block_limit: int | None = None
     tx_intrinsic_zk_gas: int | None = None
     spawn_estimates: Mapping[str, int] = field(default_factory=dict)
+    version_identity: Mapping[str, str] = field(default_factory=dict)
 
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -817,6 +818,7 @@ PURE_OPCODE_DEFAULTS = {
     0x1B: ("bitwise", "stack_binary", 3),
     0x1C: ("bitwise", "stack_binary", 3),
     0x1D: ("bitwise", "stack_binary", 3),
+    0x1E: ("bitwise", "stack_unary", 5),
     0x20: ("memory", "keccak_32", 36),
     0x50: ("stack", "stack_pop", 2),
     0x51: ("memory", "memory_load_32", 3),
@@ -860,6 +862,18 @@ PRECOMPILE_BODY_DEFAULTS = {
 }
 
 PLANNED_PURE_OPCODE_OPCODES = set(PURE_OPCODE_DEFAULTS)
+
+EXPORTED_VERSION_IDENTITY_FIELDS = (
+    "taiko_fork",
+    "production_schedule",
+    "ethereum_upgrade",
+    "revm_spec_id",
+)
+CALIBRATION_VERSION_IDENTITY_FIELDS = (
+    *EXPORTED_VERSION_IDENTITY_FIELDS,
+    "proving_backend",
+    "primary_metric",
+)
 
 
 def load_current_uzen_schedule() -> UnzenSchedule:
@@ -952,6 +966,17 @@ def parse_complete_uzen_schedule(data: Any) -> UnzenSchedule:
         for value in spawn.values()
     ):
         raise ValueError("Unzen schedule export has invalid spawn_estimates")
+    version_identity = data.get("version_identity")
+    if (
+        not isinstance(version_identity, dict)
+        or set(version_identity) != set(EXPORTED_VERSION_IDENTITY_FIELDS)
+        or any(
+            not isinstance(version_identity.get(field), str)
+            or not version_identity[field]
+            for field in EXPORTED_VERSION_IDENTITY_FIELDS
+        )
+    ):
+        raise ValueError("Unzen schedule export has invalid version_identity")
     opcode_explicit = {}
     for row in data["opcodes"]:
         opcode = parse_opcode(row["opcode"])
@@ -978,6 +1003,12 @@ def parse_complete_uzen_schedule(data: Any) -> UnzenSchedule:
         block_limit=data["block_limit"],
         tx_intrinsic_zk_gas=data["tx_intrinsic_zk_gas"],
         spawn_estimates=MappingProxyType(dict(spawn)),
+        version_identity=MappingProxyType(
+            {
+                field: version_identity[field]
+                for field in EXPORTED_VERSION_IDENTITY_FIELDS
+            }
+        ),
     )
     exported_hash = data.get("schedule_sha256")
     if exported_hash is not None:
@@ -1056,6 +1087,47 @@ def _parse_schedule_rows(
 @functools.cache
 def current_uzen_schedule() -> UnzenSchedule:
     return load_current_uzen_schedule()
+
+
+def calibration_version_identity(schedule: UnzenSchedule) -> dict[str, str]:
+    exported = schedule.version_identity
+    if set(exported) != set(EXPORTED_VERSION_IDENTITY_FIELDS) or any(
+        not isinstance(exported.get(field), str) or not exported[field]
+        for field in EXPORTED_VERSION_IDENTITY_FIELDS
+    ):
+        raise ValueError("Unzen schedule has no structured version identity")
+    return {
+        **{field: exported[field] for field in EXPORTED_VERSION_IDENTITY_FIELDS},
+        "proving_backend": "sp1",
+        "primary_metric": "proverGas",
+    }
+
+
+def validate_calibration_version_identity(
+    identity: Mapping[str, Any],
+    *,
+    expected: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    version_identity = identity.get("version_identity")
+    if (
+        not isinstance(version_identity, Mapping)
+        or set(version_identity) != set(CALIBRATION_VERSION_IDENTITY_FIELDS)
+        or any(
+            not isinstance(version_identity.get(field), str)
+            or not version_identity[field]
+            for field in CALIBRATION_VERSION_IDENTITY_FIELDS
+        )
+    ):
+        raise ValueError("calibration has invalid version identity")
+    result = {
+        field: version_identity[field]
+        for field in CALIBRATION_VERSION_IDENTITY_FIELDS
+    }
+    if result["primary_metric"] != identity.get("primary_metric"):
+        raise ValueError("calibration version identity differs from primary metric")
+    if expected is not None and not _exact_json_equal(result, expected):
+        raise ValueError("calibration version identity differs from exported schedule")
+    return result
 
 
 def _canonical_schedule_key(component: str, identifier: int) -> str:
@@ -1904,6 +1976,8 @@ POP_OPCODE = 0x50
 POP_RAW_GAS = 2
 NOT_OPCODE = 0x19
 NOT_RAW_GAS = 3
+ISZERO_OPCODE = 0x15
+CLZ_OPCODE = 0x1E
 DUP1_OPCODE = 0x80
 DUP1_RAW_GAS = 3
 SWAP1_OPCODE = 0x90
@@ -2211,15 +2285,22 @@ def matched_control_spec(
 
     if case.template in {"stack_binary", "stack_exp", "stack_unary"}:
         operands = MATCHED_CONTROL_OPERAND_PROFILES[operand_profile][case.template]
-        if case.template == "stack_unary":
+        if case.opcode in {ISZERO_OPCODE, CLZ_OPCODE}:
+            operands = (1, 2 if operand_profile == "zero" else operands[0])
+            reference_opcode = SWAP1_OPCODE
+            reference_raw_gas = SWAP1_RAW_GAS
+            relation = "OP-SWAP1"
+            final_stack_height = 2
+        elif case.template == "stack_unary":
             reference_opcode = NOT_OPCODE
             reference_raw_gas = NOT_RAW_GAS
             relation = "OP-NOT"
+            final_stack_height = 1
         else:
             reference_opcode = POP_OPCODE
             reference_raw_gas = POP_RAW_GAS
             relation = "OP-POP"
-        final_stack_height = 1
+            final_stack_height = 1
         setup = b"".join(
             _fixed_push(value, target_opcode=case.opcode) for value in operands
         )
@@ -9651,6 +9732,8 @@ def experiment_provenance_declaration(
         raise ValueError("experiment controlled manifest identity is inconsistent")
     if identity.get("sp1_execution_parameters") != sp1_execution_parameters():
         raise ValueError("experiment has unexpected SP1 execution parameters")
+    if "version_identity" in identity:
+        validate_calibration_version_identity(identity)
     return {
         "schema_version": 1,
         "calibration_id": calibration_id,
@@ -9700,6 +9783,10 @@ def validate_calibration_execution_identity(
             raise ValueError("frozen guest artifact path escapes the repository")
         if not artifact.is_file() or sha256_file(artifact) != expected_sha256:
             raise ValueError(f"frozen guest artifact changed: {relative}")
+    expected_version_identity = calibration_version_identity(current_uzen_schedule())
+    validate_calibration_version_identity(
+        identity, expected=expected_version_identity
+    )
     return identity
 
 
@@ -9739,8 +9826,9 @@ def prepare_calibration(
         raise ValueError("bridge_key_ids must include normalization_reference_key opcode:0x01")
     if q_formula != Q_FORMULA or any(key not in bridge_key_ids for key in Q_FORMULA):
         raise ValueError("controlled manifest must freeze the exact Q_formula in bridge_key_ids")
+    schedule = current_uzen_schedule()
     if complete_schedule_hash is None:
-        complete_schedule_hash = schedule_sha256(current_uzen_schedule())
+        complete_schedule_hash = schedule_sha256(schedule)
     if len(complete_schedule_hash) != 64:
         raise ValueError("complete_schedule_hash must be a SHA256 digest")
     workspace = tomllib.loads((REPO_ROOT / "Cargo.toml").read_text())
@@ -9794,6 +9882,7 @@ def prepare_calibration(
         "out_of_fit_checkpoint": out_of_fit_checkpoint,
         "quality_gates": quality_gates,
         "bridge": bridge_contract,
+        "version_identity": calibration_version_identity(schedule),
     }
     calibration_id = sha256_bytes(
         canonical_json(calibration_identity)
@@ -13482,8 +13571,8 @@ def _core_opcode_keys(manifest: Manifest) -> tuple[str, ...]:
         and PURE_OPCODE_DEFAULTS[case.opcode][1] == case.template
     )
     expected = tuple(f"opcode:0x{opcode:02x}" for opcode in PURE_OPCODE_DEFAULTS)
-    if keys != expected or len(keys) != 102:
-        raise ValueError("core opcode manifest must contain the ordered 102-key inventory")
+    if keys != expected or len(keys) != 103:
+        raise ValueError("core opcode manifest must contain the ordered 103-key inventory")
     return keys
 
 
@@ -16673,7 +16762,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     core_submodel = subcommands.add_parser(
         "build-core-opcode-submodel",
-        help="seal the replayable non-candidate 102-opcode core submodel",
+        help="seal the replayable non-candidate 103-opcode core submodel",
     )
     core_submodel.add_argument(
         "--calibration-run", type=pathlib.Path, required=True

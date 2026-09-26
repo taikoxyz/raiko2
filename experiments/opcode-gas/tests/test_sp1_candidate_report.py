@@ -878,6 +878,9 @@ def persist_execution_identity(root, manifest, revision="a" * 40):
         "out_of_fit_checkpoint": {"mapping": opcode_gas.OUT_OF_FIT_CHECKPOINTS},
         "quality_gates": {"checkpoint_ape_max": 0.10},
         "bridge": {"model": manifest.bridge_model},
+        "version_identity": opcode_gas.calibration_version_identity(
+            fixture_schedule()
+        ),
     }
     calibration_id = opcode_gas.sha256_bytes(opcode_gas.canonical_json(identity))[:24]
     run = root / calibration_id
@@ -1981,7 +1984,7 @@ class FormalOpcodeRelationTests(unittest.TestCase):
         self.assertLess(abs(result["slope"] - Decimal(5000)), Decimal("1e-20"))
         self.assertEqual(result["signal"], Decimal(15000))
 
-    def test_fits_rank_98_artifact_with_negative_slope_and_exact_serialization(self):
+    def test_fits_rank_99_artifact_with_negative_slope_and_exact_serialization(self):
         manifest = formal_relation_manifest()
         negative = next(
             relation for relation in manifest.opcode_relations if relation.signed_raw_gas_by_key
@@ -1994,14 +1997,14 @@ class FormalOpcodeRelationTests(unittest.TestCase):
 
         self.assertEqual(artifact["schema_version"], 3)
         self.assertEqual(artifact["status"], "accepted")
-        self.assertEqual(len(artifact["equations"]), 98)
+        self.assertEqual(len(artifact["equations"]), 99)
         self.assertEqual(len(artifact["self_controls"]), 4)
         self.assertEqual(len(artifact["dynamic_holdouts"]), 68)
         self.assertEqual(
             Counter(row["model_split"] for row in artifact["dynamic_holdouts"]),
             Counter({"fit": 42, "holdout": 26}),
         )
-        self.assertEqual(artifact["affine_model"]["rank"], 98)
+        self.assertEqual(artifact["affine_model"]["rank"], 99)
         self.assertEqual(artifact["affine_model"]["nullity"], 4)
         self.assertEqual(
             artifact["artifact_sha256"],
@@ -2079,9 +2082,9 @@ class FormalOpcodeRelationTests(unittest.TestCase):
                 formal_relation_provenance(rows),
             )
 
-        self.assertEqual(len(artifact["equations"]), 98)
+        self.assertEqual(len(artifact["equations"]), 99)
         self.assertEqual(len(artifact["dynamic_holdouts"]), 69)
-        self.assertEqual(artifact["affine_model"]["rank"], 98)
+        self.assertEqual(artifact["affine_model"]["rank"], 99)
 
     def test_relation_artifact_replays_model_split_and_exact_scenario_metadata(self):
         manifest = formal_relation_manifest()
@@ -4632,6 +4635,8 @@ class CandidateConstructionTests(unittest.TestCase):
             ), mock.patch.object(
                 opcode_gas, "git_worktree_status", return_value=""
             ), mock.patch.object(
+                opcode_gas, "current_uzen_schedule", return_value=fixture_schedule()
+            ), mock.patch.object(
                 opcode_gas,
                 "verify_frozen_controlled_manifest",
                 return_value=(
@@ -4745,6 +4750,8 @@ class CandidateConstructionTests(unittest.TestCase):
                 opcode_gas, "git_head", return_value="a" * 40
             ), mock.patch.object(
                 opcode_gas, "git_worktree_status", return_value=""
+            ), mock.patch.object(
+                opcode_gas, "current_uzen_schedule", return_value=fixture_schedule()
             ), mock.patch.object(
                 opcode_gas,
                 "verify_frozen_controlled_manifest",

@@ -45,6 +45,7 @@ bridge_key_ids = [
   "opcode:0x1b",
   "opcode:0x1c",
   "opcode:0x1d",
+  "opcode:0x1e",
   "opcode:0x20",
   "opcode:0x50",
   "opcode:0x51",
@@ -1188,6 +1189,15 @@ template = "stack_binary"
 target_raw_gas = 3
 
 [[cases]]
+name = "clz"
+kind = "opcode"
+opcode = "0x1e"
+scenario = "bitwise"
+execution_basis = "interpreter_raw_gas"
+template = "stack_unary"
+target_raw_gas = 5
+
+[[cases]]
 name = "keccak256"
 kind = "opcode"
 opcode = "0x20"
@@ -2283,6 +2293,14 @@ pricing_basis = "raw_gas_slope"
 required_case_ids = ["sar"]
 diagnostic_case_ids = []
 event_match = { component = "opcode", opcode = "0x1d" }
+
+[[measurement_keys]]
+id = "opcode:0x1e"
+production_schedule_key = "opcode:0x1e"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["clz"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x1e" }
 
 [[measurement_keys]]
 id = "opcode:0x20"

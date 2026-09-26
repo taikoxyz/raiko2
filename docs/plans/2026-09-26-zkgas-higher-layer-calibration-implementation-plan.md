@@ -248,7 +248,7 @@ git commit -m "test(zkgas): freeze higher-layer calibration contract"
 
 - [ ] **Step 1: Write failing Rust aggregation tests**
 
-For a controlled contract containing two `PUSH0` operations per transaction, require:
+For a controlled contract containing two retained `PUSH0` operations per transaction, require:
 
 ```rust
 assert_eq!(push0.pricing_basis, PricingBasis::RawGasSlope);
@@ -257,7 +257,10 @@ assert_eq!(push0.event_count, event_count);
 ```
 
 Test target/control subtraction for positive, negative, and zero deltas. Test that one key cannot
-change pricing basis and that event-count overflow fails.
+change pricing basis and that event-count overflow fails. Also require that REVM's synthetic
+zero-pricing-unit `STOP` at EOF remains outside the canonical operation-pricing ledger. Task 4
+intentionally classifies `opcode:0x00` as unsupported; Task 2 must not turn that synthetic runtime
+event into a newly measured operation or silently give it the common-dispatch coefficient.
 
 - [ ] **Step 2: Run the Rust tests and confirm RED**
 
@@ -281,9 +284,14 @@ pub struct ControlledOperationUnits {
 }
 ```
 
-Increment `event_count` once for each emitted execution or confirmed wrapper row. Subtract both
-fields in target/control deltas. Remove zero deltas only when both `units == 0` and
-`event_count == 0`. Do not infer event count from raw gas.
+Preserve the existing canonical-pricing filter: an execution with zero pricing units, including
+REVM's synthetic EOF `STOP`, is not inserted into the operation-pricing ledger. After that filter,
+increment `event_count` once for each retained execution or confirmed wrapper row. Subtract both
+fields in target/control deltas. For retained keys, remove a delta only when both `units == 0` and
+`event_count == 0`. Do not infer event count from raw gas. This boundary is deliberate: any
+unmodeled synthetic-termination cost remains in the contract-call residual and is exposed by the
+required agreement between the two independent `tx_base` estimates instead of being mislabeled as
+an opcode coefficient.
 
 - [ ] **Step 4: Write failing Python resolver tests**
 

@@ -266,6 +266,65 @@ The existing Prague-derived 101-supported core coefficients remain the sealed hi
 and are reused unchanged. The Osaka follow-up samples only ISZERO and CLZ; an augmented artifact must
 bind both the baseline and this supplemental evidence without claiming a full 103-key resample.
 
+### Bounded Osaka supplement
+
+Run these commands from the repository root. First verify the exact tracked historical-schema
+fixture; its checksum record intentionally contains a repository-relative path:
+
+```bash
+sha256sum --check experiments/opcode-gas/tests/fixtures/historical-core-102/controlled-manifest.sha256
+```
+
+The bounded runner reads the calibration directory from the durable path file. It executes only the
+eleven frozen compatibility relations at their historical selected counts and, after that canary
+passes, the adaptive ISZERO and CLZ relations. It uses three repeats and the existing relation
+generation, execution, fitting, precision, checkpoint, and decision-replay machinery.
+
+```bash
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py run-osaka-opcode-supplement \
+  --run-path-file experiments/opcode-gas/runs/current-run.path \
+  --controlled-manifest experiments/opcode-gas/manifests/sp1-calibration-v1.toml \
+  --baseline-derivation experiments/opcode-gas/derivations/3e1d97c461cd2ef9a40e6a02 \
+  --historical-manifest experiments/opcode-gas/tests/fixtures/historical-core-102/controlled-manifest.toml \
+  --guest-launcher target/release/guest-launcher \
+  --elf crates/guests/elf/sp1_revm_opcode_lab.elf
+
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py verify-osaka-opcode-supplement \
+  --run-path-file experiments/opcode-gas/runs/current-run.path \
+  --controlled-manifest experiments/opcode-gas/manifests/sp1-calibration-v1.toml \
+  --baseline-derivation experiments/opcode-gas/derivations/3e1d97c461cd2ef9a40e6a02 \
+  --historical-manifest experiments/opcode-gas/tests/fixtures/historical-core-102/controlled-manifest.toml
+```
+
+The run writes fixtures, raw rows, a sealed adaptive decision ledger,
+`compatibility-canary.json`, and `opcode-supplement.json` below
+`runs/<calibration-id>/osaka-opcode-supplement/`. Resume accepts persisted rounds only after exact
+row, result, provenance, and hash replay. Verification never invokes a guest.
+
+Seal and replay the review-only augmentation with:
+
+```bash
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py seal-osaka-opcode-augmentation \
+  --run-path-file experiments/opcode-gas/runs/current-run.path \
+  --baseline-derivation experiments/opcode-gas/derivations/3e1d97c461cd2ef9a40e6a02 \
+  --historical-manifest experiments/opcode-gas/tests/fixtures/historical-core-102/controlled-manifest.toml \
+  --out-root experiments/opcode-gas/derivations \
+  --augmentation-path-file experiments/opcode-gas/derivations/current-osaka-augmentation.path
+
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py verify-osaka-opcode-augmentation \
+  --augmentation-path-file experiments/opcode-gas/derivations/current-osaka-augmentation.path \
+  --historical-manifest experiments/opcode-gas/tests/fixtures/historical-core-102/controlled-manifest.toml
+```
+
+The create-only augmentation directory contains exactly `augmentation.json`, the canary, the
+supplement, and the augmented core artifact. Its identity binds the immutable historical baseline,
+all source rows and decisions, current manifest and schedule hashes, Osaka guest and analysis
+revision, and the complete structured version identity. The verifier reads only that directory and
+the declared historical fixture, then recomputes every content/file hash and both supplemental
+equations. This workflow does not sample proposals, rerun the historical 101 coefficients, write a
+production multiplier table or config, or alter Boundless behavior. A failed canary requires a
+separately reviewed recalibration; it never launches a full resample automatically.
+
 Block-level validation must report the frequency-dependent residual from NOT, JUMPDEST, and the
 small-EXP bucket. A later fixed offset may not absorb or hide those approximation errors.
 

@@ -416,6 +416,27 @@ FORMAL_RELATION_PROVENANCE_FIELDS = (
     "controlled_manifest_rows_sha256",
 )
 
+OSAKA_CANARY_RELATION_IDS = (
+    "opcode:0x01:canonical",
+    "opcode:0x02:canonical",
+    "opcode:0x10:canonical",
+    "opcode:0x1b:canonical",
+    "opcode:0x57:canonical",
+    "opcode:0x19:canonical",
+    "opcode:0x5b:canonical",
+    "opcode:0x0a:exp-bytes-1",
+    "opcode:0x20:input-32",
+    "opcode:0x51:offset-0x00",
+    "opcode:0x5e:copy-32",
+)
+OSAKA_SUPPLEMENT_RELATION_IDS = (
+    "opcode:0x15:canonical",
+    "opcode:0x1e:canonical",
+)
+HISTORICAL_CORE_MANIFEST_SHA256 = (
+    "4140fe1a0ccc533dbee8940a63da6db41be8a26955cc0022ccae5e1aedc3e01e"
+)
+
 ANCHOR_PROBE_PURPOSE = "synthetic_opcode_anchor_prior"
 ANCHOR_PROBE_SCENARIOS = {
     "target": "anchor_target_",
@@ -14215,6 +14236,909 @@ _CORE_OPCODE_DERIVATION_SCHEMA_VERSION = 1
 _CORE_OPCODE_DERIVATION_PURPOSE = "core_opcode_postprocess_derivation"
 
 
+def _verify_repo_relative_checksum(path: pathlib.Path) -> str:
+    """Verify the canonical sibling SHA record used by historical inputs."""
+    try:
+        relative = path.resolve(strict=True).relative_to(REPO_ROOT.resolve())
+    except (FileNotFoundError, ValueError) as error:
+        raise ValueError("historical manifest must be a tracked repository file") from error
+    checksum_path = path.with_suffix(".sha256")
+    if not checksum_path.is_file():
+        raise ValueError("historical manifest checksum is missing")
+    parts = checksum_path.read_text().strip().split(maxsplit=1)
+    if len(parts) != 2 or not _is_sha256(parts[0]):
+        raise ValueError("historical manifest checksum record is invalid")
+    recorded_path = pathlib.PurePosixPath(parts[1])
+    if recorded_path != pathlib.PurePosixPath(relative.as_posix()):
+        raise ValueError("historical manifest checksum path is not repository-relative")
+    actual = sha256_file(path)
+    if actual != parts[0]:
+        raise ValueError("historical manifest checksum differs from exact bytes")
+    return actual
+
+
+def _historical_core_opcode_keys(manifest: Manifest) -> tuple[str, ...]:
+    """Validate the frozen 102-key schema without consulting current inventory size."""
+    keys = tuple(
+        f"opcode:0x{case.opcode:02x}"
+        for case in manifest.cases
+        if case.kind == "opcode"
+        and case.opcode is not None
+        and case.opcode in PURE_OPCODE_DEFAULTS
+        and PURE_OPCODE_DEFAULTS[case.opcode][1] == case.template
+    )
+    historical_expected = tuple(
+        f"opcode:0x{opcode:02x}"
+        for opcode in PURE_OPCODE_DEFAULTS
+        if opcode != 0x1E
+    )
+    if keys != historical_expected or len(keys) != 102:
+        raise ValueError("historical core manifest must contain its ordered 102-key inventory")
+    return keys
+
+
+def validate_historical_core_opcode_baseline(
+    derivation_dir: pathlib.Path,
+    historical_manifest: pathlib.Path,
+) -> dict[str, Any]:
+    """Validate the immutable schema-102 derivation without current-schema replay."""
+    derivation_dir = derivation_dir.resolve()
+    manifest_sha256 = _verify_repo_relative_checksum(historical_manifest)
+    if manifest_sha256 != HISTORICAL_CORE_MANIFEST_SHA256:
+        raise ValueError("historical manifest is not the frozen baseline fixture")
+    manifest = load_manifest(historical_manifest)
+    opcode_keys = _historical_core_opcode_keys(manifest)
+
+    paths = {
+        "derivation": derivation_dir / "derivation.json",
+        "dynamic": derivation_dir / "dynamic-opcode-models.json",
+        "core": derivation_dir / "core-opcode-submodel.json",
+    }
+    if any(not path.is_file() for path in paths.values()):
+        raise ValueError("historical baseline derivation is incomplete")
+    values = {name: json.loads(path.read_text()) for name, path in paths.items()}
+    derivation = values["derivation"]
+    dynamic = values["dynamic"]
+    core = values["core"]
+    for label, value in values.items():
+        if not isinstance(value, Mapping):
+            raise ValueError(f"historical {label} artifact is not an object")
+        _validate_content_addressed_artifact(value, label=f"historical {label}")
+
+    identity = derivation.get("derivation_identity")
+    source = derivation.get("source")
+    output_hashes = derivation.get("output_hashes")
+    if (
+        derivation.get("schema_version") != 1
+        or derivation.get("purpose") != _CORE_OPCODE_DERIVATION_PURPOSE
+        or derivation.get("status") != "supported_core_submodel"
+        or derivation.get("candidate_eligible") is not False
+        or not isinstance(identity, Mapping)
+        or not isinstance(source, Mapping)
+        or not isinstance(output_hashes, Mapping)
+        or not _exact_json_equal(source, identity.get("source"))
+        or derivation.get("derivation_id")
+        != sha256_bytes(canonical_json(identity))[:24]
+        or derivation_dir.name != derivation.get("derivation_id")
+    ):
+        raise ValueError("historical derivation identity/schema is invalid")
+    algorithm = identity.get("algorithm")
+    if (
+        identity.get("schema_version") != 1
+        or identity.get("purpose") != _CORE_OPCODE_DERIVATION_PURPOSE
+        or not isinstance(algorithm, Mapping)
+        or algorithm.get("dynamic_schema_version") != 4
+        or algorithm.get("core_schema_version") != 3
+    ):
+        raise ValueError("historical derivation algorithm schema is invalid")
+    source_hashes = source.get("source_hashes")
+    source_files = (
+        source_hashes.get("source_files_sha256")
+        if isinstance(source_hashes, Mapping)
+        else None
+    )
+    if (
+        source.get("controlled_manifest_sha256") != manifest_sha256
+        or source.get("controlled_manifest_rows_sha256")
+        != controlled_manifest_rows_sha256(historical_manifest)
+        or not isinstance(source_files, Mapping)
+        or source_files.get("controlled-manifest.toml") != manifest_sha256
+    ):
+        raise ValueError("historical derivation source identity differs from fixture")
+    source_run = REPO_ROOT / "experiments" / "opcode-gas" / "runs" / str(
+        source.get("calibration_id")
+    )
+    if not source_run.is_dir():
+        raise ValueError("historical derivation source run is missing")
+    for relative, expected_sha256 in source_files.items():
+        candidate = source_run / relative
+        if (
+            not isinstance(relative, str)
+            or pathlib.Path(relative).is_absolute()
+            or ".." in pathlib.Path(relative).parts
+            or not _is_sha256(expected_sha256)
+            or not candidate.is_file()
+            or sha256_file(candidate) != expected_sha256
+        ):
+            raise ValueError("historical derivation source file hash differs")
+    if (
+        output_hashes.get("dynamic_artifact_sha256")
+        != dynamic.get("artifact_sha256")
+        or output_hashes.get("dynamic_file_sha256") != sha256_file(paths["dynamic"])
+        or output_hashes.get("core_artifact_sha256") != core.get("artifact_sha256")
+        or output_hashes.get("core_file_sha256") != sha256_file(paths["core"])
+    ):
+        raise ValueError("historical derivation output hashes differ")
+
+    expected_provenance = {
+        field: source.get(field)
+        for field in (
+            "calibration_id",
+            "calibration_identity_sha256",
+            "implementation_revision",
+            "controlled_manifest_sha256",
+            "controlled_manifest_rows_sha256",
+        )
+    }
+    if (
+        dynamic.get("schema_version") != 4
+        or dynamic.get("purpose") != "dynamic_opcode_models"
+        or dynamic.get("status") != "supported"
+        or dynamic.get("candidate_eligible") is not False
+        or not _exact_json_equal(dynamic.get("provenance"), expected_provenance)
+        or core.get("schema_version") != 3
+        or core.get("purpose") != "core_opcode_submodel"
+        or core.get("status") != "supported_core_submodel"
+        or core.get("candidate_eligible") is not False
+        or not _exact_json_equal(core.get("provenance"), expected_provenance)
+    ):
+        raise ValueError("historical core/dynamic schema or source identity is invalid")
+    dynamic_sources = dynamic.get("source_hashes")
+    core_sources = core.get("source_hashes")
+    if (
+        not isinstance(dynamic_sources, Mapping)
+        or not isinstance(core_sources, Mapping)
+        or core_sources.get("dynamic_artifact_sha256")
+        != dynamic.get("artifact_sha256")
+        or any(
+            core_sources.get(field) != dynamic_sources.get(field)
+            for field in (
+                "anchor_probe_primary_sha256",
+                "raw_block_rows_sha256",
+                "relation_artifact_sha256",
+                "relation_raw_rows_sha256",
+            )
+        )
+    ):
+        raise ValueError("historical core dynamic source identity differs")
+
+    registry = core.get("registry")
+    models = registry.get("models") if isinstance(registry, Mapping) else None
+    expected_models = {"invalid", *(key for key in opcode_keys if key != "opcode:0x15")}
+    expected_unsupported = [
+        f"opcode:0x{opcode:02x}"
+        for opcode in sorted(UZEN_OPCODE_NAMES)
+        if f"opcode:0x{opcode:02x}" not in expected_models
+    ]
+    missing = [
+        key for key in opcode_keys if not isinstance(models, Mapping) or key not in models
+    ]
+    if (
+        not isinstance(registry, Mapping)
+        or not isinstance(models, Mapping)
+        or set(models) != expected_models
+        or missing != ["opcode:0x15"]
+        or core.get("modeled_named_opcode_count") != 101
+        or core.get("unsupported_named_opcode_count") != 49
+        or core.get("unsupported_named_opcode_keys") != expected_unsupported
+    ):
+        raise ValueError("historical core registry coverage is invalid")
+    decisions_path = source_run / "formal-relation-decisions.json"
+    decisions_seal_path = source_run / "formal-relation-decisions.sha256"
+    raw_path = source_run / "raw" / "formal-relations.jsonl"
+    if (
+        not decisions_path.is_file()
+        or not decisions_seal_path.is_file()
+        or _read_digest(decisions_seal_path) != sha256_file(decisions_path)
+        or not raw_path.is_file()
+    ):
+        raise ValueError("historical formal relation ledger is not sealed")
+    decisions = json.loads(decisions_path.read_text())
+    if (
+        decisions.get("schema_version") != 1
+        or decisions.get("calibration_identity_sha256")
+        != source.get("calibration_identity_sha256")
+        or decisions.get("relation_ids")
+        != [relation.id for relation in manifest.opcode_relations]
+        or not isinstance(decisions.get("rounds"), list)
+    ):
+        raise ValueError("historical formal relation ledger identity is invalid")
+    rows = list(iter_jsonl(raw_path))
+    relation_artifact = json.loads((source_run / "opcode-relations.json").read_text())
+    _validate_content_addressed_artifact(
+        relation_artifact, label="historical opcode relation artifact"
+    )
+    if (
+        relation_artifact.get("schema_version") != 3
+        or relation_artifact.get("status") != "accepted"
+        or relation_artifact.get("raw_rows_sha256")
+        != sha256_bytes(canonical_json(rows))
+        or
+        relation_artifact.get("artifact_sha256")
+        != source_hashes.get("relation_artifact_sha256")
+        or relation_artifact.get("raw_rows_sha256")
+        != source_hashes.get("relation_raw_rows_sha256")
+    ):
+        raise ValueError("historical relation source differs from derivation identity")
+    return {
+        "derivation": derivation,
+        "dynamic_artifact": dynamic,
+        "core_artifact": core,
+        "manifest": manifest,
+        "opcode_keys": opcode_keys,
+        "modeled_named_opcode_count": core["modeled_named_opcode_count"],
+        "missing_core_opcode_keys": missing,
+        "unsupported_named_opcode_count": core["unsupported_named_opcode_count"],
+        "relation_artifact": relation_artifact,
+        "formal_relation_artifacts": {
+            "decisions": decisions,
+            "rows": rows,
+            "raw_path": raw_path,
+            "formal_relation_decisions_sha256": sha256_file(decisions_path),
+        },
+        "source_run": source_run,
+    }
+
+
+def validate_osaka_relation_subsets(
+    current_manifest: Manifest,
+    historical_manifest: Manifest,
+    canary_relation_ids: Iterable[str],
+    supplement_relation_ids: Iterable[str],
+) -> None:
+    """Fail closed unless the two frozen relation subsets match exact identity."""
+    canary_ids = tuple(canary_relation_ids)
+    supplement_ids = tuple(supplement_relation_ids)
+    if canary_ids != OSAKA_CANARY_RELATION_IDS:
+        raise ValueError("Osaka canary relation identity differs from the frozen subset")
+    if supplement_ids != OSAKA_SUPPLEMENT_RELATION_IDS:
+        raise ValueError("Osaka supplemental relation identity differs from the frozen subset")
+    historical = {relation.id: relation for relation in historical_manifest.opcode_relations}
+    current = {relation.id: relation for relation in current_manifest.opcode_relations}
+    for relation_id in canary_ids:
+        if relation_id not in historical or relation_id not in current:
+            raise ValueError("Osaka canary relation is unknown to the historical baseline")
+        if current[relation_id] != historical[relation_id]:
+            raise ValueError("Osaka canary relation differs from historical identity")
+    if any(relation_id not in current for relation_id in supplement_ids):
+        raise ValueError("Osaka supplemental relation is absent from the current manifest")
+
+
+@_isolated_decimal_context
+def build_osaka_compatibility_canary(
+    historical_rows: Iterable[Mapping[str, Any]],
+    osaka_rows: Iterable[Mapping[str, Any]],
+    *,
+    baseline_artifact_sha256: str,
+    expected_baseline_artifact_sha256: str,
+) -> dict[str, Any]:
+    """Evaluate bounded slope drift without producing replacement coefficients."""
+    if (
+        not _is_sha256(baseline_artifact_sha256)
+        or baseline_artifact_sha256 != expected_baseline_artifact_sha256
+    ):
+        raise ValueError("Osaka canary baseline artifact identity differs")
+    historical_rows = list(historical_rows)
+    osaka_rows = list(osaka_rows)
+    expected_ids = list(OSAKA_CANARY_RELATION_IDS)
+    if [row.get("relation_id") for row in historical_rows] != expected_ids:
+        raise ValueError("historical canary relation order differs from frozen subset")
+    if [row.get("relation_id") for row in osaka_rows] != expected_ids:
+        raise ValueError("Osaka canary relation order differs from frozen subset")
+    identity_fields = (
+        "relation_id",
+        "signed_raw_gas_by_key",
+        "target_raw_gas_by_key",
+        "control_raw_gas_by_key",
+        "program_sha256",
+    )
+    relations = []
+    relation_limit_exceeded = False
+    for historical, osaka in zip(historical_rows, osaka_rows):
+        if historical.get("status") != "accepted" or osaka.get("status") != "accepted":
+            raise ValueError("Osaka canary relation did not pass its fit gates")
+        if historical.get("repeat_count") != 3 or osaka.get("repeat_count") != 3:
+            raise ValueError("Osaka canary relation requires three exact repeats")
+        if any(
+            not _exact_json_equal(historical.get(field), osaka.get(field))
+            for field in identity_fields
+        ):
+            raise ValueError("Osaka canary relation program or raw-gas identity differs")
+        if not _is_sha256(historical.get("program_sha256")) or not _is_sha256(
+            osaka.get("program_sha256")
+        ):
+            raise ValueError("Osaka canary program hash is invalid")
+        if not _is_sha256(historical.get("raw_rows_sha256")) or not _is_sha256(
+            osaka.get("raw_rows_sha256")
+        ):
+            raise ValueError("Osaka canary raw-row hash is invalid")
+        baseline_slope = _canonical_artifact_decimal(
+            historical.get("slope_p"), label="historical canary slope"
+        )
+        osaka_slope = _canonical_artifact_decimal(
+            osaka.get("slope_p"), label="Osaka canary slope"
+        )
+        if baseline_slope == 0 or osaka_slope == 0:
+            raise ValueError("Osaka canary slope must be nonzero")
+        if (baseline_slope > 0) != (osaka_slope > 0):
+            raise ValueError("Osaka canary slope sign changed")
+        residual = osaka_slope - baseline_slope
+        ape = abs(residual) / abs(baseline_slope)
+        relation_limit_exceeded = relation_limit_exceeded or ape > Decimal("0.10")
+        relations.append(
+            {
+                "relation_id": historical["relation_id"],
+                "baseline_slope_p": _decimal_text(baseline_slope),
+                "osaka_slope_p": _decimal_text(osaka_slope),
+                "signed_residual_p": _decimal_text(residual),
+                "drift_ape": _decimal_text(ape),
+                "signed_raw_gas_by_key": historical["signed_raw_gas_by_key"],
+                "target_raw_gas_by_key": historical["target_raw_gas_by_key"],
+                "control_raw_gas_by_key": historical["control_raw_gas_by_key"],
+                "program_sha256": historical["program_sha256"],
+                "historical_raw_rows_sha256": historical["raw_rows_sha256"],
+                "osaka_raw_rows_sha256": osaka["raw_rows_sha256"],
+                "repeat_count": 3,
+            }
+        )
+    drift_mape = sum(
+        (_decimal(row["drift_ape"], label="canary drift APE") for row in relations),
+        Decimal(0),
+    ) / Decimal(len(relations))
+    reasons = []
+    if relation_limit_exceeded:
+        reasons.append("relation_drift_ape_exceeds_0.10")
+    if drift_mape > Decimal("0.05"):
+        reasons.append("drift_mape_exceeds_0.05")
+    artifact = {
+        "schema_version": 1,
+        "purpose": "osaka_opcode_compatibility_canary",
+        "status": "passed" if not reasons else "failed",
+        "candidate_eligible": False,
+        "baseline_artifact_sha256": baseline_artifact_sha256,
+        "relation_ids": expected_ids,
+        "quality_gates": {
+            "same_slope_sign": True,
+            "per_relation_drift_ape_max": "0.10",
+            "drift_mape_max": "0.05",
+            "repeats": 3,
+        },
+        "relations": relations,
+        "drift_mape": _decimal_text(drift_mape),
+        "reasons": reasons,
+    }
+    artifact["artifact_sha256"] = sha256_bytes(canonical_json(artifact))
+    return artifact
+
+
+@_isolated_decimal_context
+def build_osaka_augmented_core_artifact(
+    baseline_core: Mapping[str, Any],
+    compatibility_canary: Mapping[str, Any],
+    opcode_supplement: Mapping[str, Any],
+    *,
+    augmentation_provenance: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Add only the two Osaka bodies to an already validated historical core."""
+    _validate_content_addressed_artifact(
+        baseline_core, label="historical core opcode baseline"
+    )
+    _validate_content_addressed_artifact(
+        compatibility_canary, label="Osaka compatibility canary"
+    )
+    _validate_content_addressed_artifact(
+        opcode_supplement, label="Osaka opcode supplement"
+    )
+    if (
+        baseline_core.get("schema_version") != 3
+        or baseline_core.get("purpose") != "core_opcode_submodel"
+        or baseline_core.get("candidate_eligible") is not False
+        or baseline_core.get("modeled_named_opcode_count") != 101
+        or baseline_core.get("unsupported_named_opcode_count") != 49
+    ):
+        raise ValueError("historical core opcode baseline schema is invalid")
+    if (
+        compatibility_canary.get("purpose")
+        != "osaka_opcode_compatibility_canary"
+        or compatibility_canary.get("status") != "passed"
+        or compatibility_canary.get("candidate_eligible") is not False
+        or compatibility_canary.get("relation_ids")
+        != list(OSAKA_CANARY_RELATION_IDS)
+    ):
+        raise ValueError("Osaka compatibility canary is not accepted")
+    relations = opcode_supplement.get("relations")
+    if (
+        opcode_supplement.get("purpose") != "osaka_opcode_supplement"
+        or opcode_supplement.get("status") != "accepted"
+        or opcode_supplement.get("candidate_eligible") is not False
+        or opcode_supplement.get("relation_ids")
+        != list(OSAKA_SUPPLEMENT_RELATION_IDS)
+        or not isinstance(relations, list)
+        or [row.get("relation_id") for row in relations]
+        != list(OSAKA_SUPPLEMENT_RELATION_IDS)
+    ):
+        raise ValueError("Osaka opcode supplement identity is invalid")
+    expected_equations = (
+        {
+            "opcode:0x15": "3",
+            "opcode:0x90": "-3",
+        },
+        {
+            "opcode:0x1e": "5",
+            "opcode:0x90": "-3",
+        },
+    )
+    for row, expected in zip(relations, expected_equations):
+        if (
+            row.get("control_opcode_key") != "opcode:0x90"
+            or not _exact_json_equal(row.get("signed_raw_gas_by_key"), expected)
+        ):
+            raise ValueError("Osaka supplement equation/control identity differs")
+
+    registry = baseline_core.get("registry")
+    models = registry.get("models") if isinstance(registry, Mapping) else None
+    swap = models.get("opcode:0x90") if isinstance(models, Mapping) else None
+    swap_parameters = swap.get("parameters") if isinstance(swap, Mapping) else None
+    if not isinstance(swap_parameters, Mapping):
+        raise ValueError("historical baseline has no SWAP1 model")
+    swap_body = _canonical_artifact_decimal(
+        swap_parameters.get("body_per_raw_gas"), label="SWAP1 body"
+    )
+    d_iszero = _canonical_artifact_decimal(
+        relations[0].get("slope_p"), label="ISZERO relation slope"
+    )
+    d_clz = _canonical_artifact_decimal(
+        relations[1].get("slope_p"), label="CLZ relation slope"
+    )
+    iszero_body = swap_body + d_iszero / Decimal(3)
+    clz_body = (d_clz + Decimal(3) * swap_body) / Decimal(5)
+    if any(not value.is_finite() or value < 0 for value in (iszero_body, clz_body)):
+        raise ValueError("Osaka supplemental solved opcode body is negative or non-finite")
+
+    artifact = json.loads(json.dumps(baseline_core))
+    artifact.pop("artifact_sha256", None)
+    artifact["schema_version"] = 4
+    artifact["purpose"] = "osaka_augmented_core_opcode_submodel"
+    artifact["status"] = "supported_osaka_augmented_core_submodel"
+    artifact["candidate_eligible"] = False
+    artifact["modeled_named_opcode_count"] = 103
+    artifact["unsupported_named_opcode_count"] = 47
+    artifact["unsupported_named_opcode_keys"] = [
+        key
+        for key in artifact.get("unsupported_named_opcode_keys", [])
+        if key not in {"opcode:0x15", "opcode:0x1e"}
+    ]
+    reasons = artifact.get("unsupported_opcode_reasons")
+    if isinstance(reasons, dict):
+        reasons.pop("opcode:0x15", None)
+        reasons.pop("opcode:0x1e", None)
+    augmented_registry = artifact["registry"]
+    augmented_models = augmented_registry["models"]
+    if "opcode:0x15" in augmented_models or "opcode:0x1e" in augmented_models:
+        raise ValueError("historical baseline already models an Osaka supplement key")
+    augmented_models["opcode:0x15"] = {
+        "kind": "static_raw_gas",
+        "parameters": {"body_per_raw_gas": _decimal_text(iszero_body)},
+    }
+    augmented_models["opcode:0x1e"] = {
+        "kind": "static_raw_gas",
+        "parameters": {"body_per_raw_gas": _decimal_text(clz_body)},
+    }
+    model_ids = augmented_registry.get("opcode_model_ids")
+    if not isinstance(model_ids, list) or len(model_ids) != 256:
+        raise ValueError("historical registry opcode-model index is invalid")
+    if model_ids[0x15] is not None or model_ids[0x1E] is not None:
+        raise ValueError("historical registry already maps an Osaka supplement key")
+    model_ids[0x15] = "opcode:0x15"
+    model_ids[0x1E] = "opcode:0x1e"
+    replayed_equations = [
+        {
+            "relation_id": "opcode:0x15:canonical",
+            "observed_slope_p": _decimal_text(d_iszero),
+            "predicted_slope_p": _decimal_text(
+                Decimal(3) * iszero_body - Decimal(3) * swap_body
+            ),
+            "signed_residual_p": _decimal_text(
+                Decimal(3) * iszero_body - Decimal(3) * swap_body - d_iszero
+            ),
+        },
+        {
+            "relation_id": "opcode:0x1e:canonical",
+            "observed_slope_p": _decimal_text(d_clz),
+            "predicted_slope_p": _decimal_text(
+                Decimal(5) * clz_body - Decimal(3) * swap_body
+            ),
+            "signed_residual_p": _decimal_text(
+                Decimal(5) * clz_body - Decimal(3) * swap_body - d_clz
+            ),
+        },
+    ]
+    artifact["replayed_equations"] = replayed_equations
+    artifact["osaka_augmentation"] = {
+        "reused_historical_model_count": 101,
+        "remeasured_historical_model_count": 0,
+        "added_opcode_keys": list(OSAKA_SUPPLEMENT_RELATION_IDS),
+        "baseline_core_artifact_sha256": baseline_core["artifact_sha256"],
+        "compatibility_canary_artifact_sha256": compatibility_canary[
+            "artifact_sha256"
+        ],
+        "opcode_supplement_artifact_sha256": opcode_supplement[
+            "artifact_sha256"
+        ],
+        "provenance": json.loads(json.dumps(augmentation_provenance)),
+    }
+    artifact["artifact_sha256"] = sha256_bytes(canonical_json(artifact))
+    return artifact
+
+
+def _canonical_json_file_bytes(value: Mapping[str, Any]) -> bytes:
+    return (json.dumps(value, indent=2, sort_keys=True) + "\n").encode()
+
+
+def _osaka_augmentation_source_hashes(
+    canary: Mapping[str, Any], supplement: Mapping[str, Any]
+) -> dict[str, Any]:
+    canary_relations = canary.get("relations")
+    supplement_relations = supplement.get("relations")
+    if (
+        not isinstance(canary_relations, list)
+        or [row.get("relation_id") for row in canary_relations]
+        != list(OSAKA_CANARY_RELATION_IDS)
+        or not isinstance(supplement_relations, list)
+        or [row.get("relation_id") for row in supplement_relations]
+        != list(OSAKA_SUPPLEMENT_RELATION_IDS)
+    ):
+        raise ValueError("Osaka augmentation source relation inventory differs")
+    canary_rows = []
+    for row in canary_relations:
+        historical = row.get("historical_raw_rows_sha256")
+        current = row.get("osaka_raw_rows_sha256")
+        if not _is_sha256(historical) or not _is_sha256(current):
+            raise ValueError("Osaka canary source-row hash is invalid")
+        canary_rows.append(
+            {
+                "relation_id": row["relation_id"],
+                "historical_raw_rows_sha256": historical,
+                "osaka_raw_rows_sha256": current,
+            }
+        )
+    supplement_rows = []
+    for row in supplement_relations:
+        raw_rows_sha256 = row.get("raw_rows_sha256")
+        if not _is_sha256(raw_rows_sha256):
+            raise ValueError("Osaka supplement source-row hash is invalid")
+        supplement_rows.append(
+            {
+                "relation_id": row["relation_id"],
+                "raw_rows_sha256": raw_rows_sha256,
+            }
+        )
+    if not _is_sha256(supplement.get("decisions_sha256")) or not _is_sha256(
+        supplement.get("raw_rows_sha256")
+    ):
+        raise ValueError("Osaka supplement decision or canonical-row hash is invalid")
+    return {
+        "canary_relation_rows": canary_rows,
+        "supplement_decisions_sha256": supplement["decisions_sha256"],
+        "supplement_raw_rows_sha256": supplement["raw_rows_sha256"],
+        "supplement_relation_rows": supplement_rows,
+    }
+
+
+def _validate_osaka_augmentation_provenance(
+    provenance: Mapping[str, Any], historical_manifest_sha256: str
+) -> dict[str, Any]:
+    declared_version_identity = provenance.get("version_identity")
+    version_identity = validate_calibration_version_identity(
+        {
+            "version_identity": declared_version_identity,
+            "primary_metric": (
+                declared_version_identity.get("primary_metric")
+                if isinstance(declared_version_identity, Mapping)
+                else None
+            ),
+        }
+    )
+    digest_fields = (
+        "calibration_identity_sha256",
+        "controlled_manifest_sha256",
+        "controlled_manifest_rows_sha256",
+        "complete_schedule_sha256",
+        "guest_elf_sha256",
+    )
+    if (
+        not isinstance(provenance.get("calibration_id"), str)
+        or len(provenance["calibration_id"]) != 24
+        or not _is_git_revision(provenance.get("implementation_revision"))
+        or any(not _is_sha256(provenance.get(field)) for field in digest_fields)
+        or not _is_sha256(historical_manifest_sha256)
+    ):
+        raise ValueError("Osaka augmentation provenance is incomplete")
+    return {
+        "calibration_id": provenance["calibration_id"],
+        "calibration_identity_sha256": provenance["calibration_identity_sha256"],
+        "implementation_revision": provenance["implementation_revision"],
+        "controlled_manifest_sha256": provenance["controlled_manifest_sha256"],
+        "controlled_manifest_rows_sha256": provenance[
+            "controlled_manifest_rows_sha256"
+        ],
+        "complete_schedule_sha256": provenance["complete_schedule_sha256"],
+        "guest_elf_sha256": provenance["guest_elf_sha256"],
+        "version_identity": version_identity,
+        "historical_manifest_sha256": historical_manifest_sha256,
+    }
+
+
+def _publish_osaka_augmentation(
+    out_root: pathlib.Path,
+    augmentation_id: str,
+    envelope: Mapping[str, Any],
+    canary: Mapping[str, Any],
+    supplement: Mapping[str, Any],
+    augmented_core: Mapping[str, Any],
+) -> pathlib.Path:
+    out_root.mkdir(parents=True, exist_ok=True)
+    target = out_root / augmentation_id
+    lock_path = out_root / f".{augmentation_id}.lock"
+    lock_descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    temporary: pathlib.Path | None = None
+    try:
+        fcntl.flock(lock_descriptor, fcntl.LOCK_EX)
+        if target.exists():
+            raise ValueError(f"augmentation directory already exists: {target}")
+        temporary = pathlib.Path(
+            tempfile.mkdtemp(prefix=f".{augmentation_id}.", dir=out_root)
+        )
+        for name, payload in (
+            ("augmentation.json", envelope),
+            ("compatibility-canary.json", canary),
+            ("opcode-supplement.json", supplement),
+            ("core-opcode-submodel.json", augmented_core),
+        ):
+            _write_derivation_json(temporary / name, payload)
+        _fsync_directory(temporary)
+        os.rename(temporary, target)
+        temporary = None
+        _fsync_directory(out_root)
+        return target
+    finally:
+        if temporary is not None and temporary.exists():
+            shutil.rmtree(temporary)
+        os.close(lock_descriptor)
+
+
+def seal_osaka_augmentation_directory(
+    out_root: pathlib.Path,
+    *,
+    baseline_derivation_path: pathlib.Path,
+    baseline_dynamic_path: pathlib.Path,
+    baseline_core_path: pathlib.Path,
+    canary_path: pathlib.Path,
+    supplement_path: pathlib.Path,
+    provenance: Mapping[str, Any],
+    historical_manifest_sha256: str,
+) -> dict[str, Any]:
+    """Seal one create-only augmentation with all inputs needed for local replay."""
+    source_paths = {
+        "derivation": baseline_derivation_path,
+        "dynamic": baseline_dynamic_path,
+        "core": baseline_core_path,
+        "canary": canary_path,
+        "supplement": supplement_path,
+    }
+    if any(not path.is_file() for path in source_paths.values()):
+        raise ValueError("Osaka augmentation source artifact is missing")
+    sources = {
+        name: json.loads(path.read_text()) for name, path in source_paths.items()
+    }
+    for name in ("derivation", "dynamic", "core", "canary", "supplement"):
+        _validate_content_addressed_artifact(sources[name], label=f"Osaka {name}")
+        if source_paths[name].read_bytes() != _canonical_json_file_bytes(sources[name]):
+            raise ValueError(f"Osaka {name} source is not canonical JSON")
+    osaka_calibration = _validate_osaka_augmentation_provenance(
+        provenance, historical_manifest_sha256
+    )
+    source_row_hashes = _osaka_augmentation_source_hashes(
+        sources["canary"], sources["supplement"]
+    )
+    input_hashes = {
+        f"baseline_{name}_artifact_sha256": sources[name]["artifact_sha256"]
+        for name in ("derivation", "dynamic", "core")
+    }
+    input_hashes.update(
+        {
+            f"baseline_{name}_file_sha256": sha256_file(source_paths[name])
+            for name in ("derivation", "dynamic", "core")
+        }
+    )
+    input_hashes.update(
+        {
+            "compatibility_canary_artifact_sha256": sources["canary"][
+                "artifact_sha256"
+            ],
+            "compatibility_canary_file_sha256": sha256_file(canary_path),
+            "opcode_supplement_artifact_sha256": sources["supplement"][
+                "artifact_sha256"
+            ],
+            "opcode_supplement_file_sha256": sha256_file(supplement_path),
+        }
+    )
+    identity = {
+        "analysis_schema_version": 1,
+        "analysis_implementation_revision": osaka_calibration[
+            "implementation_revision"
+        ],
+        "osaka_calibration": osaka_calibration,
+        "input_hashes": input_hashes,
+        "source_row_hashes": source_row_hashes,
+    }
+    identity_sha256 = sha256_bytes(canonical_json(identity))
+    augmentation_id = identity_sha256[:24]
+    augmented_core = build_osaka_augmented_core_artifact(
+        sources["core"],
+        sources["canary"],
+        sources["supplement"],
+        augmentation_provenance=osaka_calibration,
+    )
+    output_hashes = {
+        "core_artifact_sha256": augmented_core["artifact_sha256"],
+        "core_file_sha256": sha256_bytes(_canonical_json_file_bytes(augmented_core)),
+    }
+    envelope: dict[str, Any] = {
+        "schema_version": 1,
+        "purpose": "osaka_opcode_augmentation",
+        "status": "sealed",
+        "candidate_eligible": False,
+        "augmentation_id": augmentation_id,
+        "augmentation_identity_sha256": identity_sha256,
+        "augmentation_identity": identity,
+        "replay_inputs": {
+            "baseline_derivation": sources["derivation"],
+            "baseline_dynamic": sources["dynamic"],
+            "baseline_core": sources["core"],
+        },
+        "output_hashes": output_hashes,
+    }
+    envelope["artifact_sha256"] = sha256_bytes(canonical_json(envelope))
+    directory = _publish_osaka_augmentation(
+        out_root,
+        augmentation_id,
+        envelope,
+        sources["canary"],
+        sources["supplement"],
+        augmented_core,
+    )
+    return {"augmentation_id": augmentation_id, "directory": str(directory)}
+
+
+def verify_osaka_augmentation_directory(
+    directory: pathlib.Path, *, expected_historical_manifest_sha256: str
+) -> dict[str, Any]:
+    """Replay one augmentation using only its four files and the fixture digest."""
+    expected_names = {
+        "augmentation.json",
+        "compatibility-canary.json",
+        "opcode-supplement.json",
+        "core-opcode-submodel.json",
+    }
+    if not directory.is_dir() or {path.name for path in directory.iterdir()} != expected_names:
+        raise ValueError("Osaka augmentation directory inventory differs")
+    paths = {name: directory / name for name in expected_names}
+    envelope = json.loads(paths["augmentation.json"].read_text())
+    canary = json.loads(paths["compatibility-canary.json"].read_text())
+    supplement = json.loads(paths["opcode-supplement.json"].read_text())
+    core = json.loads(paths["core-opcode-submodel.json"].read_text())
+    for label, payload in (
+        ("augmentation", envelope),
+        ("compatibility canary", canary),
+        ("opcode supplement", supplement),
+        ("augmented core", core),
+    ):
+        _validate_content_addressed_artifact(payload, label=label)
+        if paths[
+            {
+                "augmentation": "augmentation.json",
+                "compatibility canary": "compatibility-canary.json",
+                "opcode supplement": "opcode-supplement.json",
+                "augmented core": "core-opcode-submodel.json",
+            }[label]
+        ].read_bytes() != _canonical_json_file_bytes(payload):
+            raise ValueError(f"{label} file is not canonical JSON")
+    identity = envelope.get("augmentation_identity")
+    replay_inputs = envelope.get("replay_inputs")
+    if (
+        envelope.get("schema_version") != 1
+        or envelope.get("purpose") != "osaka_opcode_augmentation"
+        or envelope.get("status") != "sealed"
+        or envelope.get("candidate_eligible") is not False
+        or not isinstance(identity, Mapping)
+        or not isinstance(replay_inputs, Mapping)
+    ):
+        raise ValueError("Osaka augmentation envelope schema differs")
+    identity_sha256 = sha256_bytes(canonical_json(identity))
+    augmentation_id = identity_sha256[:24]
+    if (
+        envelope.get("augmentation_identity_sha256") != identity_sha256
+        or envelope.get("augmentation_id") != augmentation_id
+        or directory.name != augmentation_id
+        or identity.get("analysis_schema_version") != 1
+    ):
+        raise ValueError("Osaka augmentation identity differs")
+    osaka_calibration = identity.get("osaka_calibration")
+    if not isinstance(osaka_calibration, Mapping):
+        raise ValueError("Osaka augmentation calibration provenance is missing")
+    expected_calibration = _validate_osaka_augmentation_provenance(
+        osaka_calibration, expected_historical_manifest_sha256
+    )
+    if (
+        not _exact_json_equal(osaka_calibration, expected_calibration)
+        or identity.get("analysis_implementation_revision")
+        != expected_calibration["implementation_revision"]
+    ):
+        raise ValueError("Osaka augmentation version or analysis identity differs")
+    baseline_sources = {}
+    for name in ("derivation", "dynamic", "core"):
+        payload = replay_inputs.get(f"baseline_{name}")
+        if not isinstance(payload, Mapping):
+            raise ValueError("Osaka augmentation baseline replay input is missing")
+        _validate_content_addressed_artifact(payload, label=f"baseline {name}")
+        baseline_sources[name] = payload
+    input_hashes = {
+        f"baseline_{name}_artifact_sha256": baseline_sources[name]["artifact_sha256"]
+        for name in ("derivation", "dynamic", "core")
+    }
+    input_hashes.update(
+        {
+            f"baseline_{name}_file_sha256": sha256_bytes(
+                _canonical_json_file_bytes(baseline_sources[name])
+            )
+            for name in ("derivation", "dynamic", "core")
+        }
+    )
+    input_hashes.update(
+        {
+            "compatibility_canary_artifact_sha256": canary["artifact_sha256"],
+            "compatibility_canary_file_sha256": sha256_file(
+                paths["compatibility-canary.json"]
+            ),
+            "opcode_supplement_artifact_sha256": supplement["artifact_sha256"],
+            "opcode_supplement_file_sha256": sha256_file(
+                paths["opcode-supplement.json"]
+            ),
+        }
+    )
+    if not _exact_json_equal(identity.get("input_hashes"), input_hashes):
+        raise ValueError("Osaka augmentation input hashes differ")
+    source_row_hashes = _osaka_augmentation_source_hashes(canary, supplement)
+    if not _exact_json_equal(identity.get("source_row_hashes"), source_row_hashes):
+        raise ValueError("Osaka augmentation source-row hashes differ")
+    replayed = build_osaka_augmented_core_artifact(
+        baseline_sources["core"],
+        canary,
+        supplement,
+        augmentation_provenance=expected_calibration,
+    )
+    if not _exact_json_equal(core, replayed):
+        raise ValueError("Osaka augmented core differs from exact equation replay")
+    expected_output_hashes = {
+        "core_artifact_sha256": replayed["artifact_sha256"],
+        "core_file_sha256": sha256_file(paths["core-opcode-submodel.json"]),
+    }
+    if not _exact_json_equal(envelope.get("output_hashes"), expected_output_hashes):
+        raise ValueError("Osaka augmentation output hashes differ")
+    return {"augmentation_id": augmentation_id, "directory": str(directory)}
+
+
 def _validated_historical_calibration_source(
     source_run: pathlib.Path,
 ) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
@@ -16205,34 +17129,23 @@ def cmd_run_controlled(args: argparse.Namespace) -> None:
     raise ValueError("controlled adaptive sweep exhausted every frozen generator round")
 
 
-def cmd_run_relations(args: argparse.Namespace) -> None:
-    """Run and seal relation-level adaptive rounds without rerunning accepted rows."""
-    calibration_run = _resolve_repo_path(
-        args.calibration_run, field_name="calibration_run"
+def run_formal_relation_adaptive_campaign(
+    *,
+    calibration_run: pathlib.Path,
+    artifact_root: pathlib.Path,
+    manifest: Manifest,
+    fixtures_root: pathlib.Path,
+    final_runs: pathlib.Path,
+    decisions_path: pathlib.Path,
+    decisions_seal_path: pathlib.Path,
+    args: argparse.Namespace,
+    provenance: Mapping[str, Any],
+    validate_dynamic_preflight: bool,
+) -> dict[str, Any]:
+    """Shared adaptive relation state machine for full and bounded campaigns."""
+    decisions = _formal_relation_identity(
+        manifest, str(provenance["calibration_identity_sha256"])
     )
-    execution_identity = validate_calibration_execution_identity(calibration_run)
-    manifest_path = _resolve_repo_path(
-        args.controlled_manifest, field_name="controlled_manifest"
-    )
-    manifest, frozen_identity = verify_frozen_controlled_manifest(
-        calibration_run, manifest_path
-    )
-    if not _exact_json_equal(execution_identity, frozen_identity):
-        raise ValueError("formal relation calibration identity changed during validation")
-    identity_sha256 = sha256_bytes(canonical_json(execution_identity))
-    fixtures_root = _resolve_repo_path(
-        args.fixtures, field_name="generated_relation_fixtures"
-    )
-    final_runs = _resolve_repo_path(args.out, field_name="formal_relation_runs")
-    expected_final = (calibration_run / "raw" / "formal-relations.jsonl").resolve()
-    if final_runs.resolve() != expected_final:
-        raise ValueError(
-            "formal relation runs must use "
-            "$CALIBRATION_RUN/raw/formal-relations.jsonl"
-        )
-    decisions_path = calibration_run / "formal-relation-decisions.json"
-    decisions_seal_path = calibration_run / "formal-relation-decisions.sha256"
-    decisions = _formal_relation_identity(manifest, identity_sha256)
     if decisions_path.exists():
         if (
             not decisions_seal_path.is_file()
@@ -16245,28 +17158,18 @@ def cmd_run_relations(args: argparse.Namespace) -> None:
     elif decisions_seal_path.exists():
         raise ValueError("formal relation decisions seal exists without its ledger")
 
-    provenance = {
-        "calibration_id": calibration_run.name,
-        "calibration_identity_sha256": identity_sha256,
-        "implementation_revision": execution_identity["implementation_revision"],
-        "controlled_manifest_sha256": execution_identity[
-            "controlled_manifest_sha256"
-        ],
-        "controlled_manifest_rows_sha256": execution_identity[
-            "controlled_manifest_rows_sha256"
-        ],
-    }
     state = validate_persisted_formal_relation_decisions(
-        calibration_run, decisions, manifest, provenance
+        artifact_root, decisions, manifest, provenance
     )
 
-    def publish_if_complete(current_state: Mapping[str, Any]) -> bool:
+    def publish_if_complete(current_state: Mapping[str, Any]) -> dict[str, Any] | None:
         if not current_state.get("complete"):
-            return False
+            return None
         canonical_rows = _canonical_formal_relation_rows(
             manifest, current_state["accepted"]
         )
-        validate_formal_dynamic_raw_gas_preflight(canonical_rows)
+        if validate_dynamic_preflight:
+            validate_formal_dynamic_raw_gas_preflight(canonical_rows)
         canonical_bytes = b"".join(
             canonical_json(row) + b"\n" for row in canonical_rows
         )
@@ -16276,10 +17179,15 @@ def cmd_run_relations(args: argparse.Namespace) -> None:
         else:
             _atomic_write_bytes(final_runs, canonical_bytes)
         print("completed formal relation adaptive campaign")
-        return True
+        return {
+            "decisions": decisions,
+            "state": current_state,
+            "rows": canonical_rows,
+        }
 
-    if publish_if_complete(state):
-        return
+    completed = publish_if_complete(state)
+    if completed is not None:
+        return completed
     if state["exhausted_relation_ids"]:
         relation_id = state["exhausted_relation_ids"][0]
         raise ValueError(
@@ -16306,7 +17214,7 @@ def cmd_run_relations(args: argparse.Namespace) -> None:
                 relation_ids=selected_relation_ids,
             )
         round_runs, round_result = _formal_relation_round_paths(
-            calibration_run, generator_max_count
+            artifact_root, generator_max_count
         )
         if round_runs.exists() or round_result.exists():
             raise ValueError(
@@ -16318,7 +17226,9 @@ def cmd_run_relations(args: argparse.Namespace) -> None:
         run_args.out = round_runs
         run_args.expected_purpose = FORMAL_RELATION_PURPOSE
         run_args.repeats = 3
-        run_args.formal_dynamic_preflight = generator_max_count == 8
+        run_args.formal_dynamic_preflight = (
+            validate_dynamic_preflight and generator_max_count == 8
+        )
         try:
             cmd_run(run_args)
         except (
@@ -16332,7 +17242,7 @@ def cmd_run_relations(args: argparse.Namespace) -> None:
                 f"{generator_max_count}: {error}"
             ) from error
         rows = list(iter_jsonl(round_runs))
-        if generator_max_count == 8:
+        if validate_dynamic_preflight and generator_max_count == 8:
             validate_formal_dynamic_raw_gas_preflight(rows)
         relation_results = fit_formal_relation_round(
             manifest,
@@ -16348,9 +17258,9 @@ def cmd_run_relations(args: argparse.Namespace) -> None:
         record = {
             "generator_max_count": generator_max_count,
             "selected_relation_ids": selected_relation_ids,
-            "raw_runs": str(round_runs.relative_to(calibration_run)),
+            "raw_runs": str(round_runs.relative_to(artifact_root)),
             "raw_runs_sha256": sha256_file(round_runs),
-            "result": str(round_result.relative_to(calibration_run)),
+            "result": str(round_result.relative_to(artifact_root)),
             "result_sha256": sha256_file(round_result),
             "terminal_decisions": [
                 {
@@ -16370,10 +17280,11 @@ def cmd_run_relations(args: argparse.Namespace) -> None:
             (sha256_bytes(decisions_bytes) + "\n").encode(),
         )
         state = validate_persisted_formal_relation_decisions(
-            calibration_run, decisions, manifest, provenance
+            artifact_root, decisions, manifest, provenance
         )
-        if publish_if_complete(state):
-            return
+        completed = publish_if_complete(state)
+        if completed is not None:
+            return completed
         if state["exhausted_relation_ids"]:
             relation_id = state["exhausted_relation_ids"][0]
             raise ValueError(
@@ -16381,6 +17292,56 @@ def cmd_run_relations(args: argparse.Namespace) -> None:
                 f"{generator_max_count} exhausted every frozen quality round"
             )
     raise ValueError("formal relation adaptive campaign ended without terminal state")
+
+
+def cmd_run_relations(args: argparse.Namespace) -> None:
+    """Run and seal relation-level adaptive rounds without rerunning accepted rows."""
+    calibration_run = _resolve_repo_path(
+        args.calibration_run, field_name="calibration_run"
+    )
+    execution_identity = validate_calibration_execution_identity(calibration_run)
+    manifest_path = _resolve_repo_path(
+        args.controlled_manifest, field_name="controlled_manifest"
+    )
+    manifest, frozen_identity = verify_frozen_controlled_manifest(
+        calibration_run, manifest_path
+    )
+    if not _exact_json_equal(execution_identity, frozen_identity):
+        raise ValueError("formal relation calibration identity changed during validation")
+    identity_sha256 = sha256_bytes(canonical_json(execution_identity))
+    fixtures_root = _resolve_repo_path(
+        args.fixtures, field_name="generated_relation_fixtures"
+    )
+    final_runs = _resolve_repo_path(args.out, field_name="formal_relation_runs")
+    expected_final = (calibration_run / "raw" / "formal-relations.jsonl").resolve()
+    if final_runs.resolve() != expected_final:
+        raise ValueError(
+            "formal relation runs must use "
+            "$CALIBRATION_RUN/raw/formal-relations.jsonl"
+        )
+    provenance = {
+        "calibration_id": calibration_run.name,
+        "calibration_identity_sha256": identity_sha256,
+        "implementation_revision": execution_identity["implementation_revision"],
+        "controlled_manifest_sha256": execution_identity[
+            "controlled_manifest_sha256"
+        ],
+        "controlled_manifest_rows_sha256": execution_identity[
+            "controlled_manifest_rows_sha256"
+        ],
+    }
+    run_formal_relation_adaptive_campaign(
+        calibration_run=calibration_run,
+        artifact_root=calibration_run,
+        manifest=manifest,
+        fixtures_root=fixtures_root,
+        final_runs=final_runs,
+        decisions_path=calibration_run / "formal-relation-decisions.json",
+        decisions_seal_path=calibration_run / "formal-relation-decisions.sha256",
+        args=args,
+        provenance=provenance,
+        validate_dynamic_preflight=True,
+    )
 
 
 def cmd_build_candidate(args: argparse.Namespace) -> None:
@@ -16552,6 +17513,730 @@ def cmd_build_sp1_bridge(args: argparse.Namespace) -> None:
         controlled_sample_artifact=(payload if "samples" in payload else None),
     )
     print(f"sealed SP1 bridge {bridge['bridge_sha256']}")
+
+
+def _read_durable_directory_path(path: pathlib.Path, *, label: str) -> pathlib.Path:
+    if not path.is_file() or path.is_symlink():
+        raise ValueError(f"{label} path file is missing or invalid")
+    lines = path.read_text().splitlines()
+    if len(lines) != 1 or not lines[0]:
+        raise ValueError(f"{label} path file must contain exactly one path")
+    resolved = pathlib.Path(lines[0]).resolve()
+    if not resolved.is_relative_to(REPO_ROOT.resolve()) or not resolved.is_dir():
+        raise ValueError(f"{label} directory must stay within the repository")
+    return resolved
+
+
+def _osaka_relation_manifest(
+    manifest: Manifest, relation_ids: Sequence[str]
+) -> Manifest:
+    relation_by_id = {relation.id: relation for relation in manifest.opcode_relations}
+    if len(set(relation_ids)) != len(relation_ids) or any(
+        relation_id not in relation_by_id for relation_id in relation_ids
+    ):
+        raise ValueError("Osaka relation subset contains an unknown or duplicate ID")
+    return replace(
+        manifest,
+        opcode_relations=tuple(relation_by_id[relation_id] for relation_id in relation_ids),
+    )
+
+
+def _osaka_relation_program_sha256(
+    relation: OpcodeRelationSpec, generator_max_count: int
+) -> str:
+    relation_identity = {
+        "id": relation.id,
+        "case_id": relation.case_id,
+        "key_id": relation.key_id,
+        "split": relation.split,
+        "model_split": relation.model_split,
+        "scenario_id": relation.scenario_id,
+        "scenario": dict(relation.scenario),
+        "target_raw_gas_by_key": dict(relation.target_raw_gas_by_key),
+        "control_raw_gas_by_key": dict(relation.control_raw_gas_by_key),
+        "signed_raw_gas_by_key": dict(relation.signed_raw_gas_by_key),
+        "dynamic_key": relation.dynamic_key,
+    }
+    return sha256_bytes(
+        canonical_json(
+            {
+                "relation": relation_identity,
+                "generator_max_count": generator_max_count,
+            }
+        )
+    )
+
+
+def _historical_osaka_canary_observations(
+    baseline: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    manifest = baseline["manifest"]
+    decisions = baseline["formal_relation_artifacts"]["decisions"]
+    rows = baseline["formal_relation_artifacts"]["rows"]
+    equations = {
+        row.get("relation_id"): row
+        for row in baseline["relation_artifact"].get("equations", [])
+        if isinstance(row, Mapping)
+    }
+    accepted_bounds: dict[str, int] = {}
+    for record in decisions["rounds"]:
+        bound = record.get("generator_max_count")
+        for decision in record.get("terminal_decisions", []):
+            relation_id = decision.get("relation_id")
+            if relation_id in accepted_bounds:
+                raise ValueError("historical relation continued after acceptance")
+            if decision.get("decision") == "accepted":
+                accepted_bounds[str(relation_id)] = bound
+    relation_by_id = {relation.id: relation for relation in manifest.opcode_relations}
+    observations = []
+    for relation_id in OSAKA_CANARY_RELATION_IDS:
+        equation = equations.get(relation_id)
+        bound = accepted_bounds.get(relation_id)
+        relation_rows = [row for row in rows if row.get("relation_id") == relation_id]
+        if not isinstance(equation, Mapping) or type(bound) is not int or not relation_rows:
+            raise ValueError("historical canary source is incomplete")
+        repeat_groups: dict[tuple[Any, Any, Any], set[int]] = {}
+        for row in relation_rows:
+            key = (
+                row.get("relation_sample_id"),
+                row.get("relation_placement"),
+                row.get("lane"),
+            )
+            repeat_groups.setdefault(key, set()).add(row.get("repeat_index"))
+        if any(repeats != {0, 1, 2} for repeats in repeat_groups.values()):
+            raise ValueError("historical canary source does not contain three repeats")
+        relation = relation_by_id[relation_id]
+        observations.append(
+            {
+                "relation_id": relation_id,
+                "status": "accepted",
+                "slope_p": equation.get("slope_p"),
+                "signed_raw_gas_by_key": equation.get("signed_raw_gas_by_key"),
+                "target_raw_gas_by_key": equation.get("target_raw_gas_by_key"),
+                "control_raw_gas_by_key": equation.get("control_raw_gas_by_key"),
+                "program_sha256": _osaka_relation_program_sha256(relation, bound),
+                "raw_rows_sha256": sha256_bytes(canonical_json(relation_rows)),
+                "repeat_count": 3,
+                "generator_max_count": bound,
+            }
+        )
+    return observations
+
+
+def _osaka_observation_from_fit(
+    relation: OpcodeRelationSpec,
+    generator_max_count: int,
+    rows: Sequence[Mapping[str, Any]],
+    result: Mapping[str, Any],
+) -> dict[str, Any]:
+    fit = result.get("fit")
+    if result.get("status") != "accepted" or not isinstance(fit, Mapping):
+        raise ValueError("Osaka relation did not pass the standard fit gates")
+    return {
+        "relation_id": relation.id,
+        "status": "accepted",
+        "slope_p": fit.get("slope_p"),
+        "signed_raw_gas_by_key": {
+            key: str(value) for key, value in relation.signed_raw_gas_by_key.items()
+        },
+        "target_raw_gas_by_key": {
+            key: str(value) for key, value in relation.target_raw_gas_by_key.items()
+        },
+        "control_raw_gas_by_key": {
+            key: str(value) for key, value in relation.control_raw_gas_by_key.items()
+        },
+        "program_sha256": _osaka_relation_program_sha256(
+            relation, generator_max_count
+        ),
+        "raw_rows_sha256": sha256_bytes(canonical_json(list(rows))),
+        "repeat_count": 3,
+        "generator_max_count": generator_max_count,
+    }
+
+
+def _run_osaka_canary_rounds(
+    *,
+    calibration_run: pathlib.Path,
+    output_root: pathlib.Path,
+    manifest: Manifest,
+    historical_observations: Sequence[Mapping[str, Any]],
+    provenance: Mapping[str, Any],
+    version_identity: Mapping[str, str],
+    args: argparse.Namespace,
+    allow_execution: bool = True,
+) -> list[dict[str, Any]]:
+    decisions_path = output_root / "canary-decisions.json"
+    seal_path = output_root / "canary-decisions.sha256"
+    decisions = {
+        "schema_version": 1,
+        "calibration_identity_sha256": provenance["calibration_identity_sha256"],
+        "version_identity": dict(version_identity),
+        "relation_ids": list(OSAKA_CANARY_RELATION_IDS),
+        "rounds": [],
+    }
+    if decisions_path.exists():
+        if not seal_path.is_file() or _read_digest(seal_path) != sha256_file(decisions_path):
+            raise ValueError("Osaka canary decisions seal differs")
+        decisions = json.loads(decisions_path.read_text())
+    elif seal_path.exists():
+        raise ValueError("Osaka canary decisions seal exists without ledger")
+    if (
+        decisions.get("schema_version") != 1
+        or decisions.get("calibration_identity_sha256")
+        != provenance["calibration_identity_sha256"]
+        or not _exact_json_equal(
+            decisions.get("version_identity"), version_identity
+        )
+        or decisions.get("relation_ids") != list(OSAKA_CANARY_RELATION_IDS)
+        or not isinstance(decisions.get("rounds"), list)
+    ):
+        raise ValueError("Osaka canary decisions identity differs")
+
+    bound_by_relation = {
+        str(observation["relation_id"]): int(observation["generator_max_count"])
+        for observation in historical_observations
+    }
+    expected_groups = [
+        (
+            bound,
+            [
+                relation.id
+                for relation in manifest.opcode_relations
+                if bound_by_relation.get(relation.id) == bound
+            ],
+        )
+        for bound in sorted(set(bound_by_relation.values()))
+    ]
+    observations: dict[str, dict[str, Any]] = {}
+    for index, (bound, relation_ids) in enumerate(expected_groups):
+        subset = _osaka_relation_manifest(manifest, relation_ids)
+        if index < len(decisions["rounds"]):
+            record = decisions["rounds"][index]
+            raw_path = output_root / str(record.get("raw_runs"))
+            result_path = output_root / str(record.get("result"))
+            if (
+                record.get("generator_max_count") != bound
+                or record.get("relation_ids") != relation_ids
+                or not raw_path.is_file()
+                or sha256_file(raw_path) != record.get("raw_runs_sha256")
+                or not result_path.is_file()
+                or sha256_file(result_path) != record.get("result_sha256")
+            ):
+                raise ValueError("persisted Osaka canary round source differs")
+            rows = list(iter_jsonl(raw_path))
+            results = fit_formal_relation_round(
+                subset,
+                rows,
+                relation_ids,
+                bound,
+                expected_provenance=provenance,
+            )
+            if not _exact_json_equal(
+                json.loads(result_path.read_text()),
+                _formal_relation_result_payload(bound, relation_ids, results),
+            ):
+                raise ValueError("persisted Osaka canary fit differs from replay")
+        else:
+            if not allow_execution:
+                raise ValueError("Osaka canary has no complete persisted round")
+            fixtures = output_root / "fixtures" / f"canary-generator-max-{bound}"
+            raw_path = output_root / "raw" / f"canary.generator-max-{bound}.jsonl"
+            result_path = output_root / f"canary-results.generator-max-{bound}.json"
+            if fixtures.exists() or raw_path.exists() or result_path.exists():
+                raise ValueError("Osaka canary round has conflicting untracked output")
+            generate_relation_cases(
+                subset,
+                fixtures,
+                provenance=provenance,
+                generator_max_count=bound,
+                relation_ids=relation_ids,
+            )
+            run_args = argparse.Namespace(
+                fixtures=fixtures,
+                guest_launcher=args.guest_launcher,
+                elf=args.elf,
+                precompile_elf=args.elf,
+                opcode_stage="revm-opcode-lab",
+                calibration_run=calibration_run,
+                controlled_manifest=args.controlled_manifest,
+                out=raw_path,
+                repeats=3,
+                expected_purpose=FORMAL_RELATION_PURPOSE,
+                formal_dynamic_preflight=False,
+            )
+            cmd_run(run_args)
+            rows = list(iter_jsonl(raw_path))
+            results = fit_formal_relation_round(
+                subset,
+                rows,
+                relation_ids,
+                bound,
+                expected_provenance=provenance,
+            )
+            payload = _formal_relation_result_payload(bound, relation_ids, results)
+            _atomic_write_json(result_path, payload)
+            record = {
+                "generator_max_count": bound,
+                "relation_ids": relation_ids,
+                "raw_runs": str(raw_path.relative_to(output_root)),
+                "raw_runs_sha256": sha256_file(raw_path),
+                "result": str(result_path.relative_to(output_root)),
+                "result_sha256": sha256_file(result_path),
+            }
+            decisions["rounds"].append(record)
+            decisions_bytes = (
+                json.dumps(decisions, indent=2, sort_keys=True) + "\n"
+            ).encode()
+            _atomic_replace_bytes(decisions_path, decisions_bytes)
+            _atomic_replace_bytes(
+                seal_path, (sha256_bytes(decisions_bytes) + "\n").encode()
+            )
+        rows_by_relation = {
+            relation_id: [row for row in rows if row.get("relation_id") == relation_id]
+            for relation_id in relation_ids
+        }
+        result_by_id = {result["relation_id"]: result for result in results}
+        relation_by_id = {relation.id: relation for relation in subset.opcode_relations}
+        for relation_id in relation_ids:
+            observations[relation_id] = _osaka_observation_from_fit(
+                relation_by_id[relation_id],
+                bound,
+                rows_by_relation[relation_id],
+                result_by_id[relation_id],
+            )
+    if len(decisions["rounds"]) != len(expected_groups):
+        raise ValueError("Osaka canary decisions contain an additional round")
+    return [observations[relation_id] for relation_id in OSAKA_CANARY_RELATION_IDS]
+
+
+def _build_osaka_supplement_artifact(
+    manifest: Manifest,
+    campaign: Mapping[str, Any],
+    fit_provenance: Mapping[str, Any],
+    artifact_provenance: Mapping[str, Any],
+    decisions_sha256: str,
+) -> dict[str, Any]:
+    relation_by_id = {relation.id: relation for relation in manifest.opcode_relations}
+    accepted = campaign["state"]["accepted"]
+    relations = []
+    for relation_id in OSAKA_SUPPLEMENT_RELATION_IDS:
+        source = accepted.get(relation_id)
+        if not isinstance(source, Mapping):
+            raise ValueError("Osaka supplement has no accepted source row")
+        bound = source.get("generator_max_count")
+        rows = list(source.get("rows", []))
+        one_manifest = _osaka_relation_manifest(manifest, [relation_id])
+        result = fit_formal_relation_round(
+            one_manifest,
+            rows,
+            [relation_id],
+            bound,
+            expected_provenance=fit_provenance,
+        )[0]
+        observation = _osaka_observation_from_fit(
+            relation_by_id[relation_id], bound, rows, result
+        )
+        relations.append(
+            {
+                "relation_id": relation_id,
+                "slope_p": observation["slope_p"],
+                "signed_raw_gas_by_key": observation["signed_raw_gas_by_key"],
+                "target_raw_gas_by_key": observation["target_raw_gas_by_key"],
+                "control_raw_gas_by_key": observation["control_raw_gas_by_key"],
+                "control_opcode_key": "opcode:0x90",
+                "generator_max_count": bound,
+                "raw_rows_sha256": observation["raw_rows_sha256"],
+                "program_sha256": observation["program_sha256"],
+            }
+        )
+    artifact = {
+        "schema_version": 1,
+        "purpose": "osaka_opcode_supplement",
+        "status": "accepted",
+        "candidate_eligible": False,
+        "relation_ids": list(OSAKA_SUPPLEMENT_RELATION_IDS),
+        "provenance": json.loads(json.dumps(artifact_provenance)),
+        "decisions_sha256": decisions_sha256,
+        "raw_rows_sha256": sha256_bytes(canonical_json(campaign["rows"])),
+        "relations": relations,
+    }
+    artifact["artifact_sha256"] = sha256_bytes(canonical_json(artifact))
+    return artifact
+
+
+def cmd_run_osaka_opcode_supplement(args: argparse.Namespace) -> None:
+    calibration_run = _read_durable_directory_path(
+        args.run_path_file, label="calibration run"
+    )
+    execution_identity = validate_calibration_execution_identity(calibration_run)
+    controlled_manifest = _resolve_repo_path(
+        args.controlled_manifest, field_name="controlled_manifest"
+    )
+    manifest, frozen_identity = verify_frozen_controlled_manifest(
+        calibration_run, controlled_manifest
+    )
+    if not _exact_json_equal(execution_identity, frozen_identity):
+        raise ValueError("Osaka supplement calibration identity changed")
+    version_identity = validate_calibration_version_identity(execution_identity)
+    guest_launcher = _resolve_repo_path(args.guest_launcher, field_name="guest_launcher")
+    validate_calibration_guest_launcher(execution_identity, guest_launcher)
+    elf = _resolve_repo_path(args.elf, field_name="opcode_guest_elf")
+    expected_elf_relative = "crates/guests/elf/sp1_revm_opcode_lab.elf"
+    expected_elf = (REPO_ROOT / expected_elf_relative).resolve()
+    if (
+        elf != expected_elf
+        or execution_identity.get("guest_artifacts", {}).get(expected_elf_relative)
+        != sha256_file(elf)
+    ):
+        raise ValueError("Osaka supplement ELF differs from frozen calibration identity")
+    baseline = validate_historical_core_opcode_baseline(
+        _resolve_repo_path(args.baseline_derivation, field_name="baseline_derivation"),
+        _resolve_repo_path(args.historical_manifest, field_name="historical_manifest"),
+    )
+    validate_osaka_relation_subsets(
+        manifest,
+        baseline["manifest"],
+        OSAKA_CANARY_RELATION_IDS,
+        OSAKA_SUPPLEMENT_RELATION_IDS,
+    )
+    output_root = calibration_run / "osaka-opcode-supplement"
+    output_root.mkdir(parents=True, exist_ok=True)
+    provenance = {
+        "calibration_id": calibration_run.name,
+        "calibration_identity_sha256": sha256_bytes(canonical_json(execution_identity)),
+        "implementation_revision": execution_identity["implementation_revision"],
+        "controlled_manifest_sha256": execution_identity["controlled_manifest_sha256"],
+        "controlled_manifest_rows_sha256": execution_identity[
+            "controlled_manifest_rows_sha256"
+        ],
+        "version_identity": version_identity,
+    }
+    formal_provenance = {
+        field: provenance[field] for field in FORMAL_RELATION_PROVENANCE_FIELDS
+    }
+    execution_args = argparse.Namespace(
+        **{
+            **vars(args),
+            "guest_launcher": guest_launcher,
+            "elf": pathlib.Path(expected_elf_relative),
+        }
+    )
+    historical_observations = _historical_osaka_canary_observations(baseline)
+    osaka_observations = _run_osaka_canary_rounds(
+        calibration_run=calibration_run,
+        output_root=output_root,
+        manifest=manifest,
+        historical_observations=historical_observations,
+        provenance=formal_provenance,
+        version_identity=version_identity,
+        args=execution_args,
+    )
+    canary = build_osaka_compatibility_canary(
+        historical_observations,
+        osaka_observations,
+        baseline_artifact_sha256=baseline["relation_artifact"]["artifact_sha256"],
+        expected_baseline_artifact_sha256=baseline["derivation"][
+            "derivation_identity"
+        ]["source"]["source_hashes"]["relation_artifact_sha256"],
+    )
+    canary["provenance"] = provenance
+    canary["artifact_sha256"] = sha256_bytes(
+        canonical_json(
+            {key: value for key, value in canary.items() if key != "artifact_sha256"}
+        )
+    )
+    canary_path = output_root / "compatibility-canary.json"
+    if canary_path.exists():
+        if not _exact_json_equal(json.loads(canary_path.read_text()), canary):
+            raise ValueError("persisted Osaka compatibility canary differs")
+    else:
+        _atomic_write_json(canary_path, canary)
+    if canary["status"] != "passed":
+        raise ValueError("Osaka compatibility canary failed")
+
+    supplement_manifest = _osaka_relation_manifest(
+        manifest, OSAKA_SUPPLEMENT_RELATION_IDS
+    )
+    fixtures_root = output_root / "fixtures" / "supplement"
+    decisions_path = output_root / "decisions.json"
+    if not decisions_path.exists() and not fixtures_root.exists():
+        generate_relation_cases(
+            supplement_manifest,
+            fixtures_root,
+            provenance=formal_provenance,
+            generator_max_count=CONTROLLED_GENERATOR_ROUNDS[0],
+            relation_ids=OSAKA_SUPPLEMENT_RELATION_IDS,
+        )
+    campaign_args = argparse.Namespace(
+        **{
+            **vars(execution_args),
+            "calibration_run": calibration_run,
+            "controlled_manifest": controlled_manifest,
+            "guest_launcher": guest_launcher,
+            "elf": pathlib.Path(expected_elf_relative),
+            "precompile_elf": elf,
+            "opcode_stage": "revm-opcode-lab",
+        }
+    )
+    campaign = run_formal_relation_adaptive_campaign(
+        calibration_run=calibration_run,
+        artifact_root=output_root,
+        manifest=supplement_manifest,
+        fixtures_root=fixtures_root,
+        final_runs=output_root / "raw" / "formal-relations.jsonl",
+        decisions_path=decisions_path,
+        decisions_seal_path=output_root / "decisions.sha256",
+        args=campaign_args,
+        provenance=formal_provenance,
+        validate_dynamic_preflight=False,
+    )
+    supplement = _build_osaka_supplement_artifact(
+        supplement_manifest,
+        campaign,
+        formal_provenance,
+        provenance,
+        sha256_file(decisions_path),
+    )
+    supplement_path = output_root / "opcode-supplement.json"
+    if supplement_path.exists():
+        if not _exact_json_equal(json.loads(supplement_path.read_text()), supplement):
+            raise ValueError("persisted Osaka opcode supplement differs")
+    else:
+        _atomic_write_json(supplement_path, supplement)
+    print(f"completed Osaka opcode supplement {calibration_run.name}")
+
+
+def _load_terminal_relation_campaign(
+    artifact_root: pathlib.Path,
+    manifest: Manifest,
+    provenance: Mapping[str, Any],
+    *,
+    decisions_name: str,
+    decisions_seal_name: str,
+    final_rows_relative: pathlib.Path,
+) -> dict[str, Any]:
+    decisions_path = artifact_root / decisions_name
+    seal_path = artifact_root / decisions_seal_name
+    if (
+        not decisions_path.is_file()
+        or not seal_path.is_file()
+        or _read_digest(seal_path) != sha256_file(decisions_path)
+    ):
+        raise ValueError("formal relation decisions seal or ledger is invalid")
+    decisions = json.loads(decisions_path.read_text())
+    state = validate_persisted_formal_relation_decisions(
+        artifact_root, decisions, manifest, provenance
+    )
+    if not state.get("complete") or state.get("remaining_relation_ids") or state.get(
+        "exhausted_relation_ids"
+    ):
+        raise ValueError("formal relation campaign is not complete")
+    rows = _canonical_formal_relation_rows(manifest, state["accepted"])
+    final_path = artifact_root / final_rows_relative
+    canonical_bytes = b"".join(canonical_json(row) + b"\n" for row in rows)
+    if not final_path.is_file() or final_path.read_bytes() != canonical_bytes:
+        raise ValueError("formal relation canonical rows differ from decisions")
+    return {"decisions": decisions, "state": state, "rows": rows}
+
+
+def verify_osaka_opcode_supplement_run(
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    calibration_run = _read_durable_directory_path(
+        args.run_path_file, label="calibration run"
+    )
+    execution_identity = validate_calibration_execution_identity(calibration_run)
+    controlled_manifest = _resolve_repo_path(
+        args.controlled_manifest, field_name="controlled_manifest"
+    )
+    manifest, frozen_identity = verify_frozen_controlled_manifest(
+        calibration_run, controlled_manifest
+    )
+    if not _exact_json_equal(execution_identity, frozen_identity):
+        raise ValueError("Osaka supplement calibration identity changed")
+    version_identity = validate_calibration_version_identity(execution_identity)
+    baseline = validate_historical_core_opcode_baseline(
+        _resolve_repo_path(args.baseline_derivation, field_name="baseline_derivation"),
+        _resolve_repo_path(args.historical_manifest, field_name="historical_manifest"),
+    )
+    validate_osaka_relation_subsets(
+        manifest,
+        baseline["manifest"],
+        OSAKA_CANARY_RELATION_IDS,
+        OSAKA_SUPPLEMENT_RELATION_IDS,
+    )
+    output_root = calibration_run / "osaka-opcode-supplement"
+    if not output_root.is_dir():
+        raise ValueError("Osaka supplement output is missing")
+    provenance = {
+        "calibration_id": calibration_run.name,
+        "calibration_identity_sha256": sha256_bytes(canonical_json(execution_identity)),
+        "implementation_revision": execution_identity["implementation_revision"],
+        "controlled_manifest_sha256": execution_identity["controlled_manifest_sha256"],
+        "controlled_manifest_rows_sha256": execution_identity[
+            "controlled_manifest_rows_sha256"
+        ],
+        "version_identity": version_identity,
+    }
+    formal_provenance = {
+        field: provenance[field] for field in FORMAL_RELATION_PROVENANCE_FIELDS
+    }
+    historical_observations = _historical_osaka_canary_observations(baseline)
+    osaka_observations = _run_osaka_canary_rounds(
+        calibration_run=calibration_run,
+        output_root=output_root,
+        manifest=manifest,
+        historical_observations=historical_observations,
+        provenance=formal_provenance,
+        version_identity=version_identity,
+        args=args,
+        allow_execution=False,
+    )
+    expected_canary = build_osaka_compatibility_canary(
+        historical_observations,
+        osaka_observations,
+        baseline_artifact_sha256=baseline["relation_artifact"]["artifact_sha256"],
+        expected_baseline_artifact_sha256=baseline["derivation"][
+            "derivation_identity"
+        ]["source"]["source_hashes"]["relation_artifact_sha256"],
+    )
+    expected_canary["provenance"] = provenance
+    expected_canary["artifact_sha256"] = sha256_bytes(
+        canonical_json(
+            {
+                key: value
+                for key, value in expected_canary.items()
+                if key != "artifact_sha256"
+            }
+        )
+    )
+    canary_path = output_root / "compatibility-canary.json"
+    if (
+        not canary_path.is_file()
+        or not _exact_json_equal(json.loads(canary_path.read_text()), expected_canary)
+        or expected_canary["status"] != "passed"
+    ):
+        raise ValueError("Osaka compatibility canary differs from replay")
+    supplement_manifest = _osaka_relation_manifest(
+        manifest, OSAKA_SUPPLEMENT_RELATION_IDS
+    )
+    campaign = _load_terminal_relation_campaign(
+        output_root,
+        supplement_manifest,
+        formal_provenance,
+        decisions_name="decisions.json",
+        decisions_seal_name="decisions.sha256",
+        final_rows_relative=pathlib.Path("raw/formal-relations.jsonl"),
+    )
+    expected_supplement = _build_osaka_supplement_artifact(
+        supplement_manifest,
+        campaign,
+        formal_provenance,
+        provenance,
+        sha256_file(output_root / "decisions.json"),
+    )
+    supplement_path = output_root / "opcode-supplement.json"
+    if not supplement_path.is_file() or not _exact_json_equal(
+        json.loads(supplement_path.read_text()), expected_supplement
+    ):
+        raise ValueError("Osaka opcode supplement differs from exact replay")
+    return {
+        "calibration_run": calibration_run,
+        "execution_identity": execution_identity,
+        "baseline": baseline,
+        "output_root": output_root,
+        "compatibility_canary": expected_canary,
+        "opcode_supplement": expected_supplement,
+        "provenance": provenance,
+    }
+
+
+def cmd_verify_osaka_opcode_supplement(args: argparse.Namespace) -> None:
+    verified = verify_osaka_opcode_supplement_run(args)
+    print(verified["calibration_run"].name)
+
+
+def cmd_seal_osaka_opcode_augmentation(args: argparse.Namespace) -> None:
+    calibration_run = _read_durable_directory_path(
+        args.run_path_file, label="calibration run"
+    )
+    baseline_dir = _resolve_repo_path(
+        args.baseline_derivation, field_name="baseline_derivation"
+    )
+    historical_manifest = _resolve_repo_path(
+        args.historical_manifest, field_name="historical_manifest"
+    )
+    verified = verify_osaka_opcode_supplement_run(
+        argparse.Namespace(
+            run_path_file=args.run_path_file,
+            controlled_manifest=calibration_run / "controlled-manifest.toml",
+            baseline_derivation=baseline_dir,
+            historical_manifest=historical_manifest,
+        )
+    )
+    execution_identity = verified["execution_identity"]
+    guest_artifacts = execution_identity.get("guest_artifacts")
+    guest_elf_sha256 = (
+        guest_artifacts.get("crates/guests/elf/sp1_revm_opcode_lab.elf")
+        if isinstance(guest_artifacts, Mapping)
+        else None
+    )
+    provenance = {
+        "calibration_id": calibration_run.name,
+        "calibration_identity_sha256": sha256_bytes(
+            canonical_json(execution_identity)
+        ),
+        "implementation_revision": execution_identity.get(
+            "implementation_revision"
+        ),
+        "controlled_manifest_sha256": execution_identity.get(
+            "controlled_manifest_sha256"
+        ),
+        "controlled_manifest_rows_sha256": execution_identity.get(
+            "controlled_manifest_rows_sha256"
+        ),
+        "complete_schedule_sha256": execution_identity.get(
+            "complete_schedule_sha256"
+        ),
+        "guest_elf_sha256": guest_elf_sha256,
+        "version_identity": validate_calibration_version_identity(
+            execution_identity
+        ),
+    }
+    output_root = _resolve_repo_path(args.out_root, field_name="augmentation_out_root")
+    sealed = seal_osaka_augmentation_directory(
+        output_root,
+        baseline_derivation_path=baseline_dir / "derivation.json",
+        baseline_dynamic_path=baseline_dir / "dynamic-opcode-models.json",
+        baseline_core_path=baseline_dir / "core-opcode-submodel.json",
+        canary_path=verified["output_root"] / "compatibility-canary.json",
+        supplement_path=verified["output_root"] / "opcode-supplement.json",
+        provenance=provenance,
+        historical_manifest_sha256=_verify_repo_relative_checksum(
+            historical_manifest
+        ),
+    )
+    _atomic_write_bytes(
+        args.augmentation_path_file,
+        (sealed["directory"] + "\n").encode(),
+    )
+    print(f"sealed Osaka opcode augmentation {sealed['augmentation_id']}")
+
+
+def cmd_verify_osaka_opcode_augmentation(args: argparse.Namespace) -> None:
+    directory = _read_durable_directory_path(
+        args.augmentation_path_file, label="augmentation"
+    )
+    historical_manifest = _resolve_repo_path(
+        args.historical_manifest, field_name="historical_manifest"
+    )
+    verified = verify_osaka_augmentation_directory(
+        directory,
+        expected_historical_manifest_sha256=_verify_repo_relative_checksum(
+            historical_manifest
+        ),
+    )
+    print(verified["augmentation_id"])
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -16784,6 +18469,53 @@ def build_parser() -> argparse.ArgumentParser:
     derived_core.add_argument("--source-run", type=pathlib.Path, required=True)
     derived_core.add_argument("--out-root", type=pathlib.Path, required=True)
     derived_core.set_defaults(func=cmd_derive_core_opcode_submodel)
+
+    osaka_run = subcommands.add_parser(
+        "run-osaka-opcode-supplement",
+        help="run the bounded Osaka compatibility canary and two relation supplement",
+    )
+    osaka_run.add_argument("--run-path-file", type=pathlib.Path, required=True)
+    osaka_run.add_argument("--controlled-manifest", type=pathlib.Path, required=True)
+    osaka_run.add_argument("--baseline-derivation", type=pathlib.Path, required=True)
+    osaka_run.add_argument("--historical-manifest", type=pathlib.Path, required=True)
+    osaka_run.add_argument("--guest-launcher", type=pathlib.Path, required=True)
+    osaka_run.add_argument("--elf", type=pathlib.Path, required=True)
+    osaka_run.set_defaults(func=cmd_run_osaka_opcode_supplement)
+
+    osaka_verify = subcommands.add_parser(
+        "verify-osaka-opcode-supplement",
+        help="replay the bounded Osaka supplement without guest execution",
+    )
+    osaka_verify.add_argument("--run-path-file", type=pathlib.Path, required=True)
+    osaka_verify.add_argument("--controlled-manifest", type=pathlib.Path, required=True)
+    osaka_verify.add_argument("--baseline-derivation", type=pathlib.Path, required=True)
+    osaka_verify.add_argument("--historical-manifest", type=pathlib.Path, required=True)
+    osaka_verify.set_defaults(func=cmd_verify_osaka_opcode_supplement)
+
+    osaka_seal = subcommands.add_parser(
+        "seal-osaka-opcode-augmentation",
+        help="seal a create-only Osaka augmented core derivation",
+    )
+    osaka_seal.add_argument("--run-path-file", type=pathlib.Path, required=True)
+    osaka_seal.add_argument("--baseline-derivation", type=pathlib.Path, required=True)
+    osaka_seal.add_argument("--historical-manifest", type=pathlib.Path, required=True)
+    osaka_seal.add_argument("--out-root", type=pathlib.Path, required=True)
+    osaka_seal.add_argument("--augmentation-path-file", type=pathlib.Path, required=True)
+    osaka_seal.set_defaults(func=cmd_seal_osaka_opcode_augmentation)
+
+    osaka_augmentation_verify = subcommands.add_parser(
+        "verify-osaka-opcode-augmentation",
+        help="replay one sealed Osaka augmented derivation",
+    )
+    osaka_augmentation_verify.add_argument(
+        "--augmentation-path-file", type=pathlib.Path, required=True
+    )
+    osaka_augmentation_verify.add_argument(
+        "--historical-manifest", type=pathlib.Path, required=True
+    )
+    osaka_augmentation_verify.set_defaults(
+        func=cmd_verify_osaka_opcode_augmentation
+    )
 
     candidate = subcommands.add_parser(
         "build-candidate", help="seal the controlled SP1 proverGas candidate"

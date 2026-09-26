@@ -1,0 +1,3889 @@
+name = "sp1-calibration-v1"
+backend = "sp1"
+variants = [0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048]
+opcode_relation_anchors = [
+  "opcode:0x50",
+  "opcode:0x5f",
+  "opcode:0x80",
+  "opcode:0x90",
+]
+dynamic_raw_gas_keys = [
+  "opcode:0x0a",
+  "opcode:0x20",
+  "opcode:0x51",
+  "opcode:0x52",
+  "opcode:0x53",
+  "opcode:0x5e",
+]
+normalization_reference_key = "opcode:0x01"
+system_operation_ownership = "block_base"
+anchor_operation_ownership = "block_base"
+q_formula = ["proposal_startup", "block_base", "tx_base", "native_value_transfer"]
+bridge_key_ids = [
+  "opcode:0x01",
+  "opcode:0x02",
+  "opcode:0x03",
+  "opcode:0x04",
+  "opcode:0x05",
+  "opcode:0x06",
+  "opcode:0x07",
+  "opcode:0x08",
+  "opcode:0x09",
+  "opcode:0x0a",
+  "opcode:0x0b",
+  "opcode:0x10",
+  "opcode:0x11",
+  "opcode:0x12",
+  "opcode:0x13",
+  "opcode:0x14",
+  "opcode:0x15",
+  "opcode:0x16",
+  "opcode:0x17",
+  "opcode:0x18",
+  "opcode:0x19",
+  "opcode:0x1a",
+  "opcode:0x1b",
+  "opcode:0x1c",
+  "opcode:0x1d",
+  "opcode:0x20",
+  "opcode:0x50",
+  "opcode:0x51",
+  "opcode:0x52",
+  "opcode:0x53",
+  "opcode:0x56",
+  "opcode:0x57",
+  "opcode:0x58",
+  "opcode:0x59",
+  "opcode:0x5a",
+  "opcode:0x5b",
+  "opcode:0x5e",
+  "opcode:0x5f",
+  "opcode:0x60",
+  "opcode:0x61",
+  "opcode:0x62",
+  "opcode:0x63",
+  "opcode:0x64",
+  "opcode:0x65",
+  "opcode:0x66",
+  "opcode:0x67",
+  "opcode:0x68",
+  "opcode:0x69",
+  "opcode:0x6a",
+  "opcode:0x6b",
+  "opcode:0x6c",
+  "opcode:0x6d",
+  "opcode:0x6e",
+  "opcode:0x6f",
+  "opcode:0x70",
+  "opcode:0x71",
+  "opcode:0x72",
+  "opcode:0x73",
+  "opcode:0x74",
+  "opcode:0x75",
+  "opcode:0x76",
+  "opcode:0x77",
+  "opcode:0x78",
+  "opcode:0x79",
+  "opcode:0x7a",
+  "opcode:0x7b",
+  "opcode:0x7c",
+  "opcode:0x7d",
+  "opcode:0x7e",
+  "opcode:0x7f",
+  "opcode:0x80",
+  "opcode:0x81",
+  "opcode:0x82",
+  "opcode:0x83",
+  "opcode:0x84",
+  "opcode:0x85",
+  "opcode:0x86",
+  "opcode:0x87",
+  "opcode:0x88",
+  "opcode:0x89",
+  "opcode:0x8a",
+  "opcode:0x8b",
+  "opcode:0x8c",
+  "opcode:0x8d",
+  "opcode:0x8e",
+  "opcode:0x8f",
+  "opcode:0x90",
+  "opcode:0x91",
+  "opcode:0x92",
+  "opcode:0x93",
+  "opcode:0x94",
+  "opcode:0x95",
+  "opcode:0x96",
+  "opcode:0x97",
+  "opcode:0x98",
+  "opcode:0x99",
+  "opcode:0x9a",
+  "opcode:0x9b",
+  "opcode:0x9c",
+  "opcode:0x9d",
+  "opcode:0x9e",
+  "opcode:0x9f",
+  "precompile:0x01",
+  "precompile:0x02",
+  "precompile:0x03",
+  "precompile:0x04",
+  "precompile:0x05",
+  "precompile:0x06",
+  "precompile:0x07",
+  "precompile:0x08",
+  "precompile:0x09",
+  "precompile:0x0a",
+  "precompile:0x0b",
+  "precompile:0x0c",
+  "precompile:0x0d",
+  "precompile:0x0e",
+  "precompile:0x0f",
+  "precompile:0x10",
+  "precompile:0x11",
+  "proposal_startup",
+  "block_base",
+  "tx_base",
+  "native_value_transfer",
+]
+bridge_model = "through_origin_equal_key_median"
+bridge_controlled_max_ape = "0.10"
+bridge_proposal_max_ape = "0.10"
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x0a:exp-bytes-1"
+case_id = "exp"
+key_id = "opcode:0x0a"
+split = "canonical"
+model_split = "fit"
+scenario_id = "exp-bytes-1"
+scenario = { exponent_byte_length = 1, initial_memory_words = 0 }
+target_raw_gas = 60
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x0a:exp-bytes-0"
+case_id = "exp"
+key_id = "opcode:0x0a"
+split = "dynamic_holdout"
+model_split = "fit"
+scenario_id = "exp-bytes-0"
+scenario = { exponent_byte_length = 0, initial_memory_words = 0 }
+target_raw_gas = 10
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x0a:exp-bytes-4"
+case_id = "exp"
+key_id = "opcode:0x0a"
+split = "dynamic_holdout"
+model_split = "fit"
+scenario_id = "exp-bytes-4"
+scenario = { exponent_byte_length = 4, initial_memory_words = 0 }
+target_raw_gas = 210
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x0a:exp-bytes-8"
+case_id = "exp"
+key_id = "opcode:0x0a"
+split = "dynamic_holdout"
+model_split = "fit"
+scenario_id = "exp-bytes-8"
+scenario = { exponent_byte_length = 8, initial_memory_words = 0 }
+target_raw_gas = 410
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x0a:exp-bytes-16"
+case_id = "exp"
+key_id = "opcode:0x0a"
+split = "dynamic_holdout"
+model_split = "fit"
+scenario_id = "exp-bytes-16"
+scenario = { exponent_byte_length = 16, initial_memory_words = 0 }
+target_raw_gas = 810
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x0a:exp-bytes-32"
+case_id = "exp"
+key_id = "opcode:0x0a"
+split = "dynamic_holdout"
+model_split = "fit"
+scenario_id = "exp-bytes-32"
+scenario = { exponent_byte_length = 32, initial_memory_words = 0 }
+target_raw_gas = 1610
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x0a:exp-bytes-2"
+case_id = "exp"
+key_id = "opcode:0x0a"
+split = "dynamic_holdout"
+model_split = "holdout"
+scenario_id = "exp-bytes-2"
+scenario = { exponent_byte_length = 2, initial_memory_words = 0 }
+target_raw_gas = 110
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x0a:exp-bytes-24"
+case_id = "exp"
+key_id = "opcode:0x0a"
+split = "dynamic_holdout"
+model_split = "holdout"
+scenario_id = "exp-bytes-24"
+scenario = { exponent_byte_length = 24, initial_memory_words = 0 }
+target_raw_gas = 1210
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x20:input-32"
+case_id = "keccak256"
+key_id = "opcode:0x20"
+split = "canonical"
+model_split = "fit"
+scenario_id = "input-32"
+scenario = { input_length = 32, initial_memory_words = 1 }
+target_raw_gas = 36
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x20:input-0"
+case_id = "keccak256"
+key_id = "opcode:0x20"
+split = "dynamic_holdout"
+model_split = "fit"
+scenario_id = "input-0"
+scenario = { input_length = 0, initial_memory_words = 1 }
+target_raw_gas = 30
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x20:input-64"
+case_id = "keccak256"
+key_id = "opcode:0x20"
+split = "dynamic_holdout"
+model_split = "fit"
+scenario_id = "input-64"
+scenario = { input_length = 64, initial_memory_words = 1 }
+target_raw_gas = 45
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x20:input-135"
+case_id = "keccak256"
+key_id = "opcode:0x20"
+split = "dynamic_holdout"
+model_split = "fit"
+scenario_id = "input-135"
+scenario = { input_length = 135, initial_memory_words = 1 }
+target_raw_gas = 72
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x20:input-136"
+case_id = "keccak256"
+key_id = "opcode:0x20"
+split = "dynamic_holdout"
+model_split = "fit"
+scenario_id = "input-136"
+scenario = { input_length = 136, initial_memory_words = 1 }
+target_raw_gas = 72
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x20:input-137"
+case_id = "keccak256"
+key_id = "opcode:0x20"
+split = "dynamic_holdout"
+model_split = "fit"
+scenario_id = "input-137"
+scenario = { input_length = 137, initial_memory_words = 1 }
+target_raw_gas = 72
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x20:input-256-memory-8"
+case_id = "keccak256"
+key_id = "opcode:0x20"
+split = "dynamic_holdout"
+model_split = "fit"
+scenario_id = "input-256-memory-8"
+scenario = { input_length = 256, initial_memory_words = 8 }
+target_raw_gas = 78
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x20:input-256"
+case_id = "keccak256"
+key_id = "opcode:0x20"
+split = "dynamic_holdout"
+model_split = "fit"
+scenario_id = "input-256"
+scenario = { input_length = 256, initial_memory_words = 1 }
+target_raw_gas = 99
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x20:input-271"
+case_id = "keccak256"
+key_id = "opcode:0x20"
+split = "dynamic_holdout"
+model_split = "fit"
+scenario_id = "input-271"
+scenario = { input_length = 271, initial_memory_words = 1 }
+target_raw_gas = 108
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x20:input-272"
+case_id = "keccak256"
+key_id = "opcode:0x20"
+split = "dynamic_holdout"
+model_split = "fit"
+scenario_id = "input-272"
+scenario = { input_length = 272, initial_memory_words = 1 }
+target_raw_gas = 108
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x20:input-273"
+case_id = "keccak256"
+key_id = "opcode:0x20"
+split = "dynamic_holdout"
+model_split = "fit"
+scenario_id = "input-273"
+scenario = { input_length = 273, initial_memory_words = 1 }
+target_raw_gas = 108
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x20:input-512-memory-16"
+case_id = "keccak256"
+key_id = "opcode:0x20"
+split = "dynamic_holdout"
+model_split = "fit"
+scenario_id = "input-512-memory-16"
+scenario = { input_length = 512, initial_memory_words = 16 }
+target_raw_gas = 126
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x20:input-512"
+case_id = "keccak256"
+key_id = "opcode:0x20"
+split = "dynamic_holdout"
+model_split = "fit"
+scenario_id = "input-512"
+scenario = { input_length = 512, initial_memory_words = 1 }
+target_raw_gas = 171
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x20:input-1024-memory-32"
+case_id = "keccak256"
+key_id = "opcode:0x20"
+split = "dynamic_holdout"
+model_split = "fit"
+scenario_id = "input-1024-memory-32"
+scenario = { input_length = 1024, initial_memory_words = 32 }
+target_raw_gas = 222
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x20:input-1024"
+case_id = "keccak256"
+key_id = "opcode:0x20"
+split = "dynamic_holdout"
+model_split = "fit"
+scenario_id = "input-1024"
+scenario = { input_length = 1024, initial_memory_words = 1 }
+target_raw_gas = 317
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x20:input-17"
+case_id = "keccak256"
+key_id = "opcode:0x20"
+split = "dynamic_holdout"
+model_split = "fit"
+scenario_id = "input-17"
+scenario = { input_length = 17, initial_memory_words = 1 }
+target_raw_gas = 36
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x20:input-200"
+case_id = "keccak256"
+key_id = "opcode:0x20"
+split = "dynamic_holdout"
+model_split = "fit"
+scenario_id = "input-200"
+scenario = { input_length = 200, initial_memory_words = 1 }
+target_raw_gas = 90
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x20:input-407"
+case_id = "keccak256"
+key_id = "opcode:0x20"
+split = "dynamic_holdout"
+model_split = "fit"
+scenario_id = "input-407"
+scenario = { input_length = 407, initial_memory_words = 1 }
+target_raw_gas = 144
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x20:input-408"
+case_id = "keccak256"
+key_id = "opcode:0x20"
+split = "dynamic_holdout"
+model_split = "fit"
+scenario_id = "input-408"
+scenario = { input_length = 408, initial_memory_words = 1 }
+target_raw_gas = 144
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x20:input-409"
+case_id = "keccak256"
+key_id = "opcode:0x20"
+split = "dynamic_holdout"
+model_split = "fit"
+scenario_id = "input-409"
+scenario = { input_length = 409, initial_memory_words = 1 }
+target_raw_gas = 144
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x20:input-777"
+case_id = "keccak256"
+key_id = "opcode:0x20"
+split = "dynamic_holdout"
+model_split = "fit"
+scenario_id = "input-777"
+scenario = { input_length = 777, initial_memory_words = 1 }
+target_raw_gas = 253
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x20:input-2048"
+case_id = "keccak256"
+key_id = "opcode:0x20"
+split = "dynamic_holdout"
+model_split = "fit"
+scenario_id = "input-2048"
+scenario = { input_length = 2048, initial_memory_words = 1 }
+target_raw_gas = 611
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x20:input-95"
+case_id = "keccak256"
+key_id = "opcode:0x20"
+split = "dynamic_holdout"
+model_split = "holdout"
+scenario_id = "input-95"
+scenario = { input_length = 95, initial_memory_words = 1 }
+target_raw_gas = 54
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x20:input-333"
+case_id = "keccak256"
+key_id = "opcode:0x20"
+split = "dynamic_holdout"
+model_split = "holdout"
+scenario_id = "input-333"
+scenario = { input_length = 333, initial_memory_words = 1 }
+target_raw_gas = 126
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x20:input-543"
+case_id = "keccak256"
+key_id = "opcode:0x20"
+split = "dynamic_holdout"
+model_split = "holdout"
+scenario_id = "input-543"
+scenario = { input_length = 543, initial_memory_words = 1 }
+target_raw_gas = 180
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x20:input-544-memory-17"
+case_id = "keccak256"
+key_id = "opcode:0x20"
+split = "dynamic_holdout"
+model_split = "holdout"
+scenario_id = "input-544-memory-17"
+scenario = { input_length = 544, initial_memory_words = 17 }
+target_raw_gas = 132
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x20:input-545"
+case_id = "keccak256"
+key_id = "opcode:0x20"
+split = "dynamic_holdout"
+model_split = "holdout"
+scenario_id = "input-545"
+scenario = { input_length = 545, initial_memory_words = 1 }
+target_raw_gas = 189
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x20:input-1500"
+case_id = "keccak256"
+key_id = "opcode:0x20"
+split = "dynamic_holdout"
+model_split = "holdout"
+scenario_id = "input-1500"
+scenario = { input_length = 1500, initial_memory_words = 1 }
+target_raw_gas = 454
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x20:input-4096"
+case_id = "keccak256"
+key_id = "opcode:0x20"
+split = "dynamic_holdout"
+model_split = "holdout"
+scenario_id = "input-4096"
+scenario = { input_length = 4096, initial_memory_words = 1 }
+target_raw_gas = 1211
+reference_raw_gas_total = 2
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x51:offset-0x00"
+case_id = "mload"
+key_id = "opcode:0x51"
+split = "canonical"
+model_split = "fit"
+scenario_id = "offset-0x00"
+scenario = { highest_touched_offset = 0, initial_memory_words = 1 }
+target_raw_gas = 3
+reference_raw_gas_total = 3
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x51:offset-0x0100"
+case_id = "mload"
+key_id = "opcode:0x51"
+split = "dynamic_holdout"
+model_split = "fit"
+scenario_id = "offset-0x0100"
+scenario = { highest_touched_offset = 256, initial_memory_words = 1 }
+target_raw_gas = 27
+reference_raw_gas_total = 3
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x51:offset-0x1000"
+case_id = "mload"
+key_id = "opcode:0x51"
+split = "dynamic_holdout"
+model_split = "fit"
+scenario_id = "offset-0x1000"
+scenario = { highest_touched_offset = 4096, initial_memory_words = 1 }
+target_raw_gas = 419
+reference_raw_gas_total = 3
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x51:offset-0x0100-memory-9"
+case_id = "mload"
+key_id = "opcode:0x51"
+split = "dynamic_holdout"
+model_split = "holdout"
+scenario_id = "offset-0x0100-memory-9"
+scenario = { highest_touched_offset = 256, initial_memory_words = 9 }
+target_raw_gas = 3
+reference_raw_gas_total = 3
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x51:offset-0x0400"
+case_id = "mload"
+key_id = "opcode:0x51"
+split = "dynamic_holdout"
+model_split = "fit"
+scenario_id = "offset-0x0400"
+scenario = { highest_touched_offset = 1024, initial_memory_words = 1 }
+target_raw_gas = 101
+reference_raw_gas_total = 3
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x51:offset-0x1000-memory-129"
+case_id = "mload"
+key_id = "opcode:0x51"
+split = "dynamic_holdout"
+model_split = "holdout"
+scenario_id = "offset-0x1000-memory-129"
+scenario = { highest_touched_offset = 4096, initial_memory_words = 129 }
+target_raw_gas = 3
+reference_raw_gas_total = 3
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x51:offset-0x0800"
+case_id = "mload"
+key_id = "opcode:0x51"
+split = "dynamic_holdout"
+model_split = "holdout"
+scenario_id = "offset-0x0800"
+scenario = { highest_touched_offset = 2048, initial_memory_words = 1 }
+target_raw_gas = 203
+reference_raw_gas_total = 3
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x51:offset-0x0fe0"
+case_id = "mload"
+key_id = "opcode:0x51"
+split = "dynamic_holdout"
+model_split = "holdout"
+scenario_id = "offset-0x0fe0"
+scenario = { highest_touched_offset = 4064, initial_memory_words = 1 }
+target_raw_gas = 416
+reference_raw_gas_total = 3
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x51:offset-0x2000"
+case_id = "mload"
+key_id = "opcode:0x51"
+split = "dynamic_holdout"
+model_split = "fit"
+scenario_id = "offset-0x2000"
+scenario = { highest_touched_offset = 8192, initial_memory_words = 1 }
+target_raw_gas = 900
+reference_raw_gas_total = 3
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x51:offset-0x4000"
+case_id = "mload"
+key_id = "opcode:0x51"
+split = "dynamic_holdout"
+model_split = "holdout"
+scenario_id = "offset-0x4000"
+scenario = { highest_touched_offset = 16384, initial_memory_words = 1 }
+target_raw_gas = 2053
+reference_raw_gas_total = 3
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x52:offset-0x00"
+case_id = "mstore"
+key_id = "opcode:0x52"
+split = "canonical"
+model_split = "fit"
+scenario_id = "offset-0x00"
+scenario = { highest_touched_offset = 0, initial_memory_words = 1 }
+target_raw_gas = 3
+reference_raw_gas_total = 5
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x52:offset-0x0100"
+case_id = "mstore"
+key_id = "opcode:0x52"
+split = "dynamic_holdout"
+model_split = "fit"
+scenario_id = "offset-0x0100"
+scenario = { highest_touched_offset = 256, initial_memory_words = 1 }
+target_raw_gas = 27
+reference_raw_gas_total = 5
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x52:offset-0x1000"
+case_id = "mstore"
+key_id = "opcode:0x52"
+split = "dynamic_holdout"
+model_split = "fit"
+scenario_id = "offset-0x1000"
+scenario = { highest_touched_offset = 4096, initial_memory_words = 1 }
+target_raw_gas = 419
+reference_raw_gas_total = 5
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x52:offset-0x0100-memory-9"
+case_id = "mstore"
+key_id = "opcode:0x52"
+split = "dynamic_holdout"
+model_split = "holdout"
+scenario_id = "offset-0x0100-memory-9"
+scenario = { highest_touched_offset = 256, initial_memory_words = 9 }
+target_raw_gas = 3
+reference_raw_gas_total = 5
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x52:offset-0x0400"
+case_id = "mstore"
+key_id = "opcode:0x52"
+split = "dynamic_holdout"
+model_split = "fit"
+scenario_id = "offset-0x0400"
+scenario = { highest_touched_offset = 1024, initial_memory_words = 1 }
+target_raw_gas = 101
+reference_raw_gas_total = 5
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x52:offset-0x1000-memory-129"
+case_id = "mstore"
+key_id = "opcode:0x52"
+split = "dynamic_holdout"
+model_split = "holdout"
+scenario_id = "offset-0x1000-memory-129"
+scenario = { highest_touched_offset = 4096, initial_memory_words = 129 }
+target_raw_gas = 3
+reference_raw_gas_total = 5
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x52:offset-0x0800"
+case_id = "mstore"
+key_id = "opcode:0x52"
+split = "dynamic_holdout"
+model_split = "holdout"
+scenario_id = "offset-0x0800"
+scenario = { highest_touched_offset = 2048, initial_memory_words = 1 }
+target_raw_gas = 203
+reference_raw_gas_total = 5
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x52:offset-0x0fe0"
+case_id = "mstore"
+key_id = "opcode:0x52"
+split = "dynamic_holdout"
+model_split = "holdout"
+scenario_id = "offset-0x0fe0"
+scenario = { highest_touched_offset = 4064, initial_memory_words = 1 }
+target_raw_gas = 416
+reference_raw_gas_total = 5
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x52:offset-0x2000"
+case_id = "mstore"
+key_id = "opcode:0x52"
+split = "dynamic_holdout"
+model_split = "fit"
+scenario_id = "offset-0x2000"
+scenario = { highest_touched_offset = 8192, initial_memory_words = 1 }
+target_raw_gas = 900
+reference_raw_gas_total = 5
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x52:offset-0x4000"
+case_id = "mstore"
+key_id = "opcode:0x52"
+split = "dynamic_holdout"
+model_split = "holdout"
+scenario_id = "offset-0x4000"
+scenario = { highest_touched_offset = 16384, initial_memory_words = 1 }
+target_raw_gas = 2053
+reference_raw_gas_total = 5
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x53:offset-0x00"
+case_id = "mstore8"
+key_id = "opcode:0x53"
+split = "canonical"
+model_split = "fit"
+scenario_id = "offset-0x00"
+scenario = { highest_touched_offset = 0, initial_memory_words = 1 }
+target_raw_gas = 3
+reference_raw_gas_total = 5
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x53:offset-0x0100"
+case_id = "mstore8"
+key_id = "opcode:0x53"
+split = "dynamic_holdout"
+model_split = "fit"
+scenario_id = "offset-0x0100"
+scenario = { highest_touched_offset = 256, initial_memory_words = 1 }
+target_raw_gas = 27
+reference_raw_gas_total = 5
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x53:offset-0x1000"
+case_id = "mstore8"
+key_id = "opcode:0x53"
+split = "dynamic_holdout"
+model_split = "fit"
+scenario_id = "offset-0x1000"
+scenario = { highest_touched_offset = 4096, initial_memory_words = 1 }
+target_raw_gas = 419
+reference_raw_gas_total = 5
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x53:offset-0x0100-memory-9"
+case_id = "mstore8"
+key_id = "opcode:0x53"
+split = "dynamic_holdout"
+model_split = "holdout"
+scenario_id = "offset-0x0100-memory-9"
+scenario = { highest_touched_offset = 256, initial_memory_words = 9 }
+target_raw_gas = 3
+reference_raw_gas_total = 5
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x53:offset-0x0400"
+case_id = "mstore8"
+key_id = "opcode:0x53"
+split = "dynamic_holdout"
+model_split = "fit"
+scenario_id = "offset-0x0400"
+scenario = { highest_touched_offset = 1024, initial_memory_words = 1 }
+target_raw_gas = 101
+reference_raw_gas_total = 5
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x53:offset-0x1000-memory-129"
+case_id = "mstore8"
+key_id = "opcode:0x53"
+split = "dynamic_holdout"
+model_split = "holdout"
+scenario_id = "offset-0x1000-memory-129"
+scenario = { highest_touched_offset = 4096, initial_memory_words = 129 }
+target_raw_gas = 3
+reference_raw_gas_total = 5
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x53:offset-0x0800"
+case_id = "mstore8"
+key_id = "opcode:0x53"
+split = "dynamic_holdout"
+model_split = "holdout"
+scenario_id = "offset-0x0800"
+scenario = { highest_touched_offset = 2048, initial_memory_words = 1 }
+target_raw_gas = 203
+reference_raw_gas_total = 5
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x53:offset-0x0fe0"
+case_id = "mstore8"
+key_id = "opcode:0x53"
+split = "dynamic_holdout"
+model_split = "holdout"
+scenario_id = "offset-0x0fe0"
+scenario = { highest_touched_offset = 4064, initial_memory_words = 1 }
+target_raw_gas = 416
+reference_raw_gas_total = 5
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x53:offset-0x2000"
+case_id = "mstore8"
+key_id = "opcode:0x53"
+split = "dynamic_holdout"
+model_split = "fit"
+scenario_id = "offset-0x2000"
+scenario = { highest_touched_offset = 8192, initial_memory_words = 1 }
+target_raw_gas = 900
+reference_raw_gas_total = 5
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x53:offset-0x4000"
+case_id = "mstore8"
+key_id = "opcode:0x53"
+split = "dynamic_holdout"
+model_split = "holdout"
+scenario_id = "offset-0x4000"
+scenario = { highest_touched_offset = 16384, initial_memory_words = 1 }
+target_raw_gas = 2053
+reference_raw_gas_total = 5
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x5e:copy-32"
+case_id = "mcopy"
+key_id = "opcode:0x5e"
+split = "canonical"
+model_split = "fit"
+scenario_id = "copy-32"
+scenario = { copy_length = 32, initial_memory_words = 1 }
+target_raw_gas = 6
+reference_raw_gas_total = 10
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x5e:copy-256-memory-8"
+case_id = "mcopy"
+key_id = "opcode:0x5e"
+split = "dynamic_holdout"
+model_split = "fit"
+scenario_id = "copy-256-memory-8"
+scenario = { copy_length = 256, initial_memory_words = 8 }
+target_raw_gas = 27
+reference_raw_gas_total = 10
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x5e:copy-1024-memory-32"
+case_id = "mcopy"
+key_id = "opcode:0x5e"
+split = "dynamic_holdout"
+model_split = "fit"
+scenario_id = "copy-1024-memory-32"
+scenario = { copy_length = 1024, initial_memory_words = 32 }
+target_raw_gas = 99
+reference_raw_gas_total = 10
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x5e:copy-256"
+case_id = "mcopy"
+key_id = "opcode:0x5e"
+split = "dynamic_holdout"
+model_split = "fit"
+scenario_id = "copy-256"
+scenario = { copy_length = 256, initial_memory_words = 1 }
+target_raw_gas = 48
+reference_raw_gas_total = 10
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x5e:copy-1024"
+case_id = "mcopy"
+key_id = "opcode:0x5e"
+split = "dynamic_holdout"
+model_split = "fit"
+scenario_id = "copy-1024"
+scenario = { copy_length = 1024, initial_memory_words = 1 }
+target_raw_gas = 194
+reference_raw_gas_total = 10
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x5e:copy-512-memory-16"
+case_id = "mcopy"
+key_id = "opcode:0x5e"
+split = "dynamic_holdout"
+model_split = "holdout"
+scenario_id = "copy-512-memory-16"
+scenario = { copy_length = 512, initial_memory_words = 16 }
+target_raw_gas = 51
+reference_raw_gas_total = 10
+
+[[opcode_relation_scenarios]]
+id = "opcode:0x5e:copy-512"
+case_id = "mcopy"
+key_id = "opcode:0x5e"
+split = "dynamic_holdout"
+model_split = "holdout"
+scenario_id = "copy-512"
+scenario = { copy_length = 512, initial_memory_words = 1 }
+target_raw_gas = 96
+reference_raw_gas_total = 10
+
+[[cases]]
+name = "add"
+kind = "opcode"
+opcode = "0x01"
+scenario = "arithmetic"
+execution_basis = "interpreter_raw_gas"
+template = "stack_binary"
+target_raw_gas = 3
+
+[[cases]]
+name = "mul"
+kind = "opcode"
+opcode = "0x02"
+scenario = "arithmetic"
+execution_basis = "interpreter_raw_gas"
+template = "stack_binary"
+target_raw_gas = 5
+
+[[cases]]
+name = "sub"
+kind = "opcode"
+opcode = "0x03"
+scenario = "arithmetic"
+execution_basis = "interpreter_raw_gas"
+template = "stack_binary"
+target_raw_gas = 3
+
+[[cases]]
+name = "div"
+kind = "opcode"
+opcode = "0x04"
+scenario = "arithmetic"
+execution_basis = "interpreter_raw_gas"
+template = "stack_binary"
+target_raw_gas = 5
+
+[[cases]]
+name = "sdiv"
+kind = "opcode"
+opcode = "0x05"
+scenario = "arithmetic"
+execution_basis = "interpreter_raw_gas"
+template = "stack_binary"
+target_raw_gas = 5
+
+[[cases]]
+name = "mod"
+kind = "opcode"
+opcode = "0x06"
+scenario = "arithmetic"
+execution_basis = "interpreter_raw_gas"
+template = "stack_binary"
+target_raw_gas = 5
+
+[[cases]]
+name = "smod"
+kind = "opcode"
+opcode = "0x07"
+scenario = "arithmetic"
+execution_basis = "interpreter_raw_gas"
+template = "stack_binary"
+target_raw_gas = 5
+
+[[cases]]
+name = "addmod"
+kind = "opcode"
+opcode = "0x08"
+scenario = "arithmetic"
+execution_basis = "interpreter_raw_gas"
+template = "stack_ternary"
+target_raw_gas = 8
+
+[[cases]]
+name = "mulmod"
+kind = "opcode"
+opcode = "0x09"
+scenario = "arithmetic"
+execution_basis = "interpreter_raw_gas"
+template = "stack_ternary"
+target_raw_gas = 8
+
+[[cases]]
+name = "exp"
+kind = "opcode"
+opcode = "0x0a"
+scenario = "arithmetic"
+execution_basis = "interpreter_raw_gas"
+template = "stack_exp"
+target_raw_gas = 60
+
+[[cases]]
+name = "signextend"
+kind = "opcode"
+opcode = "0x0b"
+scenario = "arithmetic"
+execution_basis = "interpreter_raw_gas"
+template = "stack_binary"
+target_raw_gas = 5
+
+[[cases]]
+name = "lt"
+kind = "opcode"
+opcode = "0x10"
+scenario = "comparison"
+execution_basis = "interpreter_raw_gas"
+template = "stack_binary"
+target_raw_gas = 3
+
+[[cases]]
+name = "gt"
+kind = "opcode"
+opcode = "0x11"
+scenario = "comparison"
+execution_basis = "interpreter_raw_gas"
+template = "stack_binary"
+target_raw_gas = 3
+
+[[cases]]
+name = "slt"
+kind = "opcode"
+opcode = "0x12"
+scenario = "comparison"
+execution_basis = "interpreter_raw_gas"
+template = "stack_binary"
+target_raw_gas = 3
+
+[[cases]]
+name = "sgt"
+kind = "opcode"
+opcode = "0x13"
+scenario = "comparison"
+execution_basis = "interpreter_raw_gas"
+template = "stack_binary"
+target_raw_gas = 3
+
+[[cases]]
+name = "eq"
+kind = "opcode"
+opcode = "0x14"
+scenario = "comparison"
+execution_basis = "interpreter_raw_gas"
+template = "stack_binary"
+target_raw_gas = 3
+
+[[cases]]
+name = "iszero"
+kind = "opcode"
+opcode = "0x15"
+scenario = "bitwise"
+execution_basis = "interpreter_raw_gas"
+template = "stack_unary"
+target_raw_gas = 3
+
+[[cases]]
+name = "and"
+kind = "opcode"
+opcode = "0x16"
+scenario = "bitwise"
+execution_basis = "interpreter_raw_gas"
+template = "stack_binary"
+target_raw_gas = 3
+
+[[cases]]
+name = "or"
+kind = "opcode"
+opcode = "0x17"
+scenario = "bitwise"
+execution_basis = "interpreter_raw_gas"
+template = "stack_binary"
+target_raw_gas = 3
+
+[[cases]]
+name = "xor"
+kind = "opcode"
+opcode = "0x18"
+scenario = "bitwise"
+execution_basis = "interpreter_raw_gas"
+template = "stack_binary"
+target_raw_gas = 3
+
+[[cases]]
+name = "not"
+kind = "opcode"
+opcode = "0x19"
+scenario = "bitwise"
+execution_basis = "interpreter_raw_gas"
+template = "stack_unary"
+target_raw_gas = 3
+
+[[cases]]
+name = "byte"
+kind = "opcode"
+opcode = "0x1a"
+scenario = "bitwise"
+execution_basis = "interpreter_raw_gas"
+template = "stack_binary"
+target_raw_gas = 3
+
+[[cases]]
+name = "shl"
+kind = "opcode"
+opcode = "0x1b"
+scenario = "bitwise"
+execution_basis = "interpreter_raw_gas"
+template = "stack_binary"
+target_raw_gas = 3
+
+[[cases]]
+name = "shr"
+kind = "opcode"
+opcode = "0x1c"
+scenario = "bitwise"
+execution_basis = "interpreter_raw_gas"
+template = "stack_binary"
+target_raw_gas = 3
+
+[[cases]]
+name = "sar"
+kind = "opcode"
+opcode = "0x1d"
+scenario = "bitwise"
+execution_basis = "interpreter_raw_gas"
+template = "stack_binary"
+target_raw_gas = 3
+
+[[cases]]
+name = "keccak256"
+kind = "opcode"
+opcode = "0x20"
+scenario = "memory"
+execution_basis = "interpreter_raw_gas"
+template = "keccak_32"
+target_raw_gas = 36
+
+[[cases]]
+name = "pop"
+kind = "opcode"
+opcode = "0x50"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_pop"
+target_raw_gas = 2
+
+[[cases]]
+name = "mload"
+kind = "opcode"
+opcode = "0x51"
+scenario = "memory"
+execution_basis = "interpreter_raw_gas"
+template = "memory_load_32"
+target_raw_gas = 3
+
+[[cases]]
+name = "mstore"
+kind = "opcode"
+opcode = "0x52"
+scenario = "memory"
+execution_basis = "interpreter_raw_gas"
+template = "memory_store_32"
+target_raw_gas = 3
+
+[[cases]]
+name = "mstore8"
+kind = "opcode"
+opcode = "0x53"
+scenario = "memory"
+execution_basis = "interpreter_raw_gas"
+template = "memory_store8"
+target_raw_gas = 3
+
+[[cases]]
+name = "jump"
+kind = "opcode"
+opcode = "0x56"
+scenario = "control"
+execution_basis = "interpreter_raw_gas"
+template = "jump_chain"
+target_raw_gas = 8
+
+[[cases]]
+name = "jumpi"
+kind = "opcode"
+opcode = "0x57"
+scenario = "control"
+execution_basis = "interpreter_raw_gas"
+template = "jumpi_chain"
+target_raw_gas = 10
+
+[[cases]]
+name = "pc"
+kind = "opcode"
+opcode = "0x58"
+scenario = "control"
+execution_basis = "interpreter_raw_gas"
+template = "stack_unary_producer"
+target_raw_gas = 2
+
+[[cases]]
+name = "msize"
+kind = "opcode"
+opcode = "0x59"
+scenario = "memory"
+execution_basis = "interpreter_raw_gas"
+template = "stack_unary_producer"
+target_raw_gas = 2
+
+[[cases]]
+name = "gas"
+kind = "opcode"
+opcode = "0x5a"
+scenario = "control"
+execution_basis = "interpreter_raw_gas"
+template = "stack_unary_producer"
+target_raw_gas = 2
+
+[[cases]]
+name = "jumpdest"
+kind = "opcode"
+opcode = "0x5b"
+scenario = "control"
+execution_basis = "interpreter_raw_gas"
+template = "jumpdest_chain"
+target_raw_gas = 1
+
+[[cases]]
+name = "mcopy"
+kind = "opcode"
+opcode = "0x5e"
+scenario = "memory"
+execution_basis = "interpreter_raw_gas"
+template = "memory_copy_32"
+target_raw_gas = 6
+
+[[cases]]
+name = "push0"
+kind = "opcode"
+opcode = "0x5f"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 2
+
+[[cases]]
+name = "push1"
+kind = "opcode"
+opcode = "0x60"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "push2"
+kind = "opcode"
+opcode = "0x61"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "push3"
+kind = "opcode"
+opcode = "0x62"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "push4"
+kind = "opcode"
+opcode = "0x63"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "push5"
+kind = "opcode"
+opcode = "0x64"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "push6"
+kind = "opcode"
+opcode = "0x65"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "push7"
+kind = "opcode"
+opcode = "0x66"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "push8"
+kind = "opcode"
+opcode = "0x67"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "push9"
+kind = "opcode"
+opcode = "0x68"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "push10"
+kind = "opcode"
+opcode = "0x69"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "push11"
+kind = "opcode"
+opcode = "0x6a"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "push12"
+kind = "opcode"
+opcode = "0x6b"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "push13"
+kind = "opcode"
+opcode = "0x6c"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "push14"
+kind = "opcode"
+opcode = "0x6d"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "push15"
+kind = "opcode"
+opcode = "0x6e"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "push16"
+kind = "opcode"
+opcode = "0x6f"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "push17"
+kind = "opcode"
+opcode = "0x70"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "push18"
+kind = "opcode"
+opcode = "0x71"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "push19"
+kind = "opcode"
+opcode = "0x72"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "push20"
+kind = "opcode"
+opcode = "0x73"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "push21"
+kind = "opcode"
+opcode = "0x74"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "push22"
+kind = "opcode"
+opcode = "0x75"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "push23"
+kind = "opcode"
+opcode = "0x76"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "push24"
+kind = "opcode"
+opcode = "0x77"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "push25"
+kind = "opcode"
+opcode = "0x78"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "push26"
+kind = "opcode"
+opcode = "0x79"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "push27"
+kind = "opcode"
+opcode = "0x7a"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "push28"
+kind = "opcode"
+opcode = "0x7b"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "push29"
+kind = "opcode"
+opcode = "0x7c"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "push30"
+kind = "opcode"
+opcode = "0x7d"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "push31"
+kind = "opcode"
+opcode = "0x7e"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "push32"
+kind = "opcode"
+opcode = "0x7f"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_push"
+target_raw_gas = 3
+
+[[cases]]
+name = "dup1"
+kind = "opcode"
+opcode = "0x80"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_dup"
+target_raw_gas = 3
+
+[[cases]]
+name = "dup2"
+kind = "opcode"
+opcode = "0x81"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_dup"
+target_raw_gas = 3
+
+[[cases]]
+name = "dup3"
+kind = "opcode"
+opcode = "0x82"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_dup"
+target_raw_gas = 3
+
+[[cases]]
+name = "dup4"
+kind = "opcode"
+opcode = "0x83"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_dup"
+target_raw_gas = 3
+
+[[cases]]
+name = "dup5"
+kind = "opcode"
+opcode = "0x84"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_dup"
+target_raw_gas = 3
+
+[[cases]]
+name = "dup6"
+kind = "opcode"
+opcode = "0x85"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_dup"
+target_raw_gas = 3
+
+[[cases]]
+name = "dup7"
+kind = "opcode"
+opcode = "0x86"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_dup"
+target_raw_gas = 3
+
+[[cases]]
+name = "dup8"
+kind = "opcode"
+opcode = "0x87"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_dup"
+target_raw_gas = 3
+
+[[cases]]
+name = "dup9"
+kind = "opcode"
+opcode = "0x88"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_dup"
+target_raw_gas = 3
+
+[[cases]]
+name = "dup10"
+kind = "opcode"
+opcode = "0x89"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_dup"
+target_raw_gas = 3
+
+[[cases]]
+name = "dup11"
+kind = "opcode"
+opcode = "0x8a"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_dup"
+target_raw_gas = 3
+
+[[cases]]
+name = "dup12"
+kind = "opcode"
+opcode = "0x8b"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_dup"
+target_raw_gas = 3
+
+[[cases]]
+name = "dup13"
+kind = "opcode"
+opcode = "0x8c"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_dup"
+target_raw_gas = 3
+
+[[cases]]
+name = "dup14"
+kind = "opcode"
+opcode = "0x8d"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_dup"
+target_raw_gas = 3
+
+[[cases]]
+name = "dup15"
+kind = "opcode"
+opcode = "0x8e"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_dup"
+target_raw_gas = 3
+
+[[cases]]
+name = "dup16"
+kind = "opcode"
+opcode = "0x8f"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_dup"
+target_raw_gas = 3
+
+[[cases]]
+name = "swap1"
+kind = "opcode"
+opcode = "0x90"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_swap"
+target_raw_gas = 3
+
+[[cases]]
+name = "swap2"
+kind = "opcode"
+opcode = "0x91"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_swap"
+target_raw_gas = 3
+
+[[cases]]
+name = "swap3"
+kind = "opcode"
+opcode = "0x92"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_swap"
+target_raw_gas = 3
+
+[[cases]]
+name = "swap4"
+kind = "opcode"
+opcode = "0x93"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_swap"
+target_raw_gas = 3
+
+[[cases]]
+name = "swap5"
+kind = "opcode"
+opcode = "0x94"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_swap"
+target_raw_gas = 3
+
+[[cases]]
+name = "swap6"
+kind = "opcode"
+opcode = "0x95"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_swap"
+target_raw_gas = 3
+
+[[cases]]
+name = "swap7"
+kind = "opcode"
+opcode = "0x96"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_swap"
+target_raw_gas = 3
+
+[[cases]]
+name = "swap8"
+kind = "opcode"
+opcode = "0x97"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_swap"
+target_raw_gas = 3
+
+[[cases]]
+name = "swap9"
+kind = "opcode"
+opcode = "0x98"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_swap"
+target_raw_gas = 3
+
+[[cases]]
+name = "swap10"
+kind = "opcode"
+opcode = "0x99"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_swap"
+target_raw_gas = 3
+
+[[cases]]
+name = "swap11"
+kind = "opcode"
+opcode = "0x9a"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_swap"
+target_raw_gas = 3
+
+[[cases]]
+name = "swap12"
+kind = "opcode"
+opcode = "0x9b"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_swap"
+target_raw_gas = 3
+
+[[cases]]
+name = "swap13"
+kind = "opcode"
+opcode = "0x9c"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_swap"
+target_raw_gas = 3
+
+[[cases]]
+name = "swap14"
+kind = "opcode"
+opcode = "0x9d"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_swap"
+target_raw_gas = 3
+
+[[cases]]
+name = "swap15"
+kind = "opcode"
+opcode = "0x9e"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_swap"
+target_raw_gas = 3
+
+[[cases]]
+name = "swap16"
+kind = "opcode"
+opcode = "0x9f"
+scenario = "stack"
+execution_basis = "interpreter_raw_gas"
+template = "stack_swap"
+target_raw_gas = 3
+
+[[cases]]
+name = "ecrecover"
+kind = "precompile"
+address = "0x01"
+scenario = "native_precompile_body"
+execution_basis = "native_gas"
+template = "precompile_ecrecover_valid"
+input_size = 128
+target_raw_gas = 3000
+paired = true
+expected_output_size = 32
+
+[[cases]]
+name = "sha256"
+kind = "precompile"
+address = "0x02"
+scenario = "native_precompile_body"
+execution_basis = "native_gas"
+template = "precompile_fixed_32"
+input_size = 32
+target_raw_gas = 72
+paired = true
+expected_output_size = 32
+
+[[cases]]
+name = "ripemd160"
+kind = "precompile"
+address = "0x03"
+scenario = "native_precompile_body"
+execution_basis = "native_gas"
+template = "precompile_fixed_32"
+input_size = 32
+target_raw_gas = 720
+paired = true
+expected_output_size = 32
+
+[[cases]]
+name = "identity"
+kind = "precompile"
+address = "0x04"
+scenario = "native_precompile_body"
+execution_basis = "native_gas"
+template = "precompile_fixed_32"
+input_size = 32
+target_raw_gas = 18
+paired = true
+expected_output_size = 32
+
+[[cases]]
+name = "modexp"
+kind = "precompile"
+address = "0x05"
+scenario = "native_precompile_body"
+execution_basis = "native_gas"
+template = "precompile_modexp_small"
+input_size = 99
+target_raw_gas = 500
+paired = true
+expected_output_size = 1
+
+[[cases]]
+name = "bn128_add"
+kind = "precompile"
+address = "0x06"
+scenario = "native_precompile_body"
+execution_basis = "native_gas"
+template = "precompile_bn254_add"
+input_size = 128
+target_raw_gas = 150
+paired = true
+expected_output_size = 64
+
+[[cases]]
+name = "bn128_mul"
+kind = "precompile"
+address = "0x07"
+scenario = "native_precompile_body"
+execution_basis = "native_gas"
+template = "precompile_bn254_mul"
+input_size = 96
+target_raw_gas = 6000
+paired = true
+expected_output_size = 64
+
+[[cases]]
+name = "bn128_pairing"
+kind = "precompile"
+address = "0x08"
+scenario = "native_precompile_body"
+execution_basis = "native_gas"
+template = "precompile_bn254_pairing"
+input_size = 192
+target_raw_gas = 79000
+paired = true
+expected_output_size = 32
+
+[[cases]]
+name = "blake2f"
+kind = "precompile"
+address = "0x09"
+scenario = "native_precompile_body"
+execution_basis = "native_gas"
+template = "precompile_blake2f_12_rounds"
+input_size = 213
+target_raw_gas = 12
+paired = true
+expected_output_size = 64
+
+[[cases]]
+name = "point_evaluation"
+kind = "precompile"
+address = "0x0a"
+scenario = "native_precompile_body"
+execution_basis = "native_gas"
+template = "precompile_kzg_point_evaluation"
+input_size = 192
+target_raw_gas = 50000
+paired = true
+expected_output_size = 64
+
+[[cases]]
+name = "bls12_g1add"
+kind = "precompile"
+address = "0x0b"
+scenario = "native_precompile_body"
+execution_basis = "native_gas"
+template = "precompile_bls12_g1add_zero"
+input_size = 256
+target_raw_gas = 375
+paired = true
+expected_output_size = 128
+
+[[cases]]
+name = "bls12_g1msm"
+kind = "precompile"
+address = "0x0c"
+scenario = "native_precompile_body"
+execution_basis = "native_gas"
+template = "precompile_bls12_g1msm_zero"
+input_size = 160
+target_raw_gas = 12000
+paired = true
+expected_output_size = 128
+
+[[cases]]
+name = "bls12_g2add"
+kind = "precompile"
+address = "0x0d"
+scenario = "native_precompile_body"
+execution_basis = "native_gas"
+template = "precompile_bls12_g2add_zero"
+input_size = 512
+target_raw_gas = 600
+paired = true
+expected_output_size = 256
+
+[[cases]]
+name = "bls12_g2msm"
+kind = "precompile"
+address = "0x0e"
+scenario = "native_precompile_body"
+execution_basis = "native_gas"
+template = "precompile_bls12_g2msm_zero"
+input_size = 288
+target_raw_gas = 22500
+paired = true
+expected_output_size = 256
+
+[[cases]]
+name = "bls12_pairing"
+kind = "precompile"
+address = "0x0f"
+scenario = "native_precompile_body"
+execution_basis = "native_gas"
+template = "precompile_bls12_pairing_zero"
+input_size = 384
+target_raw_gas = 70300
+paired = true
+expected_output_size = 32
+
+[[cases]]
+name = "bls12_map_fp_to_g1"
+kind = "precompile"
+address = "0x10"
+scenario = "native_precompile_body"
+execution_basis = "native_gas"
+template = "precompile_bls12_map_fp_to_g1_zero"
+input_size = 64
+target_raw_gas = 5500
+paired = true
+expected_output_size = 128
+
+[[cases]]
+name = "bls12_map_fp2_to_g2"
+kind = "precompile"
+address = "0x11"
+scenario = "native_precompile_body"
+execution_basis = "native_gas"
+template = "precompile_bls12_map_fp2_to_g2_zero"
+input_size = 128
+target_raw_gas = 23800
+paired = true
+expected_output_size = 256
+
+[[measurement_keys]]
+id = "opcode:0x01"
+production_schedule_key = "opcode:0x01"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["add"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x01" }
+
+[[measurement_keys]]
+id = "opcode:0x02"
+production_schedule_key = "opcode:0x02"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["mul"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x02" }
+
+[[measurement_keys]]
+id = "opcode:0x03"
+production_schedule_key = "opcode:0x03"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["sub"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x03" }
+
+[[measurement_keys]]
+id = "opcode:0x04"
+production_schedule_key = "opcode:0x04"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["div"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x04" }
+
+[[measurement_keys]]
+id = "opcode:0x05"
+production_schedule_key = "opcode:0x05"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["sdiv"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x05" }
+
+[[measurement_keys]]
+id = "opcode:0x06"
+production_schedule_key = "opcode:0x06"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["mod"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x06" }
+
+[[measurement_keys]]
+id = "opcode:0x07"
+production_schedule_key = "opcode:0x07"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["smod"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x07" }
+
+[[measurement_keys]]
+id = "opcode:0x08"
+production_schedule_key = "opcode:0x08"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["addmod"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x08" }
+
+[[measurement_keys]]
+id = "opcode:0x09"
+production_schedule_key = "opcode:0x09"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["mulmod"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x09" }
+
+[[measurement_keys]]
+id = "opcode:0x0a"
+production_schedule_key = "opcode:0x0a"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["exp"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x0a" }
+
+[[measurement_keys]]
+id = "opcode:0x0b"
+production_schedule_key = "opcode:0x0b"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["signextend"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x0b" }
+
+[[measurement_keys]]
+id = "opcode:0x10"
+production_schedule_key = "opcode:0x10"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["lt"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x10" }
+
+[[measurement_keys]]
+id = "opcode:0x11"
+production_schedule_key = "opcode:0x11"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["gt"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x11" }
+
+[[measurement_keys]]
+id = "opcode:0x12"
+production_schedule_key = "opcode:0x12"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["slt"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x12" }
+
+[[measurement_keys]]
+id = "opcode:0x13"
+production_schedule_key = "opcode:0x13"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["sgt"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x13" }
+
+[[measurement_keys]]
+id = "opcode:0x14"
+production_schedule_key = "opcode:0x14"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["eq"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x14" }
+
+[[measurement_keys]]
+id = "opcode:0x15"
+production_schedule_key = "opcode:0x15"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["iszero"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x15" }
+
+[[measurement_keys]]
+id = "opcode:0x16"
+production_schedule_key = "opcode:0x16"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["and"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x16" }
+
+[[measurement_keys]]
+id = "opcode:0x17"
+production_schedule_key = "opcode:0x17"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["or"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x17" }
+
+[[measurement_keys]]
+id = "opcode:0x18"
+production_schedule_key = "opcode:0x18"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["xor"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x18" }
+
+[[measurement_keys]]
+id = "opcode:0x19"
+production_schedule_key = "opcode:0x19"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["not"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x19" }
+
+[[measurement_keys]]
+id = "opcode:0x1a"
+production_schedule_key = "opcode:0x1a"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["byte"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x1a" }
+
+[[measurement_keys]]
+id = "opcode:0x1b"
+production_schedule_key = "opcode:0x1b"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["shl"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x1b" }
+
+[[measurement_keys]]
+id = "opcode:0x1c"
+production_schedule_key = "opcode:0x1c"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["shr"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x1c" }
+
+[[measurement_keys]]
+id = "opcode:0x1d"
+production_schedule_key = "opcode:0x1d"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["sar"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x1d" }
+
+[[measurement_keys]]
+id = "opcode:0x20"
+production_schedule_key = "opcode:0x20"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["keccak256"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x20" }
+
+[[measurement_keys]]
+id = "opcode:0x50"
+production_schedule_key = "opcode:0x50"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["pop"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x50" }
+
+[[measurement_keys]]
+id = "opcode:0x51"
+production_schedule_key = "opcode:0x51"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["mload"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x51" }
+
+[[measurement_keys]]
+id = "opcode:0x52"
+production_schedule_key = "opcode:0x52"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["mstore"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x52" }
+
+[[measurement_keys]]
+id = "opcode:0x53"
+production_schedule_key = "opcode:0x53"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["mstore8"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x53" }
+
+[[measurement_keys]]
+id = "opcode:0x56"
+production_schedule_key = "opcode:0x56"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["jump"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x56" }
+
+[[measurement_keys]]
+id = "opcode:0x57"
+production_schedule_key = "opcode:0x57"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["jumpi"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x57" }
+
+[[measurement_keys]]
+id = "opcode:0x58"
+production_schedule_key = "opcode:0x58"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["pc"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x58" }
+
+[[measurement_keys]]
+id = "opcode:0x59"
+production_schedule_key = "opcode:0x59"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["msize"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x59" }
+
+[[measurement_keys]]
+id = "opcode:0x5a"
+production_schedule_key = "opcode:0x5a"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["gas"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x5a" }
+
+[[measurement_keys]]
+id = "opcode:0x5b"
+production_schedule_key = "opcode:0x5b"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["jumpdest"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x5b" }
+
+[[measurement_keys]]
+id = "opcode:0x5e"
+production_schedule_key = "opcode:0x5e"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["mcopy"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x5e" }
+
+[[measurement_keys]]
+id = "opcode:0x5f"
+production_schedule_key = "opcode:0x5f"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push0"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x5f" }
+
+[[measurement_keys]]
+id = "opcode:0x60"
+production_schedule_key = "opcode:0x60"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push1"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x60" }
+
+[[measurement_keys]]
+id = "opcode:0x61"
+production_schedule_key = "opcode:0x61"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push2"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x61" }
+
+[[measurement_keys]]
+id = "opcode:0x62"
+production_schedule_key = "opcode:0x62"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push3"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x62" }
+
+[[measurement_keys]]
+id = "opcode:0x63"
+production_schedule_key = "opcode:0x63"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push4"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x63" }
+
+[[measurement_keys]]
+id = "opcode:0x64"
+production_schedule_key = "opcode:0x64"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push5"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x64" }
+
+[[measurement_keys]]
+id = "opcode:0x65"
+production_schedule_key = "opcode:0x65"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push6"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x65" }
+
+[[measurement_keys]]
+id = "opcode:0x66"
+production_schedule_key = "opcode:0x66"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push7"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x66" }
+
+[[measurement_keys]]
+id = "opcode:0x67"
+production_schedule_key = "opcode:0x67"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push8"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x67" }
+
+[[measurement_keys]]
+id = "opcode:0x68"
+production_schedule_key = "opcode:0x68"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push9"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x68" }
+
+[[measurement_keys]]
+id = "opcode:0x69"
+production_schedule_key = "opcode:0x69"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push10"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x69" }
+
+[[measurement_keys]]
+id = "opcode:0x6a"
+production_schedule_key = "opcode:0x6a"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push11"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x6a" }
+
+[[measurement_keys]]
+id = "opcode:0x6b"
+production_schedule_key = "opcode:0x6b"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push12"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x6b" }
+
+[[measurement_keys]]
+id = "opcode:0x6c"
+production_schedule_key = "opcode:0x6c"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push13"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x6c" }
+
+[[measurement_keys]]
+id = "opcode:0x6d"
+production_schedule_key = "opcode:0x6d"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push14"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x6d" }
+
+[[measurement_keys]]
+id = "opcode:0x6e"
+production_schedule_key = "opcode:0x6e"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push15"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x6e" }
+
+[[measurement_keys]]
+id = "opcode:0x6f"
+production_schedule_key = "opcode:0x6f"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push16"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x6f" }
+
+[[measurement_keys]]
+id = "opcode:0x70"
+production_schedule_key = "opcode:0x70"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push17"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x70" }
+
+[[measurement_keys]]
+id = "opcode:0x71"
+production_schedule_key = "opcode:0x71"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push18"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x71" }
+
+[[measurement_keys]]
+id = "opcode:0x72"
+production_schedule_key = "opcode:0x72"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push19"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x72" }
+
+[[measurement_keys]]
+id = "opcode:0x73"
+production_schedule_key = "opcode:0x73"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push20"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x73" }
+
+[[measurement_keys]]
+id = "opcode:0x74"
+production_schedule_key = "opcode:0x74"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push21"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x74" }
+
+[[measurement_keys]]
+id = "opcode:0x75"
+production_schedule_key = "opcode:0x75"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push22"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x75" }
+
+[[measurement_keys]]
+id = "opcode:0x76"
+production_schedule_key = "opcode:0x76"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push23"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x76" }
+
+[[measurement_keys]]
+id = "opcode:0x77"
+production_schedule_key = "opcode:0x77"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push24"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x77" }
+
+[[measurement_keys]]
+id = "opcode:0x78"
+production_schedule_key = "opcode:0x78"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push25"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x78" }
+
+[[measurement_keys]]
+id = "opcode:0x79"
+production_schedule_key = "opcode:0x79"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push26"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x79" }
+
+[[measurement_keys]]
+id = "opcode:0x7a"
+production_schedule_key = "opcode:0x7a"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push27"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x7a" }
+
+[[measurement_keys]]
+id = "opcode:0x7b"
+production_schedule_key = "opcode:0x7b"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push28"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x7b" }
+
+[[measurement_keys]]
+id = "opcode:0x7c"
+production_schedule_key = "opcode:0x7c"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push29"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x7c" }
+
+[[measurement_keys]]
+id = "opcode:0x7d"
+production_schedule_key = "opcode:0x7d"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push30"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x7d" }
+
+[[measurement_keys]]
+id = "opcode:0x7e"
+production_schedule_key = "opcode:0x7e"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push31"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x7e" }
+
+[[measurement_keys]]
+id = "opcode:0x7f"
+production_schedule_key = "opcode:0x7f"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["push32"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x7f" }
+
+[[measurement_keys]]
+id = "opcode:0x80"
+production_schedule_key = "opcode:0x80"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["dup1"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x80" }
+
+[[measurement_keys]]
+id = "opcode:0x81"
+production_schedule_key = "opcode:0x81"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["dup2"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x81" }
+
+[[measurement_keys]]
+id = "opcode:0x82"
+production_schedule_key = "opcode:0x82"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["dup3"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x82" }
+
+[[measurement_keys]]
+id = "opcode:0x83"
+production_schedule_key = "opcode:0x83"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["dup4"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x83" }
+
+[[measurement_keys]]
+id = "opcode:0x84"
+production_schedule_key = "opcode:0x84"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["dup5"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x84" }
+
+[[measurement_keys]]
+id = "opcode:0x85"
+production_schedule_key = "opcode:0x85"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["dup6"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x85" }
+
+[[measurement_keys]]
+id = "opcode:0x86"
+production_schedule_key = "opcode:0x86"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["dup7"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x86" }
+
+[[measurement_keys]]
+id = "opcode:0x87"
+production_schedule_key = "opcode:0x87"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["dup8"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x87" }
+
+[[measurement_keys]]
+id = "opcode:0x88"
+production_schedule_key = "opcode:0x88"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["dup9"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x88" }
+
+[[measurement_keys]]
+id = "opcode:0x89"
+production_schedule_key = "opcode:0x89"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["dup10"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x89" }
+
+[[measurement_keys]]
+id = "opcode:0x8a"
+production_schedule_key = "opcode:0x8a"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["dup11"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x8a" }
+
+[[measurement_keys]]
+id = "opcode:0x8b"
+production_schedule_key = "opcode:0x8b"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["dup12"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x8b" }
+
+[[measurement_keys]]
+id = "opcode:0x8c"
+production_schedule_key = "opcode:0x8c"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["dup13"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x8c" }
+
+[[measurement_keys]]
+id = "opcode:0x8d"
+production_schedule_key = "opcode:0x8d"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["dup14"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x8d" }
+
+[[measurement_keys]]
+id = "opcode:0x8e"
+production_schedule_key = "opcode:0x8e"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["dup15"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x8e" }
+
+[[measurement_keys]]
+id = "opcode:0x8f"
+production_schedule_key = "opcode:0x8f"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["dup16"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x8f" }
+
+[[measurement_keys]]
+id = "opcode:0x90"
+production_schedule_key = "opcode:0x90"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["swap1"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x90" }
+
+[[measurement_keys]]
+id = "opcode:0x91"
+production_schedule_key = "opcode:0x91"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["swap2"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x91" }
+
+[[measurement_keys]]
+id = "opcode:0x92"
+production_schedule_key = "opcode:0x92"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["swap3"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x92" }
+
+[[measurement_keys]]
+id = "opcode:0x93"
+production_schedule_key = "opcode:0x93"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["swap4"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x93" }
+
+[[measurement_keys]]
+id = "opcode:0x94"
+production_schedule_key = "opcode:0x94"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["swap5"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x94" }
+
+[[measurement_keys]]
+id = "opcode:0x95"
+production_schedule_key = "opcode:0x95"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["swap6"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x95" }
+
+[[measurement_keys]]
+id = "opcode:0x96"
+production_schedule_key = "opcode:0x96"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["swap7"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x96" }
+
+[[measurement_keys]]
+id = "opcode:0x97"
+production_schedule_key = "opcode:0x97"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["swap8"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x97" }
+
+[[measurement_keys]]
+id = "opcode:0x98"
+production_schedule_key = "opcode:0x98"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["swap9"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x98" }
+
+[[measurement_keys]]
+id = "opcode:0x99"
+production_schedule_key = "opcode:0x99"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["swap10"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x99" }
+
+[[measurement_keys]]
+id = "opcode:0x9a"
+production_schedule_key = "opcode:0x9a"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["swap11"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x9a" }
+
+[[measurement_keys]]
+id = "opcode:0x9b"
+production_schedule_key = "opcode:0x9b"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["swap12"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x9b" }
+
+[[measurement_keys]]
+id = "opcode:0x9c"
+production_schedule_key = "opcode:0x9c"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["swap13"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x9c" }
+
+[[measurement_keys]]
+id = "opcode:0x9d"
+production_schedule_key = "opcode:0x9d"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["swap14"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x9d" }
+
+[[measurement_keys]]
+id = "opcode:0x9e"
+production_schedule_key = "opcode:0x9e"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["swap15"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x9e" }
+
+[[measurement_keys]]
+id = "opcode:0x9f"
+production_schedule_key = "opcode:0x9f"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["swap16"]
+diagnostic_case_ids = []
+event_match = { component = "opcode", opcode = "0x9f" }
+
+[[measurement_keys]]
+id = "precompile:0x01"
+production_schedule_key = "precompile:0x01"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["ecrecover"]
+diagnostic_case_ids = []
+event_match = { component = "precompile", address = "0x01" }
+
+[[measurement_keys]]
+id = "precompile:0x02"
+production_schedule_key = "precompile:0x02"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["sha256"]
+diagnostic_case_ids = []
+event_match = { component = "precompile", address = "0x02" }
+
+[[measurement_keys]]
+id = "precompile:0x03"
+production_schedule_key = "precompile:0x03"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["ripemd160"]
+diagnostic_case_ids = []
+event_match = { component = "precompile", address = "0x03" }
+
+[[measurement_keys]]
+id = "precompile:0x04"
+production_schedule_key = "precompile:0x04"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["identity"]
+diagnostic_case_ids = []
+event_match = { component = "precompile", address = "0x04" }
+
+[[measurement_keys]]
+id = "precompile:0x05"
+production_schedule_key = "precompile:0x05"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["modexp"]
+diagnostic_case_ids = []
+event_match = { component = "precompile", address = "0x05" }
+
+[[measurement_keys]]
+id = "precompile:0x06"
+production_schedule_key = "precompile:0x06"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["bn128_add"]
+diagnostic_case_ids = []
+event_match = { component = "precompile", address = "0x06" }
+
+[[measurement_keys]]
+id = "precompile:0x07"
+production_schedule_key = "precompile:0x07"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["bn128_mul"]
+diagnostic_case_ids = []
+event_match = { component = "precompile", address = "0x07" }
+
+[[measurement_keys]]
+id = "precompile:0x08"
+production_schedule_key = "precompile:0x08"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["bn128_pairing"]
+diagnostic_case_ids = []
+event_match = { component = "precompile", address = "0x08" }
+
+[[measurement_keys]]
+id = "precompile:0x09"
+production_schedule_key = "precompile:0x09"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["blake2f"]
+diagnostic_case_ids = []
+event_match = { component = "precompile", address = "0x09" }
+
+[[measurement_keys]]
+id = "precompile:0x0a"
+production_schedule_key = "precompile:0x0a"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["point_evaluation"]
+diagnostic_case_ids = []
+event_match = { component = "precompile", address = "0x0a" }
+
+[[measurement_keys]]
+id = "precompile:0x0b"
+production_schedule_key = "precompile:0x0b"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["bls12_g1add"]
+diagnostic_case_ids = []
+event_match = { component = "precompile", address = "0x0b" }
+
+[[measurement_keys]]
+id = "precompile:0x0c"
+production_schedule_key = "precompile:0x0c"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["bls12_g1msm"]
+diagnostic_case_ids = []
+event_match = { component = "precompile", address = "0x0c" }
+
+[[measurement_keys]]
+id = "precompile:0x0d"
+production_schedule_key = "precompile:0x0d"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["bls12_g2add"]
+diagnostic_case_ids = []
+event_match = { component = "precompile", address = "0x0d" }
+
+[[measurement_keys]]
+id = "precompile:0x0e"
+production_schedule_key = "precompile:0x0e"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["bls12_g2msm"]
+diagnostic_case_ids = []
+event_match = { component = "precompile", address = "0x0e" }
+
+[[measurement_keys]]
+id = "precompile:0x0f"
+production_schedule_key = "precompile:0x0f"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["bls12_pairing"]
+diagnostic_case_ids = []
+event_match = { component = "precompile", address = "0x0f" }
+
+[[measurement_keys]]
+id = "precompile:0x10"
+production_schedule_key = "precompile:0x10"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["bls12_map_fp_to_g1"]
+diagnostic_case_ids = []
+event_match = { component = "precompile", address = "0x10" }
+
+[[measurement_keys]]
+id = "precompile:0x11"
+production_schedule_key = "precompile:0x11"
+pricing_basis = "raw_gas_slope"
+required_case_ids = ["bls12_map_fp2_to_g2"]
+diagnostic_case_ids = []
+event_match = { component = "precompile", address = "0x11" }
+
+[[overhead_keys]]
+id = "tx_base"
+unit = "started_non_anchor_transaction"
+formula_role = "required"
+subtract_keys = []
+bundled_keys = []
+bundled_ratios = {}
+required_case_ids = ["tx_base_no_code_no_value", "tx_base_minimal_contract_call"]
+diagnostic_case_ids = []
+
+[[overhead_keys]]
+id = "native_value_transfer"
+unit = "native_value_transfer"
+formula_role = "required"
+subtract_keys = ["tx_base"]
+bundled_keys = []
+bundled_ratios = {}
+required_case_ids = ["native_transfer_positive_vs_zero"]
+diagnostic_case_ids = []
+
+[[overhead_keys]]
+id = "block_base"
+unit = "block"
+formula_role = "required"
+subtract_keys = ["tx_base", "native_value_transfer"]
+bundled_keys = []
+bundled_ratios = {}
+required_case_ids = ["block_base_one_vs_two_minimal_blocks"]
+diagnostic_case_ids = []
+
+[[overhead_keys]]
+id = "proposal_startup"
+unit = "proposal"
+formula_role = "required"
+subtract_keys = ["block_base"]
+bundled_keys = []
+bundled_ratios = {}
+required_case_ids = ["startup_minimal_no_candidate_tx", "startup_minimal_one_no_code_tx"]
+diagnostic_case_ids = []
+
+[[overhead_keys]]
+id = "witness_byte"
+unit = "witness_byte"
+formula_role = "diagnostic"
+subtract_keys = []
+bundled_keys = []
+bundled_ratios = {}
+required_case_ids = []
+diagnostic_case_ids = ["witness_bytes"]
+
+[[overhead_keys]]
+id = "witness_node"
+unit = "witness_node"
+formula_role = "diagnostic"
+subtract_keys = []
+bundled_keys = []
+bundled_ratios = {}
+required_case_ids = []
+diagnostic_case_ids = ["witness_nodes"]
+
+[[overhead_keys]]
+id = "stdin_byte"
+unit = "stdin_byte"
+formula_role = "diagnostic"
+subtract_keys = []
+bundled_keys = []
+bundled_ratios = {}
+required_case_ids = []
+diagnostic_case_ids = ["stdin_bytes"]
+
+[[overhead_keys]]
+id = "blob_byte"
+unit = "blob_byte"
+formula_role = "diagnostic"
+subtract_keys = []
+bundled_keys = []
+bundled_ratios = {}
+required_case_ids = []
+diagnostic_case_ids = ["blob_bytes"]
+
+[[overhead_keys]]
+id = "kzg_invocation"
+unit = "kzg_invocation"
+formula_role = "diagnostic"
+subtract_keys = []
+bundled_keys = []
+bundled_ratios = {}
+required_case_ids = []
+diagnostic_case_ids = ["kzg_invocations"]
+
+[[overhead_keys]]
+id = "unique_state_access"
+unit = "unique_state_access"
+formula_role = "diagnostic"
+subtract_keys = []
+bundled_keys = []
+bundled_ratios = {}
+required_case_ids = []
+diagnostic_case_ids = ["unique_state_accesses"]
+
+[[overhead_keys]]
+id = "dirty_state_entry"
+unit = "dirty_state_entry"
+formula_role = "diagnostic"
+subtract_keys = []
+bundled_keys = []
+bundled_ratios = {}
+required_case_ids = []
+diagnostic_case_ids = ["dirty_state_entries"]
+
+[[overhead_cases]]
+name = "tx_base_no_code_no_value"
+overhead_key_id = "tx_base"
+target_template = "tx_no_code"
+control_template = "tx_absent"
+expected_changed_feature_keys = ["tx_base"]
+
+[[overhead_cases]]
+name = "tx_base_minimal_contract_call"
+overhead_key_id = "tx_base"
+target_template = "tx_minimal_contract_call"
+control_template = "tx_absent"
+expected_changed_feature_keys = ["tx_base"]
+
+[[overhead_cases]]
+name = "native_transfer_positive_vs_zero"
+overhead_key_id = "native_value_transfer"
+target_template = "native_value"
+control_template = "native_zero"
+expected_changed_feature_keys = ["native_value_transfer"]
+
+[[overhead_cases]]
+name = "block_base_one_vs_two_minimal_blocks"
+overhead_key_id = "block_base"
+target_template = "two_minimal_blocks"
+control_template = "one_minimal_block"
+expected_changed_feature_keys = ["block_base"]
+
+[[overhead_cases]]
+name = "startup_minimal_no_candidate_tx"
+overhead_key_id = "proposal_startup"
+target_template = "minimal_proposal_no_candidate_tx"
+control_template = "proposal_control"
+expected_changed_feature_keys = ["proposal_startup", "block_base"]
+
+[[overhead_cases]]
+name = "startup_minimal_one_no_code_tx"
+overhead_key_id = "proposal_startup"
+target_template = "minimal_proposal_one_no_code_tx"
+control_template = "proposal_control"
+expected_changed_feature_keys = ["proposal_startup", "block_base", "tx_base"]
+
+[[overhead_cases]]
+name = "witness_bytes"
+overhead_key_id = "witness_byte"
+target_template = "witness_bytes_target"
+control_template = "witness_bytes_control"
+expected_changed_feature_keys = ["witness_byte"]
+
+[[overhead_cases]]
+name = "witness_nodes"
+overhead_key_id = "witness_node"
+target_template = "witness_nodes_target"
+control_template = "witness_nodes_control"
+expected_changed_feature_keys = ["witness_node"]
+
+[[overhead_cases]]
+name = "stdin_bytes"
+overhead_key_id = "stdin_byte"
+target_template = "stdin_bytes_target"
+control_template = "stdin_bytes_control"
+expected_changed_feature_keys = ["stdin_byte"]
+
+[[overhead_cases]]
+name = "blob_bytes"
+overhead_key_id = "blob_byte"
+target_template = "blob_bytes_target"
+control_template = "blob_bytes_control"
+expected_changed_feature_keys = ["blob_byte"]
+
+[[overhead_cases]]
+name = "kzg_invocations"
+overhead_key_id = "kzg_invocation"
+target_template = "kzg_invocations_target"
+control_template = "kzg_invocations_control"
+expected_changed_feature_keys = ["kzg_invocation"]
+
+[[overhead_cases]]
+name = "unique_state_accesses"
+overhead_key_id = "unique_state_access"
+target_template = "unique_state_accesses_target"
+control_template = "unique_state_accesses_control"
+expected_changed_feature_keys = ["unique_state_access"]
+
+[[overhead_cases]]
+name = "dirty_state_entries"
+overhead_key_id = "dirty_state_entry"
+target_template = "dirty_state_entries_target"
+control_template = "dirty_state_entries_control"
+expected_changed_feature_keys = ["dirty_state_entry"]
+
+# Production-guest block calibration rows. Every expectation was materialized from the
+# production Shasta reconstruction trace before any SP1 execution.
+
+[[block_calibration_rows]]
+row_id = "101a611ebdba0c685eecf1c62f661d635d9e6ba470dc48b4403e83ab710afd9c"
+workload_family = "pop_family"
+split = "fit"
+block_count = 1
+transaction_count = 1
+program = { kind = "opcode_loop", family = "pop_family", count = 1, scenario = "push0_pop" }
+expected_final_state_root = "0xe0244879d78f6b8c11f5f1ce32b582b64aeef0e025238503063c24005c8ad8c4"
+expected_raw_gas_by_key = { "opcode:0x03" = 3, "opcode:0x15" = 6, "opcode:0x50" = 4, "opcode:0x56" = 8, "opcode:0x57" = 20, "opcode:0x5b" = 3, "opcode:0x60" = 15, "opcode:0x62" = 3, "opcode:0x80" = 6, "opcode:0x90" = 3 }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "cc63356968a408d08e772ab10b47b948008a3bf9a5206ef65cd72a0d490ccce0"
+workload_family = "pop_family"
+split = "fit"
+block_count = 1
+transaction_count = 1
+program = { kind = "opcode_loop", family = "pop_family", count = 2, scenario = "push0_pop" }
+expected_final_state_root = "0x552c4669e4ab0a2ce1cccf60983326035a5012e7ce8e3ff39de90f46d62195a6"
+expected_raw_gas_by_key = { "opcode:0x03" = 6, "opcode:0x15" = 9, "opcode:0x50" = 6, "opcode:0x56" = 16, "opcode:0x57" = 30, "opcode:0x5b" = 4, "opcode:0x60" = 27, "opcode:0x62" = 3, "opcode:0x80" = 9, "opcode:0x90" = 6 }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "7a7a0ce7a18147640b5e59be14c42dba38f433e5d252d5fe312d4abd0a81b183"
+workload_family = "pop_family"
+split = "fit"
+block_count = 1
+transaction_count = 1
+program = { kind = "opcode_loop", family = "pop_family", count = 4, scenario = "push0_pop" }
+expected_final_state_root = "0x14caf2958613f26e998a76cf58e0718502300e065066376443774481e3d32d3d"
+expected_raw_gas_by_key = { "opcode:0x03" = 12, "opcode:0x15" = 15, "opcode:0x50" = 10, "opcode:0x56" = 32, "opcode:0x57" = 50, "opcode:0x5b" = 6, "opcode:0x60" = 51, "opcode:0x62" = 3, "opcode:0x80" = 15, "opcode:0x90" = 12 }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "bc368d9174fb1f63a47a382809708686482dec5a8d991f4cabf2e624afba9844"
+workload_family = "pop_family"
+split = "fit"
+block_count = 1
+transaction_count = 1
+program = { kind = "opcode_loop", family = "pop_family", count = 8, scenario = "push0_pop" }
+expected_final_state_root = "0xe5aa0b095ed345526cacdba33895dc87e080be7f0785346570149c5008b23cee"
+expected_raw_gas_by_key = { "opcode:0x03" = 24, "opcode:0x15" = 27, "opcode:0x50" = 18, "opcode:0x56" = 64, "opcode:0x57" = 90, "opcode:0x5b" = 10, "opcode:0x60" = 99, "opcode:0x62" = 3, "opcode:0x80" = 27, "opcode:0x90" = 24 }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "51518de457b6e85ca60046e8e0f49975893fdbabb9ae067a5ff470e853c1b4cb"
+workload_family = "pop_family"
+split = "fit"
+block_count = 1
+transaction_count = 1
+program = { kind = "opcode_loop", family = "pop_family", count = 16, scenario = "push0_pop" }
+expected_final_state_root = "0xc2746b6465d80a1fab1bc6ab369ba21540796bd641a00c9132b20d69d3c06c6f"
+expected_raw_gas_by_key = { "opcode:0x03" = 48, "opcode:0x15" = 51, "opcode:0x50" = 34, "opcode:0x56" = 128, "opcode:0x57" = 170, "opcode:0x5b" = 18, "opcode:0x60" = 195, "opcode:0x62" = 3, "opcode:0x80" = 51, "opcode:0x90" = 48 }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "a53f1c61498d7480a52c14c51789bb8cdf7f51501c9eaa8dbc731b2fbcd37f5f"
+workload_family = "pop_family"
+split = "holdout"
+block_count = 1
+transaction_count = 1
+program = { kind = "opcode_loop", family = "pop_family", count = 32, scenario = "push0_pop" }
+expected_final_state_root = "0x89151360298672af85ffce246e47dee97c0dfebf493efb94a60e44f184c8ca9b"
+expected_raw_gas_by_key = { "opcode:0x03" = 96, "opcode:0x15" = 99, "opcode:0x50" = 66, "opcode:0x56" = 256, "opcode:0x57" = 330, "opcode:0x5b" = 34, "opcode:0x60" = 387, "opcode:0x62" = 3, "opcode:0x80" = 99, "opcode:0x90" = 96 }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "3bec7ed35259963dc0330d921249b087b9a1c16ffcccb5dd85b6a719e59ce8f4"
+workload_family = "push_family"
+split = "fit"
+block_count = 1
+transaction_count = 1
+program = { kind = "opcode_loop", family = "push_family", count = 1, scenario = "push0_stack" }
+expected_final_state_root = "0x7a1e7cdf3a26cd1b939e907ba0c75ce7e918eab84b23b91294f6f5f5fa6410b6"
+expected_raw_gas_by_key = { "opcode:0x03" = 3, "opcode:0x15" = 6, "opcode:0x50" = 2, "opcode:0x56" = 8, "opcode:0x57" = 20, "opcode:0x5b" = 3, "opcode:0x5f" = 2, "opcode:0x60" = 12, "opcode:0x62" = 3, "opcode:0x80" = 6, "opcode:0x90" = 6 }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "cf6c37b588a612e9079c3dc979628b5954831aac71e1c5fc79571c1c60d701a7"
+workload_family = "push_family"
+split = "fit"
+block_count = 1
+transaction_count = 1
+program = { kind = "opcode_loop", family = "push_family", count = 2, scenario = "push0_stack" }
+expected_final_state_root = "0x2d836832aec4a399a2571082ece4ca1b0953de49ba7861b04b83de10df47de94"
+expected_raw_gas_by_key = { "opcode:0x03" = 6, "opcode:0x15" = 9, "opcode:0x50" = 2, "opcode:0x56" = 16, "opcode:0x57" = 30, "opcode:0x5b" = 4, "opcode:0x5f" = 4, "opcode:0x60" = 21, "opcode:0x62" = 3, "opcode:0x80" = 9, "opcode:0x90" = 12 }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "56a7f7d9928da1464872f59f8c763b39dc1429fe14a8c787ffb2b02ace5226ff"
+workload_family = "push_family"
+split = "fit"
+block_count = 1
+transaction_count = 1
+program = { kind = "opcode_loop", family = "push_family", count = 4, scenario = "push0_stack" }
+expected_final_state_root = "0x981ed9058e413f0cfbf2e824f0c0d4f3bd38acf38479e32d5de01ad10277e3c2"
+expected_raw_gas_by_key = { "opcode:0x03" = 12, "opcode:0x15" = 15, "opcode:0x50" = 2, "opcode:0x56" = 32, "opcode:0x57" = 50, "opcode:0x5b" = 6, "opcode:0x5f" = 8, "opcode:0x60" = 39, "opcode:0x62" = 3, "opcode:0x80" = 15, "opcode:0x90" = 24 }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "b1dc616da4920b2001ce64d8fcd496cd594886f42a4b180cf8fc759b72804720"
+workload_family = "push_family"
+split = "fit"
+block_count = 1
+transaction_count = 1
+program = { kind = "opcode_loop", family = "push_family", count = 8, scenario = "push0_stack" }
+expected_final_state_root = "0x13c9bce71d321b698bcca9b3d9184345fb11487368cec45d59539c05b457a672"
+expected_raw_gas_by_key = { "opcode:0x03" = 24, "opcode:0x15" = 27, "opcode:0x50" = 2, "opcode:0x56" = 64, "opcode:0x57" = 90, "opcode:0x5b" = 10, "opcode:0x5f" = 16, "opcode:0x60" = 75, "opcode:0x62" = 3, "opcode:0x80" = 27, "opcode:0x90" = 48 }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "04c6d987b41fbf821e864c29279c3f6179139b6abeebd88494f48faafc391009"
+workload_family = "push_family"
+split = "fit"
+block_count = 1
+transaction_count = 1
+program = { kind = "opcode_loop", family = "push_family", count = 16, scenario = "push0_stack" }
+expected_final_state_root = "0x362a642d7f5a9f92d6b6a9b304dcf7147d30ddcafbae3e14be7844ea7b2a740a"
+expected_raw_gas_by_key = { "opcode:0x03" = 48, "opcode:0x15" = 51, "opcode:0x50" = 2, "opcode:0x56" = 128, "opcode:0x57" = 170, "opcode:0x5b" = 18, "opcode:0x5f" = 32, "opcode:0x60" = 147, "opcode:0x62" = 3, "opcode:0x80" = 51, "opcode:0x90" = 96 }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "b4326b6496efca20e717fc588fbd38c0a89d49f89003caa3ce5339dad2ca6991"
+workload_family = "push_family"
+split = "holdout"
+block_count = 1
+transaction_count = 1
+program = { kind = "opcode_loop", family = "push_family", count = 32, scenario = "push0_stack" }
+expected_final_state_root = "0xfa565744197235a6c8530a1fe0d8b10ac326718702eca28c3b2af25505e11363"
+expected_raw_gas_by_key = { "opcode:0x03" = 96, "opcode:0x15" = 99, "opcode:0x50" = 2, "opcode:0x56" = 256, "opcode:0x57" = 330, "opcode:0x5b" = 34, "opcode:0x5f" = 64, "opcode:0x60" = 291, "opcode:0x62" = 3, "opcode:0x80" = 99, "opcode:0x90" = 192 }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "c7c320bb44a4a0e3d2adff04de7bd9e1f64f6b909571a5ba1d4febdd1e04cb3b"
+workload_family = "dup_family"
+split = "fit"
+block_count = 1
+transaction_count = 1
+program = { kind = "opcode_loop", family = "dup_family", count = 1, scenario = "push0_dup1_then_pop" }
+expected_final_state_root = "0x4bf7d5c230077a4f8187b9e3314af5d6769621b6a2354e60252f6b76cb66aeec"
+expected_raw_gas_by_key = { "opcode:0x03" = 3, "opcode:0x15" = 6, "opcode:0x50" = 4, "opcode:0x56" = 8, "opcode:0x57" = 20, "opcode:0x5b" = 3, "opcode:0x60" = 12, "opcode:0x62" = 3, "opcode:0x80" = 9, "opcode:0x90" = 3 }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "7eff9df7f35d072eae028ee1c1f081e612ea519a8f3eb84421a8bf0895290bcb"
+workload_family = "dup_family"
+split = "fit"
+block_count = 1
+transaction_count = 1
+program = { kind = "opcode_loop", family = "dup_family", count = 2, scenario = "push0_dup1_then_pop" }
+expected_final_state_root = "0xcff74905faf5afccad926ff3c1f85b0ee3760f2b7dcd3160efa408e824c2d2ec"
+expected_raw_gas_by_key = { "opcode:0x03" = 6, "opcode:0x15" = 9, "opcode:0x50" = 6, "opcode:0x56" = 16, "opcode:0x57" = 30, "opcode:0x5b" = 4, "opcode:0x60" = 21, "opcode:0x62" = 3, "opcode:0x80" = 15, "opcode:0x90" = 6 }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "a049903e967f49718f527a72fca964eeae37466dc48d88d2b28cdbb53e4d55ca"
+workload_family = "dup_family"
+split = "fit"
+block_count = 1
+transaction_count = 1
+program = { kind = "opcode_loop", family = "dup_family", count = 4, scenario = "push0_dup1_then_pop" }
+expected_final_state_root = "0x04984708b4a2db14934f8c71e07eb5eb69dd7e15b9a3055db1529fc6bd0c5cf6"
+expected_raw_gas_by_key = { "opcode:0x03" = 12, "opcode:0x15" = 15, "opcode:0x50" = 10, "opcode:0x56" = 32, "opcode:0x57" = 50, "opcode:0x5b" = 6, "opcode:0x60" = 39, "opcode:0x62" = 3, "opcode:0x80" = 27, "opcode:0x90" = 12 }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "aa7ae9099d4aa82ff63f4e0022c3b126428a33f8b8859ba2354a03f36c31131d"
+workload_family = "dup_family"
+split = "fit"
+block_count = 1
+transaction_count = 1
+program = { kind = "opcode_loop", family = "dup_family", count = 8, scenario = "push0_dup1_then_pop" }
+expected_final_state_root = "0x885b5668adabe2fe4b574d8b1f771aa948e7d992b5a035bdbc791f715bcd7803"
+expected_raw_gas_by_key = { "opcode:0x03" = 24, "opcode:0x15" = 27, "opcode:0x50" = 18, "opcode:0x56" = 64, "opcode:0x57" = 90, "opcode:0x5b" = 10, "opcode:0x60" = 75, "opcode:0x62" = 3, "opcode:0x80" = 51, "opcode:0x90" = 24 }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "4b21627e8b3800118de0b4dad59570df519dcfc8e303833a42b46a1823ff0b3c"
+workload_family = "dup_family"
+split = "fit"
+block_count = 1
+transaction_count = 1
+program = { kind = "opcode_loop", family = "dup_family", count = 16, scenario = "push0_dup1_then_pop" }
+expected_final_state_root = "0x8a2775213155dc60ff7b45b00e48b0d606381146fdebf991dd2bfdcb017f2a2e"
+expected_raw_gas_by_key = { "opcode:0x03" = 48, "opcode:0x15" = 51, "opcode:0x50" = 34, "opcode:0x56" = 128, "opcode:0x57" = 170, "opcode:0x5b" = 18, "opcode:0x60" = 147, "opcode:0x62" = 3, "opcode:0x80" = 99, "opcode:0x90" = 48 }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "c53c36ccf2776c9f3aa299645f69d459bd1fe9afea43a2c55c772492930687a9"
+workload_family = "dup_family"
+split = "holdout"
+block_count = 1
+transaction_count = 1
+program = { kind = "opcode_loop", family = "dup_family", count = 32, scenario = "push0_dup1_then_pop" }
+expected_final_state_root = "0x21262cf28424882e608a1b61d3132ec86fc9c711c86c635eb43e862d8187ca00"
+expected_raw_gas_by_key = { "opcode:0x03" = 96, "opcode:0x15" = 99, "opcode:0x50" = 66, "opcode:0x56" = 256, "opcode:0x57" = 330, "opcode:0x5b" = 34, "opcode:0x60" = 291, "opcode:0x62" = 3, "opcode:0x80" = 195, "opcode:0x90" = 96 }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "f728947da508da85212c04c844f9c3c94b572b5ef03eb2fb0111718c92cd38e3"
+workload_family = "swap_family"
+split = "fit"
+block_count = 1
+transaction_count = 1
+program = { kind = "opcode_loop", family = "swap_family", count = 1, scenario = "push0_pair_swap1_then_pop" }
+expected_final_state_root = "0xaf0c6e9399ca41225029300b58fe17ee0fce92dd5b2379ea104d6520ead01834"
+expected_raw_gas_by_key = { "opcode:0x03" = 3, "opcode:0x15" = 6, "opcode:0x50" = 6, "opcode:0x56" = 8, "opcode:0x57" = 20, "opcode:0x5b" = 3, "opcode:0x5f" = 2, "opcode:0x60" = 12, "opcode:0x62" = 3, "opcode:0x80" = 9, "opcode:0x90" = 6 }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "15e231ef7c4633c7570a0276ae282701a97fcb60a74722ebfc5c33057f4f1ada"
+workload_family = "swap_family"
+split = "fit"
+block_count = 1
+transaction_count = 1
+program = { kind = "opcode_loop", family = "swap_family", count = 2, scenario = "push0_pair_swap1_then_pop" }
+expected_final_state_root = "0x53935801662b1908536478aad07897ade1ccbcd098fd02fb9ecdaa1373d7edba"
+expected_raw_gas_by_key = { "opcode:0x03" = 6, "opcode:0x15" = 9, "opcode:0x50" = 10, "opcode:0x56" = 16, "opcode:0x57" = 30, "opcode:0x5b" = 4, "opcode:0x5f" = 4, "opcode:0x60" = 21, "opcode:0x62" = 3, "opcode:0x80" = 15, "opcode:0x90" = 12 }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "f983286dd233ac45d8f21ac3906302f244b9c1c5f5bd25c35f1bbaa226be3a02"
+workload_family = "swap_family"
+split = "fit"
+block_count = 1
+transaction_count = 1
+program = { kind = "opcode_loop", family = "swap_family", count = 4, scenario = "push0_pair_swap1_then_pop" }
+expected_final_state_root = "0x929aec95630b61b8b39f82ab9719b809c7bc38a18ef8c5a3c1542d6da2188245"
+expected_raw_gas_by_key = { "opcode:0x03" = 12, "opcode:0x15" = 15, "opcode:0x50" = 18, "opcode:0x56" = 32, "opcode:0x57" = 50, "opcode:0x5b" = 6, "opcode:0x5f" = 8, "opcode:0x60" = 39, "opcode:0x62" = 3, "opcode:0x80" = 27, "opcode:0x90" = 24 }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "64c8160d77f44794240646301753d978200191f77f8c1427c14bcaa752a6b93e"
+workload_family = "swap_family"
+split = "fit"
+block_count = 1
+transaction_count = 1
+program = { kind = "opcode_loop", family = "swap_family", count = 8, scenario = "push0_pair_swap1_then_pop" }
+expected_final_state_root = "0x544487b84f3d8febe1fc5db408619e93acc1ef090a90c06094c876a8c72bac95"
+expected_raw_gas_by_key = { "opcode:0x03" = 24, "opcode:0x15" = 27, "opcode:0x50" = 34, "opcode:0x56" = 64, "opcode:0x57" = 90, "opcode:0x5b" = 10, "opcode:0x5f" = 16, "opcode:0x60" = 75, "opcode:0x62" = 3, "opcode:0x80" = 51, "opcode:0x90" = 48 }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "4052c37774f6efd79eeb06d2cc3a08de265cb8f63379aa28bf2b0bb1e6808fe9"
+workload_family = "swap_family"
+split = "fit"
+block_count = 1
+transaction_count = 1
+program = { kind = "opcode_loop", family = "swap_family", count = 16, scenario = "push0_pair_swap1_then_pop" }
+expected_final_state_root = "0xa3e650dca75d0fd0745552ca79adcadf5ee645c801ef070693cb64f67e4388c6"
+expected_raw_gas_by_key = { "opcode:0x03" = 48, "opcode:0x15" = 51, "opcode:0x50" = 66, "opcode:0x56" = 128, "opcode:0x57" = 170, "opcode:0x5b" = 18, "opcode:0x5f" = 32, "opcode:0x60" = 147, "opcode:0x62" = 3, "opcode:0x80" = 99, "opcode:0x90" = 96 }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "89b731ed4772e107ed9bc622525515a608cdfc79533a3790650da312f57a1360"
+workload_family = "swap_family"
+split = "holdout"
+block_count = 1
+transaction_count = 1
+program = { kind = "opcode_loop", family = "swap_family", count = 32, scenario = "push0_pair_swap1_then_pop" }
+expected_final_state_root = "0x63d6f7f3ac06fef3ad6f7f4734b61a4df8751dacc97637ab6610bcd73d092400"
+expected_raw_gas_by_key = { "opcode:0x03" = 96, "opcode:0x15" = 99, "opcode:0x50" = 130, "opcode:0x56" = 256, "opcode:0x57" = 330, "opcode:0x5b" = 34, "opcode:0x5f" = 64, "opcode:0x60" = 291, "opcode:0x62" = 3, "opcode:0x80" = 195, "opcode:0x90" = 192 }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "846c9140b7cefacfef7312f79175d5cc883d08d5c5866ab99f7420c0884676d7"
+workload_family = "block_base"
+split = "fit"
+block_count = 1
+transaction_count = 0
+program = { kind = "empty" }
+expected_final_state_root = "0x1b80f5db83bf61df48fb29054f54a40c1d530ac98931e77a76dd4f5514cd9d4c"
+expected_raw_gas_by_key = {  }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 0 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 0, "calldata_length" = 0, "guest_input_bincode_length" = 331684, "kzg_invocation_count" = 1, "touched_state_key_count" = 7, "witness_byte_count" = 297, "witness_node_count" = 3 }
+
+[[block_calibration_rows]]
+row_id = "fdd035e8db75e1ee27cb6be7e4b82e15c81fe7a3a4b6747fc436dd046d4c26e8"
+workload_family = "block_base"
+split = "fit"
+block_count = 2
+transaction_count = 0
+program = { kind = "empty" }
+expected_final_state_root = "0x32224aa8d23b0826af006b770e7e06ee46ae12d396c4061ba9bcf5a73073838e"
+expected_raw_gas_by_key = {  }
+expected_features = { "block_base" = 2, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 0 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 0, "calldata_length" = 0, "guest_input_bincode_length" = 341404, "kzg_invocation_count" = 1, "touched_state_key_count" = 8, "witness_byte_count" = 1088, "witness_node_count" = 12 }
+
+[[block_calibration_rows]]
+row_id = "2fd1883bf9f596e250328def8de0ff36b8a03795ba11acaaecbb41dff580c9ed"
+workload_family = "block_base"
+split = "fit"
+block_count = 4
+transaction_count = 0
+program = { kind = "empty" }
+expected_final_state_root = "0xf9f783b217545443dc517c33603b3c2ef7dbf73141f4d7b411e7cdb66e09b141"
+expected_raw_gas_by_key = {  }
+expected_features = { "block_base" = 4, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 0 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 0, "calldata_length" = 0, "guest_input_bincode_length" = 360806, "kzg_invocation_count" = 1, "touched_state_key_count" = 10, "witness_byte_count" = 3024, "witness_node_count" = 34 }
+
+[[block_calibration_rows]]
+row_id = "fd1c7a4547d90a12c6367dd8feb2f2e836ceee52710407a46181a84216792dad"
+workload_family = "block_base"
+split = "fit"
+block_count = 8
+transaction_count = 0
+program = { kind = "empty" }
+expected_final_state_root = "0x675ac0ab42829efe7c917ca52b5eefb35ddff8179e11bf067e552ecbb2494d38"
+expected_raw_gas_by_key = {  }
+expected_features = { "block_base" = 8, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 0 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 0, "calldata_length" = 0, "guest_input_bincode_length" = 399950, "kzg_invocation_count" = 1, "touched_state_key_count" = 14, "witness_byte_count" = 8363, "witness_node_count" = 95 }
+
+[[block_calibration_rows]]
+row_id = "de329230ec660e88bb79c9ac12a2798a66c86bf0c83c5c8be648b426cddd86db"
+workload_family = "block_base"
+split = "fit"
+block_count = 16
+transaction_count = 0
+program = { kind = "empty" }
+expected_final_state_root = "0x81f1de26b46f8d6d62c23b5bf0af80d9bbed4763efb47ace3b26163c971dc033"
+expected_raw_gas_by_key = {  }
+expected_features = { "block_base" = 16, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 0 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 0, "calldata_length" = 0, "guest_input_bincode_length" = 479968, "kzg_invocation_count" = 1, "touched_state_key_count" = 22, "witness_byte_count" = 25169, "witness_node_count" = 290 }
+
+[[block_calibration_rows]]
+row_id = "23c1262027943ffdaafe2d6f0e8d2aca82e97dcf97c98905a1fc06b19407eb9b"
+workload_family = "block_base"
+split = "holdout"
+block_count = 32
+transaction_count = 0
+program = { kind = "empty" }
+expected_final_state_root = "0x546ca4f36961ce52dfbc06be73609560a04a3d5f0ffe77fa4983a4a3469eda26"
+expected_raw_gas_by_key = {  }
+expected_features = { "block_base" = 32, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 0 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 0, "calldata_length" = 0, "guest_input_bincode_length" = 644300, "kzg_invocation_count" = 1, "touched_state_key_count" = 38, "witness_byte_count" = 80778, "witness_node_count" = 923 }
+
+[[block_calibration_rows]]
+row_id = "23f82df50ab24888854162be3e17a9c180298e5ee626ccbb0fed9cb73e0ef2ed"
+workload_family = "tx_base"
+split = "fit"
+block_count = 1
+transaction_count = 1
+program = { kind = "native_transfer", value = 0 }
+expected_final_state_root = "0x26b4bf938b387230843558f1d4d0ee2e7f0a1a1e564b5957fd3753f6ebf1277a"
+expected_raw_gas_by_key = {  }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 0, "calldata_length" = 0, "guest_input_bincode_length" = 332417, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "c27d479fa3dbc37ecd6195546e5abc8f4af2fb01d97e055e1162db8589c4ef20"
+workload_family = "tx_base"
+split = "fit"
+block_count = 1
+transaction_count = 2
+program = { kind = "native_transfer", value = 0 }
+expected_final_state_root = "0x954ef7430c4399eb8707744375aef998e53f8433da22d517e8ee792ac7ddf9fa"
+expected_raw_gas_by_key = {  }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 2 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 0, "calldata_length" = 0, "guest_input_bincode_length" = 332658, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "eb8f8cf5a3a40f2da79ded1530f6af5328b8e1d3ca29ff44f28c6632e503248f"
+workload_family = "tx_base"
+split = "fit"
+block_count = 1
+transaction_count = 4
+program = { kind = "native_transfer", value = 0 }
+expected_final_state_root = "0x0cb919b03f09acfbb150aad3953f24a851e0e4893f6901f2ff145bb2bf8f59b8"
+expected_raw_gas_by_key = {  }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 4 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 0, "calldata_length" = 0, "guest_input_bincode_length" = 333140, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "b660057a12404f3971247cddc06094d242f9f89dc7d6035707efef18ad71ea11"
+workload_family = "tx_base"
+split = "fit"
+block_count = 1
+transaction_count = 8
+program = { kind = "native_transfer", value = 0 }
+expected_final_state_root = "0x960b8478a697b87c54c9ec95d8c0e95b6859447159577ce0f94d4bbc3b7312b5"
+expected_raw_gas_by_key = {  }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 8 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 0, "calldata_length" = 0, "guest_input_bincode_length" = 334104, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "f611adff6c480e862cd3beede2d835450b42d8c1b503dea783c611926ec2b8da"
+workload_family = "tx_base"
+split = "fit"
+block_count = 1
+transaction_count = 16
+program = { kind = "native_transfer", value = 0 }
+expected_final_state_root = "0x1edf06b970de9e8bad7077cb68456fdf51de30570c57e61a3bc431cb2c2faa48"
+expected_raw_gas_by_key = {  }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 16 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 0, "calldata_length" = 0, "guest_input_bincode_length" = 336032, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "421a31e1d0528d853391b5ef02b87edf4b148f5262c9847e7ea6629e66619356"
+workload_family = "tx_base"
+split = "holdout"
+block_count = 1
+transaction_count = 32
+program = { kind = "native_transfer", value = 0 }
+expected_final_state_root = "0xfae61d41be4d9b9d6de310b0b1a979ff65e6dee306d5004105eda1df90e1f99c"
+expected_raw_gas_by_key = {  }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 32 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 0, "calldata_length" = 0, "guest_input_bincode_length" = 339888, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "9d389418f23f4ea4cfca8afdfd0a95cc974d53d3a723658a4c79339bd275a41e"
+workload_family = "native_value_transfer"
+split = "fit"
+block_count = 1
+transaction_count = 1
+program = { kind = "native_transfer", value = 1 }
+expected_final_state_root = "0x046e6d9cb36d0d3032ceb4cb96d02a33e2e4f30b9d4a5c75a6dbdc6fedf4725c"
+expected_raw_gas_by_key = {  }
+expected_features = { "block_base" = 1, "native_value_transfer" = 1, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 0, "calldata_length" = 0, "guest_input_bincode_length" = 332417, "kzg_invocation_count" = 1, "touched_state_key_count" = 10, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "4eb5d8dc509f5df712809b64296bb02a7efc1cc3e937f4b3bde43b6116c423ef"
+workload_family = "native_value_transfer"
+split = "fit"
+block_count = 1
+transaction_count = 2
+program = { kind = "native_transfer", value = 1 }
+expected_final_state_root = "0x62722a8300267522af2ff2823a567bac0d678f5457f3ae619e28761f0563a9ae"
+expected_raw_gas_by_key = {  }
+expected_features = { "block_base" = 1, "native_value_transfer" = 2, "proposal_startup" = 1, "tx_base" = 2 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 0, "calldata_length" = 0, "guest_input_bincode_length" = 332658, "kzg_invocation_count" = 1, "touched_state_key_count" = 10, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "6aeafb0d1c9b8658c5b957c603963e01a8591a13c09db35970aa0849d2251c8f"
+workload_family = "native_value_transfer"
+split = "fit"
+block_count = 1
+transaction_count = 4
+program = { kind = "native_transfer", value = 1 }
+expected_final_state_root = "0xcc3494d9f589b25a7c546c8afac0439e3de538912d3a27c489ac22d2fd11fd30"
+expected_raw_gas_by_key = {  }
+expected_features = { "block_base" = 1, "native_value_transfer" = 4, "proposal_startup" = 1, "tx_base" = 4 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 0, "calldata_length" = 0, "guest_input_bincode_length" = 333140, "kzg_invocation_count" = 1, "touched_state_key_count" = 10, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "0e78b2774a1b24f3eb431aebf1fb9a5359698deeb0e1fc50a1d5359cf4386429"
+workload_family = "native_value_transfer"
+split = "fit"
+block_count = 1
+transaction_count = 8
+program = { kind = "native_transfer", value = 1 }
+expected_final_state_root = "0xa4210e4f3959fe70505792607e4c3be71c7f1fe87cb7d36a074ca04b1080ed7a"
+expected_raw_gas_by_key = {  }
+expected_features = { "block_base" = 1, "native_value_transfer" = 8, "proposal_startup" = 1, "tx_base" = 8 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 0, "calldata_length" = 0, "guest_input_bincode_length" = 334104, "kzg_invocation_count" = 1, "touched_state_key_count" = 10, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "d32a3b0e42bddc320cbcf085aa1d35b22ea2d8f9f072047fcda70372eebfb6e3"
+workload_family = "native_value_transfer"
+split = "fit"
+block_count = 1
+transaction_count = 16
+program = { kind = "native_transfer", value = 1 }
+expected_final_state_root = "0x85552929334444d64e0b3f0c97222dacceb99761eccea4468d96c2f225d50ee8"
+expected_raw_gas_by_key = {  }
+expected_features = { "block_base" = 1, "native_value_transfer" = 16, "proposal_startup" = 1, "tx_base" = 16 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 0, "calldata_length" = 0, "guest_input_bincode_length" = 336032, "kzg_invocation_count" = 1, "touched_state_key_count" = 10, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "96433801a16907c1ed456b430f7fab8382b72332086ffa1e1093552005154ac9"
+workload_family = "native_value_transfer"
+split = "holdout"
+block_count = 1
+transaction_count = 32
+program = { kind = "native_transfer", value = 1 }
+expected_final_state_root = "0x4f7c49ad4bbcca15e5b5129cfafd2ab9159d936f6f21de6f59f54a9f90e17efb"
+expected_raw_gas_by_key = {  }
+expected_features = { "block_base" = 1, "native_value_transfer" = 32, "proposal_startup" = 1, "tx_base" = 32 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 0, "calldata_length" = 0, "guest_input_bincode_length" = 339888, "kzg_invocation_count" = 1, "touched_state_key_count" = 10, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "329b8385684cdfaa96ff0b152c6bfa89211ca9e316d3086931feda545c8d2e9b"
+workload_family = "proposal_startup"
+split = "fit"
+block_count = 1
+transaction_count = 0
+program = { kind = "empty" }
+expected_final_state_root = "0x1b80f5db83bf61df48fb29054f54a40c1d530ac98931e77a76dd4f5514cd9d4c"
+expected_raw_gas_by_key = {  }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 0 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 0, "calldata_length" = 0, "guest_input_bincode_length" = 331684, "kzg_invocation_count" = 1, "touched_state_key_count" = 7, "witness_byte_count" = 297, "witness_node_count" = 3 }
+
+[[block_calibration_rows]]
+row_id = "0a2a94610311aa66333eba4b241b17cbdeb8ecb84173b57a16f36d042926cab7"
+workload_family = "proposal_startup"
+split = "fit"
+block_count = 2
+transaction_count = 0
+program = { kind = "empty" }
+expected_final_state_root = "0x32224aa8d23b0826af006b770e7e06ee46ae12d396c4061ba9bcf5a73073838e"
+expected_raw_gas_by_key = {  }
+expected_features = { "block_base" = 2, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 0 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 0, "calldata_length" = 0, "guest_input_bincode_length" = 341404, "kzg_invocation_count" = 1, "touched_state_key_count" = 8, "witness_byte_count" = 1088, "witness_node_count" = 12 }
+
+[[block_calibration_rows]]
+row_id = "a261d17c367dfd471f478d2c5902d5300d8bf01b32c61126af6894c406b9a904"
+workload_family = "proposal_startup"
+split = "fit"
+block_count = 1
+transaction_count = 1
+program = { kind = "opcode_loop", family = "push_family", count = 1, scenario = "push0_stack" }
+expected_final_state_root = "0x7a1e7cdf3a26cd1b939e907ba0c75ce7e918eab84b23b91294f6f5f5fa6410b6"
+expected_raw_gas_by_key = { "opcode:0x03" = 3, "opcode:0x15" = 6, "opcode:0x50" = 2, "opcode:0x56" = 8, "opcode:0x57" = 20, "opcode:0x5b" = 3, "opcode:0x5f" = 2, "opcode:0x60" = 12, "opcode:0x62" = 3, "opcode:0x80" = 6, "opcode:0x90" = 6 }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "7aaef8ea8f437beb424a40d69ad2ef9e6bef01b6d333875ea1e3293356b512f9"
+workload_family = "proposal_startup"
+split = "fit"
+block_count = 1
+transaction_count = 1
+program = { kind = "native_transfer", value = 1 }
+expected_final_state_root = "0x046e6d9cb36d0d3032ceb4cb96d02a33e2e4f30b9d4a5c75a6dbdc6fedf4725c"
+expected_raw_gas_by_key = {  }
+expected_features = { "block_base" = 1, "native_value_transfer" = 1, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 0, "calldata_length" = 0, "guest_input_bincode_length" = 332417, "kzg_invocation_count" = 1, "touched_state_key_count" = 10, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "478cd539e36cfb7d4d4f43fb45474108c21f8929ac6e9ac83524da6e50cfa509"
+workload_family = "proposal_startup"
+split = "fit"
+block_count = 1
+transaction_count = 1
+program = { kind = "opcode_loop", family = "pop_family", count = 1, scenario = "push0_pop" }
+expected_final_state_root = "0xe0244879d78f6b8c11f5f1ce32b582b64aeef0e025238503063c24005c8ad8c4"
+expected_raw_gas_by_key = { "opcode:0x03" = 3, "opcode:0x15" = 6, "opcode:0x50" = 4, "opcode:0x56" = 8, "opcode:0x57" = 20, "opcode:0x5b" = 3, "opcode:0x60" = 15, "opcode:0x62" = 3, "opcode:0x80" = 6, "opcode:0x90" = 3 }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[block_calibration_rows]]
+row_id = "b976a5a236090582e69f4eeb01028ac1100b08bb297011df51d091090c8f237f"
+workload_family = "proposal_startup"
+split = "holdout"
+block_count = 2
+transaction_count = 1
+program = { kind = "opcode_loop", family = "dup_family", count = 2, scenario = "push0_dup1_then_pop" }
+expected_final_state_root = "0x887e05cfb38bcea356262f5f79ba88407d85f502ee87ebcfe88935bfca07ae2c"
+expected_raw_gas_by_key = { "opcode:0x03" = 6, "opcode:0x15" = 9, "opcode:0x50" = 6, "opcode:0x56" = 16, "opcode:0x57" = 30, "opcode:0x5b" = 4, "opcode:0x60" = 21, "opcode:0x62" = 3, "opcode:0x80" = 15, "opcode:0x90" = 6 }
+expected_features = { "block_base" = 2, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 343002, "kzg_invocation_count" = 1, "touched_state_key_count" = 10, "witness_byte_count" = 1760, "witness_node_count" = 18 }
+
+[[static_count_control_rows]]
+row_id = "13c72b3001f7deaa648e2d115063eb543b8af64267a1d4d912fea51c6e28211c"
+workload_family = "static_count_control"
+split = "diagnostic"
+block_count = 1
+transaction_count = 1
+program = { kind = "opcode_loop", family = "static_count_control", count = 1, scenario = "push3_pop_fixed_pop" }
+expected_final_state_root = "0x862fd1dba9907ea2e145366635e2ef24c9e1f9ec4bf11552c6990e608f433b2f"
+expected_raw_gas_by_key = { "opcode:0x50" = 4, "opcode:0x60" = 3, "opcode:0x62" = 3 }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[static_count_control_rows]]
+row_id = "1abd2ade5de8280f5772906ea9aceee282a308a4d3d233ce5ae36ce33677f946"
+workload_family = "static_count_control"
+split = "diagnostic"
+block_count = 1
+transaction_count = 1
+program = { kind = "opcode_loop", family = "static_count_control", count = 2, scenario = "push3_pop_fixed_pop" }
+expected_final_state_root = "0xcf15d0a6df6e911ebabfd04482f38a64ee379ad7f0299d2ed3fddf54e94b6e37"
+expected_raw_gas_by_key = { "opcode:0x50" = 4, "opcode:0x60" = 3, "opcode:0x62" = 3 }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[static_count_control_rows]]
+row_id = "ad8925c0e0bedb22276f4afc500f85716dffecdb084d01e36ad41cbcb387f88b"
+workload_family = "static_count_control"
+split = "diagnostic"
+block_count = 1
+transaction_count = 1
+program = { kind = "opcode_loop", family = "static_count_control", count = 4, scenario = "push3_pop_fixed_pop" }
+expected_final_state_root = "0xd08048e00e728688f50c6a801749d9207af32d80c5a2142d1ec2c0cee6d78617"
+expected_raw_gas_by_key = { "opcode:0x50" = 4, "opcode:0x60" = 3, "opcode:0x62" = 3 }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[static_count_control_rows]]
+row_id = "f619e598a81c4cb58c2b01ea32ea3921abfbb488052f2d6d9bb10e14e2abe566"
+workload_family = "static_count_control"
+split = "diagnostic"
+block_count = 1
+transaction_count = 1
+program = { kind = "opcode_loop", family = "static_count_control", count = 8, scenario = "push3_pop_fixed_pop" }
+expected_final_state_root = "0x341c65a1687f3835d8fdbcc6e298abe779332dc5e17188ab965cca5ead51ce7f"
+expected_raw_gas_by_key = { "opcode:0x50" = 4, "opcode:0x60" = 3, "opcode:0x62" = 3 }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[static_count_control_rows]]
+row_id = "ba1c1eaf8a7f82a5b94c2fbf5043959e466f15d78126f70952b7053123c59100"
+workload_family = "static_count_control"
+split = "diagnostic"
+block_count = 1
+transaction_count = 1
+program = { kind = "opcode_loop", family = "static_count_control", count = 16, scenario = "push3_pop_fixed_pop" }
+expected_final_state_root = "0xc6354dd7476c3b4b2dfec5108bc9ffd2f38f24c6c001b8243703b533e9ab25e0"
+expected_raw_gas_by_key = { "opcode:0x50" = 4, "opcode:0x60" = 3, "opcode:0x62" = 3 }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }
+
+[[static_count_control_rows]]
+row_id = "0269f40c3fc3d2ba773a1bae17f35d0286778bbb7bce87dba577231a5bcfcffc"
+workload_family = "static_count_control"
+split = "diagnostic"
+block_count = 1
+transaction_count = 1
+program = { kind = "opcode_loop", family = "static_count_control", count = 32, scenario = "push3_pop_fixed_pop" }
+expected_final_state_root = "0xb30bc14f423fd8f653f7fe77c25cfd993819d3ea87f2490e1d997f47def7b8ee"
+expected_raw_gas_by_key = { "opcode:0x50" = 4, "opcode:0x60" = 3, "opcode:0x62" = 3 }
+expected_features = { "block_base" = 1, "native_value_transfer" = 0, "proposal_startup" = 1, "tx_base" = 1 }
+expected_diagnostics = { "blob_count" = 1, "bytecode_length" = 256, "calldata_length" = 0, "guest_input_bincode_length" = 332681, "kzg_invocation_count" = 1, "touched_state_key_count" = 9, "witness_byte_count" = 633, "witness_node_count" = 6 }

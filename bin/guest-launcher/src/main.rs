@@ -134,6 +134,8 @@ enum Stage {
     ControlledBlock,
     #[value(name = "controlled-state-holdout")]
     ControlledStateHoldout,
+    #[value(name = "controlled-state-holdout-trace")]
+    ControlledStateHoldoutTrace,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum, PartialEq, Eq)]
@@ -268,6 +270,15 @@ struct ControlledStateHoldoutRunResult {
     observation: Option<controlled_workload::ControlledStateHoldoutObservation>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+struct ControlledStateHoldoutTraceRow {
+    schema_version: u64,
+    pair_id: String,
+    lane: controlled_workload::ControlledStateHoldoutLane,
+    spec: controlled_workload::ControlledStateHoldoutPairSpec,
+    observation: controlled_workload::ControlledStateHoldoutObservation,
+}
+
 impl BenchReport {
     fn new(
         stage: &'static str,
@@ -390,6 +401,7 @@ impl Stage {
             Stage::ControlledOverhead => "controlled-overhead",
             Stage::ControlledBlock => "controlled-block",
             Stage::ControlledStateHoldout => "controlled-state-holdout",
+            Stage::ControlledStateHoldoutTrace => "controlled-state-holdout-trace",
         }
     }
 }
@@ -483,6 +495,40 @@ impl Args {
             }
         }
 
+        Ok(())
+    }
+
+    fn validate_controlled_state_holdout_trace(&self) -> Result<()> {
+        if self.stage != Stage::ControlledStateHoldoutTrace {
+            bail!("controlled state holdout trace validation requires its dedicated stage");
+        }
+        if self.proof_type != ProofType::Native
+            || self.mode != Mode::Execute
+            || self.sp1_execution_engine != Sp1ExecutionEngine::Standard
+        {
+            bail!("controlled-state-holdout-trace supports only native execute semantics");
+        }
+        if self.input.is_none() {
+            bail!("controlled-state-holdout-trace requires --input");
+        }
+        if self.jsonl_out.is_none() {
+            bail!("controlled-state-holdout-trace requires --jsonl-out");
+        }
+        if self.input_list.is_some()
+            || self.elf.is_some()
+            || !self.aggregate.is_empty()
+            || self.output.is_some()
+            || self.json_out.is_some()
+            || self.proof_mode.is_some()
+            || self.sp1_prover.is_some()
+            || self.sp1_network_mode != CliSp1NetworkMode::Reserved
+            || self.sp1_fulfillment_strategy != CliSp1FulfillmentStrategy::Reserved
+            || self.sp1_cycle_limit != 1_000_000_000_000
+            || self.sp1_timeout_secs != 3_600
+            || self.risc0_execution_po2 != 20
+        {
+            bail!("controlled-state-holdout-trace rejects prover and alternate-input flags");
+        }
         Ok(())
     }
 
@@ -611,7 +657,8 @@ fn opcode_lab_memory_labels(stage: Stage) -> OpcodeLabMemoryLabels {
         | Stage::PrecompileLab
         | Stage::ControlledOverhead
         | Stage::ControlledBlock
-        | Stage::ControlledStateHoldout => {
+        | Stage::ControlledStateHoldout
+        | Stage::ControlledStateHoldoutTrace => {
             unreachable!("not an opcode lab stage")
         }
     }
@@ -716,6 +763,9 @@ async fn main() -> Result<()> {
     }
     if args.stage == Stage::ControlledBlock {
         return run_controlled_block(args).await;
+    }
+    if args.stage == Stage::ControlledStateHoldoutTrace {
+        return run_controlled_state_holdout_trace(args);
     }
     if args.stage == Stage::ControlledStateHoldout {
         return run_controlled_state_holdout(args).await;
@@ -1366,6 +1416,49 @@ async fn run_controlled_block(args: Args) -> Result<()> {
     Ok(())
 }
 
+fn prepare_controlled_state_holdout(
+    input_path: &Path,
+) -> Result<(
+    controlled_workload::ControlledStateHoldoutPairSpec,
+    Vec<controlled_workload::ControlledStateHoldoutFixture>,
+    Vec<controlled_workload::ControlledStateHoldoutObservation>,
+)> {
+    let spec: controlled_workload::ControlledStateHoldoutPairSpec = serde_json::from_slice(
+        &fs::read(input_path).with_context(|| format!("read {}", input_path.display()))?,
+    )
+    .context("parse controlled state holdout input")?;
+    let fixtures = controlled_workload::build_controlled_state_holdout_fixtures(&spec)?;
+    let observations = controlled_workload::validate_controlled_state_holdout_fixtures(&fixtures)?;
+    Ok((spec, fixtures, observations))
+}
+
+fn run_controlled_state_holdout_trace(args: Args) -> Result<()> {
+    args.validate_controlled_state_holdout_trace()?;
+    let input_path = args
+        .input
+        .as_ref()
+        .context("controlled-state-holdout-trace requires --input")?;
+    let output_path = args
+        .jsonl_out
+        .as_ref()
+        .context("controlled-state-holdout-trace requires --jsonl-out")?;
+    let (spec, fixtures, observations) = prepare_controlled_state_holdout(input_path)?;
+    let mut output = String::new();
+    for (fixture, observation) in fixtures.into_iter().zip(observations) {
+        let row = ControlledStateHoldoutTraceRow {
+            schema_version: 1,
+            pair_id: fixture.pair_id,
+            lane: fixture.lane,
+            spec: spec.clone(),
+            observation,
+        };
+        output.push_str(&serde_json::to_string(&row)?);
+        output.push('\n');
+    }
+    fs::write(output_path, output).with_context(|| format!("write {}", output_path.display()))?;
+    Ok(())
+}
+
 async fn run_controlled_state_holdout(args: Args) -> Result<()> {
     if args.proof_type != ProofType::Sp1
         || args.mode != Mode::Execute
@@ -1387,12 +1480,7 @@ async fn run_controlled_state_holdout(args: Args) -> Result<()> {
         .jsonl_out
         .as_ref()
         .context("controlled-state-holdout requires --jsonl-out")?;
-    let spec: controlled_workload::ControlledStateHoldoutPairSpec = serde_json::from_slice(
-        &fs::read(input_path).with_context(|| format!("read {}", input_path.display()))?,
-    )
-    .context("parse controlled-state-holdout input")?;
-    let fixtures = controlled_workload::build_controlled_state_holdout_fixtures(&spec)?;
-    let observations = controlled_workload::validate_controlled_state_holdout_fixtures(&fixtures)?;
+    let (_spec, fixtures, observations) = prepare_controlled_state_holdout(input_path)?;
     let backend = load_sp1_shasta_backend()
         .map_err(anyhow::Error::msg)
         .context("load production SP1 Shasta guest ELFs")?;
@@ -2135,7 +2223,7 @@ mod tests {
         canonicalize_sp1_core_opts, execute_opcode_lab_gas_estimator_with_opts,
         finalize_opcode_lab_execution_report, install_opcode_lab_input_identity,
         new_controlled_overhead_report, parse_sp1_program, read_input, read_opcode_lab_input,
-        read_opcode_lab_input_list, risc0_padded_cycles,
+        read_opcode_lab_input_list, risc0_padded_cycles, run_controlled_state_holdout_trace,
     };
     use alloy_primitives::{Address, B256, hex};
     use clap::Parser as _;
@@ -2321,6 +2409,181 @@ mod tests {
         .expect("parse args");
 
         assert!(args.validate_sp1_execution_engine().is_err());
+    }
+
+    #[test]
+    fn parses_native_controlled_state_holdout_trace_stage() {
+        let args = Args::try_parse_from([
+            "guest-launcher",
+            "--stage",
+            "controlled-state-holdout-trace",
+            "--proof-type",
+            "native",
+            "--mode",
+            "execute",
+            "--input",
+            "controlled-state-holdout.json",
+            "--jsonl-out",
+            "controlled-state-holdout-trace.jsonl",
+        ])
+        .expect("parse args");
+
+        assert_eq!(args.stage, Stage::ControlledStateHoldoutTrace);
+        args.validate_controlled_state_holdout_trace()
+            .expect("native controlled state holdout trace args");
+    }
+
+    #[test]
+    fn controlled_state_holdout_trace_rejects_incompatible_flags() {
+        let parse = |extra: &[&str]| {
+            let mut argv = vec![
+                "guest-launcher",
+                "--stage",
+                "controlled-state-holdout-trace",
+                "--input",
+                "controlled-state-holdout.json",
+                "--jsonl-out",
+                "controlled-state-holdout-trace.jsonl",
+            ];
+            argv.extend_from_slice(extra);
+            Args::try_parse_from(argv).expect("parse incompatible trace args")
+        };
+        for extra in [
+            vec!["--proof-type", "sp1"],
+            vec!["--proof-type", "risc0"],
+            vec!["--mode", "prove"],
+            vec!["--sp1-execution-engine", "gas-estimator"],
+            vec!["--aggregate", "proof.json"],
+            vec!["--elf", "guest.elf"],
+            vec!["--output", "proof.json"],
+            vec!["--json-out", "report.json"],
+            vec!["--input-list", "inputs.json"],
+            vec!["--proof-mode", "compressed"],
+            vec!["--sp1-prover", "local"],
+            vec!["--sp1-network-mode", "mainnet"],
+            vec!["--sp1-fulfillment-strategy", "hosted"],
+            vec!["--sp1-cycle-limit", "1"],
+            vec!["--sp1-timeout-secs", "1"],
+            vec!["--risc0-execution-po2", "21"],
+        ] {
+            assert!(
+                parse(&extra)
+                    .validate_controlled_state_holdout_trace()
+                    .is_err(),
+                "trace stage accepted incompatible flags {extra:?}",
+            );
+        }
+
+        let missing_input = Args::try_parse_from([
+            "guest-launcher",
+            "--stage",
+            "controlled-state-holdout-trace",
+            "--jsonl-out",
+            "trace.jsonl",
+        ])
+        .expect("parse missing input args");
+        assert!(
+            missing_input
+                .validate_controlled_state_holdout_trace()
+                .is_err()
+        );
+        let missing_output = Args::try_parse_from([
+            "guest-launcher",
+            "--stage",
+            "controlled-state-holdout-trace",
+            "--input",
+            "pair.json",
+        ])
+        .expect("parse missing output args");
+        assert!(
+            missing_output
+                .validate_controlled_state_holdout_trace()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn controlled_state_holdout_trace_writes_exactly_two_typed_rows_without_prover_gas() {
+        fn assert_no_prover_gas(value: &serde_json::Value) {
+            match value {
+                serde_json::Value::Object(object) => {
+                    assert!(!object.contains_key("proverGas"));
+                    assert!(!object.contains_key("prover_gas"));
+                    for child in object.values() {
+                        assert_no_prover_gas(child);
+                    }
+                }
+                serde_json::Value::Array(values) => {
+                    for child in values {
+                        assert_no_prover_gas(child);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let input_path = directory.path().join("pair.json");
+        let output_path = directory.path().join("trace.jsonl");
+        let spec = serde_json::json!({
+            "pair_id": "witness_topology_1",
+            "kind": "witness_topology",
+            "scale": 1,
+            "control": {"extra_account_count": 0},
+            "target": {"extra_account_count": 1},
+        });
+        fs::write(
+            &input_path,
+            serde_json::to_vec(&spec).expect("serialize pair"),
+        )
+        .expect("write pair");
+        let args = Args::try_parse_from([
+            "guest-launcher",
+            "--stage",
+            "controlled-state-holdout-trace",
+            "--proof-type",
+            "native",
+            "--mode",
+            "execute",
+            "--input",
+            input_path.to_str().expect("UTF-8 input path"),
+            "--jsonl-out",
+            output_path.to_str().expect("UTF-8 output path"),
+        ])
+        .expect("parse trace args");
+
+        run_controlled_state_holdout_trace(args).expect("run host-only trace");
+
+        let output = fs::read_to_string(output_path).expect("read trace rows");
+        assert!(output.ends_with('\n'));
+        let rows = output
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("parse trace row"))
+            .collect::<Vec<_>>();
+        assert_eq!(rows.len(), 2);
+        for (row, lane) in rows.iter().zip(["control", "target"]) {
+            assert_eq!(
+                row.as_object()
+                    .expect("trace row object")
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<std::collections::BTreeSet<_>>(),
+                std::collections::BTreeSet::from([
+                    "lane",
+                    "observation",
+                    "pair_id",
+                    "schema_version",
+                    "spec",
+                ]),
+            );
+            assert_eq!(row["schema_version"], 1);
+            assert_eq!(row["pair_id"], "witness_topology_1");
+            assert_eq!(row["lane"], lane);
+            assert_eq!(row["spec"], spec);
+            assert_eq!(row["observation"]["lane"], lane);
+            assert_eq!(row["observation"]["pair_id"], "witness_topology_1");
+            assert_no_prover_gas(row);
+        }
     }
 
     #[test]

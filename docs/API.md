@@ -1234,10 +1234,11 @@ set both SGX lane timeouts. Use the independent `prover.sgx.timeout_ms` and
   instead of the built-in endpoint from the resolved L1 chain spec. Raiko2 preserves any configured
   path prefix, discards query parameters and fragments from the base URL, and calls
   `GET /eth/v1/beacon/blobs/{slot}?versioned_hashes=...`; it does not fall back to the deprecated
-  `blob_sidecars` route. Transport, non-2xx, empty-response, and response-decoding failures remain
-  retryable RPC errors. A non-empty decoded response containing blob bytes that cannot produce a KZG
-  commitment, or omitting a requested versioned hash, fails fast as a preflight content-validation
-  error. Prysm operators must deploy v7.1.8 or later before using this path.
+  `blob_sidecars` route. Transport, non-2xx, empty-response, and JSON-response-decoding failures
+  remain retryable RPC errors. A non-empty decoded response containing invalid blob hex, blob bytes
+  that cannot produce a KZG commitment, or omitting a requested versioned hash fails fast as a
+  preflight content-validation error. Prysm operators must deploy v7.1.8 or later before using this
+  path.
 - `rpc.pairs[*].l2_rpc` is the canonical read/state RPC used for blocks and account/state proofs.
 - `rpc.pairs[*].l2_provider` selects the L2 execution-client family. It defaults to `reth`;
   set it to `geth` when `l2_rpc`/`l2_witness_rpc` points at a geth endpoint with native

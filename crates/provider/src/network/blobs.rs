@@ -150,7 +150,7 @@ impl NetworkProvider {
         let mut blobs_by_hash = BTreeMap::new();
         for (response_idx, encoded_blob) in payload.data.iter().enumerate() {
             let blob = decode_hex_bytes(encoded_blob, "blob").map_err(|err| {
-                RaikoError::RPC(format!(
+                RaikoError::Preflight(format!(
                     "malformed beacon blob at response index {response_idx} for slot {slot} from GET {endpoint_route}: {err}; {compatibility_hint}"
                 ))
             })?;
@@ -536,6 +536,28 @@ mod tests {
         assert!(matches!(err, RaikoError::Preflight(_)), "{err:?}");
         let message = err.to_string();
 
+        assert!(message.contains("malformed beacon blob"), "{message}");
+        assert!(message.contains("slot 2"), "{message}");
+        assert!(message.contains("Prysm >= 7.1.8"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn invalid_blob_hex_fails_fast() {
+        let requested_hash = B256::repeat_byte(0x42);
+        let (beacon_rpc, _) = serve_once("200 OK", r#"{"data":["0xzz"]}"#.to_string()).await;
+        let event = proposal_event(vec![source(124, vec![requested_hash])]);
+
+        let err = provider()
+            .fetch_shasta_data_sources(
+                &chain_spec(beacon_rpc),
+                &event,
+                BlobProofType::ProofOfEquivalence,
+            )
+            .await
+            .expect_err("invalid blob hex should be rejected");
+
+        assert!(matches!(err, RaikoError::Preflight(_)), "{err:?}");
+        let message = err.to_string();
         assert!(message.contains("malformed beacon blob"), "{message}");
         assert!(message.contains("slot 2"), "{message}");
         assert!(message.contains("Prysm >= 7.1.8"), "{message}");

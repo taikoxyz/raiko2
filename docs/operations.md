@@ -1627,12 +1627,13 @@ endpoint and intervening proxy exposes the blobs route. Prysm deployments must r
 later**: Prysm v6.1.0 through v7.1.7 can drop the connection when a requested blob appears more than
 once in its block ([OffchainLabs/prysm#17199](https://github.com/OffchainLabs/prysm/pull/17199)).
 Raiko2 does not parse or gate beacon-client versions because gateways may hide or rewrite version
-metadata. Transport failures, non-2xx responses, empty responses, and response-decoding failures are
-retryable RPC errors, so an incompatible endpoint keeps the task in retrying preflight while logging
-the slot, endpoint route, failure reason, and this Prysm compatibility hint. After a non-empty
-response decodes successfully, a blob that cannot produce a KZG commitment or a response that omits
-a requested versioned hash is a deterministic content-validation failure and fails the task with a
-`Preflight` error. Upgrade or reconfigure the endpoint, then retry any failed task.
+metadata. Transport failures, non-2xx responses, empty responses, and JSON-response-decoding failures
+are retryable RPC errors, so an incompatible endpoint keeps the task in retrying preflight while
+logging the slot, endpoint route, failure reason, and this Prysm compatibility hint. After a
+non-empty response decodes successfully, invalid blob hex, a blob that cannot produce a KZG
+commitment, or a response that omits a requested versioned hash is a deterministic
+content-validation failure and fails the task with a `Preflight` error. Upgrade or reconfigure the
+endpoint, then retry any failed task.
 
 `rpc.pairs[*].l2_rpc` should ideally point to a witness-capable endpoint that supports
 `debug_executionWitness` for the best latency envelope.

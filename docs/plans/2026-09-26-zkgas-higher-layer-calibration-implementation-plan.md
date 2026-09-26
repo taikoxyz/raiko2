@@ -462,7 +462,7 @@ git add bin/guest-launcher/src/controlled_workload.rs \
 git commit -m "feat(zkgas): add controlled state holdouts"
 ```
 
-### Task 4: Prepare And Run The Bounded Higher-Layer Campaign
+### Task 4: Prepare, Evaluate, And Run The Bounded Higher-Layer Campaign
 
 **Files:**
 - Modify: `experiments/opcode-gas/opcode_gas.py`
@@ -487,6 +487,12 @@ run-higher-layer-calibration
 Test rejection of dirty implementation files, wrong manifest/core/coverage hashes, wrong launcher,
 wrong ELF, noncanonical output path, rerunning a completed round with different bytes, missing prior
 round decisions, and any generator bound outside `8,32,128`.
+
+Also write pure fixed-round evaluator tests with synthetic Decimal rows for the known costs
+`proposal_startup=1000`, `block_base=2000`, `tx_base=300`, and
+`native_value_transfer=40`. Require exact recovery and canonical decision payloads. Cover accepted,
+`checkpoint_generator_bound`, `exhausted_sweep`, a non-expandable quality failure, dependency
+propagation, and exhaustion at round 128 before any orchestration code is written.
 
 - [ ] **Step 2: Run focused tests and confirm RED**
 
@@ -518,12 +524,35 @@ SP1 execution parameters
 The calibration ID is the first 24 hex characters of the full canonical identity SHA256. Existing
 directories are accepted only when every byte exactly matches the recomputed identity.
 
-- [ ] **Step 4: Reuse the existing overhead round executor**
+- [ ] **Step 4: Add the one authoritative fixed-round evaluator and reuse the executor**
+
+Implement a pure function with this role:
+
+```python
+evaluate_higher_layer_fixed_round(
+    manifest, operation_coverage, augmented_core, rows, generator_max_count
+) -> Mapping[str, Any]
+```
+
+It is the only fitting kernel for both Task 4 adaptive decisions and Task 5 final fixed-cost
+sealing. It must use Task 2's exact frozen operation resolver, `evaluate_controlled_sweep`, the
+four-term dependency order, the two-case `tx_base` agreement gate, and the startup residual rule.
+It returns exact Decimal-serialized fixed costs, per-case evidence, root rejection reasons, and one
+canonical decision: `accepted`, `expand_next_round`, or `terminal_failure`.
+
+`expand_next_round` is allowed only when every unresolved root cause is one of
+`checkpoint_generator_bound` or `exhausted_sweep`, and only before round 128. A dependent term that
+cannot yet be evaluated inherits the upstream root cause in the top-level decision; the generic
+label `unmeasured_overhead_dependency` is never itself an expansion reason. Any other failure, or
+either expansion reason at round 128, is terminal. The evaluator is deterministic and performs no
+file writes or execution.
 
 Refactor `run_controlled_overhead_round` only enough to bind the new identity and event-count schema.
-Do not copy its target/control construction or SP1 invocation loop. Execute round 8 first. After
-fitting that round, run 32 only for `checkpoint_generator_bound` or `exhausted_sweep`; run 128 under
-the same rule. Any other failure terminates the campaign with preserved raw evidence.
+Do not copy its target/control construction or SP1 invocation loop. Execute round 8 first, call the
+shared evaluator, and immutably persist that round's raw rows, canonical fit payload, hashes, and
+decision. Run 32 and then 128 only after an exact persisted `expand_next_round` decision. Any other
+decision terminates the campaign with preserved evidence. Replay the entire contiguous decision
+ledger before resuming; no decision may be inferred from raw rows without the evaluator.
 
 - [ ] **Step 5: Enforce the fixed-cost gate**
 
@@ -565,7 +594,7 @@ git add experiments/opcode-gas/opcode_gas.py \
 git commit -m "feat(zkgas): add bounded higher-layer campaign"
 ```
 
-### Task 5: Fit Fixed Costs And Evaluate The Coarse State Model
+### Task 5: Seal Fixed Costs And Evaluate The Coarse State Model
 
 **Files:**
 - Modify: `experiments/opcode-gas/opcode_gas.py`
@@ -573,14 +602,14 @@ git commit -m "feat(zkgas): add bounded higher-layer campaign"
 - Modify: `experiments/opcode-gas/README.md`
 
 **Interfaces:**
-- Consumes: immutable raw overhead evidence; after fixed-cost acceptance, creates and consumes the
-  immutable state-holdout evidence.
+- Consumes: immutable raw overhead evidence and the Task 4 fixed-round decision ledger; after
+  fixed-cost acceptance, creates and consumes the immutable state-holdout evidence.
 - Produces: `fit_higher_layer_calibration(run: pathlib.Path) -> Mapping[str, Any]` with fixed costs,
   predictions, coverage, and one of `coarse_model_accepted`, `needs_state_split`, or `inconclusive`.
 
 - [ ] **Step 1: Write failing exact-fit tests**
 
-Use synthetic Decimal rows with known costs:
+Replay Task 4's pure evaluator with synthetic Decimal rows with known costs:
 
 ```text
 proposal_startup = 1000
@@ -589,10 +618,11 @@ tx_base = 300
 native_value_transfer = 40
 ```
 
-Require exact recovery, rank four, first-passing adaptive round, checkpoint exclusion from fitting,
-and byte-stable serialization. Test rejection of negative cost, rank loss, repeat noise, low signal,
-low R2, excessive slope error, excessive residual, failed checkpoint, and >5% disagreement between
-the two tx-base cases.
+Require exact recovery identical to the persisted Task 4 round payload, rank four, first-passing
+adaptive round, checkpoint exclusion from fitting, decision-ledger hash validation, and byte-stable
+serialization. Test rejection of a changed replay result, negative cost, rank loss, repeat noise,
+low signal, low R2, excessive slope error, excessive residual, failed checkpoint, and >5%
+disagreement between the two tx-base cases.
 
 - [ ] **Step 2: Write failing holdout-verdict tests**
 
@@ -618,14 +648,13 @@ env PYTHONDONTWRITEBYTECODE=1 ~/.venv/bin/python -m unittest \
 
 Expected: FAIL because the fitter and verdict do not exist.
 
-- [ ] **Step 4: Implement fixed-cost fitting**
+- [ ] **Step 4: Replay and seal the accepted fixed-cost result**
 
-Reuse `evaluate_controlled_sweep` for non-startup overheads. Replace its operation-cost input with
-the exact frozen resolver from Task 2. Residualize `native_value_transfer` by `tx_base`, and
-`proposal_startup` by the accepted lower-level terms. Average the two startup residual cases only
-after their maximum/minimum spread is `<= 5%`. Expose this through
-`fit-higher-layer-fixed-costs --run RUN`; the command writes only the canonical fixed-cost artifact
-inside that run and rejects a differing pre-existing result.
+`fit-higher-layer-fixed-costs --run RUN` validates and replays the complete contiguous Task 4 round
+ledger through `evaluate_higher_layer_fixed_round`. It requires one terminal `accepted` round,
+writes only the canonical fixed-cost artifact inside that run, and rejects a changed replay result,
+missing/extra round, changed source hash, terminal failure, or differing pre-existing artifact. It
+must not contain a second fit path or recompute coefficients with legacy `fit_controlled_overheads`.
 
 - [ ] **Step 5: Implement gated state holdout execution**
 

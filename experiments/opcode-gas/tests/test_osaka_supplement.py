@@ -13,6 +13,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "experiments" / "opcode-gas"))
 
 import opcode_gas
+from test_sp1_candidate_report import canonical_formal_relation_round_rows
 
 
 FIXTURE = (
@@ -1112,17 +1113,36 @@ class OsakaRunnerTests(unittest.TestCase):
 
 
 class AugmentationSealTests(unittest.TestCase):
-    def _seal(self, root, mutate_canary=None):
-        _baseline, _ignored_canary, supplement = minimal_augmentation_sources()
-        historical_rows = opcode_gas._historical_osaka_canary_observations(
-            opcode_gas.validate_historical_core_opcode_baseline(DERIVATION, FIXTURE)
-        )
-        canary = opcode_gas.build_osaka_compatibility_canary(
-            historical_rows,
-            historical_rows,
-            baseline_artifact_sha256="a" * 64,
-            expected_baseline_artifact_sha256="a" * 64,
-        )
+    def _build_current_campaign(self, root):
+        output = root / "current-source"
+        identity_path = root / "execution-identity.json"
+        if identity_path.is_file():
+            identity = json.loads(identity_path.read_text())
+            provenance = {
+                "calibration_id": opcode_gas.sha256_bytes(
+                    opcode_gas.canonical_json(identity)
+                )[:24],
+                "calibration_identity_sha256": opcode_gas.sha256_bytes(
+                    opcode_gas.canonical_json(identity)
+                ),
+                "implementation_revision": identity["implementation_revision"],
+                "controlled_manifest_sha256": identity[
+                    "controlled_manifest_sha256"
+                ],
+                "controlled_manifest_rows_sha256": identity[
+                    "controlled_manifest_rows_sha256"
+                ],
+                "complete_schedule_sha256": identity["complete_schedule_sha256"],
+                "guest_elf_sha256": identity["guest_artifacts"][
+                    "crates/guests/elf/sp1_revm_opcode_lab.elf"
+                ],
+                "version_identity": identity["version_identity"],
+            }
+            return output, provenance, identity
+
+        output.mkdir()
+        controlled_manifest = output / "controlled-manifest.toml"
+        shutil.copy2(CURRENT_MANIFEST, controlled_manifest)
         version_identity = {
             "taiko_fork": "Unzen",
             "production_schedule": "UNZEN_ZK_GAS_SCHEDULE",
@@ -1131,28 +1151,200 @@ class AugmentationSealTests(unittest.TestCase):
             "proving_backend": "sp1",
             "primary_metric": "proverGas",
         }
-        provenance = {
-            "calibration_id": "a" * 24,
-            "calibration_identity_sha256": "a" * 64,
+        guest_artifacts = {
+            str(path.relative_to(ROOT)): opcode_gas.sha256_file(path)
+            for path in sorted((ROOT / "crates" / "guests" / "elf").glob("sp1*"))
+            if path.is_file()
+            and (path.name.endswith(".elf") or path.name.endswith(".vk.bin"))
+        }
+        identity = {
             "implementation_revision": "b" * 40,
-            "controlled_manifest_sha256": "c" * 64,
-            "controlled_manifest_rows_sha256": "d" * 64,
+            "alethia_reth_revision": "c" * 40,
+            "rust_version": "rustc test",
+            "sp1_sdk_version": "test-sdk",
+            "controlled_manifest_sha256": opcode_gas.sha256_file(
+                controlled_manifest
+            ),
+            "controlled_manifest_rows_sha256": opcode_gas.controlled_manifest_rows_sha256(
+                controlled_manifest
+            ),
             "complete_schedule_sha256": "e" * 64,
-            "guest_elf_sha256": "f" * 64,
+            "guest_artifacts": guest_artifacts,
+            "guest_artifacts_sha256": opcode_gas.sha256_bytes(
+                opcode_gas.canonical_json(guest_artifacts)
+            ),
+            "guest_launcher_sha256": "9" * 64,
+            "normalization_reference_key": "opcode:0x01",
+            "sp1_execution_parameters": opcode_gas.sp1_execution_parameters(),
+            "primary_metric": "proverGas",
+            "sp1_instruction_count": "secondary_non_gating",
+            "workload_identity_schema_version": 1,
+            "workload_canonicalization": "sha256(canonical_json(workload_spec))",
+            "primary_formulas": {"candidate_cost": "g_p(k) / r(k)"},
+            "q_formula": list(opcode_gas.Q_FORMULA),
+            "out_of_fit_checkpoint": {
+                "mapping": opcode_gas.OUT_OF_FIT_CHECKPOINTS
+            },
+            "quality_gates": {"checkpoint_ape_max": 0.10},
+            "bridge": {"model": "through_origin_equal_key_median"},
             "version_identity": version_identity,
         }
-        for payload in (canary, supplement):
-            payload["provenance"] = copy.deepcopy(provenance)
-            payload["artifact_sha256"] = opcode_gas.sha256_bytes(
-                opcode_gas.canonical_json(
-                    {
-                        key: value
-                        for key, value in payload.items()
-                        if key != "artifact_sha256"
-                    }
+        calibration_identity_sha256 = opcode_gas.sha256_bytes(
+            opcode_gas.canonical_json(identity)
+        )
+        provenance = {
+            "calibration_id": calibration_identity_sha256[:24],
+            "calibration_identity_sha256": calibration_identity_sha256,
+            "implementation_revision": identity["implementation_revision"],
+            "controlled_manifest_sha256": identity[
+                "controlled_manifest_sha256"
+            ],
+            "controlled_manifest_rows_sha256": identity[
+                "controlled_manifest_rows_sha256"
+            ],
+            "complete_schedule_sha256": identity["complete_schedule_sha256"],
+            "guest_elf_sha256": guest_artifacts[
+                "crates/guests/elf/sp1_revm_opcode_lab.elf"
+            ],
+            "version_identity": version_identity,
+        }
+        formal_provenance = {
+            field: provenance[field]
+            for field in opcode_gas.FORMAL_RELATION_PROVENANCE_FIELDS
+        }
+        manifest = opcode_gas.load_manifest(controlled_manifest)
+        baseline = opcode_gas.validate_historical_core_opcode_baseline(
+            DERIVATION, FIXTURE
+        )
+        historical_rows = opcode_gas._historical_osaka_canary_observations(
+            baseline
+        )
+        historical_by_id = {
+            row["relation_id"]: row for row in historical_rows
+        }
+        canary_rows_by_bound = {}
+        for bound in sorted(
+            {row["generator_max_count"] for row in historical_rows}
+        ):
+            relation_ids = [
+                relation.id
+                for relation in manifest.opcode_relations
+                if historical_by_id.get(relation.id, {}).get(
+                    "generator_max_count"
                 )
+                == bound
+            ]
+            subset = opcode_gas._osaka_relation_manifest(manifest, relation_ids)
+            canary_rows_by_bound[bound] = canonical_formal_relation_round_rows(
+                subset,
+                slope_overrides={
+                    relation_id: historical_by_id[relation_id]["slope_p"]
+                    for relation_id in relation_ids
+                },
+                generator_max_count=bound,
+                provenance=formal_provenance,
             )
+
+        def fake_generate(_manifest, fixtures, **_kwargs):
+            fixtures.mkdir(parents=True)
+
+        def fake_canary_run(args):
+            bound = int(args.out.stem.rsplit("-", 1)[1])
+            opcode_gas._write_canonical_jsonl(
+                args.out, canary_rows_by_bound[bound]
+            )
+
+        with mock.patch.object(
+            opcode_gas, "generate_relation_cases", side_effect=fake_generate
+        ), mock.patch.object(opcode_gas, "cmd_run", side_effect=fake_canary_run):
+            current_rows = opcode_gas._run_osaka_canary_rounds(
+                calibration_run=root,
+                output_root=output,
+                manifest=manifest,
+                historical_observations=historical_rows,
+                provenance=formal_provenance,
+                version_identity=version_identity,
+                args=Namespace(
+                    guest_launcher=root / "guest-launcher",
+                    elf=root / "opcode.elf",
+                    controlled_manifest=controlled_manifest,
+                ),
+            )
+        relation_artifact_sha256 = baseline["relation_artifact"][
+            "artifact_sha256"
+        ]
+        canary = opcode_gas.build_osaka_compatibility_canary(
+            historical_rows,
+            current_rows,
+            baseline_artifact_sha256=relation_artifact_sha256,
+            expected_baseline_artifact_sha256=relation_artifact_sha256,
+        )
+        canary["provenance"] = copy.deepcopy(provenance)
+        canary["artifact_sha256"] = opcode_gas.sha256_bytes(
+            opcode_gas.canonical_json(
+                {
+                    key: value
+                    for key, value in canary.items()
+                    if key != "artifact_sha256"
+                }
+            )
+        )
+        opcode_gas._atomic_write_json(output / "compatibility-canary.json", canary)
+
+        supplement_manifest = opcode_gas._osaka_relation_manifest(
+            manifest, opcode_gas.OSAKA_SUPPLEMENT_RELATION_IDS
+        )
+        supplement_rows = canonical_formal_relation_round_rows(
+            supplement_manifest,
+            slope_overrides={
+                "opcode:0x15:canonical": "5000",
+                "opcode:0x1e:canonical": "6000",
+            },
+            generator_max_count=8,
+            provenance=formal_provenance,
+        )
+        fixtures_root = output / "fixtures" / "supplement"
+        fixtures_root.mkdir(parents=True)
+
+        def fake_supplement_run(args):
+            opcode_gas._write_canonical_jsonl(args.out, supplement_rows)
+
+        with mock.patch.object(opcode_gas, "cmd_run", side_effect=fake_supplement_run):
+            campaign = opcode_gas.run_formal_relation_adaptive_campaign(
+                calibration_run=root,
+                artifact_root=output,
+                manifest=supplement_manifest,
+                fixtures_root=fixtures_root,
+                final_runs=output / "raw" / "formal-relations.jsonl",
+                decisions_path=output / "decisions.json",
+                decisions_seal_path=output / "decisions.sha256",
+                args=Namespace(),
+                provenance=formal_provenance,
+                validate_dynamic_preflight=False,
+            )
+        supplement = opcode_gas._build_osaka_supplement_artifact(
+            supplement_manifest,
+            campaign,
+            formal_provenance,
+            provenance,
+            opcode_gas.sha256_file(output / "decisions.json"),
+        )
+        opcode_gas._atomic_write_json(output / "opcode-supplement.json", supplement)
+        identity_path.write_text(json.dumps(identity, indent=2, sort_keys=True) + "\n")
+        return output, provenance, identity
+
+    def _seal(
+        self,
+        root,
+        mutate_canary=None,
+        mutate_supplement=None,
+        mutate_identity=None,
+    ):
+        output, provenance, identity = self._build_current_campaign(root)
+        canary_path = output / "compatibility-canary.json"
+        supplement_path = output / "opcode-supplement.json"
         if mutate_canary is not None:
+            canary = json.loads(canary_path.read_text())
             mutate_canary(canary)
             canary["artifact_sha256"] = opcode_gas.sha256_bytes(
                 opcode_gas.canonical_json(
@@ -1163,25 +1355,36 @@ class AugmentationSealTests(unittest.TestCase):
                     }
                 )
             )
-        paths = {
-            "derivation": DERIVATION / "derivation.json",
-            "dynamic": DERIVATION / "dynamic-opcode-models.json",
-            "core": DERIVATION / "core-opcode-submodel.json",
-        }
-        for name, payload in (("canary", canary), ("supplement", supplement)):
-            path = root / f"{name}.json"
-            path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
-            paths[name] = path
+            canary_path.write_bytes(opcode_gas._canonical_json_file_bytes(canary))
+        if mutate_supplement is not None:
+            supplement = json.loads(supplement_path.read_text())
+            mutate_supplement(supplement)
+            supplement["artifact_sha256"] = opcode_gas.sha256_bytes(
+                opcode_gas.canonical_json(
+                    {
+                        key: value
+                        for key, value in supplement.items()
+                        if key != "artifact_sha256"
+                    }
+                )
+            )
+            supplement_path.write_bytes(
+                opcode_gas._canonical_json_file_bytes(supplement)
+            )
+        if mutate_identity is not None:
+            mutate_identity(identity)
         return opcode_gas.seal_osaka_augmentation_directory(
             root / "derivations",
-            baseline_derivation_path=paths["derivation"],
-            baseline_dynamic_path=paths["dynamic"],
-            baseline_core_path=paths["core"],
-            canary_path=paths["canary"],
-            supplement_path=paths["supplement"],
+            baseline_derivation_path=DERIVATION / "derivation.json",
+            baseline_dynamic_path=DERIVATION / "dynamic-opcode-models.json",
+            baseline_core_path=DERIVATION / "core-opcode-submodel.json",
+            canary_path=canary_path,
+            supplement_path=supplement_path,
             provenance=provenance,
             historical_manifest=FIXTURE,
             historical_manifest_sha256=opcode_gas.HISTORICAL_CORE_MANIFEST_SHA256,
+            controlled_manifest=output / "controlled-manifest.toml",
+            execution_identity=identity,
         )
 
     def test_create_only_seal_and_directory_only_replay(self):
@@ -1291,8 +1494,57 @@ class AugmentationSealTests(unittest.TestCase):
         )
         for mutate in mutations:
             with self.subTest(mutate=mutate), tempfile.TemporaryDirectory() as tmp:
-                with self.assertRaisesRegex(ValueError, "historical program or equation"):
+                with self.assertRaises(ValueError):
                     self._seal(pathlib.Path(tmp), mutate_canary=mutate)
+
+    def test_seal_rejects_fully_resealed_current_canary_contract_drift(self):
+        mutations = (
+            lambda value: value.__setitem__("schema_version", 2),
+            lambda value: value.__setitem__("baseline_artifact_sha256", "0" * 64),
+            lambda value: value["quality_gates"].__setitem__(
+                "per_relation_drift_ape_max", "0.20"
+            ),
+            lambda value: value["relations"][0].__setitem__(
+                "osaka_raw_rows_sha256", "0" * 64
+            ),
+        )
+        for mutate in mutations:
+            with self.subTest(mutate=mutate), tempfile.TemporaryDirectory() as tmp:
+                with self.assertRaises(ValueError):
+                    self._seal(pathlib.Path(tmp), mutate_canary=mutate)
+
+    def test_seal_rejects_fully_resealed_supplement_contract_drift(self):
+        mutations = (
+            lambda value: value.__setitem__("schema_version", 2),
+            lambda value: value.__setitem__("decisions_sha256", "0" * 64),
+            lambda value: value.__setitem__("raw_rows_sha256", "0" * 64),
+            lambda value: value["relations"][0].__setitem__(
+                "raw_rows_sha256", "0" * 64
+            ),
+            lambda value: value["relations"][0].__setitem__("slope_p", "5001"),
+            lambda value: value["relations"][0].__setitem__(
+                "program_sha256", "0" * 64
+            ),
+            lambda value: value["relations"][0].__setitem__(
+                "generator_max_count", 32
+            ),
+        )
+        for mutate in mutations:
+            with self.subTest(mutate=mutate), tempfile.TemporaryDirectory() as tmp:
+                with self.assertRaises(ValueError):
+                    self._seal(pathlib.Path(tmp), mutate_supplement=mutate)
+
+    def test_seal_rejects_execution_identity_map_and_launcher_drift(self):
+        mutations = (
+            lambda value: value["guest_artifacts"].__setitem__(
+                "crates/guests/elf/sp1_revm_opcode_lab.elf", "0" * 64
+            ),
+            lambda value: value.__setitem__("guest_launcher_sha256", "0" * 64),
+        )
+        for mutate in mutations:
+            with self.subTest(mutate=mutate), tempfile.TemporaryDirectory() as tmp:
+                with self.assertRaises(ValueError):
+                    self._seal(pathlib.Path(tmp), mutate_identity=mutate)
 
 if __name__ == "__main__":
     unittest.main()

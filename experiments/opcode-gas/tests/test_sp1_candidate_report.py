@@ -223,9 +223,16 @@ _FORMAL_RELATION_ROWS_CACHE = {}
 
 
 def canonical_formal_relation_round_rows(
-    manifest, relation=None, *, slope_overrides=None
+    manifest, relation=None, *, slope_overrides=None, generator_max_count=8, provenance=None
 ):
     slope_overrides = slope_overrides or {}
+    provenance = provenance or {
+        "calibration_id": "b" * 24,
+        "calibration_identity_sha256": "b" * 64,
+        "implementation_revision": "c" * 40,
+        "controlled_manifest_sha256": "d" * 64,
+        "controlled_manifest_rows_sha256": "e" * 64,
+    }
     selected_relations = (
         [relation] if relation is not None else list(manifest.opcode_relations)
     )
@@ -247,24 +254,19 @@ def canonical_formal_relation_round_rows(
                     for item in selected_relations
                 ],
                 "slopes": {key: str(value) for key, value in slope_overrides.items()},
+                "generator_max_count": generator_max_count,
+                "provenance": provenance,
             }
         )
     )
     if cache_key in _FORMAL_RELATION_ROWS_CACHE:
         return copy.deepcopy(_FORMAL_RELATION_ROWS_CACHE[cache_key])
-    provenance = {
-        "calibration_id": "b" * 24,
-        "calibration_identity_sha256": "b" * 64,
-        "implementation_revision": "c" * 40,
-        "controlled_manifest_sha256": "d" * 64,
-        "controlled_manifest_rows_sha256": "e" * 64,
-    }
     with tempfile.TemporaryDirectory() as tmp:
         paths = opcode_gas.generate_relation_cases(
             manifest,
             pathlib.Path(tmp),
             provenance=provenance,
-            generator_max_count=8,
+            generator_max_count=generator_max_count,
             relation_ids=[item.id for item in selected_relations],
         )
         fixtures = [
@@ -326,13 +328,13 @@ def canonical_formal_relation_round_rows(
         ).hexdigest()
         if lane == "control":
             actual_map = {
-                key: value * 8
+                key: value * generator_max_count
                 for key, value in relation.control_raw_gas_by_key.items()
             }
             prover_gas = 100_000
         else:
             actual_map = {
-                key: value * (8 - count)
+                key: value * (generator_max_count - count)
                 for key, value in relation.control_raw_gas_by_key.items()
             }
             for key, value in relation.target_raw_gas_by_key.items():

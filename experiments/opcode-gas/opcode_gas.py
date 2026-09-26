@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import fcntl
 import functools
+import gzip
 import hashlib
 import json
 import os
@@ -14339,6 +14341,11 @@ _HISTORICAL_PROGRAM_EVIDENCE_FIELDS = (
 _FORMAL_RELATION_PROGRAM_INPUT_FIELDS = tuple(
     field for field in _HISTORICAL_PROGRAM_EVIDENCE_FIELDS if field != "bytecode_sha256"
 )
+_FORMAL_RELATION_PROGRAM_STABLE_FIELDS = tuple(
+    field
+    for field in _FORMAL_RELATION_PROGRAM_INPUT_FIELDS
+    if field not in {"fixture_sha256", "guest_input_sha256", "pair_id"}
+)
 
 
 def _formal_relation_program_evidence(rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -14349,7 +14356,7 @@ def _formal_relation_program_evidence(rows: Iterable[Mapping[str, Any]]) -> list
         bytecode = row.get("bytecode")
         if not isinstance(bytecode, str) or not bytecode.startswith("0x"):
             raise ValueError("formal relation program bytecode is invalid")
-        projected = {field: row[field] for field in _FORMAL_RELATION_PROGRAM_INPUT_FIELDS}
+        projected = {field: row[field] for field in _FORMAL_RELATION_PROGRAM_STABLE_FIELDS}
         projected["bytecode_sha256"] = sha256_bytes(bytecode.encode())
         evidence.append(projected)
     return evidence
@@ -14357,6 +14364,29 @@ def _formal_relation_program_evidence(rows: Iterable[Mapping[str, Any]]) -> list
 
 def _formal_relation_program_sha256(rows: Iterable[Mapping[str, Any]]) -> str:
     return sha256_bytes(canonical_json(_formal_relation_program_evidence(rows)))
+
+
+def _historical_formal_relation_program_sha256(
+    rows: Iterable[Mapping[str, Any]],
+) -> str:
+    """Hash the same stable program projection stored by historical evidence."""
+    projected = []
+    for row in rows:
+        if not isinstance(row, Mapping) or any(
+            field not in row
+            for field in (*_FORMAL_RELATION_PROGRAM_STABLE_FIELDS, "bytecode_sha256")
+        ):
+            raise ValueError("historical formal relation program evidence is incomplete")
+        projected.append(
+            {
+                field: row[field]
+                for field in (
+                    *_FORMAL_RELATION_PROGRAM_STABLE_FIELDS,
+                    "bytecode_sha256",
+                )
+            }
+        )
+    return sha256_bytes(canonical_json(projected))
 
 
 def _load_historical_core_evidence(
@@ -15242,6 +15272,185 @@ def _publish_osaka_augmentation(
         os.close(lock_descriptor)
 
 
+def _osaka_current_source_evidence(
+    output_root: pathlib.Path,
+    controlled_manifest: pathlib.Path,
+    execution_identity: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Pack only replay inputs, never generated fixtures or an ignored run tree."""
+    if not output_root.is_dir() or output_root.is_symlink() or not controlled_manifest.is_file():
+        raise ValueError("Osaka current source evidence is missing")
+    root = output_root.resolve()
+    files: dict[str, str] = {"controlled-manifest.toml": base64.b64encode(controlled_manifest.read_bytes()).decode()}
+
+    def add(relative: pathlib.PurePosixPath) -> None:
+        if relative.is_absolute() or ".." in relative.parts or relative == pathlib.PurePosixPath("."):
+            raise ValueError("Osaka current source evidence path is invalid")
+        path = output_root / relative
+        if path.is_symlink() or not path.is_file() or not path.resolve().is_relative_to(root):
+            raise ValueError("Osaka current source evidence is incomplete")
+        files[str(relative)] = base64.b64encode(path.read_bytes()).decode()
+
+    for ledger_name, seal_name in (("canary-decisions.json", "canary-decisions.sha256"), ("decisions.json", "decisions.sha256")):
+        add(pathlib.PurePosixPath(ledger_name))
+        add(pathlib.PurePosixPath(seal_name))
+        ledger = json.loads(base64.b64decode(files[ledger_name]).decode())
+        rounds = ledger.get("rounds")
+        if not isinstance(rounds, list):
+            raise ValueError("Osaka current source evidence ledger is invalid")
+        for record in rounds:
+            if not isinstance(record, Mapping):
+                raise ValueError("Osaka current source evidence ledger is invalid")
+            for field in ("raw_runs", "result"):
+                relative = record.get(field)
+                if not isinstance(relative, str):
+                    raise ValueError("Osaka current source evidence ledger is invalid")
+                add(pathlib.PurePosixPath(relative))
+    add(pathlib.PurePosixPath("raw/formal-relations.jsonl"))
+    canonical = canonical_json({"schema_version": 1, "execution_identity": execution_identity, "files": files})
+    compressed = gzip.compress(canonical, mtime=0)
+    return {
+        "schema_version": 1,
+        "encoding": "gzip+base64",
+        "sha256": sha256_bytes(compressed),
+        "payload": base64.b64encode(compressed).decode(),
+    }
+
+
+def _unpack_osaka_current_source_evidence(
+    value: Any, destination: pathlib.Path
+) -> tuple[pathlib.Path, Mapping[str, Any]]:
+    if not isinstance(value, Mapping) or set(value) != {"schema_version", "encoding", "sha256", "payload"}:
+        raise ValueError("Osaka current source evidence schema differs")
+    if value.get("schema_version") != 1 or value.get("encoding") != "gzip+base64" or not _is_sha256(value.get("sha256")) or not isinstance(value.get("payload"), str):
+        raise ValueError("Osaka current source evidence encoding differs")
+    try:
+        compressed = base64.b64decode(value["payload"], validate=True)
+        decoded = gzip.decompress(compressed)
+        payload = json.loads(decoded)
+    except (ValueError, OSError, json.JSONDecodeError) as error:
+        raise ValueError("Osaka current source evidence cannot be decoded") from error
+    if sha256_bytes(compressed) != value["sha256"] or not isinstance(payload, Mapping) or set(payload) != {"schema_version", "execution_identity", "files"} or payload.get("schema_version") != 1 or not isinstance(payload.get("execution_identity"), Mapping) or not isinstance(payload.get("files"), Mapping):
+        raise ValueError("Osaka current source evidence differs")
+    files = payload["files"]
+    required = {"controlled-manifest.toml", "canary-decisions.json", "canary-decisions.sha256", "decisions.json", "decisions.sha256", "raw/formal-relations.jsonl"}
+    for ledger_name in ("canary-decisions.json", "decisions.json"):
+        encoded = files.get(ledger_name)
+        try:
+            ledger = json.loads(base64.b64decode(encoded, validate=True))
+        except (TypeError, ValueError, json.JSONDecodeError) as error:
+            raise ValueError("Osaka current source evidence ledger is invalid") from error
+        if not isinstance(ledger, Mapping) or not isinstance(ledger.get("rounds"), list):
+            raise ValueError("Osaka current source evidence ledger is invalid")
+        for record in ledger["rounds"]:
+            if not isinstance(record, Mapping):
+                raise ValueError("Osaka current source evidence ledger is invalid")
+            for field in ("raw_runs", "result"):
+                raw_path = record.get(field)
+                path = pathlib.PurePosixPath(raw_path) if isinstance(raw_path, str) else None
+                if path is None or path.is_absolute() or ".." in path.parts or str(path) != raw_path:
+                    raise ValueError("Osaka current source evidence ledger path is invalid")
+                required.add(raw_path)
+    if set(files) != required:
+        raise ValueError("Osaka current source evidence allowlist differs")
+    if destination.exists() or destination.is_symlink():
+        raise ValueError("Osaka current source evidence destination is invalid")
+    destination.mkdir(parents=True)
+    for raw_path, encoded in files.items():
+        relative = pathlib.PurePosixPath(raw_path)
+        if not isinstance(encoded, str) or relative.is_absolute() or ".." in relative.parts or relative == pathlib.PurePosixPath(".") or str(relative) != raw_path:
+            raise ValueError("Osaka current source evidence path is invalid")
+        path = destination / relative
+        if not path.resolve().is_relative_to(destination.resolve()):
+            raise ValueError("Osaka current source evidence path escapes replay root")
+        try:
+            content = base64.b64decode(encoded, validate=True)
+        except ValueError as error:
+            raise ValueError("Osaka current source evidence file is invalid") from error
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+    return destination / "controlled-manifest.toml", payload["execution_identity"]
+
+
+def _replay_osaka_current_source_evidence(
+    evidence: Any,
+    *,
+    expected_calibration: Mapping[str, Any],
+    baseline: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Rebuild both current artifacts from sealed raw rows, results, and ledgers."""
+    with tempfile.TemporaryDirectory(prefix="osaka-augmentation-replay.") as temporary:
+        root = pathlib.Path(temporary) / "replay"
+        manifest_path, execution_identity = _unpack_osaka_current_source_evidence(evidence, root)
+        guest_artifacts = execution_identity.get("guest_artifacts") if isinstance(execution_identity, Mapping) else None
+        if (
+            sha256_bytes(canonical_json(execution_identity)) != expected_calibration["calibration_identity_sha256"]
+            or execution_identity.get("implementation_revision") != expected_calibration["implementation_revision"]
+            or execution_identity.get("controlled_manifest_sha256") != expected_calibration["controlled_manifest_sha256"]
+            or execution_identity.get("controlled_manifest_rows_sha256") != expected_calibration["controlled_manifest_rows_sha256"]
+            or execution_identity.get("complete_schedule_sha256") != expected_calibration["complete_schedule_sha256"]
+            or not isinstance(guest_artifacts, Mapping)
+            or not guest_artifacts
+            or any(
+                not isinstance(path, str)
+                or pathlib.PurePosixPath(path).is_absolute()
+                or ".." in pathlib.PurePosixPath(path).parts
+                or str(pathlib.PurePosixPath(path)) != path
+                or not _is_sha256(digest)
+                for path, digest in guest_artifacts.items()
+            )
+            or execution_identity.get("guest_artifacts_sha256") != sha256_bytes(canonical_json(guest_artifacts))
+            or not _is_sha256(execution_identity.get("guest_launcher_sha256"))
+            or guest_artifacts.get("crates/guests/elf/sp1_revm_opcode_lab.elf") != expected_calibration["guest_elf_sha256"]
+            or validate_calibration_version_identity(execution_identity) != expected_calibration["version_identity"]
+            or sha256_file(manifest_path) != expected_calibration["controlled_manifest_sha256"]
+            or controlled_manifest_rows_sha256(manifest_path) != expected_calibration["controlled_manifest_rows_sha256"]
+        ):
+            raise ValueError("Osaka current source execution identity differs")
+        manifest = load_manifest(manifest_path)
+        formal_provenance = {
+            field: expected_calibration[field] for field in FORMAL_RELATION_PROVENANCE_FIELDS
+        }
+        historical = _historical_osaka_canary_observations(baseline)
+        current = _run_osaka_canary_rounds(
+            calibration_run=root,
+            output_root=root,
+            manifest=manifest,
+            historical_observations=historical,
+            provenance=formal_provenance,
+            version_identity=expected_calibration["version_identity"],
+            args=argparse.Namespace(),
+            allow_execution=False,
+        )
+        expected_canary = build_osaka_compatibility_canary(
+            historical,
+            current,
+            baseline_artifact_sha256=baseline["derivation"]["derivation_identity"]["source"]["source_hashes"]["relation_artifact_sha256"],
+            expected_baseline_artifact_sha256=baseline["derivation"]["derivation_identity"]["source"]["source_hashes"]["relation_artifact_sha256"],
+        )
+        source_provenance = dict(expected_calibration)
+        source_provenance.pop("historical_manifest_sha256", None)
+        expected_canary["provenance"] = source_provenance
+        expected_canary.pop("historical_manifest_sha256", None)
+        expected_canary.pop("artifact_sha256", None)
+        expected_canary["artifact_sha256"] = sha256_bytes(canonical_json(expected_canary))
+        supplement_manifest = _osaka_relation_manifest(manifest, OSAKA_SUPPLEMENT_RELATION_IDS)
+        campaign = _load_terminal_relation_campaign(
+            root, supplement_manifest, formal_provenance,
+            decisions_name="decisions.json", decisions_seal_name="decisions.sha256",
+            final_rows_relative=pathlib.Path("raw/formal-relations.jsonl"),
+            validate_dynamic_preflight=False,
+        )
+        expected_supplement = _build_osaka_supplement_artifact(
+            supplement_manifest,
+            campaign,
+            formal_provenance,
+            source_provenance,
+            sha256_file(root / "decisions.json"),
+        )
+        return expected_canary, expected_supplement
+
+
 def seal_osaka_augmentation_directory(
     out_root: pathlib.Path,
     *,
@@ -15253,6 +15462,8 @@ def seal_osaka_augmentation_directory(
     provenance: Mapping[str, Any],
     historical_manifest: pathlib.Path,
     historical_manifest_sha256: str,
+    controlled_manifest: pathlib.Path,
+    execution_identity: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Seal one create-only augmentation with all inputs needed for local replay."""
     source_paths = {
@@ -15296,6 +15507,26 @@ def seal_osaka_augmentation_directory(
     source_row_hashes = _osaka_augmentation_source_hashes(
         sources["canary"], sources["supplement"]
     )
+    current_source_evidence = _osaka_current_source_evidence(
+        canary_path.parent, controlled_manifest, execution_identity
+    )
+    replay_baseline = {
+        **_load_historical_core_evidence(
+            historical_manifest,
+            sources["derivation"]["source"],
+            load_manifest(historical_manifest),
+        ),
+        "derivation": sources["derivation"],
+    }
+    replayed_canary, replayed_supplement = _replay_osaka_current_source_evidence(
+        current_source_evidence,
+        expected_calibration=osaka_calibration,
+        baseline=replay_baseline,
+    )
+    if not _exact_json_equal(
+        sources["canary"], replayed_canary
+    ) or not _exact_json_equal(sources["supplement"], replayed_supplement):
+        raise ValueError("Osaka current source artifacts differ from exact replay")
     input_hashes = {
         f"baseline_{name}_artifact_sha256": sources[name]["artifact_sha256"]
         for name in ("derivation", "dynamic", "core")
@@ -15306,6 +15537,7 @@ def seal_osaka_augmentation_directory(
             for name in ("derivation", "dynamic", "core")
         }
     )
+    input_hashes["current_source_evidence_sha256"] = current_source_evidence["sha256"]
     input_hashes.update(
         {
             "compatibility_canary_artifact_sha256": sources["canary"][
@@ -15353,6 +15585,7 @@ def seal_osaka_augmentation_directory(
             "baseline_core": sources["core"],
             "historical_evidence_artifact_sha256": HISTORICAL_CORE_EVIDENCE_ARTIFACT_SHA256,
             "historical_canary_observations": historical_canary_observations,
+            "current_source_evidence": current_source_evidence,
         },
         "output_hashes": output_hashes,
     }
@@ -15481,6 +15714,22 @@ def verify_osaka_augmentation_directory(
         )
     ):
         raise ValueError("Osaka augmentation frozen historical canary replay differs")
+    replay_baseline = {
+        **_load_historical_core_evidence(
+            historical_manifest,
+            baseline_sources["derivation"]["source"],
+            load_manifest(historical_manifest),
+        ),
+        "derivation": baseline_sources["derivation"],
+    }
+    current_evidence = replay_inputs.get("current_source_evidence")
+    if not isinstance(current_evidence, Mapping) or not _is_sha256(current_evidence.get("sha256")):
+        raise ValueError("Osaka augmentation current source evidence is missing")
+    replayed_canary, replayed_supplement = _replay_osaka_current_source_evidence(
+        current_evidence, expected_calibration=expected_calibration, baseline=replay_baseline
+    )
+    if not _exact_json_equal(canary, replayed_canary) or not _exact_json_equal(supplement, replayed_supplement):
+        raise ValueError("Osaka current source artifacts differ from exact replay")
     _validate_osaka_compatibility_canary_artifact(canary)
     _validate_frozen_historical_canary_binding(canary, historical_canary_observations)
     input_hashes = {
@@ -15495,6 +15744,7 @@ def verify_osaka_augmentation_directory(
             for name in ("derivation", "dynamic", "core")
         }
     )
+    input_hashes["current_source_evidence_sha256"] = current_evidence["sha256"]
     input_hashes.update(
         {
             "compatibility_canary_artifact_sha256": canary["artifact_sha256"],
@@ -17980,7 +18230,9 @@ def _historical_osaka_canary_observations(
                 "signed_raw_gas_by_key": equation.get("signed_raw_gas_by_key"),
                 "target_raw_gas_by_key": equation.get("target_raw_gas_by_key"),
                 "control_raw_gas_by_key": equation.get("control_raw_gas_by_key"),
-                "program_sha256": sha256_bytes(canonical_json(relation_rows)),
+                "program_sha256": _historical_formal_relation_program_sha256(
+                    relation_rows
+                ),
                 "raw_rows_sha256": sha256_bytes(canonical_json(relation_rows)),
                 "repeat_count": 3,
                 "generator_max_count": bound,
@@ -18666,6 +18918,8 @@ def cmd_seal_osaka_opcode_augmentation(args: argparse.Namespace) -> None:
         historical_manifest_sha256=_verify_repo_relative_checksum(
             historical_manifest
         ),
+        controlled_manifest=calibration_run / "controlled-manifest.toml",
+        execution_identity=execution_identity,
     )
     _atomic_write_bytes(
         augmentation_path_file,

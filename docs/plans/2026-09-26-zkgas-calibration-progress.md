@@ -4,7 +4,7 @@
 
 In progress.
 
-Last updated: 2026-09-26.
+Last updated: 2026-09-27.
 
 This document is the execution-status ledger for the ZKGas calibration work. It records what is
 currently proved, what is actively being changed, and which gate opens the next layer. It does not
@@ -63,8 +63,8 @@ Osaka execution semantics while continuing to bind the actual exported Unzen sch
 | Experiment framework | Core scope complete | Preserve its identity and replay invariants |
 | Opcode core | Complete at partial coverage | Preserve sealed 101-plus-2 augmentation |
 | Remaining operations | Complete at frozen classification | Preserve the sealed coverage and ownership ledgers |
-| State/trie | Pending | Pass a coarse holdout or justify a split model |
-| Transaction | Pending | Pass controlled fit and holdout |
+| State/trie | Closed by fixed-cost gate | Pass a coarse holdout or justify a split model |
+| Transaction | Blocked by terminal controlled fit | Redesign the independent native-transfer experiment |
 | Block | Pending | Pass frozen block holdouts without proposal fitting |
 | Proposal | Closed | Seal every lower layer before opening the corpus |
 | Other ZKVM backends | Future | Measure natively or validate an explicit bridge |
@@ -190,12 +190,77 @@ The operation boundary is frozen in
   focused review suite passed 41 tests with one skip and reported no remaining findings. The fresh
   complete opcode-gas Python suite passed 406 tests with one skip.
 
+## Blocked Milestone: Higher-Layer Fixed Costs
+
+The bounded production-SP1 campaign stopped fail-closed at its predeclared maximum overhead bound.
+It did not produce an accepted four-cost artifact, did not open state holdouts, and did not seal a
+derivation.
+
+Execution identity:
+
+- implementation revision: `1155fb384da5c06a369b73da07e12728d162eb3b`;
+- canonical run: `999b91b91fd693899d09fa53`;
+- full run identity SHA256:
+  `999b91b91fd693899d09fa53c0502c19e6c43d6f9a0ddcf4c38bd15ef9c0fccd`;
+- production guest-launcher SHA256:
+  `80f5d04b607ccc650c0e99714453b90c81d7d272af9e3bfc63f8e4b24c28ff53`;
+- SP1 Shasta proposal ELF SHA256:
+  `e32daf0bf9e981162c95c95e4004996a9be153357c503dd6373d647559b41bf1`;
+- SP1 Shasta proposal VK SHA256:
+  `f7ddfdf9434ef7a4569922cd54714dd39a182c945e4d37e65a51a4bb89e7f97e`;
+- higher-layer manifest artifact SHA256:
+  `f531201bd93f98ba20e51474ae4d64ae1f444bdaad027ea88362a47fb45e9809`;
+- frozen operation-coverage artifact SHA256:
+  `fbb4817d50b04147d0d9c86a25c82324d5e36ce9d6acbf49c51dd165cf1905a3`;
+- augmented Osaka core artifact SHA256:
+  `b66d7951bfa416810f93319f99c30ce91969026ee9fa3a402a74cbc2214f7e8b`.
+
+The controller published exactly the three authorized rounds:
+
+| Bound | Decision | Raw rows SHA256 | Fit SHA256 | Root reason |
+| ---: | --- | --- | --- | --- |
+| 8 | `expand_next_round` | `9b6c838eb70b2a20c10e36240b115a29c69c5b4487a1cd13c827f18871fd29e2` | `514c8d18e75120847bd58d9ee96190361d1c4e2e0ba56e1f15a84d1eff6505af` | `exhausted_sweep` |
+| 32 | `expand_next_round` | `05995ff07c08cd2035af7d50533cb89562bd39c63840901007dabcef4ea92874` | `4cb5374e5771014956b5ff4cae17014d89f68af4f71ba0324f69c3f4b29a1901` | `exhausted_sweep` |
+| 128 | `terminal_failure` | `297d88799b069765481f9793645da504c507b14193677109cf760803d491140e` | `fc92696741c1b74503b4863f156936a6b3ad00164222058d8db26f14f637b3e5` | `exhausted_sweep` |
+
+At bound 128, both tx-base cases passed the primary fit and checkpoint gates. Their checkpoint APEs
+were respectively
+`0.0013251328670122864495007550638558906913476686660355976150006060471772567880810233`
+and
+`0.0013714482628306657157669194327305215850772189025004586950608042066992932335457321`.
+The rejected terminal fit computed tx-base
+`172458.52776158196293291840525518983976157762777355659715869882250567609245941806`;
+this value is evidence inside a rejected round, not an accepted fixed-cost artifact. The other three
+fixed costs are absent:
+
+- `native_value_transfer`: rejected on `primary_residual` at bound 128, then
+  `exhausted_sweep`;
+- `block_base`: not measured because the native-transfer dependency remained closed;
+- `proposal_startup`: not measured because the native-transfer and block-base dependencies remained
+  closed.
+
+There is therefore no selected accepted round, no four-cost digest, and no higher-layer derivation
+ID. All six frozen state pairs remained closed and have no result:
+`witness_topology_1`, `witness_topology_8`, `witness_topology_32`, `dirty_accounts_2`,
+`dirty_accounts_8`, and `dirty_accounts_32`. No coarse-state verdict exists. Proposal evidence also
+remained closed.
+
+The profiling-enabled release build and fresh preparation passed, and the bounded overhead command
+completed normally with the explicit terminal result. Fitting, state execution, finalization,
+verification, and sealing were not run because their predecessor gate did not pass. The earlier
+identity-only run `72d6408bcabf192c420d8a31` is preserved as an aborted integration attempt; it
+identified a JSON-versus-bincode GuestInput hash mismatch. Fix `1155fb38` aligned the Rust workload
+identity with the production backend bytes and passed independent review and behavioral testing
+before the canonical run above. No opcode coefficient was refit, no final proposal was opened, and
+no production schedule, runtime configuration, block limit, or Boundless configuration changed.
+
 ## Next Gate
 
-Write the next implementation plan for the smallest controlled state/trie and transaction
-calibration. Start with the coarse block/state model, started non-Anchor transaction count, and
-native value-transfer count; open finer state features only if the predeclared holdout rejects the
-coarse model. Proposal execution remains closed.
+Diagnose whether a constant native-transfer model is structurally unsuitable or whether the current
+fixture is confounded. Predeclare the next workload, model, and gates before collecting new evidence;
+failure must remain an allowed conclusion. This campaign may define the question but must not select
+a looser threshold. After the diagnostic experiment is designed, reviewed, and sealed, decide
+whether a new clean higher-layer campaign is justified. State and proposal execution remain closed.
 
 ## Next Milestones
 

@@ -465,6 +465,7 @@ git commit -m "feat(zkgas): add controlled state holdouts"
 ### Task 4: Prepare, Evaluate, And Run The Bounded Higher-Layer Campaign
 
 **Files:**
+- Modify: `bin/guest-launcher/src/main.rs`
 - Modify: `experiments/opcode-gas/opcode_gas.py`
 - Modify: `experiments/opcode-gas/tests/test_higher_layer_calibration.py`
 - Modify: `experiments/opcode-gas/README.md`
@@ -525,6 +526,14 @@ The calibration ID is the first 24 hex characters of the full canonical identity
 directories are accepted only when every byte exactly matches the recomputed identity.
 
 - [ ] **Step 4: Add the one authoritative fixed-round evaluator and reuse the executor**
+
+First extend the existing `controlled-overhead` launcher stage to accept the gas-estimator engine
+under the same SP1/local/execute/no-aggregate and production-proposal-ELF guards as
+`controlled-block`. Reuse `execute_sp1_guest_gas_estimator_blocking`; do not create another SP1
+execution implementation. Preserve `standard` as the legacy default for callers that do not select
+an engine, but the higher-layer runner must always pass `--sp1-execution-engine gas-estimator` and
+must reject a standard-engine report. Add Rust RED/GREEN tests for the allowlist, guard failures,
+selected execution metadata, and continued legacy-standard default before changing Python.
 
 Implement a pure function with this role:
 
@@ -588,7 +597,8 @@ env PYTHONDONTWRITEBYTECODE=1 ~/.venv/bin/python -m unittest \
   experiments/opcode-gas/tests/test_higher_layer_calibration.py \
   experiments/opcode-gas/tests/test_sp1_candidate_report.py
 git diff --check
-git add experiments/opcode-gas/opcode_gas.py \
+git add bin/guest-launcher/src/main.rs \
+  experiments/opcode-gas/opcode_gas.py \
   experiments/opcode-gas/tests/test_higher_layer_calibration.py \
   experiments/opcode-gas/README.md
 git commit -m "feat(zkgas): add bounded higher-layer campaign"

@@ -902,6 +902,30 @@ For tiny stack and memory templates, always inspect `fit.json` before using `dam
 the current variant counts are too small or the template has setup/cleanup noise. In that case, rerun
 with larger variants or a cleaner template before treating the slope as a candidate coefficient.
 
+## Bounded Higher-Layer Calibration
+
+The higher-layer campaign binds the clean implementation revision, exact manifest, operation
+coverage, Osaka core, launcher, and production SP1 proposal ELF/VK. It evaluates round 8 first and
+opens rounds 32 and 128 only after a persisted expandable decision. This command stops after the
+overhead decision ledger; it cannot execute state holdouts, which remain gated on the later sealed
+fixed-cost artifact.
+
+```bash
+RUN_PATH_FILE="$(mktemp)"
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py \
+  prepare-higher-layer-calibration \
+  --manifest experiments/opcode-gas/manifests/sp1-higher-layer-v1.json \
+  --operation-coverage experiments/opcode-gas/manifests/operation-coverage-v1.json \
+  --augmented-core experiments/opcode-gas/derivations/f945e67bb2c38c9c8ef50530/core-opcode-submodel.json \
+  --guest-launcher target/release/guest-launcher \
+  --elf crates/guests/elf/sp1_shasta_proposal.elf \
+  --out experiments/opcode-gas/runs \
+  --run-path-file "$RUN_PATH_FILE"
+HIGHER_LAYER_RUN="$(<"$RUN_PATH_FILE")"
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py \
+  run-higher-layer-calibration --run "$HIGHER_LAYER_RUN"
+```
+
 ## Follow-Up TODO
 
 ## Frozen SP1 Calibration Inputs

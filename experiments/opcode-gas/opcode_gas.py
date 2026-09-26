@@ -6598,19 +6598,31 @@ def sp1_execution_parameters() -> dict[str, Any]:
     }
 
 
+def higher_layer_sp1_execution_parameters() -> dict[str, Any]:
+    """Bind higher-layer production proposal execution to the gas estimator."""
+    parameters = sp1_execution_parameters()
+    return {
+        **parameters,
+        "engines": {**parameters["engines"], "overhead": "gas-estimator"},
+    }
+
+
 def validate_sp1_execution_provenance(
-    row: Mapping[str, Any], *, workload_kind: str
+    row: Mapping[str, Any], *, workload_kind: str, expected_engine: str | None = None
 ) -> None:
-    expected_engine = sp1_execution_parameters()["engines"].get(workload_kind)
+    if expected_engine is None:
+        expected_engine = sp1_execution_parameters()["engines"].get(workload_kind)
     if expected_engine is None:
         raise ValueError(f"unknown SP1 workload kind {workload_kind}")
+    if expected_engine not in {"standard", "gas-estimator"}:
+        raise ValueError(f"unknown SP1 execution engine {expected_engine}")
     if row.get("sp1_execution_engine") != expected_engine:
         raise ValueError(
             f"SP1 execution provenance requires {workload_kind} engine {expected_engine}"
         )
     threshold = row.get("sp1_gas_trace_chunk_threshold")
     slots = row.get("sp1_gas_trace_chunk_slots")
-    if workload_kind in {"opcode", "block"}:
+    if expected_engine == "gas-estimator":
         if (
             type(threshold) is not int
             or threshold != SP1_GAS_TRACE_CHUNK_THRESHOLD
@@ -8885,6 +8897,461 @@ def fixed_startup_residual(panel_repeat_residuals: Iterable[Iterable[Any]]) -> D
     if not case_values:
         raise ValueError("startup residual panel is empty")
     return sum(case_values) / Decimal(len(case_values))
+
+
+_HIGHER_LAYER_EXPANSION_REASONS = frozenset(
+    {"checkpoint_generator_bound", "exhausted_sweep"}
+)
+
+
+def _higher_layer_root_reasons(result: Mapping[str, Any]) -> list[str]:
+    reasons = list(result.get("reasons", []))
+    if "checkpoint_generator_bound" in reasons:
+        return ["checkpoint_generator_bound"]
+    if "exhausted_sweep" in reasons:
+        return ["exhausted_sweep"]
+    return reasons
+
+
+def _higher_layer_repeat_values(
+    rows: Iterable[Mapping[str, Any]], *, label: str
+) -> list[Decimal]:
+    ordered = sorted(rows, key=lambda row: int(row.get("repeat_index", -1)))
+    if [row.get("repeat_index") for row in ordered] != [0, 1, 2]:
+        raise ValueError(f"{label} requires repeat_index 0, 1, and 2")
+    if any(row.get("status") != "accepted" for row in ordered):
+        raise ValueError(f"{label} contains a generation failure")
+    for row in ordered:
+        validate_sp1_execution_provenance(
+            row, workload_kind="overhead", expected_engine="gas-estimator"
+        )
+    return [
+        _decimal(row.get("prover_gas", row.get("gas")), label=f"{label} proverGas")
+        for row in ordered
+    ]
+
+
+def _higher_layer_stable_map(
+    rows: Iterable[Mapping[str, Any]], field_name: str
+) -> Mapping[str, Any]:
+    values = [row.get(field_name, {}) for row in rows]
+    if not values or any(not isinstance(value, Mapping) for value in values):
+        raise ValueError(f"higher-layer rows are missing {field_name}")
+    if len({canonical_json(value) for value in values}) != 1:
+        raise ValueError(f"higher-layer {field_name} changed across repeats")
+    return values[0]
+
+
+def _higher_layer_operation_cost(
+    core: Mapping[str, Any],
+    coverage: Mapping[str, Any],
+    rows: Iterable[Mapping[str, Any]],
+) -> Decimal:
+    deltas = _stable_operation_deltas(rows, "observed_operation_deltas")
+    return sum(
+        (
+            resolve_static_operation_delta(core, coverage, key, delta)
+            for key, delta in sorted(deltas.items())
+        ),
+        Decimal(0),
+    )
+
+
+def _higher_layer_sweep_case(
+    *,
+    case_id: str,
+    key_id: str,
+    rows: list[Mapping[str, Any]],
+    core: Mapping[str, Any],
+    coverage: Mapping[str, Any],
+    accepted_costs: Mapping[str, Decimal],
+    dependencies: tuple[str, ...],
+    generator_max_count: int,
+) -> dict[str, Any]:
+    if any(
+        row.get("case") == case_id and row.get("status") == "rejected"
+        for row in rows
+    ):
+        return {
+            "case_id": case_id,
+            "overhead_key_id": key_id,
+            "status": "rejected",
+            "reasons": ["generation_failure"],
+        }
+    counts = sorted(
+        {
+            int(row.get("target_count", -1))
+            for row in rows
+            if row.get("case") == case_id and row.get("lane") == "target"
+        }
+    )
+    points = []
+    try:
+        for count in counts:
+            target_rows = [
+                row
+                for row in rows
+                if row.get("case") == case_id
+                and row.get("lane") == "target"
+                and int(row.get("target_count", -1)) == count
+            ]
+            control_rows = [
+                row
+                for row in rows
+                if row.get("case") == case_id
+                and row.get("lane") == "control"
+                and int(row.get("target_count", -1)) == count
+            ]
+            target_values = _higher_layer_repeat_values(
+                target_rows, label=f"{case_id} target {count}"
+            )
+            control_values = _higher_layer_repeat_values(
+                control_rows, label=f"{case_id} control {count}"
+            )
+            features = _higher_layer_stable_map(
+                target_rows, "expected_feature_deltas"
+            )
+            if any(
+                isinstance(value, bool) or not isinstance(value, int)
+                for value in features.values()
+            ):
+                raise ValueError("higher-layer feature deltas must be integers")
+            if features.get(key_id) != count:
+                raise ValueError("higher-layer target feature count differs")
+            if set(features) != {key_id, *dependencies}:
+                raise ValueError("higher-layer case feature declaration differs")
+            operation_cost = _higher_layer_operation_cost(
+                core, coverage, target_rows
+            )
+            residuals = []
+            for target, control in zip(target_values, control_values):
+                residual = target - control - operation_cost
+                for dependency in dependencies:
+                    residual -= Decimal(features.get(dependency, 0)) * accepted_costs[
+                        dependency
+                    ]
+                residuals.append(_decimal_text(residual))
+            points.append(
+                {
+                    "count": count,
+                    "prover_gas_repeats": residuals,
+                    "case_input_sha256_repeats": ["paired"] * 3,
+                    "exit_code_repeats": [0, 0, 0],
+                    "public_values_repeats": ["paired"] * 3,
+                    "isolation": {
+                        "status": "passed",
+                        "bytecode_size": 0,
+                        "input_size": 0,
+                        "non_target_counts": {},
+                        "non_target_raw_gas": 0,
+                    },
+                }
+            )
+    except (KeyError, TypeError, ValueError) as error:
+        return {
+            "case_id": case_id,
+            "overhead_key_id": key_id,
+            "status": "rejected",
+            "reasons": [str(error)],
+        }
+    return {
+        "case_id": case_id,
+        "overhead_key_id": key_id,
+        **evaluate_controlled_sweep(
+            points,
+            pricing_basis="fixed_per_event",
+            target_raw_gas=None,
+            generator_max_count=generator_max_count,
+            require_tx_gas_limit=False,
+        ),
+    }
+
+
+@_isolated_decimal_context
+def evaluate_higher_layer_fixed_round(
+    manifest: HigherLayerManifest,
+    operation_coverage: Mapping[str, Any],
+    augmented_core: Mapping[str, Any],
+    rows: Iterable[Mapping[str, Any]],
+    generator_max_count: int,
+) -> Mapping[str, Any]:
+    """Fit one bounded higher-layer round without executing or writing files."""
+    if not isinstance(manifest, HigherLayerManifest):
+        raise ValueError("higher-layer evaluator requires the validated manifest")
+    if generator_max_count not in manifest.generator_rounds:
+        raise ValueError("higher-layer generator bound must be one of 8, 32, or 128")
+    _require_pinned_operation_artifact(
+        operation_coverage,
+        expected_sha256=manifest.operation_coverage_ref["artifact_sha256"],
+        label="pinned operation coverage",
+    )
+    _require_pinned_operation_artifact(
+        augmented_core,
+        expected_sha256=manifest.augmented_core_ref["artifact_sha256"],
+        label="pinned augmented core",
+    )
+    row_list = list(rows)
+    if any(
+        row.get("case") not in manifest.overhead_case_ids
+        or row.get("generator_max_count") != generator_max_count
+        for row in row_list
+    ):
+        raise ValueError("higher-layer row identity or generator bound differs")
+
+    accepted: dict[str, Decimal] = {}
+    case_results: list[dict[str, Any]] = []
+    overhead_results: dict[str, dict[str, Any]] = {}
+    roots_by_key: dict[str, list[str]] = {}
+
+    tx_results = [
+        _higher_layer_sweep_case(
+            case_id=case_id,
+            key_id="tx_base",
+            rows=row_list,
+            core=augmented_core,
+            coverage=operation_coverage,
+            accepted_costs=accepted,
+            dependencies=(),
+            generator_max_count=generator_max_count,
+        )
+        for case_id in manifest.overhead_case_ids[:2]
+    ]
+    case_results.extend(tx_results)
+    tx_roots = list(
+        dict.fromkeys(
+            reason
+            for result in tx_results
+            if result.get("status") != "accepted"
+            for reason in _higher_layer_root_reasons(result)
+        )
+    )
+    tx_values = [
+        _decimal(result["f_p"], label="tx_base case value")
+        for result in tx_results
+        if result.get("status") == "accepted"
+    ]
+    if not tx_roots and len(tx_values) == 2:
+        minimum, maximum = min(tx_values), max(tx_values)
+        if minimum <= 0 or maximum / minimum - Decimal(1) > Decimal(
+            manifest.gates["maximum_tx_base_disagreement"]
+        ):
+            tx_roots = ["tx_base_disagreement"]
+    if tx_roots:
+        roots_by_key["tx_base"] = tx_roots
+        overhead_results["tx_base"] = {
+            "status": "required_case_incomplete",
+            "required_case_ids": list(manifest.overhead_case_ids[:2]),
+            "root_rejection_reasons": tx_roots,
+        }
+    else:
+        accepted["tx_base"] = sum(tx_values) / Decimal(2)
+        overhead_results["tx_base"] = {
+            "status": "accepted",
+            "o_p": _decimal_text(accepted["tx_base"]),
+            "required_case_ids": list(manifest.overhead_case_ids[:2]),
+            "checkpoint_evidence": {
+                result["case_id"]: result.get("checkpoint") for result in tx_results
+            },
+        }
+
+    def fit_single(
+        key_id: str, case_id: str, dependencies: tuple[str, ...]
+    ) -> None:
+        missing = [dependency for dependency in dependencies if dependency not in accepted]
+        if missing:
+            inherited = list(
+                dict.fromkeys(
+                    reason
+                    for dependency in missing
+                    for reason in roots_by_key[dependency]
+                )
+            )
+            roots_by_key[key_id] = inherited
+            result = {
+                "case_id": case_id,
+                "overhead_key_id": key_id,
+                "status": "rejected",
+                "reasons": ["unmeasured_overhead_dependency"],
+                "dependency_ids": missing,
+                "root_rejection_reasons": inherited,
+            }
+        else:
+            result = _higher_layer_sweep_case(
+                case_id=case_id,
+                key_id=key_id,
+                rows=row_list,
+                core=augmented_core,
+                coverage=operation_coverage,
+                accepted_costs=accepted,
+                dependencies=dependencies,
+                generator_max_count=generator_max_count,
+            )
+            if result.get("status") == "accepted":
+                accepted[key_id] = _decimal(
+                    result["f_p"], label=f"{key_id} fixed cost"
+                )
+            else:
+                roots_by_key[key_id] = _higher_layer_root_reasons(result)
+        case_results.append(result)
+        if key_id in accepted:
+            overhead_results[key_id] = {
+                "status": "accepted",
+                "o_p": _decimal_text(accepted[key_id]),
+                "required_case_ids": [case_id],
+                "checkpoint_evidence": {case_id: result.get("checkpoint")},
+            }
+        else:
+            overhead_results[key_id] = {
+                "status": "required_case_incomplete",
+                "required_case_ids": [case_id],
+                "root_rejection_reasons": roots_by_key[key_id],
+            }
+
+    fit_single(
+        "native_value_transfer",
+        "native_transfer_positive_vs_zero",
+        ("tx_base",),
+    )
+    fit_single(
+        "block_base",
+        "block_base_one_vs_two_minimal_blocks",
+        ("tx_base", "native_value_transfer"),
+    )
+
+    startup_dependencies = ("block_base", "tx_base", "native_value_transfer")
+    missing_startup = [key for key in startup_dependencies if key not in accepted]
+    startup_case_ids = manifest.overhead_case_ids[4:]
+    if missing_startup:
+        startup_roots = list(
+            dict.fromkeys(
+                reason
+                for dependency in missing_startup
+                for reason in roots_by_key[dependency]
+            )
+        )
+        roots_by_key["proposal_startup"] = startup_roots
+        for case_id in startup_case_ids:
+            case_results.append(
+                {
+                    "case_id": case_id,
+                    "overhead_key_id": "proposal_startup",
+                    "status": "rejected",
+                    "reasons": ["unmeasured_overhead_dependency"],
+                    "dependency_ids": missing_startup,
+                    "root_rejection_reasons": startup_roots,
+                }
+            )
+    else:
+        startup_panels = []
+        startup_results = []
+        for case_id in startup_case_ids:
+            case_rows = [
+                row
+                for row in row_list
+                if row.get("case") == case_id and row.get("lane") == "target"
+            ]
+            try:
+                values = _higher_layer_repeat_values(case_rows, label=case_id)
+                features = _higher_layer_stable_map(
+                    case_rows, "expected_feature_deltas"
+                )
+                if (
+                    any(row.get("target_count") != 1 for row in case_rows)
+                    or features.get("proposal_startup") != 1
+                    or set(features)
+                    != {
+                    "proposal_startup",
+                    *startup_dependencies,
+                    }
+                ):
+                    raise ValueError("higher-layer startup feature identity differs")
+                operation_cost = _higher_layer_operation_cost(
+                    augmented_core, operation_coverage, case_rows
+                )
+                residuals = [
+                    _decimal_text(
+                        value
+                        - operation_cost
+                        - sum(
+                            Decimal(features.get(dependency, 0))
+                            * accepted[dependency]
+                            for dependency in startup_dependencies
+                        )
+                    )
+                    for value in values
+                ]
+                startup_panels.append(residuals)
+                startup_results.append(
+                    {
+                        "case_id": case_id,
+                        "overhead_key_id": "proposal_startup",
+                        "status": "accepted",
+                        "repeat_residuals": residuals,
+                    }
+                )
+            except (KeyError, TypeError, ValueError) as error:
+                roots_by_key["proposal_startup"] = [str(error)]
+                startup_results.append(
+                    {
+                        "case_id": case_id,
+                        "overhead_key_id": "proposal_startup",
+                        "status": "rejected",
+                        "reasons": [str(error)],
+                    }
+                )
+        case_results.extend(startup_results)
+        if "proposal_startup" not in roots_by_key:
+            try:
+                accepted["proposal_startup"] = fixed_startup_residual(startup_panels)
+            except ValueError as error:
+                roots_by_key["proposal_startup"] = [str(error)]
+
+    if "proposal_startup" in accepted:
+        overhead_results["proposal_startup"] = {
+            "status": "accepted",
+            "o_p": _decimal_text(accepted["proposal_startup"]),
+            "baseline_kind": "mathematical_zero_baseline",
+            "required_case_ids": list(startup_case_ids),
+        }
+    else:
+        overhead_results["proposal_startup"] = {
+            "status": "required_case_incomplete",
+            "required_case_ids": list(startup_case_ids),
+            "root_rejection_reasons": roots_by_key.get("proposal_startup", []),
+        }
+
+    roots = list(
+        dict.fromkeys(
+            reason
+            for key_id in manifest.q_formula
+            for reason in roots_by_key.get(key_id, [])
+        )
+    )
+    complete = set(accepted) == set(manifest.q_formula)
+    if complete:
+        decision = "accepted"
+    elif (
+        roots
+        and set(roots) <= _HIGHER_LAYER_EXPANSION_REASONS
+        and generator_max_count < manifest.generator_rounds[-1]
+    ):
+        decision = "expand_next_round"
+    else:
+        decision = "terminal_failure"
+    return {
+        "schema_version": 1,
+        "generator_max_count": generator_max_count,
+        "status": "accepted" if complete else "rejected",
+        "decision": decision,
+        "fixed_costs": {
+            key: _decimal_text(accepted[key])
+            for key in manifest.q_formula
+            if key in accepted
+        },
+        "root_rejection_reasons": roots,
+        "overhead_results": overhead_results,
+        "case_results": case_results,
+    }
 
 
 @_isolated_decimal_context
@@ -12688,11 +13155,18 @@ def cmd_prepare_calibration(args: argparse.Namespace) -> None:
     print(f"prepared calibration {experiment['calibration_id']}")
 
 
-def write_run_path_file(path: pathlib.Path, run: pathlib.Path) -> None:
+def write_run_path_file(
+    path: pathlib.Path,
+    run: pathlib.Path,
+    *,
+    durable_identity_name: str = "provenance.json",
+) -> None:
     """Durably publish one machine-readable run path without partial contents."""
-    provenance = run / "provenance.json"
-    if not provenance.is_file():
-        raise ValueError("calibration provenance must be durable before run-path handoff")
+    if durable_identity_name not in {"provenance.json", "identity.json"}:
+        raise ValueError("run-path durable identity filename is invalid")
+    durable_identity = run / durable_identity_name
+    if not durable_identity.is_file():
+        raise ValueError("calibration identity must be durable before run-path handoff")
     for item in sorted(run.rglob("*")):
         if item.is_file():
             with item.open("rb") as input_file:
@@ -18062,8 +18536,11 @@ def run_controlled_overhead_round(
     generator_max_count: int,
     include_startup: bool,
     out: pathlib.Path,
+    execution_engine: str = "standard",
 ) -> None:
     """Execute each frozen overhead point three times through sp1-shasta-proposal."""
+    if execution_engine not in {"standard", "gas-estimator"}:
+        raise ValueError("controlled overhead has an unknown SP1 execution engine")
     if generator_max_count > CONTROLLED_OVERHEAD_GENERATOR_MAX_COUNT:
         raise ValueError(
             "controlled overhead generator exceeds the frozen "
@@ -18099,6 +18576,8 @@ def run_controlled_overhead_round(
                     "execute",
                     "--sp1-prover",
                     "local",
+                    "--sp1-execution-engine",
+                    execution_engine,
                     "--input",
                     str(spec_path),
                     "--jsonl-out",
@@ -18107,7 +18586,11 @@ def run_controlled_overhead_round(
                 check=True,
             )
             for report in iter_jsonl(report_path):
-                validate_sp1_execution_provenance(report, workload_kind="overhead")
+                validate_sp1_execution_provenance(
+                    report,
+                    workload_kind="overhead",
+                    expected_engine=execution_engine,
+                )
                 controlled = report.get("controlled_overhead")
                 if not isinstance(controlled, Mapping):
                     raise ValueError("controlled overhead report is missing typed metadata")
@@ -20350,9 +20833,465 @@ def cmd_verify_osaka_opcode_augmentation(args: argparse.Namespace) -> None:
     print(verified["augmentation_id"])
 
 
+_HIGHER_LAYER_MANIFEST_PATH = pathlib.Path(
+    "experiments/opcode-gas/manifests/sp1-higher-layer-v1.json"
+)
+_HIGHER_LAYER_COVERAGE_PATH = pathlib.Path(_HIGHER_LAYER_OPERATION_COVERAGE_REF["path"])
+_HIGHER_LAYER_CORE_PATH = pathlib.Path(_HIGHER_LAYER_AUGMENTED_CORE_REF["path"])
+_HIGHER_LAYER_LAUNCHER_PATH = pathlib.Path("target/release/guest-launcher")
+_HIGHER_LAYER_ELF_PATH = pathlib.Path("crates/guests/elf/sp1_shasta_proposal.elf")
+_HIGHER_LAYER_VK_PATH = pathlib.Path("crates/guests/elf/sp1_shasta_proposal.vk.bin")
+_HIGHER_LAYER_RUN_ROOT = pathlib.Path("experiments/opcode-gas/runs")
+_HIGHER_LAYER_IDENTITY_SCHEMA_VERSION = 1
+_HIGHER_LAYER_DECISIONS_SCHEMA_VERSION = 1
+
+
+def _higher_layer_canonical_path(
+    value: pathlib.Path | str, expected: pathlib.Path, *, label: str
+) -> pathlib.Path:
+    resolved = _resolve_repo_path(value, field_name=label)
+    canonical = (REPO_ROOT / expected).resolve()
+    if resolved != canonical:
+        raise ValueError(f"{label} path is not canonical")
+    return resolved
+
+
+def _higher_layer_regular_file(path: pathlib.Path, *, label: str) -> pathlib.Path:
+    try:
+        mode = path.stat(follow_symlinks=False).st_mode
+    except OSError as error:
+        raise ValueError(f"{label} is missing") from error
+    if path.is_symlink() or not stat.S_ISREG(mode):
+        raise ValueError(f"{label} must be a regular non-symlink file")
+    return path
+
+
+def _higher_layer_json_artifact(path: pathlib.Path, *, label: str) -> Mapping[str, Any]:
+    _higher_layer_regular_file(path, label=label)
+    try:
+        artifact = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"{label} is not valid JSON") from error
+    if not isinstance(artifact, Mapping):
+        raise ValueError(f"{label} must be a JSON object")
+    if path.read_bytes() != _canonical_json_file_bytes(artifact):
+        raise ValueError(f"{label} is not canonical JSON")
+    _validate_content_addressed_artifact(artifact, label=label)
+    return artifact
+
+
+def _higher_layer_identity_payload(
+    *,
+    implementation_revision: str,
+    manifest_path: pathlib.Path,
+    operation_coverage_path: pathlib.Path,
+    augmented_core_path: pathlib.Path,
+    guest_launcher: pathlib.Path,
+    elf: pathlib.Path,
+) -> dict[str, Any]:
+    if not _is_git_revision(implementation_revision):
+        raise ValueError("higher-layer implementation revision is invalid")
+    manifest = load_higher_layer_manifest(manifest_path)
+    manifest_artifact = _higher_layer_json_artifact(
+        manifest_path, label="higher-layer manifest"
+    )
+    coverage = _higher_layer_json_artifact(
+        operation_coverage_path, label="operation coverage"
+    )
+    core = _higher_layer_json_artifact(augmented_core_path, label="augmented core")
+    if (
+        coverage.get("artifact_sha256")
+        != manifest.operation_coverage_ref["artifact_sha256"]
+        or sha256_file(operation_coverage_path)
+        != manifest.operation_coverage_ref["file_sha256"]
+    ):
+        raise ValueError("operation coverage hashes differ from the manifest")
+    if (
+        core.get("artifact_sha256") != manifest.augmented_core_ref["artifact_sha256"]
+        or sha256_file(augmented_core_path) != manifest.augmented_core_ref["file_sha256"]
+    ):
+        raise ValueError("augmented core hashes differ from the manifest")
+    _higher_layer_regular_file(guest_launcher, label="guest launcher")
+    _higher_layer_regular_file(elf, label="SP1 proposal ELF")
+    vk = _higher_layer_regular_file(
+        (REPO_ROOT / _HIGHER_LAYER_VK_PATH).resolve(), label="SP1 proposal VK"
+    )
+    return {
+        "schema_version": _HIGHER_LAYER_IDENTITY_SCHEMA_VERSION,
+        "purpose": manifest.purpose,
+        "implementation_revision": implementation_revision,
+        "higher_layer_manifest": {
+            "path": str(_HIGHER_LAYER_MANIFEST_PATH),
+            "artifact_sha256": manifest_artifact["artifact_sha256"],
+            "file_sha256": sha256_file(manifest_path),
+        },
+        "operation_coverage": dict(manifest.operation_coverage_ref),
+        "augmented_core": dict(manifest.augmented_core_ref),
+        "guest_launcher": {
+            "path": str(_HIGHER_LAYER_LAUNCHER_PATH),
+            "file_sha256": sha256_file(guest_launcher),
+        },
+        "sp1_proposal_guest": {
+            "elf_path": str(_HIGHER_LAYER_ELF_PATH),
+            "elf_sha256": sha256_file(elf),
+            "vk_path": str(_HIGHER_LAYER_VK_PATH),
+            "vk_sha256": sha256_file(vk),
+        },
+        "version_identity": dict(manifest.version_identity),
+        "sp1_execution_parameters": higher_layer_sp1_execution_parameters(),
+    }
+
+
+def persist_immutable_bytes(path: pathlib.Path, value: bytes) -> None:
+    """Create one campaign artifact, accepting only an exact-byte replay."""
+    if path.exists():
+        if path.is_symlink() or not path.is_file() or path.read_bytes() != value:
+            raise ValueError(f"immutable artifact already exists with different bytes: {path}")
+        return
+    _atomic_write_bytes(path, value)
+
+
+def prepare_higher_layer_calibration(
+    *,
+    manifest_path: pathlib.Path,
+    operation_coverage_path: pathlib.Path,
+    augmented_core_path: pathlib.Path,
+    guest_launcher: pathlib.Path,
+    elf: pathlib.Path,
+    output_root: pathlib.Path,
+) -> pathlib.Path:
+    """Freeze the canonical clean higher-layer implementation and executable inputs."""
+    manifest_path = _higher_layer_canonical_path(
+        manifest_path, _HIGHER_LAYER_MANIFEST_PATH, label="higher-layer manifest"
+    )
+    operation_coverage_path = _higher_layer_canonical_path(
+        operation_coverage_path,
+        _HIGHER_LAYER_COVERAGE_PATH,
+        label="operation coverage",
+    )
+    augmented_core_path = _higher_layer_canonical_path(
+        augmented_core_path, _HIGHER_LAYER_CORE_PATH, label="augmented core"
+    )
+    guest_launcher = _higher_layer_canonical_path(
+        guest_launcher, _HIGHER_LAYER_LAUNCHER_PATH, label="guest launcher"
+    )
+    elf = _higher_layer_canonical_path(elf, _HIGHER_LAYER_ELF_PATH, label="SP1 proposal ELF")
+    output_root = _higher_layer_canonical_path(
+        output_root, _HIGHER_LAYER_RUN_ROOT, label="higher-layer output"
+    )
+    assert_generated_paths_only(git_worktree_status())
+    payload = _higher_layer_identity_payload(
+        implementation_revision=git_head(),
+        manifest_path=manifest_path,
+        operation_coverage_path=operation_coverage_path,
+        augmented_core_path=augmented_core_path,
+        guest_launcher=guest_launcher,
+        elf=elf,
+    )
+    identity_sha256 = sha256_bytes(canonical_json(payload))
+    calibration_id = identity_sha256[:24]
+    document = {
+        "schema_version": _HIGHER_LAYER_IDENTITY_SCHEMA_VERSION,
+        "calibration_id": calibration_id,
+        "identity_sha256": identity_sha256,
+        "identity": payload,
+    }
+    identity_bytes = _canonical_json_file_bytes(document)
+    run = output_root / calibration_id
+    if run.exists() and (not run.is_dir() or run.is_symlink()):
+        raise ValueError("higher-layer run path is not a regular directory")
+    run.mkdir(parents=True, exist_ok=True)
+    persist_immutable_bytes(run / "identity.json", identity_bytes)
+    return run
+
+
+def _load_higher_layer_identity(run: pathlib.Path) -> tuple[dict[str, Any], dict[str, Any]]:
+    run = _resolve_repo_path(run, field_name="higher-layer run")
+    canonical_root = (REPO_ROOT / _HIGHER_LAYER_RUN_ROOT).resolve()
+    if run.parent != canonical_root or run.name == "" or run.is_symlink():
+        raise ValueError("higher-layer run path is not canonical")
+    identity_path = run / "identity.json"
+    try:
+        raw = identity_path.read_bytes()
+        document = json.loads(raw)
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError("higher-layer identity is missing or invalid") from error
+    if not isinstance(document, dict) or raw != _canonical_json_file_bytes(document):
+        raise ValueError("higher-layer identity is not canonical JSON")
+    if set(document) != {
+        "schema_version",
+        "calibration_id",
+        "identity_sha256",
+        "identity",
+    }:
+        raise ValueError("higher-layer identity fields differ")
+    payload = document.get("identity")
+    if not isinstance(payload, dict):
+        raise ValueError("higher-layer identity payload is invalid")
+    digest = sha256_bytes(canonical_json(payload))
+    if (
+        document.get("schema_version") != _HIGHER_LAYER_IDENTITY_SCHEMA_VERSION
+        or document.get("identity_sha256") != digest
+        or document.get("calibration_id") != digest[:24]
+        or run.name != digest[:24]
+    ):
+        raise ValueError("higher-layer calibration identity differs")
+    return document, payload
+
+
+def _validate_current_higher_layer_identity(
+    run: pathlib.Path,
+) -> tuple[dict[str, Any], HigherLayerManifest, Mapping[str, Any], Mapping[str, Any]]:
+    document, payload = _load_higher_layer_identity(run)
+    assert_generated_paths_only(git_worktree_status())
+    expected = _higher_layer_identity_payload(
+        implementation_revision=git_head(),
+        manifest_path=(REPO_ROOT / _HIGHER_LAYER_MANIFEST_PATH).resolve(),
+        operation_coverage_path=(REPO_ROOT / _HIGHER_LAYER_COVERAGE_PATH).resolve(),
+        augmented_core_path=(REPO_ROOT / _HIGHER_LAYER_CORE_PATH).resolve(),
+        guest_launcher=(REPO_ROOT / _HIGHER_LAYER_LAUNCHER_PATH).resolve(),
+        elf=(REPO_ROOT / _HIGHER_LAYER_ELF_PATH).resolve(),
+    )
+    if canonical_json(payload) != canonical_json(expected):
+        raise ValueError("higher-layer implementation or executable identity changed")
+    manifest = load_higher_layer_manifest((REPO_ROOT / _HIGHER_LAYER_MANIFEST_PATH).resolve())
+    coverage = _higher_layer_json_artifact(
+        (REPO_ROOT / _HIGHER_LAYER_COVERAGE_PATH).resolve(), label="operation coverage"
+    )
+    core = _higher_layer_json_artifact(
+        (REPO_ROOT / _HIGHER_LAYER_CORE_PATH).resolve(), label="augmented core"
+    )
+    return document, manifest, coverage, core
+
+
+def _higher_layer_decisions_bytes(value: Mapping[str, Any]) -> bytes:
+    return _canonical_json_file_bytes(value)
+
+
+def _write_higher_layer_decisions(
+    run: pathlib.Path, decisions: Mapping[str, Any]
+) -> None:
+    value = _higher_layer_decisions_bytes(decisions)
+    _atomic_replace_bytes(run / "overhead-decisions.json", value)
+    _atomic_replace_bytes(
+        run / "overhead-decisions.sha256",
+        (sha256_bytes(value) + "\n").encode(),
+    )
+
+
+def _read_higher_layer_rows(path: pathlib.Path) -> list[Mapping[str, Any]]:
+    try:
+        return list(iter_jsonl(path))
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        raise ValueError(f"higher-layer raw rows are invalid: {path}") from error
+
+
+def validate_persisted_higher_layer_decisions(
+    run: pathlib.Path,
+    decisions: Mapping[str, Any],
+    manifest: HigherLayerManifest,
+    coverage: Mapping[str, Any],
+    core: Mapping[str, Any],
+    identity_sha256: str,
+) -> list[dict[str, Any]]:
+    if set(decisions) != {"schema_version", "identity_sha256", "rounds"} or (
+        decisions.get("schema_version") != _HIGHER_LAYER_DECISIONS_SCHEMA_VERSION
+        or decisions.get("identity_sha256") != identity_sha256
+        or not isinstance(decisions.get("rounds"), list)
+    ):
+        raise ValueError("higher-layer decision ledger identity differs")
+    rounds = decisions["rounds"]
+    observed = [record.get("generator_max_count") for record in rounds]
+    if observed != list(manifest.generator_rounds[: len(observed)]):
+        raise ValueError("higher-layer decisions are not a contiguous round prefix")
+    validated = []
+    prior_decision = None
+    for index, record in enumerate(rounds):
+        if set(record) != {
+            "generator_max_count",
+            "raw_rows",
+            "raw_rows_sha256",
+            "fit",
+            "fit_sha256",
+            "decision",
+        }:
+            raise ValueError("higher-layer decision record fields differ")
+        bound = manifest.generator_rounds[index]
+        if index and prior_decision != "expand_next_round":
+            raise ValueError("higher-layer round lacks a prior expansion decision")
+        expected_raw = pathlib.Path("raw") / f"overhead-round-{bound}.jsonl"
+        expected_fit = pathlib.Path("fit") / f"overhead-round-{bound}.json"
+        if record.get("raw_rows") != str(expected_raw) or record.get("fit") != str(
+            expected_fit
+        ):
+            raise ValueError("higher-layer round artifact path is not canonical")
+        raw_path = run / expected_raw
+        fit_path = run / expected_fit
+        if (
+            not raw_path.is_file()
+            or sha256_file(raw_path) != record.get("raw_rows_sha256")
+            or not fit_path.is_file()
+            or sha256_file(fit_path) != record.get("fit_sha256")
+        ):
+            raise ValueError("higher-layer round artifact hash differs")
+        rows = _read_higher_layer_rows(raw_path)
+        replay = evaluate_higher_layer_fixed_round(
+            manifest, coverage, core, rows, bound
+        )
+        fit_bytes = _canonical_json_file_bytes(replay)
+        if fit_path.read_bytes() != fit_bytes or record.get("decision") != replay.get(
+            "decision"
+        ):
+            raise ValueError("higher-layer round fit or decision differs on replay")
+        validated.append({**record, "fit_payload": replay})
+        prior_decision = record["decision"]
+    return validated
+
+
+def _load_higher_layer_decisions(
+    run: pathlib.Path,
+    manifest: HigherLayerManifest,
+    coverage: Mapping[str, Any],
+    core: Mapping[str, Any],
+    identity_sha256: str,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    path = run / "overhead-decisions.json"
+    seal = run / "overhead-decisions.sha256"
+    artifacts_exist = any((run / directory).exists() for directory in ("raw", "fit"))
+    if not path.exists() and not seal.exists():
+        if artifacts_exist:
+            raise ValueError("higher-layer raw evidence is missing prior round decisions")
+        decisions = {
+            "schema_version": _HIGHER_LAYER_DECISIONS_SCHEMA_VERSION,
+            "identity_sha256": identity_sha256,
+            "rounds": [],
+        }
+        return decisions, []
+    if not path.is_file() or not seal.is_file():
+        raise ValueError("higher-layer decision ledger or seal is missing")
+    raw = path.read_bytes()
+    if seal.read_text().strip() != sha256_bytes(raw):
+        raise ValueError("higher-layer decision ledger seal differs")
+    try:
+        decisions = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise ValueError("higher-layer decision ledger is invalid") from error
+    if raw != _higher_layer_decisions_bytes(decisions):
+        raise ValueError("higher-layer decision ledger is not canonical")
+    validated = validate_persisted_higher_layer_decisions(
+        run, decisions, manifest, coverage, core, identity_sha256
+    )
+    return decisions, validated
+
+
+def run_higher_layer_calibration(
+    run: pathlib.Path,
+    *,
+    executor=run_controlled_overhead_round,
+) -> Mapping[str, Any]:
+    """Execute only the bounded overhead campaign, replaying every prior decision."""
+    run = _resolve_repo_path(run, field_name="higher-layer run")
+    identity, manifest, coverage, core = _validate_current_higher_layer_identity(run)
+    decisions, validated = _load_higher_layer_decisions(
+        run,
+        manifest,
+        coverage,
+        core,
+        identity["identity_sha256"],
+    )
+    if validated and validated[-1]["decision"] != "expand_next_round":
+        return validated[-1]["fit_payload"]
+    start = len(validated)
+    for bound in manifest.generator_rounds[start:]:
+        if bound not in _HIGHER_LAYER_GENERATOR_ROUNDS:
+            raise ValueError("higher-layer generator bound is outside 8, 32, 128")
+        raw_relative = pathlib.Path("raw") / f"overhead-round-{bound}.jsonl"
+        fit_relative = pathlib.Path("fit") / f"overhead-round-{bound}.json"
+        raw_path = run / raw_relative
+        fit_path = run / fit_relative
+        if raw_path.exists() or fit_path.exists():
+            raise ValueError("higher-layer round exists without its prior decision")
+        with tempfile.TemporaryDirectory(prefix=f"higher-layer-{bound}-") as temporary:
+            temporary_raw = pathlib.Path(temporary) / raw_path.name
+            executor(
+                guest_launcher=(REPO_ROOT / _HIGHER_LAYER_LAUNCHER_PATH).resolve(),
+                calibration_run_id=identity["calibration_id"],
+                generator_max_count=bound,
+                include_startup=True,
+                out=temporary_raw,
+                execution_engine="gas-estimator",
+            )
+            rows = _read_higher_layer_rows(temporary_raw)
+        raw_bytes = b"".join(canonical_json(row) + b"\n" for row in rows)
+        fit = evaluate_higher_layer_fixed_round(
+            manifest, coverage, core, rows, bound
+        )
+        fit_bytes = _canonical_json_file_bytes(fit)
+        persist_immutable_bytes(raw_path, raw_bytes)
+        persist_immutable_bytes(fit_path, fit_bytes)
+        record = {
+            "generator_max_count": bound,
+            "raw_rows": str(raw_relative),
+            "raw_rows_sha256": sha256_bytes(raw_bytes),
+            "fit": str(fit_relative),
+            "fit_sha256": sha256_bytes(fit_bytes),
+            "decision": fit["decision"],
+        }
+        decisions["rounds"].append(record)
+        _write_higher_layer_decisions(run, decisions)
+        if fit["decision"] != "expand_next_round":
+            return fit
+    raise ValueError("higher-layer campaign exhausted rounds without a terminal decision")
+
+
+def cmd_prepare_higher_layer_calibration(args: argparse.Namespace) -> None:
+    run = prepare_higher_layer_calibration(
+        manifest_path=args.manifest,
+        operation_coverage_path=args.operation_coverage,
+        augmented_core_path=args.augmented_core,
+        guest_launcher=args.guest_launcher,
+        elf=args.elf,
+        output_root=args.out,
+    )
+    write_run_path_file(
+        args.run_path_file, run, durable_identity_name="identity.json"
+    )
+    print(f"prepared higher-layer calibration {run.name}")
+
+
+def cmd_run_higher_layer_calibration(args: argparse.Namespace) -> None:
+    result = run_higher_layer_calibration(args.run)
+    print(
+        f"higher-layer calibration {result['decision']} at round "
+        f"{result['generator_max_count']}"
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subcommands = parser.add_subparsers(dest="command", required=True)
+
+    higher_prepare = subcommands.add_parser(
+        "prepare-higher-layer-calibration",
+        help="freeze the canonical bounded SP1 higher-layer campaign identity",
+    )
+    higher_prepare.add_argument("--manifest", type=pathlib.Path, required=True)
+    higher_prepare.add_argument(
+        "--operation-coverage", type=pathlib.Path, required=True
+    )
+    higher_prepare.add_argument("--augmented-core", type=pathlib.Path, required=True)
+    higher_prepare.add_argument("--guest-launcher", type=pathlib.Path, required=True)
+    higher_prepare.add_argument("--elf", type=pathlib.Path, required=True)
+    higher_prepare.add_argument("--out", type=pathlib.Path, required=True)
+    higher_prepare.add_argument("--run-path-file", type=pathlib.Path, required=True)
+    higher_prepare.set_defaults(func=cmd_prepare_higher_layer_calibration)
+
+    higher_run = subcommands.add_parser(
+        "run-higher-layer-calibration",
+        help="run and replay the bounded higher-layer overhead rounds",
+    )
+    higher_run.add_argument("--run", type=pathlib.Path, required=True)
+    higher_run.set_defaults(func=cmd_run_higher_layer_calibration)
 
     anchor_generate = subcommands.add_parser(
         "generate-anchor-probe",

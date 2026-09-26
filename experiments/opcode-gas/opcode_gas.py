@@ -5989,6 +5989,288 @@ def validate_operation_coverage_manifest(
         raise ValueError("execution coverage differs from exact source replay")
 
 
+_HIGHER_LAYER_SCHEMA_VERSION = 1
+_HIGHER_LAYER_PURPOSE = "sp1_higher_layer_fixed_cost_calibration"
+_HIGHER_LAYER_VERSION_IDENTITY = {
+    "taiko_fork": "Unzen",
+    "production_schedule": "UNZEN_ZK_GAS_SCHEDULE",
+    "ethereum_upgrade": "Fusaka",
+    "revm_spec_id": "OSAKA",
+    "proving_backend": "sp1",
+    "primary_metric": "proverGas",
+}
+_HIGHER_LAYER_OPERATION_COVERAGE_REF = {
+    "path": "experiments/opcode-gas/manifests/operation-coverage-v1.json",
+    "artifact_sha256": (
+        "fbb4817d50b04147d0d9c86a25c82324d5e36ce9d6acbf49c51dd165cf1905a3"
+    ),
+    "file_sha256": "c5e5a7c28bb2640249f70df2298f6e8a4ee5d46b3bfe2d204c4cb6a86bf1d9be",
+}
+_HIGHER_LAYER_AUGMENTED_CORE_REF = {
+    "path": _OPERATION_AUGMENTED_CORE_REF,
+    "artifact_sha256": _OPERATION_AUGMENTED_CORE_ARTIFACT_SHA256,
+    "file_sha256": _OPERATION_AUGMENTED_CORE_FILE_SHA256,
+}
+_HIGHER_LAYER_Q_FORMULA = (
+    "proposal_startup",
+    "block_base",
+    "tx_base",
+    "native_value_transfer",
+)
+_HIGHER_LAYER_GENERATOR_ROUNDS = (8, 32, 128)
+_HIGHER_LAYER_OVERHEAD_CASE_IDS = (
+    "tx_base_no_code_no_value",
+    "tx_base_minimal_contract_call",
+    "native_transfer_positive_vs_zero",
+    "block_base_one_vs_two_minimal_blocks",
+    "startup_minimal_no_candidate_tx",
+    "startup_minimal_one_no_code_tx",
+)
+_HIGHER_LAYER_GATES = {
+    "minimum_signal_absolute": 1000,
+    "minimum_signal_baseline_ratio": "0.01",
+    "minimum_r2": "0.995",
+    "maximum_relative_slope_standard_error": "0.05",
+    "maximum_residual_signal_ratio": "0.02",
+    "maximum_checkpoint_ape": "0.10",
+    "maximum_tx_base_disagreement": "0.05",
+    "maximum_state_effect_ratio": "0.10",
+    "maximum_state_total_ape": "0.10",
+}
+
+
+@dataclass(frozen=True)
+class StateHoldoutSpec:
+    pair_id: str
+    kind: str
+    scale: int
+    control: Mapping[str, Any]
+    target: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class HigherLayerManifest:
+    schema_version: int
+    purpose: str
+    artifact_sha256: str
+    version_identity: Mapping[str, str]
+    operation_coverage_ref: Mapping[str, str]
+    augmented_core_ref: Mapping[str, str]
+    q_formula: tuple[str, ...]
+    generator_rounds: tuple[int, ...]
+    repeats: int
+    overhead_case_ids: tuple[str, ...]
+    state_holdouts: tuple[StateHoldoutSpec, ...]
+    gates: Mapping[str, str | int]
+
+
+def _higher_layer_expected_state_holdouts() -> tuple[dict[str, Any], ...]:
+    witness = tuple(
+        {
+            "pair_id": f"witness_topology_{scale}",
+            "kind": "witness_topology",
+            "scale": scale,
+            "control": {"extra_account_count": 0},
+            "target": {"extra_account_count": scale},
+        }
+        for scale in (1, 8, 32)
+    )
+    dirty = tuple(
+        {
+            "pair_id": f"dirty_accounts_{scale}",
+            "kind": "dirty_accounts",
+            "scale": scale,
+            "control": {
+                "transaction_count": scale,
+                "value": 1,
+                "recipient_mode": "single",
+            },
+            "target": {
+                "transaction_count": scale,
+                "value": 1,
+                "recipient_mode": "distinct",
+            },
+        }
+        for scale in (2, 8, 32)
+    )
+    return witness + dirty
+
+
+def _reject_unknown_fields(value: Any, expected: set[str], *, label: str) -> None:
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{label} must be an object")
+    unknown = set(value) - expected
+    if unknown:
+        raise ValueError(f"{label} has unknown fields: {sorted(unknown)!r}")
+    missing = expected - set(value)
+    if missing:
+        raise ValueError(f"{label} is missing fields: {sorted(missing)!r}")
+
+
+def _validate_higher_layer_source_ref(
+    value: Any, *, expected: Mapping[str, str], label: str
+) -> None:
+    _reject_unknown_fields(value, set(expected), label=f"{label} reference")
+    if not _exact_json_equal(value, expected):
+        raise ValueError(f"{label} reference differs")
+    path = _operation_pinned_regular_file(expected["path"])
+    if sha256_file(path) != expected["file_sha256"]:
+        raise ValueError(f"{label} file SHA256 differs")
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"{label} is not valid JSON") from error
+    if not isinstance(payload, Mapping):
+        raise ValueError(f"{label} is not an object")
+    _validate_content_addressed_artifact(payload, label=label)
+    if payload.get("artifact_sha256") != expected["artifact_sha256"]:
+        raise ValueError(f"{label} artifact SHA256 differs")
+    if path.read_bytes() != _canonical_json_file_bytes(payload):
+        raise ValueError(f"{label} is not canonical JSON")
+
+
+def validate_higher_layer_manifest(artifact: Mapping[str, Any]) -> None:
+    """Fail closed unless the higher-layer campaign matches its frozen contract."""
+    fields = {
+        "schema_version",
+        "purpose",
+        "artifact_sha256",
+        "version_identity",
+        "operation_coverage_ref",
+        "augmented_core_ref",
+        "q_formula",
+        "generator_rounds",
+        "repeats",
+        "overhead_case_ids",
+        "state_holdouts",
+        "gates",
+    }
+    _reject_unknown_fields(artifact, fields, label="higher-layer manifest")
+    _validate_content_addressed_artifact(artifact, label="higher-layer manifest")
+    if (
+        type(artifact.get("schema_version")) is not int
+        or artifact["schema_version"] != _HIGHER_LAYER_SCHEMA_VERSION
+        or artifact.get("purpose") != _HIGHER_LAYER_PURPOSE
+    ):
+        raise ValueError("higher-layer manifest header differs")
+    _reject_unknown_fields(
+        artifact["version_identity"],
+        set(_HIGHER_LAYER_VERSION_IDENTITY),
+        label="higher-layer version identity",
+    )
+    if not _exact_json_equal(
+        artifact["version_identity"], _HIGHER_LAYER_VERSION_IDENTITY
+    ):
+        raise ValueError("higher-layer version identity differs")
+    _validate_higher_layer_source_ref(
+        artifact["operation_coverage_ref"],
+        expected=_HIGHER_LAYER_OPERATION_COVERAGE_REF,
+        label="operation coverage",
+    )
+    _validate_higher_layer_source_ref(
+        artifact["augmented_core_ref"],
+        expected=_HIGHER_LAYER_AUGMENTED_CORE_REF,
+        label="augmented core",
+    )
+    if not _exact_json_equal(artifact["q_formula"], list(_HIGHER_LAYER_Q_FORMULA)):
+        raise ValueError("higher-layer Q formula differs")
+    if not _exact_json_equal(
+        artifact["generator_rounds"], list(_HIGHER_LAYER_GENERATOR_ROUNDS)
+    ):
+        raise ValueError("higher-layer generator rounds differ")
+    if type(artifact.get("repeats")) is not int or artifact["repeats"] != 3:
+        raise ValueError("higher-layer repeats differ")
+
+    holdouts = artifact["state_holdouts"]
+    if not isinstance(holdouts, list):
+        raise ValueError("higher-layer state holdouts must be a list")
+    holdout_fields = {"pair_id", "kind", "scale", "control", "target"}
+    for index, holdout in enumerate(holdouts):
+        _reject_unknown_fields(
+            holdout, holdout_fields, label=f"state holdout {index}"
+        )
+        kind = holdout.get("kind")
+        lane_fields = (
+            {"extra_account_count"}
+            if kind == "witness_topology"
+            else {"transaction_count", "value", "recipient_mode"}
+            if kind == "dirty_accounts"
+            else set()
+        )
+        _reject_unknown_fields(
+            holdout["control"], lane_fields, label=f"state holdout {index} control"
+        )
+        _reject_unknown_fields(
+            holdout["target"], lane_fields, label=f"state holdout {index} target"
+        )
+    pair_ids = [holdout.get("pair_id") for holdout in holdouts]
+    if len(pair_ids) != len(set(pair_ids)):
+        raise ValueError("duplicate state holdout")
+
+    overhead_case_ids = artifact["overhead_case_ids"]
+    if isinstance(overhead_case_ids, list) and set(pair_ids) & set(overhead_case_ids):
+        raise ValueError("state holdouts cannot enter the fit set")
+    if not _exact_json_equal(
+        overhead_case_ids, list(_HIGHER_LAYER_OVERHEAD_CASE_IDS)
+    ):
+        raise ValueError("higher-layer overhead cases differ")
+    expected_holdouts = list(_higher_layer_expected_state_holdouts())
+    if not _exact_json_equal(holdouts, expected_holdouts):
+        raise ValueError("higher-layer state holdouts differ")
+
+    gates = artifact["gates"]
+    if isinstance(gates, Mapping) and set(_HIGHER_LAYER_GATES) - set(gates):
+        raise ValueError("higher-layer gates differ")
+    _reject_unknown_fields(gates, set(_HIGHER_LAYER_GATES), label="higher-layer gates")
+    if not _exact_json_equal(gates, _HIGHER_LAYER_GATES):
+        raise ValueError("higher-layer gates differ")
+
+
+def load_higher_layer_manifest(path: pathlib.Path) -> HigherLayerManifest:
+    """Load and validate the canonical higher-layer campaign manifest."""
+    if path.is_symlink():
+        raise ValueError("higher-layer manifest must be a regular non-symlink file")
+    try:
+        mode = path.stat(follow_symlinks=False).st_mode
+        raw_bytes = path.read_bytes()
+        artifact = json.loads(raw_bytes)
+    except (FileNotFoundError, OSError, json.JSONDecodeError) as error:
+        raise ValueError("higher-layer manifest is not valid JSON") from error
+    if not stat.S_ISREG(mode) or not isinstance(artifact, Mapping):
+        raise ValueError(
+            "higher-layer manifest must be a JSON object in a regular file"
+        )
+    if raw_bytes != _canonical_json_file_bytes(artifact):
+        raise ValueError("higher-layer manifest is not canonical JSON")
+    validate_higher_layer_manifest(artifact)
+    state_holdouts = tuple(
+        StateHoldoutSpec(
+            pair_id=holdout["pair_id"],
+            kind=holdout["kind"],
+            scale=holdout["scale"],
+            control=MappingProxyType(dict(holdout["control"])),
+            target=MappingProxyType(dict(holdout["target"])),
+        )
+        for holdout in artifact["state_holdouts"]
+    )
+    return HigherLayerManifest(
+        schema_version=artifact["schema_version"],
+        purpose=artifact["purpose"],
+        artifact_sha256=artifact["artifact_sha256"],
+        version_identity=MappingProxyType(dict(artifact["version_identity"])),
+        operation_coverage_ref=MappingProxyType(
+            dict(artifact["operation_coverage_ref"])
+        ),
+        augmented_core_ref=MappingProxyType(dict(artifact["augmented_core_ref"])),
+        q_formula=tuple(artifact["q_formula"]),
+        generator_rounds=tuple(artifact["generator_rounds"]),
+        repeats=artifact["repeats"],
+        overhead_case_ids=tuple(artifact["overhead_case_ids"]),
+        state_holdouts=state_holdouts,
+        gates=MappingProxyType(dict(artifact["gates"])),
+    )
+
+
 def damage_report(
     *,
     fit_path: pathlib.Path,

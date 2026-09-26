@@ -552,6 +552,12 @@ four-term dependency order, the two-case `tx_base` agreement gate, and the start
 It returns exact Decimal-serialized fixed costs, per-case evidence, root rejection reasons, and one
 canonical decision: `accepted`, `expand_next_round`, or `terminal_failure`.
 
+Before fitting, require the exact complete row inventory for the round: every frozen count has the
+four non-startup cases, both target/control lanes, and repeats `0..2`; the zero-count invocation
+also has exactly the two target-only startup cases with their frozen target count and mathematical
+zero baseline. Reject every missing, duplicate, extra, unknown-lane, extra-startup, or otherwise
+unused row. A fit may not silently ignore raw evidence that was sealed into the round.
+
 `expand_next_round` is allowed only when every unresolved root cause is one of
 `checkpoint_generator_bound` or `exhausted_sweep`, and only before round 128. A dependent term that
 cannot yet be evaluated inherits the upstream root cause in the top-level decision; the generic
@@ -559,7 +565,8 @@ label `unmeasured_overhead_dependency` is never itself an expansion reason. Any 
 either expansion reason at round 128, is terminal. The evaluator is deterministic and performs no
 file writes or execution. Every accepted raw row must replay its workload ID and execution-row ID
 against the supplied current calibration identity, SP1 backend, gas-estimator engine, repeat index,
-and backend-input hash. Pre-execution rejected rows must also carry and match the current
+canonical gas-estimator chunk parameters, and backend-input hash. Declaring `standard` while using
+a gas-estimator-derived row ID is invalid. Pre-execution rejected rows must also carry and match the current
 calibration identity. The workload spec's canonical GuestInput hash must equal the normalized
 backend-input and report GuestInput hashes; coordinated edits to all outer row hashes do not make a
 different input valid. No row may be attributed to a run only because it is stored below that run.

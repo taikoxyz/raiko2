@@ -499,11 +499,12 @@ impl Args {
             self.stage,
             Stage::OpcodeLab
                 | Stage::RevmOpcodeLab
+                | Stage::ControlledOverhead
                 | Stage::ControlledBlock
                 | Stage::ControlledStateHoldout
         ) {
             bail!(
-                "--sp1-execution-engine gas-estimator is restricted to opcode labs, controlled blocks, and controlled state holdouts"
+                "--sp1-execution-engine gas-estimator is restricted to opcode labs, controlled overhead, controlled blocks, and controlled state holdouts"
             );
         }
         if self.proof_type != ProofType::Sp1 {
@@ -1117,6 +1118,15 @@ async fn run_proposal(args: Args) -> Result<()> {
     }
 }
 
+fn new_controlled_overhead_report(
+    execution_engine: Sp1ExecutionEngine,
+    input: String,
+) -> BenchReport {
+    let mut report = BenchReport::new("controlled-overhead", "execute", "compressed", input);
+    apply_sp1_execution_engine_metadata(&mut report, execution_engine);
+    report
+}
+
 async fn run_controlled_overhead(args: Args) -> Result<()> {
     if args.proof_type != ProofType::Sp1 || args.mode != Mode::Execute {
         bail!("controlled-overhead supports only SP1 execute mode");
@@ -1137,10 +1147,8 @@ async fn run_controlled_overhead(args: Args) -> Result<()> {
     )
     .context("parse controlled-overhead input")?;
     if spec.target_count.saturating_add(1) > 768 {
-        let mut report = BenchReport::new(
-            "controlled-overhead",
-            "execute",
-            "compressed",
+        let mut report = new_controlled_overhead_report(
+            args.sp1_execution_engine,
             input_path.display().to_string(),
         );
         report.controlled_overhead = Some(ControlledOverheadRunResult {
@@ -1159,46 +1167,74 @@ async fn run_controlled_overhead(args: Args) -> Result<()> {
         fixtures.retain(|fixture| fixture.overhead_key_id != "proposal_startup");
     }
     let observations = controlled_workload::validate_required_overhead_fixtures(&fixtures)?;
-    let sp1_config = args.sp1_config()?;
     let backend = load_sp1_shasta_backend()
         .map_err(anyhow::Error::msg)
         .context("load production SP1 Shasta guest ELFs")?;
-    let prover = Sp1Prover::new(sp1_config);
+    let standard_prover = match args.sp1_execution_engine {
+        Sp1ExecutionEngine::Standard => Some(Sp1Prover::new(args.sp1_config()?)),
+        Sp1ExecutionEngine::GasEstimator => None,
+    };
+    let estimator_elf = match args.sp1_execution_engine {
+        Sp1ExecutionEngine::Standard => None,
+        Sp1ExecutionEngine::GasEstimator => Some(
+            backend
+                .elf(ProofStage::Proposal)
+                .map_err(anyhow::Error::msg)
+                .context("load production SP1 proposal ELF")?
+                .to_vec(),
+        ),
+    };
     let mut output = String::new();
     for (fixture, observation) in fixtures.into_iter().zip(observations) {
         let lane = serde_json::to_value(fixture.lane)?
             .as_str()
             .unwrap_or("unknown")
             .to_string();
-        let mut report = BenchReport::new(
-            "controlled-overhead",
-            "execute",
-            "compressed",
+        let mut report = new_controlled_overhead_report(
+            args.sp1_execution_engine,
             format!("{}:{lane}:{}", fixture.case_id, fixture.target_count),
         );
         report.guest_input_sha256 = Some(observation.guest_input_sha256.clone());
         report.guest_input_bincode_length = Some(observation.guest_input_bincode_length);
         record_memory_snapshot(&mut report, "controlled-overhead:before_sp1_prover");
         let start = Instant::now();
-        let proof = prover
-            .prove(fixture.guest_input, &serde_json::Value::Null, &backend)
-            .await
-            .with_context(|| {
-                format!(
-                    "production SP1 proposal failed for {} {lane}",
-                    fixture.case_id
+        match args.sp1_execution_engine {
+            Sp1ExecutionEngine::Standard => {
+                let proof = standard_prover
+                    .as_ref()
+                    .expect("standard engine initializes the SP1 prover")
+                    .prove(fixture.guest_input, &serde_json::Value::Null, &backend)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "production SP1 proposal failed for {} {lane}",
+                            fixture.case_id
+                        )
+                    })?;
+                let metadata_value = proof
+                    .extra_data
+                    .as_ref()
+                    .and_then(|extra_data| extra_data.get("sp1"))
+                    .cloned()
+                    .context("controlled-overhead SP1 execute is missing production metadata")?;
+                let metadata: Sp1ExecutionMetadata = serde_json::from_value(metadata_value)
+                    .context("parse controlled-overhead SP1 execution metadata")?;
+                apply_sp1_metadata(&mut report, &metadata);
+            }
+            Sp1ExecutionEngine::GasEstimator => {
+                let (public_values, execution_report) = execute_sp1_guest_gas_estimator_blocking(
+                    estimator_elf
+                        .as_ref()
+                        .expect("gas-estimator engine loads the production proposal ELF")
+                        .clone(),
+                    fixture.guest_input,
                 )
-            })?;
+                .await?;
+                report.public_values = public_values.raw();
+                apply_execution_metadata(&mut report, &execution_report);
+            }
+        }
         report.wall_time_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
-        let metadata_value = proof
-            .extra_data
-            .as_ref()
-            .and_then(|extra_data| extra_data.get("sp1"))
-            .cloned()
-            .context("controlled-overhead SP1 execute is missing production metadata")?;
-        let metadata: Sp1ExecutionMetadata = serde_json::from_value(metadata_value)
-            .context("parse controlled-overhead SP1 execution metadata")?;
-        apply_sp1_metadata(&mut report, &metadata);
         if report.public_values != format!("{:#x}", observation.public_output).to_lowercase() {
             bail!(
                 "controlled-overhead trace/SP1 public output mismatch for {} {lane}",
@@ -2097,8 +2133,9 @@ mod tests {
         apply_controlled_opcode_trace, apply_controlled_precompile_trace,
         apply_risc0_execution_metadata, apply_sp1_metadata, canonical_sp1_core_opts,
         canonicalize_sp1_core_opts, execute_opcode_lab_gas_estimator_with_opts,
-        finalize_opcode_lab_execution_report, install_opcode_lab_input_identity, parse_sp1_program,
-        read_input, read_opcode_lab_input, read_opcode_lab_input_list, risc0_padded_cycles,
+        finalize_opcode_lab_execution_report, install_opcode_lab_input_identity,
+        new_controlled_overhead_report, parse_sp1_program, read_input, read_opcode_lab_input,
+        read_opcode_lab_input_list, risc0_padded_cycles,
     };
     use alloy_primitives::{Address, B256, hex};
     use clap::Parser as _;
@@ -2131,7 +2168,87 @@ mod tests {
         .expect("parse args");
 
         assert_eq!(args.stage, Stage::ControlledOverhead);
+        assert_eq!(args.sp1_execution_engine, Sp1ExecutionEngine::Standard);
         assert!(args.elf.is_none(), "production proposal ELF is built in");
+        args.validate_sp1_execution_engine()
+            .expect("controlled overhead preserves the legacy standard engine default");
+        let report = serde_json::to_value(new_controlled_overhead_report(
+            args.sp1_execution_engine,
+            "block_base_target:8".into(),
+        ))
+        .expect("serialize report");
+        assert_eq!(report["sp1_execution_engine"], "standard");
+        assert!(report["sp1_gas_trace_chunk_threshold"].is_null());
+        assert!(report["sp1_gas_trace_chunk_slots"].is_null());
+    }
+
+    #[test]
+    fn controlled_overhead_accepts_local_sp1_execute_gas_estimator() {
+        let args = Args::try_parse_from([
+            "guest-launcher",
+            "--stage",
+            "controlled-overhead",
+            "--proof-type",
+            "sp1",
+            "--mode",
+            "execute",
+            "--sp1-prover",
+            "local",
+            "--sp1-execution-engine",
+            "gas-estimator",
+            "--input",
+            "controlled-overhead.json",
+            "--jsonl-out",
+            "controlled-overhead-runs.jsonl",
+        ])
+        .expect("parse args");
+
+        args.validate_sp1_execution_engine()
+            .expect("controlled overhead accepts the local SP1 gas estimator");
+        assert!(args.elf.is_none(), "production proposal ELF is built in");
+
+        let report =
+            new_controlled_overhead_report(args.sp1_execution_engine, "block_base_target:8".into());
+        let report = serde_json::to_value(report).expect("serialize report");
+        assert_eq!(report["sp1_execution_engine"], "gas-estimator");
+        assert_eq!(report["sp1_gas_trace_chunk_threshold"], 134_217_728);
+        assert_eq!(report["sp1_gas_trace_chunk_slots"], 2);
+    }
+
+    #[test]
+    fn controlled_overhead_gas_estimator_rejects_wrong_execution_guards() {
+        for (proof_type, mode, prover, aggregate) in [
+            ("native", "execute", "local", false),
+            ("sp1", "prove", "local", false),
+            ("sp1", "execute", "network", false),
+            ("sp1", "execute", "local", true),
+        ] {
+            let mut argv = vec![
+                "guest-launcher",
+                "--stage",
+                "controlled-overhead",
+                "--proof-type",
+                proof_type,
+                "--mode",
+                mode,
+                "--sp1-prover",
+                prover,
+                "--sp1-execution-engine",
+                "gas-estimator",
+                "--input",
+                "controlled-overhead.json",
+                "--jsonl-out",
+                "controlled-overhead-runs.jsonl",
+            ];
+            if aggregate {
+                argv.extend(["--aggregate", "proof.json"]);
+            }
+            let args = Args::try_parse_from(argv).expect("parse invalid args");
+            assert!(
+                args.validate_sp1_execution_engine().is_err(),
+                "controlled overhead accepted proof_type={proof_type} mode={mode} prover={prover} aggregate={aggregate}",
+            );
+        }
     }
 
     #[test]
@@ -2234,8 +2351,14 @@ mod tests {
     }
 
     #[test]
-    fn gas_estimator_accepts_only_local_sp1_execute_opcode_labs_and_controlled_blocks() {
-        for stage in ["opcode-lab", "revm-opcode-lab", "controlled-block"] {
+    fn gas_estimator_accepts_local_sp1_execute_for_every_supported_stage() {
+        for stage in [
+            "opcode-lab",
+            "revm-opcode-lab",
+            "controlled-overhead",
+            "controlled-block",
+            "controlled-state-holdout",
+        ] {
             let args = Args::try_parse_from([
                 "guest-launcher",
                 "--stage",
@@ -2248,8 +2371,6 @@ mod tests {
                 "local",
                 "--sp1-execution-engine",
                 "gas-estimator",
-                "--elf",
-                "/tmp/lab.elf",
                 "--input",
                 "/tmp/input.json",
             ])
@@ -2265,7 +2386,6 @@ mod tests {
         let invalid = [
             ("precompile-lab", "sp1", "execute", "local", false),
             ("proposal", "sp1", "execute", "local", false),
-            ("controlled-overhead", "sp1", "execute", "local", false),
             ("opcode-lab", "sp1", "prove", "local", false),
             ("opcode-lab", "sp1", "execute", "network", false),
             ("opcode-lab", "native", "execute", "local", false),

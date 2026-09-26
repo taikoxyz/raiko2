@@ -294,6 +294,86 @@ pub struct ControlledBlockObservation {
     pub anchor_operation_ownership: &'static str,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WitnessTopologyLaneSpec {
+    pub extra_account_count: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DirtyAccountsRecipientMode {
+    Single,
+    Distinct,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DirtyAccountsLaneSpec {
+    pub transaction_count: u64,
+    pub value: u64,
+    pub recipient_mode: DirtyAccountsRecipientMode,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case", tag = "kind")]
+pub enum ControlledStateHoldoutPairSpec {
+    WitnessTopology {
+        pair_id: String,
+        scale: usize,
+        control: WitnessTopologyLaneSpec,
+        target: WitnessTopologyLaneSpec,
+    },
+    DirtyAccounts {
+        pair_id: String,
+        scale: u64,
+        control: DirtyAccountsLaneSpec,
+        target: DirtyAccountsLaneSpec,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ControlledStateHoldout {
+    WitnessTopology { extra_account_count: usize },
+    DirtyAccounts { transaction_count: u64, value: u64 },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlledStateHoldoutLane {
+    Control,
+    Target,
+}
+
+#[derive(Clone, Debug)]
+pub struct ControlledStateHoldoutFixture {
+    pub spec: ControlledStateHoldoutPairSpec,
+    pub pair_id: String,
+    pub lane: ControlledStateHoldoutLane,
+    pub guest_input: GuestInput,
+    touched_state_key_count: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ControlledStateHoldoutObservation {
+    pub pair_id: String,
+    pub lane: ControlledStateHoldoutLane,
+    pub backend_input_sha256: String,
+    pub guest_input_sha256: String,
+    pub guest_input_bincode_length: usize,
+    pub public_output: B256,
+    pub actual_final_state_root: B256,
+    pub actual_raw_gas_by_key: BTreeMap<String, i64>,
+    pub actual_features: BTreeMap<String, i64>,
+    pub actual_diagnostics: BTreeMap<String, i64>,
+    pub started_candidate_transaction_count: u64,
+    pub committed_candidate_transaction_count: u64,
+    pub unattempted_candidate_transaction_count: u64,
+    pub operation_phase_ownership: &'static str,
+    pub system_operation_ownership: &'static str,
+    pub anchor_operation_ownership: &'static str,
+}
+
 pub fn controlled_block_row_id(spec: &ControlledBlockRowSpec) -> Result<String> {
     let mut semantics = serde_json::to_value(spec)?;
     semantics
@@ -674,6 +754,10 @@ enum CandidateKind {
     },
     NativeZero,
     NativeValue(u64),
+    NativeValueTopology {
+        value: u64,
+        distinct_recipients: bool,
+    },
 }
 
 struct BuiltOverheadGuestInput {
@@ -730,16 +814,28 @@ fn controlled_candidate_signer() -> Result<PrivateKeySigner> {
     Ok(PrivateKeySigner::from_bytes(&B256::repeat_byte(0x11))?)
 }
 
+fn controlled_state_holdout_address(domain: &[u8], index: u64) -> Address {
+    let mut hasher = Sha256::new();
+    hasher.update(b"raiko2-controlled-state-holdout-v1");
+    hasher.update(
+        u64::try_from(domain.len())
+            .expect("fixed holdout domain label length fits u64")
+            .to_be_bytes(),
+    );
+    hasher.update(domain);
+    hasher.update(index.to_be_bytes());
+    let digest = hasher.finalize();
+    Address::from_slice(&digest[12..])
+}
+
 fn candidate_transactions(kind: &CandidateKind, count: u64) -> Result<Vec<TransactionSigned>> {
     if matches!(kind, CandidateKind::None) {
         return Ok(Vec::new());
     }
-    let recipient = match kind {
-        CandidateKind::ControlledContract { .. } => Address::repeat_byte(0x66),
-        _ => Address::repeat_byte(0x55),
-    };
     let value = match kind {
-        CandidateKind::NativeValue(value) => U256::from(*value),
+        CandidateKind::NativeValue(value) | CandidateKind::NativeValueTopology { value, .. } => {
+            U256::from(*value)
+        }
         _ => U256::ZERO,
     };
     let signer = controlled_candidate_signer()?;
@@ -753,6 +849,17 @@ fn candidate_transactions(kind: &CandidateKind, count: u64) -> Result<Vec<Transa
     };
     (0..count)
         .map(|nonce| {
+            let recipient = match kind {
+                CandidateKind::ControlledContract { .. } => Address::repeat_byte(0x66),
+                CandidateKind::NativeValueTopology {
+                    distinct_recipients,
+                    ..
+                } => controlled_state_holdout_address(
+                    b"dirty-accounts-recipient",
+                    if *distinct_recipients { nonce } else { 0 },
+                ),
+                _ => Address::repeat_byte(0x55),
+            };
             let tx = TxEip1559 {
                 chain_id: OVERHEAD_CHAIN_ID,
                 nonce,
@@ -951,16 +1058,18 @@ fn overhead_prestate(
             .recover_signer()
             .map_err(|_| anyhow::anyhow!("controlled candidate signature is unrecoverable"))?;
         state.insert_account(signer, CONTROLLED_CANDIDATE_FINAL_BALANCE, 0, KECCAK_EMPTY);
-        let recipient = candidate
-            .to()
-            .ok_or_else(|| anyhow::anyhow!("controlled candidate must be a call"))?;
         let code_hash = if let Some(code) = controlled_contract_code {
             codes.push(code.clone());
             keccak256(code)
         } else {
             KECCAK_EMPTY
         };
-        state.insert_account(recipient, U256::ZERO, 0, code_hash);
+        for candidate in candidates {
+            let recipient = candidate
+                .to()
+                .ok_or_else(|| anyhow::anyhow!("controlled candidate must be a call"))?;
+            state.insert_account(recipient, U256::ZERO, 0, code_hash);
+        }
     }
     for address in extra_prestate_accounts {
         state.insert_account(*address, U256::from(1), 0, KECCAK_EMPTY);
@@ -1644,6 +1753,384 @@ pub fn validate_controlled_block_fixture(
         );
     }
     Ok(observation)
+}
+
+impl ControlledStateHoldoutPairSpec {
+    fn validate_and_normalize(&self) -> Result<(&str, ControlledStateHoldout)> {
+        match self {
+            Self::WitnessTopology {
+                pair_id,
+                scale,
+                control,
+                target,
+            } => {
+                if !matches!(scale, 1 | 8 | 32) {
+                    bail!("witness topology scale must be one of 1, 8, or 32");
+                }
+                let expected_pair_id = format!("witness_topology_{scale}");
+                if pair_id != &expected_pair_id {
+                    bail!("witness topology pair_id must be {expected_pair_id}, got {pair_id}");
+                }
+                if control.extra_account_count != 0 || target.extra_account_count != *scale {
+                    bail!(
+                        "witness topology {pair_id} must use control extra_account_count 0 and target extra_account_count {scale}"
+                    );
+                }
+                Ok((
+                    pair_id,
+                    ControlledStateHoldout::WitnessTopology {
+                        extra_account_count: *scale,
+                    },
+                ))
+            }
+            Self::DirtyAccounts {
+                pair_id,
+                scale,
+                control,
+                target,
+            } => {
+                if !matches!(scale, 2 | 8 | 32) {
+                    bail!("dirty-account scale must be one of 2, 8, or 32");
+                }
+                let expected_pair_id = format!("dirty_accounts_{scale}");
+                if pair_id != &expected_pair_id {
+                    bail!("dirty-account pair_id must be {expected_pair_id}, got {pair_id}");
+                }
+                if control.transaction_count != *scale || target.transaction_count != *scale {
+                    bail!(
+                        "dirty-account {pair_id} control and target transaction_count must equal scale {scale}"
+                    );
+                }
+                if control.value != 1 || target.value != 1 {
+                    bail!("dirty-account {pair_id} control and target value must equal 1");
+                }
+                if control.recipient_mode != DirtyAccountsRecipientMode::Single
+                    || target.recipient_mode != DirtyAccountsRecipientMode::Distinct
+                {
+                    bail!(
+                        "dirty-account {pair_id} requires single-recipient control and distinct-recipient target"
+                    );
+                }
+                Ok((
+                    pair_id,
+                    ControlledStateHoldout::DirtyAccounts {
+                        transaction_count: *scale,
+                        value: 1,
+                    },
+                ))
+            }
+        }
+    }
+}
+
+pub fn build_controlled_state_holdout_fixtures(
+    spec: &ControlledStateHoldoutPairSpec,
+) -> Result<Vec<ControlledStateHoldoutFixture>> {
+    let (pair_id, normalized) = spec.validate_and_normalize()?;
+    let (control, target) = match normalized {
+        ControlledStateHoldout::WitnessTopology {
+            extra_account_count,
+        } => {
+            let extra_accounts = (0..extra_account_count)
+                .map(|index| {
+                    controlled_state_holdout_address(
+                        b"witness-topology-extra-account",
+                        u64::try_from(index).expect("frozen witness scale fits u64"),
+                    )
+                })
+                .collect::<Vec<_>>();
+            (
+                build_overhead_guest_input_with_topology(CandidateKind::None, 1, 0, &[])?,
+                build_overhead_guest_input_with_topology(
+                    CandidateKind::None,
+                    1,
+                    0,
+                    &extra_accounts,
+                )?,
+            )
+        }
+        ControlledStateHoldout::DirtyAccounts {
+            transaction_count,
+            value,
+        } => (
+            build_overhead_guest_input_with_topology(
+                CandidateKind::NativeValueTopology {
+                    value,
+                    distinct_recipients: false,
+                },
+                1,
+                transaction_count,
+                &[],
+            )?,
+            build_overhead_guest_input_with_topology(
+                CandidateKind::NativeValueTopology {
+                    value,
+                    distinct_recipients: true,
+                },
+                1,
+                transaction_count,
+                &[],
+            )?,
+        ),
+    };
+    Ok(vec![
+        ControlledStateHoldoutFixture {
+            spec: spec.clone(),
+            pair_id: pair_id.to_string(),
+            lane: ControlledStateHoldoutLane::Control,
+            guest_input: control.guest_input,
+            touched_state_key_count: control.touched_state_key_count,
+        },
+        ControlledStateHoldoutFixture {
+            spec: spec.clone(),
+            pair_id: pair_id.to_string(),
+            lane: ControlledStateHoldoutLane::Target,
+            guest_input: target.guest_input,
+            touched_state_key_count: target.touched_state_key_count,
+        },
+    ])
+}
+
+fn observe_controlled_state_holdout_fixture(
+    fixture: &ControlledStateHoldoutFixture,
+) -> Result<ControlledStateHoldoutObservation> {
+    let trace = trace_shasta_proposal(&fixture.guest_input)?;
+    if trace.status != ProposalTraceStatus::Complete
+        || !trace.parity.passed
+        || !trace.partial_blocks.is_empty()
+        || !trace.recovery_failures.is_empty()
+    {
+        let (stage, error) = trace
+            .failure
+            .as_ref()
+            .map(|failure| (failure.stage.as_str(), failure.error.as_str()))
+            .unwrap_or(("unknown", "trace failed without typed failure diagnostics"));
+        bail!(
+            "controlled state holdout {} {:?} did not complete the production trace path: trace stage={stage}, error={error}",
+            fixture.pair_id,
+            fixture.lane,
+        );
+    }
+    let operation_units = absolute_transaction_operation_units(&trace)?;
+    if !operation_units.is_empty() {
+        bail!(
+            "controlled state holdout {} {:?} contains transaction operation work: {:?}",
+            fixture.pair_id,
+            fixture.lane,
+            operation_units.keys().collect::<Vec<_>>(),
+        );
+    }
+    let actual_raw_gas_by_key = BTreeMap::new();
+    let candidate_transactions = trace
+        .blocks
+        .iter()
+        .flat_map(|block| &block.transactions)
+        .filter(|transaction| !transaction.is_anchor)
+        .collect::<Vec<_>>();
+    let started_candidate_transaction_count = u64::try_from(
+        candidate_transactions
+            .iter()
+            .filter(|transaction| transaction.disposition != TransactionDisposition::Unattempted)
+            .count(),
+    )?;
+    let committed_candidate_transaction_count = u64::try_from(
+        candidate_transactions
+            .iter()
+            .filter(|transaction| {
+                transaction.disposition == TransactionDisposition::CommittedSuccess
+            })
+            .count(),
+    )?;
+    let unattempted_candidate_transaction_count = u64::try_from(
+        candidate_transactions
+            .iter()
+            .filter(|transaction| transaction.disposition == TransactionDisposition::Unattempted)
+            .count(),
+    )?;
+    let native_value_transfer_count = trace.blocks.iter().try_fold(0u64, |total, block| {
+        total
+            .checked_add(u64::try_from(block.native_value_transfer_count)?)
+            .ok_or_else(|| anyhow::anyhow!("native value transfer count overflow"))
+    })?;
+    let actual_features = BTreeMap::from([
+        ("proposal_startup".into(), 1),
+        ("block_base".into(), i64::try_from(trace.blocks.len())?),
+        (
+            "tx_base".into(),
+            i64::try_from(started_candidate_transaction_count)?,
+        ),
+        (
+            "native_value_transfer".into(),
+            i64::try_from(native_value_transfer_count)?,
+        ),
+    ]);
+    let witness_node_count = fixture
+        .guest_input
+        .witnesses
+        .iter()
+        .map(|witness| witness.witness.state.len())
+        .sum::<usize>();
+    let witness_byte_count = fixture
+        .guest_input
+        .witnesses
+        .iter()
+        .flat_map(|witness| &witness.witness.state)
+        .map(|node| node.bytes.len())
+        .sum::<usize>();
+    let blob_count = fixture
+        .guest_input
+        .taiko
+        .data_sources
+        .iter()
+        .map(|source| source.tx_data_from_blob.len())
+        .sum::<usize>();
+    let kzg_invocation_count = fixture
+        .guest_input
+        .taiko
+        .data_sources
+        .iter()
+        .map(|source| source.blob_commitments.len())
+        .sum::<usize>();
+    let calldata_length = fixture
+        .guest_input
+        .taiko
+        .data_sources
+        .iter()
+        .map(|source| source.tx_data_from_calldata.len())
+        .sum::<usize>();
+    let actual_diagnostics = BTreeMap::from([
+        (
+            "guest_input_bincode_length".into(),
+            i64::try_from(trace.guest_input_bincode_length)?,
+        ),
+        (
+            "witness_node_count".into(),
+            i64::try_from(witness_node_count)?,
+        ),
+        (
+            "witness_byte_count".into(),
+            i64::try_from(witness_byte_count)?,
+        ),
+        ("blob_count".into(), i64::try_from(blob_count)?),
+        (
+            "kzg_invocation_count".into(),
+            i64::try_from(kzg_invocation_count)?,
+        ),
+        ("calldata_length".into(), i64::try_from(calldata_length)?),
+        ("bytecode_length".into(), 0),
+        (
+            "touched_state_key_count".into(),
+            i64::try_from(fixture.touched_state_key_count)?,
+        ),
+    ]);
+    Ok(ControlledStateHoldoutObservation {
+        pair_id: fixture.pair_id.clone(),
+        lane: fixture.lane,
+        backend_input_sha256: trace
+            .guest_input_sha256
+            .trim_start_matches("0x")
+            .to_string(),
+        guest_input_sha256: trace.guest_input_sha256,
+        guest_input_bincode_length: trace.guest_input_bincode_length,
+        public_output: trace
+            .public_output
+            .ok_or_else(|| anyhow::anyhow!("complete controlled trace is missing public output"))?,
+        actual_final_state_root: fixture
+            .guest_input
+            .witnesses
+            .last()
+            .ok_or_else(|| anyhow::anyhow!("controlled state holdout has no final witness"))?
+            .block
+            .header
+            .state_root,
+        actual_raw_gas_by_key,
+        actual_features,
+        actual_diagnostics,
+        started_candidate_transaction_count,
+        committed_candidate_transaction_count,
+        unattempted_candidate_transaction_count,
+        operation_phase_ownership: "transaction_non_anchor_only",
+        system_operation_ownership: "block_base",
+        anchor_operation_ownership: "block_base",
+    })
+}
+
+pub fn validate_controlled_state_holdout_fixtures(
+    fixtures: &[ControlledStateHoldoutFixture],
+) -> Result<Vec<ControlledStateHoldoutObservation>> {
+    let [control_fixture, target_fixture] = fixtures else {
+        bail!("controlled state holdout requires exactly one control and one target fixture");
+    };
+    if control_fixture.lane != ControlledStateHoldoutLane::Control
+        || target_fixture.lane != ControlledStateHoldoutLane::Target
+        || control_fixture.spec != target_fixture.spec
+        || control_fixture.pair_id != target_fixture.pair_id
+    {
+        bail!("controlled state holdout pair identity or lane ordering differs");
+    }
+    let control = observe_controlled_state_holdout_fixture(control_fixture)?;
+    let target = observe_controlled_state_holdout_fixture(target_fixture)?;
+    if target.actual_features != control.actual_features {
+        bail!("controlled state holdout changed the frozen four-term feature vector");
+    }
+    if target.actual_raw_gas_by_key != control.actual_raw_gas_by_key {
+        bail!("controlled state holdout changed the frozen operation-cost vector");
+    }
+    let (_, normalized) = control_fixture.spec.validate_and_normalize()?;
+    match normalized {
+        ControlledStateHoldout::WitnessTopology { .. } => {
+            let expected_features = BTreeMap::from([
+                ("proposal_startup".into(), 1),
+                ("block_base".into(), 1),
+                ("tx_base".into(), 0),
+                ("native_value_transfer".into(), 0),
+            ]);
+            if control.actual_features != expected_features {
+                bail!("witness topology holdout changed its frozen feature counts");
+            }
+            if control.started_candidate_transaction_count != 0
+                || target.started_candidate_transaction_count != 0
+            {
+                bail!("witness topology holdout must not contain candidate transactions");
+            }
+            if target.actual_diagnostics["witness_node_count"]
+                <= control.actual_diagnostics["witness_node_count"]
+                || target.actual_diagnostics["witness_byte_count"]
+                    <= control.actual_diagnostics["witness_byte_count"]
+            {
+                bail!("witness topology target did not increase witness topology");
+            }
+        }
+        ControlledStateHoldout::DirtyAccounts {
+            transaction_count, ..
+        } => {
+            let expected_count = i64::try_from(transaction_count)?;
+            let expected_features = BTreeMap::from([
+                ("proposal_startup".into(), 1),
+                ("block_base".into(), 1),
+                ("tx_base".into(), expected_count),
+                ("native_value_transfer".into(), expected_count),
+            ]);
+            if control.actual_features != expected_features {
+                bail!("dirty-account holdout changed its frozen feature counts");
+            }
+            if control.started_candidate_transaction_count != transaction_count
+                || target.started_candidate_transaction_count != transaction_count
+                || control.committed_candidate_transaction_count != transaction_count
+                || target.committed_candidate_transaction_count != transaction_count
+                || control.unattempted_candidate_transaction_count != 0
+                || target.unattempted_candidate_transaction_count != 0
+            {
+                bail!("dirty-account holdout transactions did not all commit successfully");
+            }
+            if target.actual_diagnostics["touched_state_key_count"]
+                <= control.actual_diagnostics["touched_state_key_count"]
+            {
+                bail!("dirty-account target did not increase touched state topology");
+            }
+        }
+    }
+    Ok(vec![control, target])
 }
 
 pub fn build_required_overhead_fixtures(

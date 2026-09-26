@@ -132,6 +132,8 @@ enum Stage {
     ControlledOverhead,
     #[value(name = "controlled-block")]
     ControlledBlock,
+    #[value(name = "controlled-state-holdout")]
+    ControlledStateHoldout,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum, PartialEq, Eq)]
@@ -221,6 +223,7 @@ struct BenchReport {
     controlled_trace: Option<controlled_workload::ControlledTrace>,
     controlled_overhead: Option<ControlledOverheadRunResult>,
     controlled_block: Option<ControlledBlockRunResult>,
+    controlled_state_holdout: Option<ControlledStateHoldoutRunResult>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -250,6 +253,19 @@ struct ControlledBlockRunResult {
     error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     observation: Option<controlled_workload::ControlledBlockObservation>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ControlledStateHoldoutRunResult {
+    status: &'static str,
+    pair_id: String,
+    lane: controlled_workload::ControlledStateHoldoutLane,
+    spec: controlled_workload::ControlledStateHoldoutPairSpec,
+    reasons: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    observation: Option<controlled_workload::ControlledStateHoldoutObservation>,
 }
 
 impl BenchReport {
@@ -292,6 +308,7 @@ impl BenchReport {
             controlled_trace: None,
             controlled_overhead: None,
             controlled_block: None,
+            controlled_state_holdout: None,
         }
     }
 
@@ -372,6 +389,7 @@ impl Stage {
             Stage::PrecompileLab => "precompile-lab",
             Stage::ControlledOverhead => "controlled-overhead",
             Stage::ControlledBlock => "controlled-block",
+            Stage::ControlledStateHoldout => "controlled-state-holdout",
         }
     }
 }
@@ -469,15 +487,23 @@ impl Args {
     }
 
     fn validate_sp1_execution_engine(&self) -> Result<()> {
+        if self.stage == Stage::ControlledStateHoldout
+            && self.sp1_execution_engine != Sp1ExecutionEngine::GasEstimator
+        {
+            bail!("controlled-state-holdout requires --sp1-execution-engine gas-estimator");
+        }
         if self.sp1_execution_engine == Sp1ExecutionEngine::Standard {
             return Ok(());
         }
         if !matches!(
             self.stage,
-            Stage::OpcodeLab | Stage::RevmOpcodeLab | Stage::ControlledBlock
+            Stage::OpcodeLab
+                | Stage::RevmOpcodeLab
+                | Stage::ControlledBlock
+                | Stage::ControlledStateHoldout
         ) {
             bail!(
-                "--sp1-execution-engine gas-estimator is restricted to opcode labs and controlled blocks"
+                "--sp1-execution-engine gas-estimator is restricted to opcode labs, controlled blocks, and controlled state holdouts"
             );
         }
         if self.proof_type != ProofType::Sp1 {
@@ -583,7 +609,8 @@ fn opcode_lab_memory_labels(stage: Stage) -> OpcodeLabMemoryLabels {
         | Stage::ProposalTrace
         | Stage::PrecompileLab
         | Stage::ControlledOverhead
-        | Stage::ControlledBlock => {
+        | Stage::ControlledBlock
+        | Stage::ControlledStateHoldout => {
             unreachable!("not an opcode lab stage")
         }
     }
@@ -688,6 +715,9 @@ async fn main() -> Result<()> {
     }
     if args.stage == Stage::ControlledBlock {
         return run_controlled_block(args).await;
+    }
+    if args.stage == Stage::ControlledStateHoldout {
+        return run_controlled_state_holdout(args).await;
     }
     if matches!(args.stage, Stage::OpcodeLab | Stage::RevmOpcodeLab) {
         return run_opcode_lab(args).await;
@@ -1297,6 +1327,85 @@ async fn run_controlled_block(args: Args) -> Result<()> {
     });
     fs::write(output_path, serde_json::to_string(&report)? + "\n")
         .with_context(|| format!("write {}", output_path.display()))?;
+    Ok(())
+}
+
+async fn run_controlled_state_holdout(args: Args) -> Result<()> {
+    if args.proof_type != ProofType::Sp1
+        || args.mode != Mode::Execute
+        || args.effective_sp1_prover_mode() != Sp1ProverMode::Local
+        || args.sp1_execution_engine != Sp1ExecutionEngine::GasEstimator
+    {
+        bail!(
+            "controlled-state-holdout supports only local SP1 execute mode with the gas-estimator engine"
+        );
+    }
+    if args.elf.is_some() || args.input_list.is_some() || !args.aggregate.is_empty() {
+        bail!("controlled-state-holdout always uses the production SP1 proposal guest");
+    }
+    if args.output.is_some() || args.json_out.is_some() {
+        bail!("controlled-state-holdout writes only --jsonl-out benchmark rows");
+    }
+    let input_path = args.input.as_ref().context("missing --input")?;
+    let output_path = args
+        .jsonl_out
+        .as_ref()
+        .context("controlled-state-holdout requires --jsonl-out")?;
+    let spec: controlled_workload::ControlledStateHoldoutPairSpec = serde_json::from_slice(
+        &fs::read(input_path).with_context(|| format!("read {}", input_path.display()))?,
+    )
+    .context("parse controlled-state-holdout input")?;
+    let fixtures = controlled_workload::build_controlled_state_holdout_fixtures(&spec)?;
+    let observations = controlled_workload::validate_controlled_state_holdout_fixtures(&fixtures)?;
+    let backend = load_sp1_shasta_backend()
+        .map_err(anyhow::Error::msg)
+        .context("load production SP1 Shasta guest ELFs")?;
+    let elf = backend
+        .elf(ProofStage::Proposal)
+        .map_err(anyhow::Error::msg)
+        .context("load production SP1 proposal ELF")?
+        .to_vec();
+    let mut output = String::new();
+    for (fixture, observation) in fixtures.into_iter().zip(observations) {
+        let lane = serde_json::to_value(fixture.lane)?
+            .as_str()
+            .unwrap_or("unknown")
+            .to_string();
+        let mut report = BenchReport::new(
+            "controlled-state-holdout",
+            "execute",
+            "compressed",
+            format!("{}:{lane}", fixture.pair_id),
+        );
+        apply_sp1_execution_engine_metadata(&mut report, args.sp1_execution_engine);
+        report.guest_input_sha256 = Some(observation.guest_input_sha256.clone());
+        report.guest_input_bincode_length = Some(observation.guest_input_bincode_length);
+        record_memory_snapshot(&mut report, "controlled-state-holdout:before_sp1_prover");
+        let start = Instant::now();
+        let (public_values, execution_report) =
+            execute_sp1_guest_gas_estimator_blocking(elf.clone(), fixture.guest_input).await?;
+        report.wall_time_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+        report.public_values = public_values.raw();
+        apply_execution_metadata(&mut report, &execution_report);
+        if report.public_values != format!("{:#x}", observation.public_output).to_lowercase() {
+            bail!(
+                "controlled-state-holdout trace/SP1 public output mismatch for {} {lane}",
+                fixture.pair_id
+            );
+        }
+        report.controlled_state_holdout = Some(ControlledStateHoldoutRunResult {
+            status: "accepted",
+            pair_id: fixture.pair_id,
+            lane: fixture.lane,
+            spec: fixture.spec,
+            reasons: Vec::new(),
+            error: None,
+            observation: Some(observation),
+        });
+        output.push_str(&serde_json::to_string(&report)?);
+        output.push('\n');
+    }
+    fs::write(output_path, output).with_context(|| format!("write {}", output_path.display()))?;
     Ok(())
 }
 
@@ -2046,6 +2155,55 @@ mod tests {
 
         assert_eq!(args.stage, Stage::ControlledBlock);
         assert!(args.elf.is_none(), "production proposal ELF is built in");
+    }
+
+    #[test]
+    fn parses_controlled_state_holdout_production_proposal_stage() {
+        let args = Args::try_parse_from([
+            "guest-launcher",
+            "--stage",
+            "controlled-state-holdout",
+            "--proof-type",
+            "sp1",
+            "--mode",
+            "execute",
+            "--sp1-prover",
+            "local",
+            "--sp1-execution-engine",
+            "gas-estimator",
+            "--input",
+            "controlled-state-holdout.json",
+            "--jsonl-out",
+            "controlled-state-holdout-runs.jsonl",
+        ])
+        .expect("parse args");
+
+        assert_eq!(args.stage, Stage::ControlledStateHoldout);
+        assert!(args.elf.is_none(), "production proposal ELF is built in");
+        args.validate_sp1_execution_engine()
+            .expect("controlled state holdouts accept the local SP1 gas estimator");
+    }
+
+    #[test]
+    fn controlled_state_holdout_rejects_the_standard_execution_engine() {
+        let args = Args::try_parse_from([
+            "guest-launcher",
+            "--stage",
+            "controlled-state-holdout",
+            "--proof-type",
+            "sp1",
+            "--mode",
+            "execute",
+            "--sp1-prover",
+            "local",
+            "--input",
+            "controlled-state-holdout.json",
+            "--jsonl-out",
+            "controlled-state-holdout-runs.jsonl",
+        ])
+        .expect("parse args");
+
+        assert!(args.validate_sp1_execution_engine().is_err());
     }
 
     #[test]

@@ -8,13 +8,15 @@ use alloy_primitives::{Address, B256};
 use controlled_workload::{
     ControlledBlockRowSpec, ControlledBlockSplit, ControlledExecutionIdentity, ControlledFootprint,
     ControlledLane, ControlledOperationUnits, ControlledOverheadLane, ControlledProgram,
-    ControlledTrace, ControlledWorkloadSpec, PairedPrecompileShape, build_controlled_block_fixture,
+    ControlledStateHoldoutLane, ControlledStateHoldoutPairSpec, ControlledTrace,
+    ControlledWorkloadSpec, PairedPrecompileShape, build_controlled_block_fixture,
     build_controlled_block_fixture_with_extra_prestate_account_for_test,
-    build_required_overhead_fixtures, controlled_block_row_id, controlled_execution_row_id,
-    controlled_overhead_workload_id, controlled_precompile_workload_spec, controlled_workload_id,
-    observe_controlled_block_fixture, operation_units_delta, trace_precompile_workload,
-    trace_revm_opcode_workload, validate_controlled_block_fixture, validate_fixed_footprint,
-    validate_precompile_pair, validate_required_overhead_fixtures,
+    build_controlled_state_holdout_fixtures, build_required_overhead_fixtures,
+    controlled_block_row_id, controlled_execution_row_id, controlled_overhead_workload_id,
+    controlled_precompile_workload_spec, controlled_workload_id, observe_controlled_block_fixture,
+    operation_units_delta, trace_precompile_workload, trace_revm_opcode_workload,
+    validate_controlled_block_fixture, validate_controlled_state_holdout_fixtures,
+    validate_fixed_footprint, validate_precompile_pair, validate_required_overhead_fixtures,
 };
 use raiko2_primitives::{
     OpcodeLabInput, PrecompileLabInput, PrecompileLabLane, SupportedChainSpecs,
@@ -86,6 +88,236 @@ fn block_row_spec() -> ControlledBlockRowSpec {
             ("bytecode_length".into(), 256),
             ("touched_state_key_count".into(), 9),
         ]),
+    }
+}
+
+fn witness_topology_pair(extra_account_count: usize) -> ControlledStateHoldoutPairSpec {
+    serde_json::from_value(json!({
+        "pair_id": format!("witness_topology_{extra_account_count}"),
+        "kind": "witness_topology",
+        "scale": extra_account_count,
+        "control": {"extra_account_count": 0},
+        "target": {"extra_account_count": extra_account_count},
+    }))
+    .expect("parse canonical witness topology pair")
+}
+
+fn dirty_accounts_pair(transaction_count: u64) -> ControlledStateHoldoutPairSpec {
+    serde_json::from_value(json!({
+        "pair_id": format!("dirty_accounts_{transaction_count}"),
+        "kind": "dirty_accounts",
+        "scale": transaction_count,
+        "control": {
+            "transaction_count": transaction_count,
+            "value": 1,
+            "recipient_mode": "single",
+        },
+        "target": {
+            "transaction_count": transaction_count,
+            "value": 1,
+            "recipient_mode": "distinct",
+        },
+    }))
+    .expect("parse canonical dirty-account pair")
+}
+
+#[test]
+fn witness_topology_state_holdouts_are_isolated_and_deterministic() {
+    for extra_account_count in [1, 8, 32] {
+        let spec = witness_topology_pair(extra_account_count);
+        let fixtures =
+            build_controlled_state_holdout_fixtures(&spec).expect("build witness topology pair");
+        let observations = validate_controlled_state_holdout_fixtures(&fixtures)
+            .expect("trace witness topology pair");
+        let [control, target] = observations.as_slice() else {
+            panic!("state holdout must produce exactly two observations")
+        };
+
+        assert_eq!(control.lane, ControlledStateHoldoutLane::Control);
+        assert_eq!(target.lane, ControlledStateHoldoutLane::Target);
+        assert_eq!(target.actual_features, control.actual_features);
+        assert_eq!(target.actual_raw_gas_by_key, control.actual_raw_gas_by_key);
+        assert_eq!(control.actual_features["tx_base"], 0);
+        assert_eq!(control.actual_features["native_value_transfer"], 0);
+        assert!(
+            target.actual_diagnostics["witness_node_count"]
+                > control.actual_diagnostics["witness_node_count"]
+        );
+        assert!(
+            target.actual_diagnostics["witness_byte_count"]
+                > control.actual_diagnostics["witness_byte_count"]
+        );
+
+        let rebuilt = build_controlled_state_holdout_fixtures(&spec)
+            .expect("rebuild deterministic witness topology pair");
+        let rebuilt_observations = validate_controlled_state_holdout_fixtures(&rebuilt)
+            .expect("retrace deterministic witness topology pair");
+        for (original, rebuilt) in observations.iter().zip(rebuilt_observations.iter()) {
+            assert_eq!(original.guest_input_sha256, rebuilt.guest_input_sha256);
+            assert_eq!(
+                original.actual_final_state_root,
+                rebuilt.actual_final_state_root
+            );
+        }
+    }
+}
+
+#[test]
+fn dirty_accounts_state_holdouts_change_only_recipient_topology() {
+    for transaction_count in [2, 8, 32] {
+        let spec = dirty_accounts_pair(transaction_count);
+        let fixtures =
+            build_controlled_state_holdout_fixtures(&spec).expect("build dirty-account pair");
+        let observations = validate_controlled_state_holdout_fixtures(&fixtures)
+            .expect("trace dirty-account pair");
+        let [control_fixture, target_fixture] = fixtures.as_slice() else {
+            panic!("state holdout must produce exactly two fixtures")
+        };
+        let [control, target] = observations.as_slice() else {
+            panic!("state holdout must produce exactly two observations")
+        };
+
+        assert_eq!(control.lane, ControlledStateHoldoutLane::Control);
+        assert_eq!(target.lane, ControlledStateHoldoutLane::Target);
+        assert_eq!(target.actual_features, control.actual_features);
+        assert_eq!(target.actual_raw_gas_by_key, control.actual_raw_gas_by_key);
+        assert!(target.actual_raw_gas_by_key.is_empty());
+        assert_eq!(
+            target.actual_features["native_value_transfer"],
+            i64::try_from(transaction_count).unwrap()
+        );
+        assert!(
+            target.actual_diagnostics["touched_state_key_count"]
+                > control.actual_diagnostics["touched_state_key_count"]
+        );
+        for observation in [control, target] {
+            assert_eq!(
+                observation.started_candidate_transaction_count,
+                transaction_count
+            );
+            assert_eq!(
+                observation.committed_candidate_transaction_count,
+                transaction_count
+            );
+            assert_eq!(observation.unattempted_candidate_transaction_count, 0);
+        }
+
+        let candidate_shape = |fixture: &controlled_workload::ControlledStateHoldoutFixture| {
+            fixture.guest_input.witnesses[0]
+                .block
+                .body
+                .transactions
+                .iter()
+                .skip(1)
+                .map(|transaction| {
+                    (
+                        transaction.nonce(),
+                        transaction.value(),
+                        transaction.to().expect("native transfer recipient"),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let control_shape = candidate_shape(control_fixture);
+        let target_shape = candidate_shape(target_fixture);
+        assert_eq!(
+            control_shape.len(),
+            usize::try_from(transaction_count).unwrap()
+        );
+        assert_eq!(target_shape.len(), control_shape.len());
+        assert_eq!(
+            control_shape
+                .iter()
+                .map(|(nonce, value, _)| (*nonce, *value))
+                .collect::<Vec<_>>(),
+            target_shape
+                .iter()
+                .map(|(nonce, value, _)| (*nonce, *value))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            control_shape
+                .iter()
+                .map(|(_, _, recipient)| recipient)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            1
+        );
+        assert_eq!(
+            target_shape
+                .iter()
+                .map(|(_, _, recipient)| recipient)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            usize::try_from(transaction_count).unwrap()
+        );
+    }
+}
+
+#[test]
+fn state_holdout_spec_uses_the_strict_canonical_pair_schema() {
+    let witness = witness_topology_pair(8);
+    let dirty = dirty_accounts_pair(8);
+    assert!(build_controlled_state_holdout_fixtures(&witness).is_ok());
+    assert!(build_controlled_state_holdout_fixtures(&dirty).is_ok());
+
+    assert!(
+        serde_json::from_value::<ControlledStateHoldoutPairSpec>(json!({
+            "kind": "dirty_accounts",
+            "transaction_count": 8,
+            "value": 1,
+        }))
+        .is_err(),
+        "the compact internal builder shape is not a CLI schema",
+    );
+
+    let mut unknown_lane_field = serde_json::to_value(&dirty).expect("serialize pair");
+    unknown_lane_field["target"]["extra"] = json!(true);
+    assert!(
+        serde_json::from_value::<ControlledStateHoldoutPairSpec>(unknown_lane_field).is_err(),
+        "lane objects reject unknown fields",
+    );
+    let mut unknown_pair_field = serde_json::to_value(&dirty).expect("serialize pair");
+    unknown_pair_field["extra"] = json!(true);
+    assert!(
+        serde_json::from_value::<ControlledStateHoldoutPairSpec>(unknown_pair_field).is_err(),
+        "pair objects reject unknown fields",
+    );
+
+    let mut invalid_pairs = Vec::new();
+    let witness_value = serde_json::to_value(&witness).expect("serialize witness pair");
+    let dirty_value = serde_json::to_value(&dirty).expect("serialize dirty pair");
+    for (pointer, replacement) in [
+        ("/pair_id", json!("witness_topology_32")),
+        ("/scale", json!(32)),
+        ("/control/extra_account_count", json!(1)),
+        ("/target/extra_account_count", json!(1)),
+    ] {
+        let mut invalid = witness_value.clone();
+        *invalid.pointer_mut(pointer).expect("witness pointer") = replacement;
+        invalid_pairs.push(invalid);
+    }
+    for (pointer, replacement) in [
+        ("/pair_id", json!("dirty_accounts_32")),
+        ("/scale", json!(32)),
+        ("/control/transaction_count", json!(2)),
+        ("/target/transaction_count", json!(2)),
+        ("/control/value", json!(2)),
+        ("/target/value", json!(2)),
+        ("/control/recipient_mode", json!("distinct")),
+        ("/target/recipient_mode", json!("single")),
+    ] {
+        let mut invalid = dirty_value.clone();
+        *invalid.pointer_mut(pointer).expect("dirty pointer") = replacement;
+        invalid_pairs.push(invalid);
+    }
+    for invalid in invalid_pairs {
+        let parsed = serde_json::from_value::<ControlledStateHoldoutPairSpec>(invalid)
+            .expect("invalid canonical combination remains structurally valid");
+        assert!(
+            build_controlled_state_holdout_fixtures(&parsed).is_err(),
+            "noncanonical pair combinations are rejected",
+        );
     }
 }
 

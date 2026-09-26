@@ -436,6 +436,42 @@ OSAKA_SUPPLEMENT_RELATION_IDS = (
 HISTORICAL_CORE_MANIFEST_SHA256 = (
     "4140fe1a0ccc533dbee8940a63da6db41be8a26955cc0022ccae5e1aedc3e01e"
 )
+HISTORICAL_CORE_DERIVATION_ID = "3e1d97c461cd2ef9a40e6a02"
+HISTORICAL_CORE_ARTIFACT_SHA256 = (
+    "900964c9e64af23c35e71d05f118c519d7b9dfee5263d201af7f850b9de8c964"
+)
+HISTORICAL_DYNAMIC_ARTIFACT_SHA256 = (
+    "6b2225662e4bd678d8a9e94983b5ebeccf173a92d358d5072604419c962dcfa8"
+)
+HISTORICAL_DERIVATION_ARTIFACT_SHA256 = (
+    "b61fda990d258ea8dbb909572d0df8efb12adca0b14e8bb01bc8f2c437a33115"
+)
+HISTORICAL_CORE_FILE_SHA256 = (
+    "d2d68c237fcd46c48db327332f781b9e56528ae4af66dbce5d35c396ff31430c"
+)
+HISTORICAL_DYNAMIC_FILE_SHA256 = (
+    "6a90f74ada5825a158fd5d3087e0a1c4d8d9f3be1a0fc883e44555a70ce9012a"
+)
+HISTORICAL_DERIVATION_FILE_SHA256 = (
+    "2ec1ba45d029ac141fbc0aaa9e3aadabd50cf283ff34c4b992d1c95b994c688a"
+)
+HISTORICAL_CORE_EVIDENCE_ARTIFACT_SHA256 = (
+    "762576b3ab6a67fe9cb6d1ddaca2d4183338a1821199242f061fc709c036e8f4"
+)
+HISTORICAL_CORE_OPCODE_KEYS = (
+    *(f"opcode:0x{opcode:02x}" for opcode in range(0x01, 0x0C)),
+    *(f"opcode:0x{opcode:02x}" for opcode in range(0x10, 0x1E)),
+    "opcode:0x20",
+    *(f"opcode:0x{opcode:02x}" for opcode in (0x50, 0x51, 0x52, 0x53, 0x56, 0x57, 0x58, 0x59, 0x5A, 0x5B, 0x5E, 0x5F)),
+    *(f"opcode:0x{opcode:02x}" for opcode in range(0x60, 0xA0)),
+)
+HISTORICAL_UNSUPPORTED_NAMED_OPCODE_KEYS = (
+    "opcode:0x00", "opcode:0x15", "opcode:0x1e",
+    *(f"opcode:0x{opcode:02x}" for opcode in range(0x30, 0x4B)),
+    "opcode:0x54", "opcode:0x55", "opcode:0x5c", "opcode:0x5d",
+    *(f"opcode:0x{opcode:02x}" for opcode in range(0xA0, 0xA5)),
+    *(f"opcode:0x{opcode:02x}" for opcode in (0xF0, 0xF1, 0xF2, 0xF3, 0xF4, 0xF5, 0xFA, 0xFD, 0xFE, 0xFF)),
+)
 
 ANCHOR_PROBE_PURPOSE = "synthetic_opcode_anchor_prior"
 ANCHOR_PROBE_SCENARIOS = {
@@ -14258,23 +14294,167 @@ def _verify_repo_relative_checksum(path: pathlib.Path) -> str:
 
 
 def _historical_core_opcode_keys(manifest: Manifest) -> tuple[str, ...]:
-    """Validate the frozen 102-key schema without consulting current inventory size."""
+    """Validate the frozen 102-key schema without consulting current globals."""
     keys = tuple(
         f"opcode:0x{case.opcode:02x}"
         for case in manifest.cases
         if case.kind == "opcode"
         and case.opcode is not None
-        and case.opcode in PURE_OPCODE_DEFAULTS
-        and PURE_OPCODE_DEFAULTS[case.opcode][1] == case.template
     )
-    historical_expected = tuple(
-        f"opcode:0x{opcode:02x}"
-        for opcode in PURE_OPCODE_DEFAULTS
-        if opcode != 0x1E
-    )
-    if keys != historical_expected or len(keys) != 102:
+    if keys != HISTORICAL_CORE_OPCODE_KEYS:
         raise ValueError("historical core manifest must contain its ordered 102-key inventory")
     return keys
+
+
+_HISTORICAL_PROGRAM_EVIDENCE_FIELDS = (
+    "relation_id",
+    "generator_max_count",
+    "relation_sample_id",
+    "relation_placement",
+    "lane",
+    "repeat_index",
+    "bytecode_sha256",
+    "fixture_sha256",
+    "guest_input_sha256",
+    "fixed_bytecode_len",
+    "tx_gas_limit",
+    "target_count",
+    "target_raw_gas",
+    "evm_opcode_counts",
+    "pair_id",
+    "original_opcode",
+    "opcode",
+    "operands",
+    "final_stack_height",
+    "relation",
+    "relation_scenario",
+    "target_raw_gas_by_key",
+    "control_raw_gas_by_key",
+    "signed_raw_gas_by_key",
+)
+
+# Raw formal-relation rows contain the bytecode itself.  The historical
+# evidence package deliberately replaces that potentially large field with
+# its digest, so do not require the derived ``bytecode_sha256`` on live rows.
+_FORMAL_RELATION_PROGRAM_INPUT_FIELDS = tuple(
+    field for field in _HISTORICAL_PROGRAM_EVIDENCE_FIELDS if field != "bytecode_sha256"
+)
+
+
+def _formal_relation_program_evidence(rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    evidence = []
+    for row in rows:
+        if not isinstance(row, Mapping) or any(field not in row for field in _FORMAL_RELATION_PROGRAM_INPUT_FIELDS):
+            raise ValueError("formal relation row lacks program identity evidence")
+        bytecode = row.get("bytecode")
+        if not isinstance(bytecode, str) or not bytecode.startswith("0x"):
+            raise ValueError("formal relation program bytecode is invalid")
+        projected = {field: row[field] for field in _FORMAL_RELATION_PROGRAM_INPUT_FIELDS}
+        projected["bytecode_sha256"] = sha256_bytes(bytecode.encode())
+        evidence.append(projected)
+    return evidence
+
+
+def _formal_relation_program_sha256(rows: Iterable[Mapping[str, Any]]) -> str:
+    return sha256_bytes(canonical_json(_formal_relation_program_evidence(rows)))
+
+
+def _load_historical_core_evidence(
+    historical_manifest: pathlib.Path,
+    source: Mapping[str, Any],
+    manifest: Manifest,
+) -> dict[str, Any]:
+    path = historical_manifest.with_name("historical-evidence.json")
+    if _verify_repo_relative_checksum(path) != sha256_file(path):
+        raise AssertionError("historical evidence checksum verification must return file hash")
+    value = json.loads(path.read_text())
+    _validate_content_addressed_artifact(value, label="historical core evidence")
+    if (
+        value.get("artifact_sha256") != HISTORICAL_CORE_EVIDENCE_ARTIFACT_SHA256
+        or value.get("schema_version") != 1
+        or value.get("purpose") != "historical_core_102_canary_evidence"
+        or value.get("derivation_id") != HISTORICAL_CORE_DERIVATION_ID
+        or value.get("derivation_artifact_sha256") != HISTORICAL_DERIVATION_ARTIFACT_SHA256
+        or not _exact_json_equal(value.get("source"), source)
+        or not _is_sha256(value.get("relation_artifact_sha256"))
+        or not isinstance(value.get("canaries"), list)
+        or [row.get("relation_id") for row in value["canaries"]]
+        != list(OSAKA_CANARY_RELATION_IDS)
+    ):
+        raise ValueError("historical core evidence identity differs")
+    relation_by_id = {relation.id: relation for relation in manifest.opcode_relations}
+    equations = []
+    for row in value["canaries"]:
+        relation_id = row.get("relation_id")
+        relation = relation_by_id.get(relation_id)
+        evidence_rows = row.get("row_evidence")
+        equation = row.get("equation")
+        if (
+            relation is None
+            or row.get("generator_max_count") not in CONTROLLED_GENERATOR_ROUNDS
+            or not isinstance(evidence_rows, list)
+            or not evidence_rows
+            or not isinstance(equation, Mapping)
+            or set(equation) != {
+                "slope_p", "signed_raw_gas_by_key", "target_raw_gas_by_key", "control_raw_gas_by_key"
+            }
+            or not _exact_json_equal(equation["signed_raw_gas_by_key"], {key: str(value) for key, value in relation.signed_raw_gas_by_key.items()})
+            or not _exact_json_equal(equation["target_raw_gas_by_key"], {key: str(value) for key, value in relation.target_raw_gas_by_key.items()})
+            or not _exact_json_equal(equation["control_raw_gas_by_key"], {key: str(value) for key, value in relation.control_raw_gas_by_key.items()})
+        ):
+            raise ValueError("historical canary evidence differs from frozen manifest")
+        if any(set(item) != set(_HISTORICAL_PROGRAM_EVIDENCE_FIELDS) for item in evidence_rows):
+            raise ValueError("historical canary program evidence schema differs")
+        equations.append({"relation_id": relation_id, **equation})
+    return {
+        "relation_artifact": {
+            "artifact_sha256": value["relation_artifact_sha256"],
+            "equations": equations,
+        },
+        "formal_relation_artifacts": {"canaries": value["canaries"]},
+    }
+
+
+def _validate_frozen_historical_baseline_payloads(
+    derivation: Mapping[str, Any], dynamic: Mapping[str, Any], core: Mapping[str, Any]
+) -> None:
+    """Validate the immutable baseline embedded in an augmentation directory."""
+    for label, value in (("derivation", derivation), ("dynamic", dynamic), ("core", core)):
+        _validate_content_addressed_artifact(value, label=f"historical {label}")
+    if (
+        derivation.get("artifact_sha256") != HISTORICAL_DERIVATION_ARTIFACT_SHA256
+        or dynamic.get("artifact_sha256") != HISTORICAL_DYNAMIC_ARTIFACT_SHA256
+        or core.get("artifact_sha256") != HISTORICAL_CORE_ARTIFACT_SHA256
+        or sha256_bytes(_canonical_json_file_bytes(derivation)) != HISTORICAL_DERIVATION_FILE_SHA256
+        or sha256_bytes(_canonical_json_file_bytes(dynamic)) != HISTORICAL_DYNAMIC_FILE_SHA256
+        or sha256_bytes(_canonical_json_file_bytes(core)) != HISTORICAL_CORE_FILE_SHA256
+        or derivation.get("derivation_id") != HISTORICAL_CORE_DERIVATION_ID
+    ):
+        raise ValueError("embedded historical baseline identity differs")
+    output_hashes = derivation.get("output_hashes")
+    source = derivation.get("source")
+    provenance = {
+        field: source.get(field)
+        for field in FORMAL_RELATION_PROVENANCE_FIELDS
+    } if isinstance(source, Mapping) else None
+    registry = core.get("registry")
+    models = registry.get("models") if isinstance(registry, Mapping) else None
+    expected_models = {"invalid", *(key for key in HISTORICAL_CORE_OPCODE_KEYS if key != "opcode:0x15")}
+    if (
+        not isinstance(output_hashes, Mapping)
+        or output_hashes.get("dynamic_artifact_sha256") != dynamic["artifact_sha256"]
+        or output_hashes.get("dynamic_file_sha256") != HISTORICAL_DYNAMIC_FILE_SHA256
+        or output_hashes.get("core_artifact_sha256") != core["artifact_sha256"]
+        or output_hashes.get("core_file_sha256") != HISTORICAL_CORE_FILE_SHA256
+        or dynamic.get("provenance") != provenance
+        or core.get("provenance") != provenance
+        or not isinstance(models, Mapping)
+        or set(models) != expected_models
+        or core.get("modeled_named_opcode_count") != 101
+        or core.get("unsupported_named_opcode_keys") != list(HISTORICAL_UNSUPPORTED_NAMED_OPCODE_KEYS)
+        or core.get("unsupported_named_opcode_count") != 49
+    ):
+        raise ValueError("embedded historical baseline semantics differ")
 
 
 def validate_historical_core_opcode_baseline(
@@ -14304,6 +14484,16 @@ def validate_historical_core_opcode_baseline(
         if not isinstance(value, Mapping):
             raise ValueError(f"historical {label} artifact is not an object")
         _validate_content_addressed_artifact(value, label=f"historical {label}")
+    _validate_frozen_historical_baseline_payloads(derivation, dynamic, core)
+    if (
+        derivation.get("artifact_sha256") != HISTORICAL_DERIVATION_ARTIFACT_SHA256
+        or dynamic.get("artifact_sha256") != HISTORICAL_DYNAMIC_ARTIFACT_SHA256
+        or core.get("artifact_sha256") != HISTORICAL_CORE_ARTIFACT_SHA256
+        or sha256_file(paths["derivation"]) != HISTORICAL_DERIVATION_FILE_SHA256
+        or sha256_file(paths["dynamic"]) != HISTORICAL_DYNAMIC_FILE_SHA256
+        or sha256_file(paths["core"]) != HISTORICAL_CORE_FILE_SHA256
+    ):
+        raise ValueError("historical baseline artifact identity differs from frozen package")
 
     identity = derivation.get("derivation_identity")
     source = derivation.get("source")
@@ -14319,7 +14509,8 @@ def validate_historical_core_opcode_baseline(
         or not _exact_json_equal(source, identity.get("source"))
         or derivation.get("derivation_id")
         != sha256_bytes(canonical_json(identity))[:24]
-        or derivation_dir.name != derivation.get("derivation_id")
+        or derivation.get("derivation_id") != HISTORICAL_CORE_DERIVATION_ID
+        or derivation_dir.name != HISTORICAL_CORE_DERIVATION_ID
     ):
         raise ValueError("historical derivation identity/schema is invalid")
     algorithm = identity.get("algorithm")
@@ -14345,22 +14536,14 @@ def validate_historical_core_opcode_baseline(
         or source_files.get("controlled-manifest.toml") != manifest_sha256
     ):
         raise ValueError("historical derivation source identity differs from fixture")
-    source_run = REPO_ROOT / "experiments" / "opcode-gas" / "runs" / str(
-        source.get("calibration_id")
-    )
-    if not source_run.is_dir():
-        raise ValueError("historical derivation source run is missing")
-    for relative, expected_sha256 in source_files.items():
-        candidate = source_run / relative
-        if (
-            not isinstance(relative, str)
-            or pathlib.Path(relative).is_absolute()
-            or ".." in pathlib.Path(relative).parts
-            or not _is_sha256(expected_sha256)
-            or not candidate.is_file()
-            or sha256_file(candidate) != expected_sha256
-        ):
-            raise ValueError("historical derivation source file hash differs")
+    if any(
+        not isinstance(relative, str)
+        or pathlib.Path(relative).is_absolute()
+        or ".." in pathlib.Path(relative).parts
+        or not _is_sha256(expected_sha256)
+        for relative, expected_sha256 in source_files.items()
+    ):
+        raise ValueError("historical derivation source hash declaration is invalid")
     if (
         output_hashes.get("dynamic_artifact_sha256")
         != dynamic.get("artifact_sha256")
@@ -14415,11 +14598,6 @@ def validate_historical_core_opcode_baseline(
     registry = core.get("registry")
     models = registry.get("models") if isinstance(registry, Mapping) else None
     expected_models = {"invalid", *(key for key in opcode_keys if key != "opcode:0x15")}
-    expected_unsupported = [
-        f"opcode:0x{opcode:02x}"
-        for opcode in sorted(UZEN_OPCODE_NAMES)
-        if f"opcode:0x{opcode:02x}" not in expected_models
-    ]
     missing = [
         key for key in opcode_keys if not isinstance(models, Mapping) or key not in models
     ]
@@ -14430,46 +14608,11 @@ def validate_historical_core_opcode_baseline(
         or missing != ["opcode:0x15"]
         or core.get("modeled_named_opcode_count") != 101
         or core.get("unsupported_named_opcode_count") != 49
-        or core.get("unsupported_named_opcode_keys") != expected_unsupported
+        or core.get("unsupported_named_opcode_keys")
+        != list(HISTORICAL_UNSUPPORTED_NAMED_OPCODE_KEYS)
     ):
         raise ValueError("historical core registry coverage is invalid")
-    decisions_path = source_run / "formal-relation-decisions.json"
-    decisions_seal_path = source_run / "formal-relation-decisions.sha256"
-    raw_path = source_run / "raw" / "formal-relations.jsonl"
-    if (
-        not decisions_path.is_file()
-        or not decisions_seal_path.is_file()
-        or _read_digest(decisions_seal_path) != sha256_file(decisions_path)
-        or not raw_path.is_file()
-    ):
-        raise ValueError("historical formal relation ledger is not sealed")
-    decisions = json.loads(decisions_path.read_text())
-    if (
-        decisions.get("schema_version") != 1
-        or decisions.get("calibration_identity_sha256")
-        != source.get("calibration_identity_sha256")
-        or decisions.get("relation_ids")
-        != [relation.id for relation in manifest.opcode_relations]
-        or not isinstance(decisions.get("rounds"), list)
-    ):
-        raise ValueError("historical formal relation ledger identity is invalid")
-    rows = list(iter_jsonl(raw_path))
-    relation_artifact = json.loads((source_run / "opcode-relations.json").read_text())
-    _validate_content_addressed_artifact(
-        relation_artifact, label="historical opcode relation artifact"
-    )
-    if (
-        relation_artifact.get("schema_version") != 3
-        or relation_artifact.get("status") != "accepted"
-        or relation_artifact.get("raw_rows_sha256")
-        != sha256_bytes(canonical_json(rows))
-        or
-        relation_artifact.get("artifact_sha256")
-        != source_hashes.get("relation_artifact_sha256")
-        or relation_artifact.get("raw_rows_sha256")
-        != source_hashes.get("relation_raw_rows_sha256")
-    ):
-        raise ValueError("historical relation source differs from derivation identity")
+    evidence = _load_historical_core_evidence(historical_manifest, source, manifest)
     return {
         "derivation": derivation,
         "dynamic_artifact": dynamic,
@@ -14479,14 +14622,8 @@ def validate_historical_core_opcode_baseline(
         "modeled_named_opcode_count": core["modeled_named_opcode_count"],
         "missing_core_opcode_keys": missing,
         "unsupported_named_opcode_count": core["unsupported_named_opcode_count"],
-        "relation_artifact": relation_artifact,
-        "formal_relation_artifacts": {
-            "decisions": decisions,
-            "rows": rows,
-            "raw_path": raw_path,
-            "formal_relation_decisions_sha256": sha256_file(decisions_path),
-        },
-        "source_run": source_run,
+        "relation_artifact": evidence["relation_artifact"],
+        "formal_relation_artifacts": evidence["formal_relation_artifacts"],
     }
 
 
@@ -14622,6 +14759,97 @@ def build_osaka_compatibility_canary(
 
 
 @_isolated_decimal_context
+def _validate_osaka_compatibility_canary_artifact(value: Mapping[str, Any]) -> None:
+    _validate_content_addressed_artifact(value, label="Osaka compatibility canary")
+    rows = value.get("relations")
+    if (
+        value.get("purpose") != "osaka_opcode_compatibility_canary"
+        or value.get("candidate_eligible") is not False
+        or value.get("relation_ids") != list(OSAKA_CANARY_RELATION_IDS)
+        or not isinstance(rows, list)
+        or [row.get("relation_id") for row in rows] != list(OSAKA_CANARY_RELATION_IDS)
+    ):
+        raise ValueError("Osaka compatibility canary schema differs")
+    apes = []
+    for row in rows:
+        baseline = _canonical_artifact_decimal(row.get("baseline_slope_p"), label="baseline slope")
+        osaka = _canonical_artifact_decimal(row.get("osaka_slope_p"), label="Osaka slope")
+        residual = _canonical_artifact_decimal(row.get("signed_residual_p"), label="canary residual")
+        ape = _canonical_artifact_decimal(row.get("drift_ape"), label="canary APE")
+        if (
+            baseline == 0
+            or osaka == 0
+            or (baseline > 0) != (osaka > 0)
+            or residual != osaka - baseline
+            or ape != abs(residual) / abs(baseline)
+            or row.get("repeat_count") != 3
+            or not _is_sha256(row.get("program_sha256"))
+            or not _is_sha256(row.get("historical_raw_rows_sha256"))
+            or not _is_sha256(row.get("osaka_raw_rows_sha256"))
+        ):
+            raise ValueError("Osaka compatibility canary relation differs")
+        apes.append(ape)
+    mape = sum(apes, Decimal(0)) / Decimal(len(apes))
+    reasons = []
+    if any(ape > Decimal("0.10") for ape in apes):
+        reasons.append("relation_drift_ape_exceeds_0.10")
+    if mape > Decimal("0.05"):
+        reasons.append("drift_mape_exceeds_0.05")
+    if (
+        value.get("drift_mape") != _decimal_text(mape)
+        or value.get("reasons") != reasons
+        or value.get("status") != ("passed" if not reasons else "failed")
+    ):
+        raise ValueError("Osaka compatibility canary aggregate differs")
+
+
+@_isolated_decimal_context
+def _solve_osaka_augmented_bodies(
+    swap_parameters: Mapping[str, Any], relations: Sequence[Mapping[str, Any]]
+) -> dict[str, Any]:
+    """Solve the two supplemental bodies exactly, then project to Decimal(80)."""
+    if len(relations) != 2:
+        raise ValueError("Osaka supplement relation count is invalid")
+    swap_body = _canonical_artifact_decimal(
+        swap_parameters.get("body_per_raw_gas"), label="SWAP1 body"
+    )
+    d_iszero = _canonical_artifact_decimal(
+        relations[0].get("slope_p"), label="ISZERO relation slope"
+    )
+    d_clz = _canonical_artifact_decimal(
+        relations[1].get("slope_p"), label="CLZ relation slope"
+    )
+
+    def projection(value: Fraction, *, label: str) -> Decimal:
+        with localcontext(_OPCODE_DECIMAL_CONTEXT):
+            result = Decimal(value.numerator) / Decimal(value.denominator)
+        if abs(Fraction(_decimal_text(result)) - value) > Fraction(1, 10**75):
+            raise ValueError(f"{label} decimal projection exceeds the 80-digit bound")
+        return result
+
+    swap_fraction = Fraction(_decimal_text(swap_body))
+    d_iszero_fraction = Fraction(_decimal_text(d_iszero))
+    d_clz_fraction = Fraction(_decimal_text(d_clz))
+    iszero_fraction = swap_fraction + d_iszero_fraction / 3
+    clz_fraction = (d_clz_fraction + 3 * swap_fraction) / 5
+    iszero_exact_residual = 3 * iszero_fraction - 3 * swap_fraction - d_iszero_fraction
+    clz_exact_residual = 5 * clz_fraction - 3 * swap_fraction - d_clz_fraction
+    if iszero_exact_residual != 0 or clz_exact_residual != 0:
+        raise AssertionError("exact Osaka supplemental solution must have zero residual")
+    return {
+        "swap_body": swap_body,
+        "d_iszero": d_iszero,
+        "d_clz": d_clz,
+        "iszero_fraction": iszero_fraction,
+        "clz_fraction": clz_fraction,
+        "iszero_body": projection(iszero_fraction, label="ISZERO body"),
+        "clz_body": projection(clz_fraction, label="CLZ body"),
+        "iszero_exact_residual": iszero_exact_residual,
+        "clz_exact_residual": clz_exact_residual,
+    }
+
+
+@_isolated_decimal_context
 def build_osaka_augmented_core_artifact(
     baseline_core: Mapping[str, Any],
     compatibility_canary: Mapping[str, Any],
@@ -14691,17 +14919,16 @@ def build_osaka_augmented_core_artifact(
     swap_parameters = swap.get("parameters") if isinstance(swap, Mapping) else None
     if not isinstance(swap_parameters, Mapping):
         raise ValueError("historical baseline has no SWAP1 model")
-    swap_body = _canonical_artifact_decimal(
-        swap_parameters.get("body_per_raw_gas"), label="SWAP1 body"
-    )
-    d_iszero = _canonical_artifact_decimal(
-        relations[0].get("slope_p"), label="ISZERO relation slope"
-    )
-    d_clz = _canonical_artifact_decimal(
-        relations[1].get("slope_p"), label="CLZ relation slope"
-    )
-    iszero_body = swap_body + d_iszero / Decimal(3)
-    clz_body = (d_clz + Decimal(3) * swap_body) / Decimal(5)
+    solved = _solve_osaka_augmented_bodies(swap_parameters, relations)
+    swap_body = solved["swap_body"]
+    d_iszero = solved["d_iszero"]
+    d_clz = solved["d_clz"]
+    iszero_fraction = solved["iszero_fraction"]
+    clz_fraction = solved["clz_fraction"]
+    iszero_body = solved["iszero_body"]
+    clz_body = solved["clz_body"]
+    iszero_exact_residual = solved["iszero_exact_residual"]
+    clz_exact_residual = solved["clz_exact_residual"]
     if any(not value.is_finite() or value < 0 for value in (iszero_body, clz_body)):
         raise ValueError("Osaka supplemental solved opcode body is negative or non-finite")
 
@@ -14751,6 +14978,7 @@ def build_osaka_augmented_core_artifact(
             "signed_residual_p": _decimal_text(
                 Decimal(3) * iszero_body - Decimal(3) * swap_body - d_iszero
             ),
+            "exact_signed_residual_fraction": _fraction_text(iszero_exact_residual),
         },
         {
             "relation_id": "opcode:0x1e:canonical",
@@ -14761,13 +14989,29 @@ def build_osaka_augmented_core_artifact(
             "signed_residual_p": _decimal_text(
                 Decimal(5) * clz_body - Decimal(3) * swap_body - d_clz
             ),
+            "exact_signed_residual_fraction": _fraction_text(clz_exact_residual),
         },
     ]
+    if any(
+        _parse_fraction_text(row["exact_signed_residual_fraction"]) != 0
+        for row in replayed_equations
+    ):
+        raise ValueError("Osaka supplemental equations do not replay exactly")
     artifact["replayed_equations"] = replayed_equations
     artifact["osaka_augmentation"] = {
         "reused_historical_model_count": 101,
         "remeasured_historical_model_count": 0,
-        "added_opcode_keys": list(OSAKA_SUPPLEMENT_RELATION_IDS),
+        "added_opcode_keys": ["opcode:0x15", "opcode:0x1e"],
+        "exact_solved_bodies": {
+            "opcode:0x15": {
+                "numerator": str(iszero_fraction.numerator),
+                "denominator": str(iszero_fraction.denominator),
+            },
+            "opcode:0x1e": {
+                "numerator": str(clz_fraction.numerator),
+                "denominator": str(clz_fraction.denominator),
+            },
+        },
         "baseline_core_artifact_sha256": baseline_core["artifact_sha256"],
         "compatibility_canary_artifact_sha256": compatibility_canary[
             "artifact_sha256"
@@ -14783,6 +15027,68 @@ def build_osaka_augmented_core_artifact(
 
 def _canonical_json_file_bytes(value: Mapping[str, Any]) -> bytes:
     return (json.dumps(value, indent=2, sort_keys=True) + "\n").encode()
+
+
+@_isolated_decimal_context
+def _validate_osaka_augmented_core_equations(
+    core: Mapping[str, Any],
+    baseline_core: Mapping[str, Any],
+    opcode_supplement: Mapping[str, Any],
+) -> None:
+    """Independently replay exact and Decimal Osaka solution fields in an artifact."""
+    registry = baseline_core.get("registry")
+    models = registry.get("models") if isinstance(registry, Mapping) else None
+    swap = models.get("opcode:0x90") if isinstance(models, Mapping) else None
+    swap_parameters = swap.get("parameters") if isinstance(swap, Mapping) else None
+    relations = opcode_supplement.get("relations")
+    if not isinstance(swap_parameters, Mapping) or not isinstance(relations, list):
+        raise ValueError("Osaka augmented core replay inputs are invalid")
+    solved = _solve_osaka_augmented_bodies(swap_parameters, relations)
+    augmentation = core.get("osaka_augmentation")
+    core_registry = core.get("registry")
+    core_models = core_registry.get("models") if isinstance(core_registry, Mapping) else None
+    if not isinstance(augmentation, Mapping) or not isinstance(core_models, Mapping):
+        raise ValueError("Osaka augmented core equation evidence is missing")
+    expected_fractions = {
+        "opcode:0x15": solved["iszero_fraction"],
+        "opcode:0x1e": solved["clz_fraction"],
+    }
+    exact_solved = augmentation.get("exact_solved_bodies")
+    if not isinstance(exact_solved, Mapping):
+        raise ValueError("Osaka augmented core exact solutions are missing")
+    for opcode_key, fraction in expected_fractions.items():
+        model = core_models.get(opcode_key)
+        parameters = model.get("parameters") if isinstance(model, Mapping) else None
+        if (
+            not isinstance(parameters, Mapping)
+            or parameters.get("body_per_raw_gas")
+            != _decimal_text(solved["iszero_body"] if opcode_key == "opcode:0x15" else solved["clz_body"])
+            or exact_solved.get(opcode_key)
+            != {"numerator": str(fraction.numerator), "denominator": str(fraction.denominator)}
+        ):
+            raise ValueError("Osaka augmented core solved body differs from exact replay")
+    expected_rows = (
+        ("opcode:0x15:canonical", Decimal(3), solved["iszero_body"], solved["d_iszero"], solved["iszero_exact_residual"]),
+        ("opcode:0x1e:canonical", Decimal(5), solved["clz_body"], solved["d_clz"], solved["clz_exact_residual"]),
+    )
+    replayed_rows = core.get("replayed_equations")
+    if not isinstance(replayed_rows, list) or len(replayed_rows) != 2:
+        raise ValueError("Osaka augmented core replay evidence is missing")
+    for row, (relation_id, target_raw_gas, body, slope, exact_residual) in zip(replayed_rows, expected_rows):
+        if not isinstance(row, Mapping):
+            raise ValueError("Osaka augmented core replay row is invalid")
+        predicted = target_raw_gas * body - Decimal(3) * solved["swap_body"]
+        residual = predicted - slope
+        if (
+            row.get("relation_id") != relation_id
+            or row.get("observed_slope_p") != _decimal_text(slope)
+            or row.get("predicted_slope_p") != _decimal_text(predicted)
+            or row.get("signed_residual_p") != _decimal_text(residual)
+            or row.get("exact_signed_residual_fraction") != _fraction_text(exact_residual)
+            or _parse_fraction_text(row["exact_signed_residual_fraction"]) != 0
+            or abs(residual) > Decimal("1e-75")
+        ):
+            raise ValueError("Osaka augmented core equation replay differs")
 
 
 def _osaka_augmentation_source_hashes(
@@ -14887,6 +15193,8 @@ def _publish_osaka_augmentation(
     supplement: Mapping[str, Any],
     augmented_core: Mapping[str, Any],
 ) -> pathlib.Path:
+    if out_root.exists() and (not out_root.is_dir() or out_root.is_symlink()):
+        raise ValueError("augmentation output root is invalid")
     out_root.mkdir(parents=True, exist_ok=True)
     target = out_root / augmentation_id
     lock_path = out_root / f".{augmentation_id}.lock"
@@ -14894,8 +15202,25 @@ def _publish_osaka_augmentation(
     temporary: pathlib.Path | None = None
     try:
         fcntl.flock(lock_descriptor, fcntl.LOCK_EX)
-        if target.exists():
-            raise ValueError(f"augmentation directory already exists: {target}")
+        if target.exists() or target.is_symlink():
+            expected = {
+                "augmentation.json": envelope,
+                "compatibility-canary.json": canary,
+                "opcode-supplement.json": supplement,
+                "core-opcode-submodel.json": augmented_core,
+            }
+            if target.is_symlink() or not target.is_dir() or {
+                path.name for path in target.iterdir()
+            } != set(expected):
+                raise ValueError(f"augmentation directory already exists: {target}")
+            for name, payload in expected.items():
+                path = target / name
+                if path.is_symlink() or not path.is_file() or path.read_bytes() != _canonical_json_file_bytes(payload):
+                    raise ValueError(f"augmentation directory already exists: {target}")
+            # A failed pointer publication may leave exactly this directory.
+            # Returning it makes a retry create the missing pointer without
+            # accepting a different pre-existing augmentation.
+            return target
         temporary = pathlib.Path(
             tempfile.mkdtemp(prefix=f".{augmentation_id}.", dir=out_root)
         )
@@ -14926,6 +15251,7 @@ def seal_osaka_augmentation_directory(
     canary_path: pathlib.Path,
     supplement_path: pathlib.Path,
     provenance: Mapping[str, Any],
+    historical_manifest: pathlib.Path,
     historical_manifest_sha256: str,
 ) -> dict[str, Any]:
     """Seal one create-only augmentation with all inputs needed for local replay."""
@@ -14945,9 +15271,28 @@ def seal_osaka_augmentation_directory(
         _validate_content_addressed_artifact(sources[name], label=f"Osaka {name}")
         if source_paths[name].read_bytes() != _canonical_json_file_bytes(sources[name]):
             raise ValueError(f"Osaka {name} source is not canonical JSON")
+    _validate_frozen_historical_baseline_payloads(
+        sources["derivation"], sources["dynamic"], sources["core"]
+    )
+    historical_canary_observations = _frozen_historical_osaka_canary_observations(
+        historical_manifest, sources["derivation"]
+    )
+    _validate_osaka_compatibility_canary_artifact(sources["canary"])
+    _validate_frozen_historical_canary_binding(
+        sources["canary"], historical_canary_observations
+    )
     osaka_calibration = _validate_osaka_augmentation_provenance(
         provenance, historical_manifest_sha256
     )
+    source_provenance = dict(osaka_calibration)
+    source_provenance.pop("historical_manifest_sha256")
+    if (
+        not _exact_json_equal(sources["canary"].get("provenance"), source_provenance)
+        or not _exact_json_equal(
+            sources["supplement"].get("provenance"), source_provenance
+        )
+    ):
+        raise ValueError("Osaka canary or supplement provenance differs from calibration")
     source_row_hashes = _osaka_augmentation_source_hashes(
         sources["canary"], sources["supplement"]
     )
@@ -15006,6 +15351,8 @@ def seal_osaka_augmentation_directory(
             "baseline_derivation": sources["derivation"],
             "baseline_dynamic": sources["dynamic"],
             "baseline_core": sources["core"],
+            "historical_evidence_artifact_sha256": HISTORICAL_CORE_EVIDENCE_ARTIFACT_SHA256,
+            "historical_canary_observations": historical_canary_observations,
         },
         "output_hashes": output_hashes,
     }
@@ -15022,7 +15369,10 @@ def seal_osaka_augmentation_directory(
 
 
 def verify_osaka_augmentation_directory(
-    directory: pathlib.Path, *, expected_historical_manifest_sha256: str
+    directory: pathlib.Path,
+    *,
+    historical_manifest: pathlib.Path,
+    expected_historical_manifest_sha256: str,
 ) -> dict[str, Any]:
     """Replay one augmentation using only its four files and the fixture digest."""
     expected_names = {
@@ -15086,6 +15436,13 @@ def verify_osaka_augmentation_directory(
         != expected_calibration["implementation_revision"]
     ):
         raise ValueError("Osaka augmentation version or analysis identity differs")
+    source_provenance = dict(expected_calibration)
+    source_provenance.pop("historical_manifest_sha256")
+    if (
+        not _exact_json_equal(canary.get("provenance"), source_provenance)
+        or not _exact_json_equal(supplement.get("provenance"), source_provenance)
+    ):
+        raise ValueError("Osaka augmentation source provenance differs")
     baseline_sources = {}
     for name in ("derivation", "dynamic", "core"):
         payload = replay_inputs.get(f"baseline_{name}")
@@ -15093,6 +15450,25 @@ def verify_osaka_augmentation_directory(
             raise ValueError("Osaka augmentation baseline replay input is missing")
         _validate_content_addressed_artifact(payload, label=f"baseline {name}")
         baseline_sources[name] = payload
+    _validate_frozen_historical_baseline_payloads(
+        baseline_sources["derivation"],
+        baseline_sources["dynamic"],
+        baseline_sources["core"],
+    )
+    historical_canary_observations = _frozen_historical_osaka_canary_observations(
+        historical_manifest, baseline_sources["derivation"]
+    )
+    if (
+        replay_inputs.get("historical_evidence_artifact_sha256")
+        != HISTORICAL_CORE_EVIDENCE_ARTIFACT_SHA256
+        or not _exact_json_equal(
+            replay_inputs.get("historical_canary_observations"),
+            historical_canary_observations,
+        )
+    ):
+        raise ValueError("Osaka augmentation frozen historical canary replay differs")
+    _validate_osaka_compatibility_canary_artifact(canary)
+    _validate_frozen_historical_canary_binding(canary, historical_canary_observations)
     input_hashes = {
         f"baseline_{name}_artifact_sha256": baseline_sources[name]["artifact_sha256"]
         for name in ("derivation", "dynamic", "core")
@@ -15122,6 +15498,7 @@ def verify_osaka_augmentation_directory(
     source_row_hashes = _osaka_augmentation_source_hashes(canary, supplement)
     if not _exact_json_equal(identity.get("source_row_hashes"), source_row_hashes):
         raise ValueError("Osaka augmentation source-row hashes differ")
+    _validate_osaka_augmented_core_equations(core, baseline_sources["core"], supplement)
     replayed = build_osaka_augmented_core_artifact(
         baseline_sources["core"],
         canary,
@@ -15777,6 +16154,8 @@ def validate_persisted_formal_relation_decisions(
     decisions: Mapping[str, Any],
     manifest: Manifest,
     expected_provenance: Mapping[str, Any],
+    *,
+    validate_dynamic_preflight: bool = True,
 ) -> dict[str, Any]:
     """Replay every persisted adaptive relation round and return accepted sources."""
     expected_provenance = _validate_formal_relation_provenance(expected_provenance)
@@ -15849,7 +16228,7 @@ def validate_persisted_formal_relation_decisions(
                 f"{generator_max_count}"
             )
         rows = list(iter_jsonl(raw_path))
-        if round_index == 0:
+        if validate_dynamic_preflight and round_index == 0:
             validate_formal_dynamic_raw_gas_preflight(rows)
         replayed_results = fit_formal_relation_round(
             manifest,
@@ -17159,7 +17538,11 @@ def run_formal_relation_adaptive_campaign(
         raise ValueError("formal relation decisions seal exists without its ledger")
 
     state = validate_persisted_formal_relation_decisions(
-        artifact_root, decisions, manifest, provenance
+        artifact_root,
+        decisions,
+        manifest,
+        provenance,
+        validate_dynamic_preflight=validate_dynamic_preflight,
     )
 
     def publish_if_complete(current_state: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -17280,7 +17663,11 @@ def run_formal_relation_adaptive_campaign(
             (sha256_bytes(decisions_bytes) + "\n").encode(),
         )
         state = validate_persisted_formal_relation_decisions(
-            artifact_root, decisions, manifest, provenance
+            artifact_root,
+            decisions,
+            manifest,
+            provenance,
+            validate_dynamic_preflight=validate_dynamic_preflight,
         )
         completed = publish_if_complete(state)
         if completed is not None:
@@ -17541,59 +17928,25 @@ def _osaka_relation_manifest(
     )
 
 
-def _osaka_relation_program_sha256(
-    relation: OpcodeRelationSpec, generator_max_count: int
-) -> str:
-    relation_identity = {
-        "id": relation.id,
-        "case_id": relation.case_id,
-        "key_id": relation.key_id,
-        "split": relation.split,
-        "model_split": relation.model_split,
-        "scenario_id": relation.scenario_id,
-        "scenario": dict(relation.scenario),
-        "target_raw_gas_by_key": dict(relation.target_raw_gas_by_key),
-        "control_raw_gas_by_key": dict(relation.control_raw_gas_by_key),
-        "signed_raw_gas_by_key": dict(relation.signed_raw_gas_by_key),
-        "dynamic_key": relation.dynamic_key,
-    }
-    return sha256_bytes(
-        canonical_json(
-            {
-                "relation": relation_identity,
-                "generator_max_count": generator_max_count,
-            }
-        )
-    )
-
-
 def _historical_osaka_canary_observations(
     baseline: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
-    manifest = baseline["manifest"]
-    decisions = baseline["formal_relation_artifacts"]["decisions"]
-    rows = baseline["formal_relation_artifacts"]["rows"]
+    evidence = baseline["formal_relation_artifacts"]["canaries"]
     equations = {
         row.get("relation_id"): row
         for row in baseline["relation_artifact"].get("equations", [])
         if isinstance(row, Mapping)
     }
-    accepted_bounds: dict[str, int] = {}
-    for record in decisions["rounds"]:
-        bound = record.get("generator_max_count")
-        for decision in record.get("terminal_decisions", []):
-            relation_id = decision.get("relation_id")
-            if relation_id in accepted_bounds:
-                raise ValueError("historical relation continued after acceptance")
-            if decision.get("decision") == "accepted":
-                accepted_bounds[str(relation_id)] = bound
-    relation_by_id = {relation.id: relation for relation in manifest.opcode_relations}
+    evidence_by_id = {row.get("relation_id"): row for row in evidence}
     observations = []
     for relation_id in OSAKA_CANARY_RELATION_IDS:
         equation = equations.get(relation_id)
-        bound = accepted_bounds.get(relation_id)
-        relation_rows = [row for row in rows if row.get("relation_id") == relation_id]
-        if not isinstance(equation, Mapping) or type(bound) is not int or not relation_rows:
+        canary = evidence_by_id.get(relation_id)
+        if not isinstance(equation, Mapping) or not isinstance(canary, Mapping):
+            raise ValueError("historical canary source is incomplete")
+        bound = canary.get("generator_max_count")
+        relation_rows = canary.get("row_evidence")
+        if type(bound) is not int or not isinstance(relation_rows, list) or not relation_rows:
             raise ValueError("historical canary source is incomplete")
         repeat_groups: dict[tuple[Any, Any, Any], set[int]] = {}
         for row in relation_rows:
@@ -17605,7 +17958,6 @@ def _historical_osaka_canary_observations(
             repeat_groups.setdefault(key, set()).add(row.get("repeat_index"))
         if any(repeats != {0, 1, 2} for repeats in repeat_groups.values()):
             raise ValueError("historical canary source does not contain three repeats")
-        relation = relation_by_id[relation_id]
         observations.append(
             {
                 "relation_id": relation_id,
@@ -17614,13 +17966,51 @@ def _historical_osaka_canary_observations(
                 "signed_raw_gas_by_key": equation.get("signed_raw_gas_by_key"),
                 "target_raw_gas_by_key": equation.get("target_raw_gas_by_key"),
                 "control_raw_gas_by_key": equation.get("control_raw_gas_by_key"),
-                "program_sha256": _osaka_relation_program_sha256(relation, bound),
+                "program_sha256": sha256_bytes(canonical_json(relation_rows)),
                 "raw_rows_sha256": sha256_bytes(canonical_json(relation_rows)),
                 "repeat_count": 3,
                 "generator_max_count": bound,
             }
         )
     return observations
+
+
+def _frozen_historical_osaka_canary_observations(
+    historical_manifest: pathlib.Path, derivation: Mapping[str, Any]
+) -> list[dict[str, Any]]:
+    """Load the compact tracked historical evidence without opening ignored runs."""
+    if _verify_repo_relative_checksum(historical_manifest) != HISTORICAL_CORE_MANIFEST_SHA256:
+        raise ValueError("historical manifest is not the frozen baseline fixture")
+    source = derivation.get("source")
+    if not isinstance(source, Mapping):
+        raise ValueError("historical derivation source is invalid")
+    manifest = load_manifest(historical_manifest)
+    evidence = _load_historical_core_evidence(historical_manifest, source, manifest)
+    return _historical_osaka_canary_observations(evidence)
+
+
+def _validate_frozen_historical_canary_binding(
+    canary: Mapping[str, Any], observations: Sequence[Mapping[str, Any]]
+) -> None:
+    """Bind the canary baseline side to the frozen program/row evidence."""
+    if [row.get("relation_id") for row in observations] != list(OSAKA_CANARY_RELATION_IDS):
+        raise ValueError("frozen historical canary observation inventory differs")
+    rows = canary.get("relations")
+    if not isinstance(rows, list) or len(rows) != len(observations):
+        raise ValueError("Osaka canary historical observation inventory differs")
+    for row, historical in zip(rows, observations):
+        expected = {
+            "relation_id": historical["relation_id"],
+            "baseline_slope_p": historical["slope_p"],
+            "signed_raw_gas_by_key": historical["signed_raw_gas_by_key"],
+            "target_raw_gas_by_key": historical["target_raw_gas_by_key"],
+            "control_raw_gas_by_key": historical["control_raw_gas_by_key"],
+            "program_sha256": historical["program_sha256"],
+            "historical_raw_rows_sha256": historical["raw_rows_sha256"],
+            "repeat_count": historical["repeat_count"],
+        }
+        if any(row.get(field) != value for field, value in expected.items()):
+            raise ValueError("Osaka canary historical program or equation binding differs")
 
 
 def _osaka_observation_from_fit(
@@ -17645,9 +18035,7 @@ def _osaka_observation_from_fit(
         "control_raw_gas_by_key": {
             key: str(value) for key, value in relation.control_raw_gas_by_key.items()
         },
-        "program_sha256": _osaka_relation_program_sha256(
-            relation, generator_max_count
-        ),
+        "program_sha256": _formal_relation_program_sha256(rows),
         "raw_rows_sha256": sha256_bytes(canonical_json(list(rows))),
         "repeat_count": 3,
         "generator_max_count": generator_max_count,
@@ -17710,15 +18098,21 @@ def _run_osaka_canary_rounds(
     observations: dict[str, dict[str, Any]] = {}
     for index, (bound, relation_ids) in enumerate(expected_groups):
         subset = _osaka_relation_manifest(manifest, relation_ids)
+        expected_raw_path = output_root / "raw" / f"canary.generator-max-{bound}.jsonl"
+        expected_result_path = output_root / f"canary-results.generator-max-{bound}.json"
         if index < len(decisions["rounds"]):
             record = decisions["rounds"][index]
-            raw_path = output_root / str(record.get("raw_runs"))
-            result_path = output_root / str(record.get("result"))
+            raw_path = expected_raw_path
+            result_path = expected_result_path
             if (
                 record.get("generator_max_count") != bound
                 or record.get("relation_ids") != relation_ids
+                or record.get("raw_runs") != str(raw_path.relative_to(output_root))
+                or record.get("result") != str(result_path.relative_to(output_root))
+                or raw_path.is_symlink()
                 or not raw_path.is_file()
                 or sha256_file(raw_path) != record.get("raw_runs_sha256")
+                or result_path.is_symlink()
                 or not result_path.is_file()
                 or sha256_file(result_path) != record.get("result_sha256")
             ):
@@ -17740,8 +18134,8 @@ def _run_osaka_canary_rounds(
             if not allow_execution:
                 raise ValueError("Osaka canary has no complete persisted round")
             fixtures = output_root / "fixtures" / f"canary-generator-max-{bound}"
-            raw_path = output_root / "raw" / f"canary.generator-max-{bound}.jsonl"
-            result_path = output_root / f"canary-results.generator-max-{bound}.json"
+            raw_path = expected_raw_path
+            result_path = expected_result_path
             if fixtures.exists() or raw_path.exists() or result_path.exists():
                 raise ValueError("Osaka canary round has conflicting untracked output")
             generate_relation_cases(
@@ -17900,6 +18294,12 @@ def cmd_run_osaka_opcode_supplement(args: argparse.Namespace) -> None:
         OSAKA_SUPPLEMENT_RELATION_IDS,
     )
     output_root = calibration_run / "osaka-opcode-supplement"
+    if output_root.exists() and (
+        output_root.is_symlink()
+        or not output_root.is_dir()
+        or any(path.is_symlink() for path in output_root.rglob("*"))
+    ):
+        raise ValueError("Osaka supplement output must be a contained non-symlink directory")
     output_root.mkdir(parents=True, exist_ok=True)
     provenance = {
         "calibration_id": calibration_run.name,
@@ -17908,6 +18308,10 @@ def cmd_run_osaka_opcode_supplement(args: argparse.Namespace) -> None:
         "controlled_manifest_sha256": execution_identity["controlled_manifest_sha256"],
         "controlled_manifest_rows_sha256": execution_identity[
             "controlled_manifest_rows_sha256"
+        ],
+        "complete_schedule_sha256": execution_identity["complete_schedule_sha256"],
+        "guest_elf_sha256": execution_identity["guest_artifacts"][
+            "crates/guests/elf/sp1_revm_opcode_lab.elf"
         ],
         "version_identity": version_identity,
     }
@@ -18014,6 +18418,7 @@ def _load_terminal_relation_campaign(
     decisions_name: str,
     decisions_seal_name: str,
     final_rows_relative: pathlib.Path,
+    validate_dynamic_preflight: bool = True,
 ) -> dict[str, Any]:
     decisions_path = artifact_root / decisions_name
     seal_path = artifact_root / decisions_seal_name
@@ -18025,7 +18430,11 @@ def _load_terminal_relation_campaign(
         raise ValueError("formal relation decisions seal or ledger is invalid")
     decisions = json.loads(decisions_path.read_text())
     state = validate_persisted_formal_relation_decisions(
-        artifact_root, decisions, manifest, provenance
+        artifact_root,
+        decisions,
+        manifest,
+        provenance,
+        validate_dynamic_preflight=validate_dynamic_preflight,
     )
     if not state.get("complete") or state.get("remaining_relation_ids") or state.get(
         "exhausted_relation_ids"
@@ -18075,6 +18484,10 @@ def verify_osaka_opcode_supplement_run(
         "controlled_manifest_sha256": execution_identity["controlled_manifest_sha256"],
         "controlled_manifest_rows_sha256": execution_identity[
             "controlled_manifest_rows_sha256"
+        ],
+        "complete_schedule_sha256": execution_identity["complete_schedule_sha256"],
+        "guest_elf_sha256": execution_identity["guest_artifacts"][
+            "crates/guests/elf/sp1_revm_opcode_lab.elf"
         ],
         "version_identity": version_identity,
     }
@@ -18127,6 +18540,7 @@ def verify_osaka_opcode_supplement_run(
         decisions_name="decisions.json",
         decisions_seal_name="decisions.sha256",
         final_rows_relative=pathlib.Path("raw/formal-relations.jsonl"),
+        validate_dynamic_preflight=False,
     )
     expected_supplement = _build_osaka_supplement_artifact(
         supplement_manifest,
@@ -18166,6 +18580,14 @@ def cmd_seal_osaka_opcode_augmentation(args: argparse.Namespace) -> None:
     historical_manifest = _resolve_repo_path(
         args.historical_manifest, field_name="historical_manifest"
     )
+    augmentation_path_file = args.augmentation_path_file
+    if augmentation_path_file.exists() or augmentation_path_file.is_symlink():
+        raise ValueError("augmentation path file already exists")
+    if augmentation_path_file.parent.exists() and (
+        not augmentation_path_file.parent.is_dir()
+        or augmentation_path_file.parent.is_symlink()
+    ):
+        raise ValueError("augmentation path file parent is invalid")
     verified = verify_osaka_opcode_supplement_run(
         argparse.Namespace(
             run_path_file=args.run_path_file,
@@ -18212,12 +18634,13 @@ def cmd_seal_osaka_opcode_augmentation(args: argparse.Namespace) -> None:
         canary_path=verified["output_root"] / "compatibility-canary.json",
         supplement_path=verified["output_root"] / "opcode-supplement.json",
         provenance=provenance,
+        historical_manifest=historical_manifest,
         historical_manifest_sha256=_verify_repo_relative_checksum(
             historical_manifest
         ),
     )
     _atomic_write_bytes(
-        args.augmentation_path_file,
+        augmentation_path_file,
         (sealed["directory"] + "\n").encode(),
     )
     print(f"sealed Osaka opcode augmentation {sealed['augmentation_id']}")
@@ -18232,6 +18655,7 @@ def cmd_verify_osaka_opcode_augmentation(args: argparse.Namespace) -> None:
     )
     verified = verify_osaka_augmentation_directory(
         directory,
+        historical_manifest=historical_manifest,
         expected_historical_manifest_sha256=_verify_repo_relative_checksum(
             historical_manifest
         ),

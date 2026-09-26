@@ -273,7 +273,12 @@ fixture; its checksum record intentionally contains a repository-relative path:
 
 ```bash
 sha256sum --check experiments/opcode-gas/tests/fixtures/historical-core-102/controlled-manifest.sha256
+sha256sum --check experiments/opcode-gas/tests/fixtures/historical-core-102/historical-evidence.sha256
 ```
+
+`historical-evidence.json` is the small, content-addressed historical canary package: it carries
+the eleven selected relation observations and canonical target/control program identity evidence.
+It makes baseline validation self-contained; no ignored historical `runs/` directory is read.
 
 The bounded runner reads the calibration directory from the durable path file. It executes only the
 eleven frozen compatibility relations at their historical selected counts and, after that canary
@@ -324,6 +329,13 @@ the declared historical fixture, then recomputes every content/file hash and bot
 equations. This workflow does not sample proposals, rerun the historical 101 coefficients, write a
 production multiplier table or config, or alter Boundless behavior. A failed canary requires a
 separately reviewed recalibration; it never launches a full resample automatically.
+
+The two supplemental bodies are sealed both as exact rational numerator/denominator pairs and as
+80-digit, half-even Decimal registry projections. The verifier replays the rational equations
+exactly and bounds the Decimal projection residual. If pointer publication fails after the
+content-addressed directory is sealed, rerun the identical seal command: it validates and reuses
+only that exact directory to create the missing pointer. An existing pointer remains create-only
+and is rejected before any directory publication.
 
 Block-level validation must report the frequency-dependent residual from NOT, JUMPDEST, and the
 small-EXP bucket. A later fixed offset may not absorb or hide those approximation errors.

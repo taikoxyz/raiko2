@@ -34,6 +34,7 @@ DERIVATION = (
 CURRENT_MANIFEST = (
     ROOT / "experiments" / "opcode-gas" / "manifests" / "sp1-calibration-v1.toml"
 )
+HISTORICAL_EVIDENCE = FIXTURE.with_name("historical-evidence.json")
 
 
 class HistoricalBaselineTests(unittest.TestCase):
@@ -59,6 +60,74 @@ class HistoricalBaselineTests(unittest.TestCase):
             "4140fe1a0ccc533dbee8940a63da6db41be8a26955cc0022ccae5e1aedc3e01e  "
             "experiments/opcode-gas/tests/fixtures/historical-core-102/controlled-manifest.toml\n",
         )
+
+    def test_historical_validator_uses_frozen_inventory_not_current_globals(self):
+        changed_defaults = dict(opcode_gas.PURE_OPCODE_DEFAULTS)
+        changed_defaults.pop(0x1E)
+        changed_defaults[0xFE] = ("stack", "stack_push", 3)
+        changed_names = dict(opcode_gas.UZEN_OPCODE_NAMES)
+        changed_names[0x1E] = "different-clz"
+        changed_names[0xFE] = "different-opcode"
+        with mock.patch.object(opcode_gas, "PURE_OPCODE_DEFAULTS", changed_defaults), mock.patch.object(
+            opcode_gas, "UZEN_OPCODE_NAMES", changed_names
+        ):
+            result = opcode_gas.validate_historical_core_opcode_baseline(
+                DERIVATION, FIXTURE
+            )
+        self.assertEqual(result["opcode_keys"], opcode_gas.HISTORICAL_CORE_OPCODE_KEYS)
+
+    def test_historical_evidence_rejects_resealed_identity_and_program_mutations(self):
+        mutations = (
+            lambda value: value["canaries"][0]["row_evidence"][0].__setitem__(
+                "bytecode_sha256", "0" * 64
+            ),
+            lambda value: value["canaries"][0]["equation"].__setitem__(
+                "slope_p", "0"
+            ),
+            lambda value: value["canaries"][0].__setitem__(
+                "relation_id", "opcode:0x15:canonical"
+            ),
+            lambda value: value["canaries"][0]["row_evidence"][0].pop(
+                "fixture_sha256"
+            ),
+        )
+        for mutate in mutations:
+            with self.subTest(mutate=mutate), tempfile.TemporaryDirectory() as tmp:
+                root = pathlib.Path(tmp)
+                fixture = root / FIXTURE.name
+                evidence = root / HISTORICAL_EVIDENCE.name
+                shutil.copy2(FIXTURE, fixture)
+                shutil.copy2(FIXTURE.with_suffix(".sha256"), fixture.with_suffix(".sha256"))
+                shutil.copy2(HISTORICAL_EVIDENCE, evidence)
+                payload = json.loads(evidence.read_text())
+                mutate(payload)
+                payload["artifact_sha256"] = opcode_gas.sha256_bytes(
+                    opcode_gas.canonical_json(
+                        {
+                            key: value
+                            for key, value in payload.items()
+                            if key != "artifact_sha256"
+                        }
+                    )
+                )
+                evidence.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+                evidence.with_suffix(".sha256").write_text(
+                    f"{opcode_gas.sha256_file(evidence)}  historical-evidence.json\n"
+                )
+                with mock.patch.object(opcode_gas, "REPO_ROOT", root), self.assertRaises(
+                    ValueError
+                ):
+                    opcode_gas.validate_historical_core_opcode_baseline(
+                        DERIVATION, fixture
+                    )
+
+    def test_program_identity_hashes_actual_bytecode_and_shape_evidence(self):
+        row = copy.deepcopy(json.loads(HISTORICAL_EVIDENCE.read_text())["canaries"][0]["row_evidence"][0])
+        row.pop("bytecode_sha256")
+        row["bytecode"] = "0x6000"
+        original = opcode_gas._formal_relation_program_sha256([row])
+        row["bytecode"] = "0x6001"
+        self.assertNotEqual(original, opcode_gas._formal_relation_program_sha256([row]))
 
     def test_historical_validator_rejects_fixture_and_derivation_mutations(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -502,6 +571,27 @@ class AugmentedCoreTests(unittest.TestCase):
                     augmentation_provenance={"implementation_revision": "a" * 40},
                 )
 
+    def test_nonterminating_decimal_solution_preserves_exact_fraction_replay(self):
+        baseline, canary, supplement = minimal_augmentation_sources(
+            iszero_slope="1", clz_slope="1"
+        )
+        artifact = opcode_gas.build_osaka_augmented_core_artifact(
+            baseline,
+            canary,
+            supplement,
+            augmentation_provenance={"implementation_revision": "a" * 40},
+        )
+        exact = artifact["osaka_augmentation"]["exact_solved_bodies"]
+        self.assertEqual(exact["opcode:0x15"]["denominator"], "3")
+        self.assertEqual(
+            artifact["replayed_equations"][0]["exact_signed_residual_fraction"],
+            "0",
+        )
+        self.assertLess(
+            abs(opcode_gas.Decimal(artifact["replayed_equations"][0]["signed_residual_p"])),
+            opcode_gas.Decimal("1e-75"),
+        )
+
         for label, mutate in (
             ("equation", lambda supplement: supplement["relations"][0]["signed_raw_gas_by_key"].__setitem__("opcode:0x90", "-2")),
             ("control", lambda supplement: supplement["relations"][1].__setitem__("control_opcode_key", "opcode:0x80")),
@@ -587,8 +677,103 @@ class OsakaCliContractTests(unittest.TestCase):
             {"augmentation_path_file", "historical_manifest"},
         )
 
+    def test_seal_rejects_conflicting_pointer_before_publication(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            pointer = root / "augmentation-path"
+            pointer.write_text("existing\n")
+            args = Namespace(
+                run_path_file=root / "run-path",
+                baseline_derivation=root / "baseline",
+                historical_manifest=root / "historical.toml",
+                out_root=root / "derivations",
+                augmentation_path_file=pointer,
+            )
+            with mock.patch.object(
+                opcode_gas, "_read_durable_directory_path", return_value=root / ("a" * 24)
+            ), mock.patch.object(
+                opcode_gas,
+                "_resolve_repo_path",
+                side_effect=[root / "baseline", root / "historical.toml"],
+            ), mock.patch.object(
+                opcode_gas, "verify_osaka_opcode_supplement_run"
+            ) as verify:
+                with self.assertRaisesRegex(ValueError, "path file already exists"):
+                    opcode_gas.cmd_seal_osaka_opcode_augmentation(args)
+            verify.assert_not_called()
+
 
 class OsakaRunnerTests(unittest.TestCase):
+    def test_bounded_campaign_replays_without_full_dynamic_preflight(self):
+        current = opcode_gas.load_manifest(CURRENT_MANIFEST)
+        manifest = opcode_gas._osaka_relation_manifest(
+            current, opcode_gas.OSAKA_SUPPLEMENT_RELATION_IDS
+        )
+        provenance = {
+            "calibration_id": "a" * 24,
+            "calibration_identity_sha256": "a" * 64,
+            "implementation_revision": "b" * 40,
+            "controlled_manifest_sha256": "c" * 64,
+            "controlled_manifest_rows_sha256": "d" * 64,
+        }
+
+        def fake_run(args):
+            args.out.parent.mkdir(parents=True, exist_ok=True)
+            args.out.write_text(
+                "".join(
+                    json.dumps(
+                        {
+                            "relation_id": relation.id,
+                            "generator_max_count": 8,
+                        }
+                    )
+                    + "\n"
+                    for relation in manifest.opcode_relations
+                )
+            )
+
+        def fake_fit(_manifest, _rows, relation_ids, bound, *, expected_provenance):
+            self.assertEqual(expected_provenance, provenance)
+            return [
+                {
+                    "relation_id": relation_id,
+                    "generator_max_count": bound,
+                    "status": "accepted",
+                    "decision": "accepted",
+                    "fit": {"slope_p": "1"},
+                }
+                for relation_id in relation_ids
+            ]
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            opcode_gas, "cmd_run", side_effect=fake_run
+        ), mock.patch.object(
+            opcode_gas, "fit_formal_relation_round", side_effect=fake_fit
+        ):
+            root = pathlib.Path(tmp)
+            fixtures = root / "fixtures"
+            fixtures.mkdir()
+            kwargs = dict(
+                calibration_run=root,
+                artifact_root=root,
+                manifest=manifest,
+                fixtures_root=fixtures,
+                final_runs=root / "raw" / "formal-relations.jsonl",
+                decisions_path=root / "decisions.json",
+                decisions_seal_path=root / "decisions.sha256",
+                args=Namespace(),
+                provenance=provenance,
+                validate_dynamic_preflight=False,
+            )
+            first = opcode_gas.run_formal_relation_adaptive_campaign(**kwargs)
+            second = opcode_gas.run_formal_relation_adaptive_campaign(**kwargs)
+
+        self.assertEqual(
+            [row["relation_id"] for row in first["rows"]],
+            list(opcode_gas.OSAKA_SUPPLEMENT_RELATION_IDS),
+        )
+        self.assertEqual(second["rows"], first["rows"])
+
     def test_top_level_runner_selects_only_bounded_relations(self):
         current = opcode_gas.load_manifest(CURRENT_MANIFEST)
         historical = opcode_gas.load_manifest(FIXTURE)
@@ -601,6 +786,7 @@ class OsakaRunnerTests(unittest.TestCase):
             "implementation_revision": "a" * 40,
             "controlled_manifest_sha256": "b" * 64,
             "controlled_manifest_rows_sha256": "c" * 64,
+            "complete_schedule_sha256": "e" * 64,
             "guest_artifacts": {
                 "crates/guests/elf/sp1_revm_opcode_lab.elf": opcode_gas.sha256_file(elf)
             },
@@ -752,6 +938,8 @@ class OsakaRunnerTests(unittest.TestCase):
             opcode_gas, "generate_relation_cases", side_effect=fake_generate
         ), mock.patch.object(opcode_gas, "cmd_run", side_effect=fake_run), mock.patch.object(
             opcode_gas, "fit_formal_relation_round", side_effect=fake_fit
+        ), mock.patch.object(
+            opcode_gas, "_formal_relation_program_sha256", return_value="f" * 64
         ):
             root = pathlib.Path(tmp)
             kwargs = dict(
@@ -819,8 +1007,9 @@ class OsakaRunnerTests(unittest.TestCase):
                 mock.patch.object(opcode_gas, "generate_relation_cases", side_effect=fake_generate),
                 mock.patch.object(opcode_gas, "cmd_run", side_effect=fake_run),
                 mock.patch.object(opcode_gas, "fit_formal_relation_round", return_value=fit),
+                mock.patch.object(opcode_gas, "_formal_relation_program_sha256", return_value="f" * 64),
             )
-            with patches[0], patches[1], patches[2]:
+            with patches[0], patches[1], patches[2], patches[3]:
                 opcode_gas._run_osaka_canary_rounds(
                     calibration_run=root,
                     output_root=output,
@@ -830,6 +1019,40 @@ class OsakaRunnerTests(unittest.TestCase):
                     version_identity=version_identity,
                     args=Namespace(guest_launcher=root / "guest", elf=root / "elf", controlled_manifest=CURRENT_MANIFEST),
                 )
+                def replay(candidate):
+                    return opcode_gas._run_osaka_canary_rounds(
+                        calibration_run=root,
+                        output_root=candidate,
+                        manifest=manifest,
+                        historical_observations=historical,
+                        provenance=provenance,
+                        version_identity=version_identity,
+                        args=Namespace(guest_launcher=root / "guest", elf=root / "elf", controlled_manifest=CURRENT_MANIFEST),
+                        allow_execution=False,
+                    )
+
+                for label, path_value in (("absolute", "/tmp/escape.jsonl"), ("parent", "../escape.jsonl")):
+                    candidate = root / f"bad-{label}"
+                    shutil.copytree(output, candidate)
+                    decisions_path = candidate / "canary-decisions.json"
+                    decisions = json.loads(decisions_path.read_text())
+                    decisions["rounds"][0]["raw_runs"] = path_value
+                    decisions_path.write_text(json.dumps(decisions, indent=2, sort_keys=True) + "\n")
+                    (candidate / "canary-decisions.sha256").write_text(
+                        opcode_gas.sha256_file(decisions_path) + "\n"
+                    )
+                    with self.subTest(path=label), self.assertRaisesRegex(ValueError, "source differs"):
+                        replay(candidate)
+
+                candidate = root / "bad-symlink"
+                shutil.copytree(output, candidate)
+                raw_link = candidate / "raw" / "canary.generator-max-8.jsonl"
+                bypass = root / "outside.jsonl"
+                shutil.copy2(raw_link, bypass)
+                raw_link.unlink()
+                raw_link.symlink_to(bypass)
+                with self.assertRaisesRegex(ValueError, "source differs"):
+                    replay(candidate)
                 raw = output / "raw" / "canary.generator-max-8.jsonl"
                 raw.write_bytes(raw.read_bytes() + b"{}\n")
                 with self.assertRaisesRegex(ValueError, "source differs"):
@@ -846,22 +1069,16 @@ class OsakaRunnerTests(unittest.TestCase):
 
 
 class AugmentationSealTests(unittest.TestCase):
-    def _seal(self, root):
-        baseline, canary, supplement = minimal_augmentation_sources()
-        derivation = seal(
-            {
-                "schema_version": 1,
-                "purpose": "core_opcode_postprocess_derivation",
-                "derivation_id": "baseline-test",
-                "candidate_eligible": False,
-            }
+    def _seal(self, root, mutate_canary=None):
+        _baseline, _ignored_canary, supplement = minimal_augmentation_sources()
+        historical_rows = opcode_gas._historical_osaka_canary_observations(
+            opcode_gas.validate_historical_core_opcode_baseline(DERIVATION, FIXTURE)
         )
-        dynamic = seal(
-            {
-                "schema_version": 4,
-                "purpose": "dynamic_opcode_models",
-                "candidate_eligible": False,
-            }
+        canary = opcode_gas.build_osaka_compatibility_canary(
+            historical_rows,
+            historical_rows,
+            baseline_artifact_sha256="a" * 64,
+            expected_baseline_artifact_sha256="a" * 64,
         )
         version_identity = {
             "taiko_fork": "Unzen",
@@ -881,14 +1098,34 @@ class AugmentationSealTests(unittest.TestCase):
             "guest_elf_sha256": "f" * 64,
             "version_identity": version_identity,
         }
-        paths = {}
-        for name, payload in (
-            ("derivation", derivation),
-            ("dynamic", dynamic),
-            ("core", baseline),
-            ("canary", canary),
-            ("supplement", supplement),
-        ):
+        for payload in (canary, supplement):
+            payload["provenance"] = copy.deepcopy(provenance)
+            payload["artifact_sha256"] = opcode_gas.sha256_bytes(
+                opcode_gas.canonical_json(
+                    {
+                        key: value
+                        for key, value in payload.items()
+                        if key != "artifact_sha256"
+                    }
+                )
+            )
+        if mutate_canary is not None:
+            mutate_canary(canary)
+            canary["artifact_sha256"] = opcode_gas.sha256_bytes(
+                opcode_gas.canonical_json(
+                    {
+                        key: value
+                        for key, value in canary.items()
+                        if key != "artifact_sha256"
+                    }
+                )
+            )
+        paths = {
+            "derivation": DERIVATION / "derivation.json",
+            "dynamic": DERIVATION / "dynamic-opcode-models.json",
+            "core": DERIVATION / "core-opcode-submodel.json",
+        }
+        for name, payload in (("canary", canary), ("supplement", supplement)):
             path = root / f"{name}.json"
             path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
             paths[name] = path
@@ -900,6 +1137,7 @@ class AugmentationSealTests(unittest.TestCase):
             canary_path=paths["canary"],
             supplement_path=paths["supplement"],
             provenance=provenance,
+            historical_manifest=FIXTURE,
             historical_manifest_sha256=opcode_gas.HISTORICAL_CORE_MANIFEST_SHA256,
         )
 
@@ -909,6 +1147,7 @@ class AugmentationSealTests(unittest.TestCase):
             sealed = self._seal(root)
             verified = opcode_gas.verify_osaka_augmentation_directory(
                 pathlib.Path(sealed["directory"]),
+                historical_manifest=FIXTURE,
                 expected_historical_manifest_sha256=opcode_gas.HISTORICAL_CORE_MANIFEST_SHA256,
             )
 
@@ -917,8 +1156,10 @@ class AugmentationSealTests(unittest.TestCase):
                 sorted(path.name for path in pathlib.Path(sealed["directory"]).iterdir()),
                 ["augmentation.json", "compatibility-canary.json", "core-opcode-submodel.json", "opcode-supplement.json"],
             )
-            with self.assertRaisesRegex(ValueError, "already exists"):
-                self._seal(root)
+            # If publication succeeded but the separate path-pointer write
+            # failed, replaying the exact sources must recover the sealed
+            # directory rather than making the operator regenerate it.
+            self.assertEqual(self._seal(root), sealed)
 
             canary_path = pathlib.Path(sealed["directory"]) / "compatibility-canary.json"
             changed = json.loads(canary_path.read_text())
@@ -927,6 +1168,7 @@ class AugmentationSealTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 opcode_gas.verify_osaka_augmentation_directory(
                     pathlib.Path(sealed["directory"]),
+                    historical_manifest=FIXTURE,
                     expected_historical_manifest_sha256=opcode_gas.HISTORICAL_CORE_MANIFEST_SHA256,
                 )
 
@@ -957,8 +1199,26 @@ class AugmentationSealTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     opcode_gas.verify_osaka_augmentation_directory(
                         directory,
+                        historical_manifest=FIXTURE,
                         expected_historical_manifest_sha256=opcode_gas.HISTORICAL_CORE_MANIFEST_SHA256,
                     )
+
+    def test_seal_rejects_resealed_historical_canary_slope_and_program_drift(self):
+        def mutate_slope(canary):
+            row = canary["relations"][0]
+            row["baseline_slope_p"] = "999"
+            row["osaka_slope_p"] = "999"
+            row["signed_residual_p"] = "0"
+            row["drift_ape"] = "0"
+
+        mutations = (
+            mutate_slope,
+            lambda canary: canary["relations"][0].__setitem__("program_sha256", "0" * 64),
+        )
+        for mutate in mutations:
+            with self.subTest(mutate=mutate), tempfile.TemporaryDirectory() as tmp:
+                with self.assertRaisesRegex(ValueError, "historical program or equation"):
+                    self._seal(pathlib.Path(tmp), mutate_canary=mutate)
 
 if __name__ == "__main__":
     unittest.main()

@@ -61,7 +61,7 @@ Osaka execution semantics while continuing to bind the actual exported Unzen sch
 | Layer | State | Exit gate |
 | --- | --- | --- |
 | Experiment framework | Core scope complete | Preserve its identity and replay invariants |
-| Opcode core | In progress | Seal the bounded 101-plus-2 augmentation |
+| Opcode core | Complete at partial coverage | Preserve sealed 101-plus-2 augmentation |
 | Remaining operations | Pending | Seal execution coverage and event ownership |
 | State/trie | Pending | Pass a coarse holdout or justify a split model |
 | Transaction | Pending | Pass controlled fit and holdout |
@@ -88,7 +88,7 @@ calibration run `09ebb08d76d3f461086b0cf4`.
 The baseline is historical evidence. Never rewrite it or claim that its 101 coefficients were
 measured under the Osaka guest.
 
-## Active Milestone: Osaka Opcode Supplement
+## Completed Milestone: Osaka Opcode Supplement
 
 The active milestone is deliberately bounded:
 
@@ -110,25 +110,48 @@ predeclared gates and the compatibility canary shows no material baseline drift.
 the 101-opcode baseline and records the failed supplement; it does not trigger an automatic full
 resample.
 
-Current worktree state at the last update:
+Sealed result:
 
-- Task 1 landed in `3ea7a8d4` with review fix `c6b64e23`;
-- the bounded Osaka/CLZ/SWAP1 inputs and structured Unzen/Fusaka/Osaka calibration identity are
-  implemented;
-- root verification passed 345 Python tests with one skip, 15 SP1 guest library tests, 24 chain-spec
-  tests, and four schedule-exporter tests;
-- the SP1 artifact provenance check is current; two forced builds were deterministic;
-- the REVM lab ELF/VK changed as expected, while the opcode-lab VK and all its `PT_LOAD` segments
-  remained byte-identical despite deterministic non-loaded ELF metadata churn;
-- independent review found one missing Prague-negative CLZ regression, verified its fix, and ended
-  with both spec-compliance and correctness verdicts passing;
-- no sampling or proposal execution ran, and no production schedule or configuration changed.
+- implementation revision: `571dd487ffef8c3e158a376e13c9e159da7c936c`;
+- Osaka calibration run: `51f71fde68f378842f872fc1`;
+- SP1 REVM opcode-lab ELF SHA256:
+  `a4d340812a54a36ce57cdd0f197843f43f67fd9ac7450acee2ec1f6e58eb9a56`;
+- augmentation: `f945e67bb2c38c9c8ef50530`;
+- augmented core artifact SHA256:
+  `b66d7951bfa416810f93319f99c30ce91969026ee9fa3a402a74cbc2214f7e8b`;
+- compatibility canary: passed all eleven relations, with drift MAPE
+  `0.00031986761894294409128641959166862087318487194524130119483505145697115354057520394`
+  and maximum per-relation APE
+  `0.00082987551867219917012448132780082987551867219917012448132780082987551867219916349`;
+- supplemental relations: `opcode:0x15:canonical` and `opcode:0x1e:canonical` both accepted at
+  generator bound 32, then solved exactly against the shared `SWAP1` control;
+- solved static bodies per raw gas:
+  - ISZERO: `13.299244356886983625148164851060802046871571495401800960152582501961195825989132`;
+  - CLZ: `15.847288549616061142830834394507448970058426768208822511575420468918652979464447`;
+- coverage: 103 of 150 named opcodes modeled, 47 explicitly unsupported, with all 101 historical
+  models reused and zero historical coefficients remeasured;
+- candidate eligibility: false;
+- final-validation proposals opened: no;
+- production table, schedule, runtime configuration, block limit, and Boundless configuration
+  changed: no.
+
+Task 2 implementation passed 31 focused Osaka tests, 91 candidate-report tests, and the complete
+376-test opcode-gas Python suite with one existing opt-in skip. The same independent reviewer closed
+all semantic-replay findings, and an independent tester reproduced directory-only replay, fully
+re-sealed forgery rejection, guest-identity rejection, and path/symlink failure behavior. The live
+supplement verifier and the sealed augmentation verifier both completed successfully.
+An independent Task 3 reviewer replayed the four-file package and reported no material findings.
+The independent tester reproduced the run-level verifier from a clean checkout at the frozen
+implementation revision and replayed the sealed augmentation from the staged package. The run-level
+verifier intentionally rejects later documentation edits; portable post-result verification uses
+the self-contained augmentation verifier.
 
 ## Next Gate
 
-Implement Task 2's historical-schema validator, exact compatibility-canary subset, bounded
-ISZERO/CLZ supplement runner, and create-only augmentation sealer. Complete its full test suite and
-independent review before running any sampling. Proposal execution remains closed.
+Execute Task 4 to freeze the remaining operation-layer classification and exact ownership ledger.
+Do not invent coefficients for the 47 unsupported named opcodes: classify each as a static relation,
+typed function, separately owned wrapper/precompile event, inactive/unreachable operation, or
+explicitly unsupported key. Proposal execution remains closed.
 
 ## Next Milestones
 
@@ -170,7 +193,7 @@ independently validated bridge may transport a cost vector between backends.
 
 ## Current Non-Goals
 
-Until the active milestone is sealed, do not:
+Until the remaining operation layer and every higher layer are sealed, do not:
 
 - resample all 101 historical opcode coefficients;
 - run the final proposal corpus;

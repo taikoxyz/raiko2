@@ -337,6 +337,57 @@ content-addressed directory is sealed, rerun the identical seal command: it vali
 only that exact directory to create the missing pointer. An existing pointer remains create-only
 and is rejected before any directory publication.
 
+The bounded Osaka supplement completed on 2026-09-26 from implementation revision
+`571dd487ffef8c3e158a376e13c9e159da7c936c`. Calibration
+`51f71fde68f378842f872fc1` used REVM opcode-lab ELF SHA256
+`a4d340812a54a36ce57cdd0f197843f43f67fd9ac7450acee2ec1f6e58eb9a56`. The eleven-relation
+compatibility canary passed with drift MAPE `0.00031986761894294409` and maximum per-relation APE
+`0.00082987551867219917`. ISZERO and CLZ were both accepted at generator bound 32. The create-only
+augmentation is `f945e67bb2c38c9c8ef50530`; its core artifact models 103 of 150 named opcodes,
+leaves 47 explicitly unsupported, reuses all 101 historical models, and has artifact SHA256
+`b66d7951bfa416810f93319f99c30ce91969026ee9fa3a402a74cbc2214f7e8b`. It remains
+`candidate_eligible=false`.
+
+The completed operator sequence used the durable path files under `target/`:
+
+```bash
+cargo build -r -p guest-launcher --features sp1-sdk/profiling
+sha256sum --check experiments/opcode-gas/tests/fixtures/historical-core-102/controlled-manifest.sha256
+sha256sum --check experiments/opcode-gas/tests/fixtures/historical-core-102/historical-evidence.sha256
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py prepare-calibration \
+  --controlled-manifest experiments/opcode-gas/manifests/sp1-calibration-v1.toml \
+  --guest-launcher target/release/guest-launcher --out experiments/opcode-gas \
+  --run-path-file target/zkgas-osaka-run-path
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py run-osaka-opcode-supplement \
+  --run-path-file target/zkgas-osaka-run-path \
+  --controlled-manifest experiments/opcode-gas/manifests/sp1-calibration-v1.toml \
+  --baseline-derivation experiments/opcode-gas/derivations/3e1d97c461cd2ef9a40e6a02 \
+  --historical-manifest experiments/opcode-gas/tests/fixtures/historical-core-102/controlled-manifest.toml \
+  --guest-launcher target/release/guest-launcher --elf crates/guests/elf/sp1_revm_opcode_lab.elf
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py verify-osaka-opcode-supplement \
+  --run-path-file target/zkgas-osaka-run-path \
+  --controlled-manifest experiments/opcode-gas/manifests/sp1-calibration-v1.toml \
+  --baseline-derivation experiments/opcode-gas/derivations/3e1d97c461cd2ef9a40e6a02 \
+  --historical-manifest experiments/opcode-gas/tests/fixtures/historical-core-102/controlled-manifest.toml
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py seal-osaka-opcode-augmentation \
+  --run-path-file target/zkgas-osaka-run-path \
+  --baseline-derivation experiments/opcode-gas/derivations/3e1d97c461cd2ef9a40e6a02 \
+  --historical-manifest experiments/opcode-gas/tests/fixtures/historical-core-102/controlled-manifest.toml \
+  --out-root experiments/opcode-gas/derivations \
+  --augmentation-path-file target/zkgas-osaka-augmentation-path
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py verify-osaka-opcode-augmentation \
+  --augmentation-path-file target/zkgas-osaka-augmentation-path \
+  --historical-manifest experiments/opcode-gas/tests/fixtures/historical-core-102/controlled-manifest.toml
+```
+
+No proposal input was opened and no production table, runtime configuration, or Boundless behavior
+changed during this run.
+
+The run-level supplement verifier is a frozen-revision check: it requires `HEAD` to equal the
+calibration implementation revision and permits only generated experiment paths to be dirty. Run it
+before updating result documentation. After the result commit changes `HEAD`, use the self-contained
+augmentation verifier for portable replay; it does not depend on the ignored runtime directory.
+
 Block-level validation must report the frequency-dependent residual from NOT, JUMPDEST, and the
 small-EXP bucket. A later fixed offset may not absorb or hide those approximation errors.
 

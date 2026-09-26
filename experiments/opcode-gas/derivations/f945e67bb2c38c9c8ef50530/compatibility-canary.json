@@ -1,0 +1,289 @@
+{
+  "artifact_sha256": "1f8d85afe64a6ccd1dc4773547167e5da0c7498f5ddfb945d113f3afa33fd4a7",
+  "baseline_artifact_sha256": "765100575ffef6a22bbfd8423c60615a9f54d1af086d75f7a18282282303c784",
+  "candidate_eligible": false,
+  "drift_mape": "0.00031986761894294409128641959166862087318487194524130119483505145697115354057520394",
+  "provenance": {
+    "calibration_id": "51f71fde68f378842f872fc1",
+    "calibration_identity_sha256": "51f71fde68f378842f872fc1f3ecb8493fa83e8102af1761f7da21d5086ce338",
+    "complete_schedule_sha256": "b27c29fb5fe482de4b3e22784de0cc6c49a5f1f0160ec8a6eaa6997869864927",
+    "controlled_manifest_rows_sha256": "5fab06ba8196410d2743251410bd7747eed447c5e0de3bd633005a854ca3ca4e",
+    "controlled_manifest_sha256": "ec1d21273e746bd03873b8c7a5b71df514b58ba3f5983f6b474177a9f63a43bd",
+    "guest_elf_sha256": "a4d340812a54a36ce57cdd0f197843f43f67fd9ac7450acee2ec1f6e58eb9a56",
+    "implementation_revision": "571dd487ffef8c3e158a376e13c9e159da7c936c",
+    "version_identity": {
+      "ethereum_upgrade": "Fusaka",
+      "primary_metric": "proverGas",
+      "production_schedule": "UNZEN_ZK_GAS_SCHEDULE",
+      "proving_backend": "sp1",
+      "revm_spec_id": "OSAKA",
+      "taiko_fork": "Unzen"
+    }
+  },
+  "purpose": "osaka_opcode_compatibility_canary",
+  "quality_gates": {
+    "drift_mape_max": "0.05",
+    "per_relation_drift_ape_max": "0.10",
+    "repeats": 3,
+    "same_slope_sign": true
+  },
+  "reasons": [],
+  "relation_ids": [
+    "opcode:0x01:canonical",
+    "opcode:0x02:canonical",
+    "opcode:0x10:canonical",
+    "opcode:0x1b:canonical",
+    "opcode:0x57:canonical",
+    "opcode:0x19:canonical",
+    "opcode:0x5b:canonical",
+    "opcode:0x0a:exp-bytes-1",
+    "opcode:0x20:input-32",
+    "opcode:0x51:offset-0x00",
+    "opcode:0x5e:copy-32"
+  ],
+  "relations": [
+    {
+      "baseline_slope_p": "22.693637433251877998008869580957552719703140555706398769119377319214408543759616",
+      "control_raw_gas_by_key": {
+        "opcode:0x50": "2"
+      },
+      "drift_ape": "0.00019741407502532483588708712541177784336090483445134839795486994600027119509295601",
+      "historical_raw_rows_sha256": "43f40227c4382f71540484b40801e9d66772ecbf0776382c00cecc85b570e7ab",
+      "osaka_raw_rows_sha256": "84658da5b1ebf166fd0cb20a1437b9d869248c0e8cdf2ccc6ff60566836ee4ab",
+      "osaka_slope_p": "22.698117476694723504389537514707213322472621956738166349895918182640962983075391",
+      "program_sha256": "ace3c6a7ec50591c4b80c8654c17b64186f84c08ce58a4617faeb6804c5ee177",
+      "relation_id": "opcode:0x01:canonical",
+      "repeat_count": 3,
+      "signed_raw_gas_by_key": {
+        "opcode:0x01": "3",
+        "opcode:0x50": "-2"
+      },
+      "signed_residual_p": "0.004480043442845506380667933749660602769481401031767580776540863426554439315775",
+      "target_raw_gas_by_key": {
+        "opcode:0x01": "3"
+      }
+    },
+    {
+      "baseline_slope_p": "56.702733279029776450357498416146257579871481582043623857362657254050140284188614",
+      "control_raw_gas_by_key": {
+        "opcode:0x50": "2"
+      },
+      "drift_ape": "0.00008140352445337932366440359548194477808361738108900358095700217953946355077385371",
+      "historical_raw_rows_sha256": "c14467c9c0db512a9ef9aa9602d822e330f7abce25f23a910692bd7fe67ed207",
+      "osaka_raw_rows_sha256": "bb4c295a650c63c4ac9b43f34443f03d84ec347617ee00694d3377e83b70e8a8",
+      "osaka_slope_p": "56.698117476694723504389537514707213322472621956738166349895918182640962983075391",
+      "program_sha256": "4ef5b0323ab1ad36340a548c19c3530d55a110f811f37456dffcff4bfacfdcf3",
+      "relation_id": "opcode:0x02:canonical",
+      "repeat_count": 3,
+      "signed_raw_gas_by_key": {
+        "opcode:0x02": "5",
+        "opcode:0x50": "-2"
+      },
+      "signed_residual_p": "-0.004615802335052945967960901439044257398859625305457507466739071409177301113223",
+      "target_raw_gas_by_key": {
+        "opcode:0x02": "5"
+      }
+    },
+    {
+      "baseline_slope_p": "15.956014118924789573717078468639695900081455335324463752375780613630192777626935",
+      "control_raw_gas_by_key": {
+        "opcode:0x50": "2"
+      },
+      "drift_ape": "0.00066081294172367241829175600403861643353866748346549592167806781699168453414099918",
+      "historical_raw_rows_sha256": "3d7f03fdf69131c2cfdbb1a4a296303dde1127448d95b6c773ff34d0c4b7c054",
+      "osaka_raw_rows_sha256": "c2785193a09c9e04efb8a24c47766af2e080c0b058557ae8f7537cce2b89cf35",
+      "osaka_slope_p": "15.966558059552900714996832292515159742963164087247714725314508100280568377228708",
+      "program_sha256": "b7f4526bdd47f88bf43182554b1e28d7cc1fa2575f7a2c488919f1303c3a729c",
+      "relation_id": "opcode:0x10:canonical",
+      "repeat_count": 3,
+      "signed_raw_gas_by_key": {
+        "opcode:0x10": "3",
+        "opcode:0x50": "-2"
+      },
+      "signed_residual_p": "0.010543940628111141279753823875463842881708751923250972938727486650375599601773",
+      "target_raw_gas_by_key": {
+        "opcode:0x10": "3"
+      }
+    },
+    {
+      "baseline_slope_p": "71.583333333333333333333333333333333333333333333333333333333333333333333333333333",
+      "control_raw_gas_by_key": {
+        "opcode:0x50": "2"
+      },
+      "drift_ape": "0.00031920087123061324120319951932104097037064854106425325772653873596454992677156694",
+      "historical_raw_rows_sha256": "0c19d90124ef9d45001d3609c35893d3eaac51f735aca97e7fa6e55f0338789e",
+      "osaka_raw_rows_sha256": "2a8aa35b18e0ca63403454b828a1578a6bc76e48bc9f6bc52f45b2e9a5e27574",
+      "osaka_slope_p": "71.560483870967741935483870967741935483870967741935483870967741935483870967741935",
+      "program_sha256": "573760b0780eb9a61c9f5a4bf4ca651ab558773e53a3696106f8ebfcd451b1e2",
+      "relation_id": "opcode:0x1b:canonical",
+      "repeat_count": 3,
+      "signed_raw_gas_by_key": {
+        "opcode:0x1b": "3",
+        "opcode:0x50": "-2"
+      },
+      "signed_residual_p": "-0.022849462365591397849462365591397849462365591397849462365591397849462365591398",
+      "target_raw_gas_by_key": {
+        "opcode:0x1b": "3"
+      }
+    },
+    {
+      "baseline_slope_p": "412.71428571428571428571428571428571428571428571428571428571428571428571428571429",
+      "control_raw_gas_by_key": {
+        "opcode:0x01": "3",
+        "opcode:0x50": "2"
+      },
+      "drift_ape": "0.00017307026652821045344409830391138802353755624783662166839736933194877120110765317",
+      "historical_raw_rows_sha256": "c9a42f6bdb13ecdb24a5fb11c4b8fd7199e23cf60291d252fc69e6c94122b0ef",
+      "osaka_raw_rows_sha256": "dfaed9deb56daaa05d9c19fe52180e822dbf14ebc9e97f0f9d734e6842df175a",
+      "osaka_slope_p": "412.64285714285714285714285714285714285714285714285714285714285714285714285714286",
+      "program_sha256": "49f961b81fc6b7eff08bbb059e55e3c0a88f49a3a6e4a3d6f83ef8194fc883cc",
+      "relation_id": "opcode:0x57:canonical",
+      "repeat_count": 3,
+      "signed_raw_gas_by_key": {
+        "opcode:0x01": "-3",
+        "opcode:0x50": "-2",
+        "opcode:0x57": "10"
+      },
+      "signed_residual_p": "-0.07142857142857142857142857142857142857142857142857142857142857142857142857143",
+      "target_raw_gas_by_key": {
+        "opcode:0x57": "10"
+      }
+    },
+    {
+      "baseline_slope_p": "-18.281563942438229704045614987781699701330437143632907955471083355959815367906598",
+      "control_raw_gas_by_key": {
+        "opcode:0x50": "2",
+        "opcode:0x5f": "2"
+      },
+      "drift_ape": "0.00071784665805250677003658542622764155193496804344705014530206492304188759016402434",
+      "historical_raw_rows_sha256": "9ef19225fbee16edc2975e07df73ea22292707df86acdca7e1c8e13dd6280264",
+      "osaka_raw_rows_sha256": "7808f1d179fe277984c3d7e60858e58afdbda586d5a9dd49e0502187a65efbdc",
+      "osaka_slope_p": "-18.268440582858177210607294777807946420490542130509548375418589917639605394153317",
+      "program_sha256": "7537dbf239ac46ddc38cf4984abc180f8ef5e0f1e6faf96b7d860869f25e302d",
+      "relation_id": "opcode:0x19:canonical",
+      "repeat_count": 3,
+      "signed_raw_gas_by_key": {
+        "opcode:0x19": "3",
+        "opcode:0x50": "-2",
+        "opcode:0x5f": "-2"
+      },
+      "signed_residual_p": "0.013123359580052493438320209973753280839895013123359580052493438320209973753281",
+      "target_raw_gas_by_key": {
+        "opcode:0x19": "3"
+      }
+    },
+    {
+      "baseline_slope_p": "-30.635125350710471535885600506833197574441125893746040365643949678703955109059643",
+      "control_raw_gas_by_key": {
+        "opcode:0x50": "2",
+        "opcode:0x5f": "2"
+      },
+      "drift_ape": "0.00010487831899257727390228590420621145537132094981350862291812843901178034639387335",
+      "historical_raw_rows_sha256": "f422836a885d4b7f6efd0176971f01e33dbf87660570dcf02156422ef342e1e8",
+      "osaka_raw_rows_sha256": "06d648cf05258c0ba2c40a5ba79b9b4aea2d364f3d8b138d98ec8e092d2c4182",
+      "osaka_slope_p": "-30.631912390261562132319666938184451081545841252602045433975925423115214046520047",
+      "program_sha256": "110d1a40769b6107419639468161e8dd29564cc9b77793bd5337105e099ec0d2",
+      "relation_id": "opcode:0x5b:canonical",
+      "repeat_count": 3,
+      "signed_raw_gas_by_key": {
+        "opcode:0x50": "-2",
+        "opcode:0x5b": "1",
+        "opcode:0x5f": "-2"
+      },
+      "signed_residual_p": "0.003212960448909403565933568648746492895284641143994931668024255588741062539596",
+      "target_raw_gas_by_key": {
+        "opcode:0x5b": "1"
+      }
+    },
+    {
+      "baseline_slope_p": "430.35714285714285714285714285714285714285714285714285714285714285714285714285714",
+      "control_raw_gas_by_key": {
+        "opcode:0x50": "2"
+      },
+      "drift_ape": "0.00082987551867219917012448132780082987551867219917012448132780082987551867219916349",
+      "historical_raw_rows_sha256": "37c5a78bbde5952e269a72ae6329670ce7cae189d348e86680149cd8c3450303",
+      "osaka_raw_rows_sha256": "6f17d989cc5b0fbe3dc74995f07b032f2f0f01a479ce6d159bcb2e08148da69b",
+      "osaka_slope_p": "430",
+      "program_sha256": "d5f05ad1c34fbe0699684301a6d1e5c6df6a30fcae0a8c5afccafa6654b65985",
+      "relation_id": "opcode:0x0a:exp-bytes-1",
+      "repeat_count": 3,
+      "signed_raw_gas_by_key": {
+        "opcode:0x0a": "60",
+        "opcode:0x50": "-2"
+      },
+      "signed_residual_p": "-0.35714285714285714285714285714285714285714285714285714285714285714285714285714",
+      "target_raw_gas_by_key": {
+        "opcode:0x0a": "60"
+      }
+    },
+    {
+      "baseline_slope_p": "2471.2857142857142857142857142857142857142857142857142857142857142857142857142857",
+      "control_raw_gas_by_key": {
+        "opcode:0x50": "2"
+      },
+      "drift_ape": "0.000028903404821087924157465749465287010809873403086883634892190300017342042892641193",
+      "historical_raw_rows_sha256": "d1a90d1974007661dc665420195c621ce6f0f5f90fcdda9f55d2703bef40a3bb",
+      "osaka_raw_rows_sha256": "58ee6406688461edb24bfa7368fd6e89a2ab2df3aaf766827d49ed1228bc7e70",
+      "osaka_slope_p": "2471.3571428571428571428571428571428571428571428571428571428571428571428571428571",
+      "program_sha256": "c83959b543d008f009f353a461cc87491494fd4ef3204d04e3d9aa67a3acd5ed",
+      "relation_id": "opcode:0x20:input-32",
+      "repeat_count": 3,
+      "signed_raw_gas_by_key": {
+        "opcode:0x20": "36",
+        "opcode:0x50": "-2"
+      },
+      "signed_residual_p": "0.0714285714285714285714285714285714285714285714285714285714285714285714285714",
+      "target_raw_gas_by_key": {
+        "opcode:0x20": "36"
+      }
+    },
+    {
+      "baseline_slope_p": "223.93413978494623655913978494623655913978494623655913978494623655913978494623656",
+      "control_raw_gas_by_key": {
+        "opcode:0x19": "3"
+      },
+      "drift_ape": "0.00029410528969371034830469308012268392084366203100710054199403386412335616150581524",
+      "historical_raw_rows_sha256": "f4f4a86e529c4f8f01a8370b765299ed5ec3eb2ca9bce23b8bf6325e074f92f4",
+      "osaka_raw_rows_sha256": "94c5fb6f3ac262e5daea5051d99cc654d3450127f83317c48635589e88ecdae3",
+      "osaka_slope_p": "224",
+      "program_sha256": "0315398305282287d4933f91fb56545d737866b6e285e06d40b296d5ca44d787",
+      "relation_id": "opcode:0x51:offset-0x00",
+      "repeat_count": 3,
+      "signed_raw_gas_by_key": {
+        "opcode:0x19": "-3",
+        "opcode:0x51": "3"
+      },
+      "signed_residual_p": "0.06586021505376344086021505376344086021505376344086021505376344086021505376344",
+      "target_raw_gas_by_key": {
+        "opcode:0x51": "3"
+      }
+    },
+    {
+      "baseline_slope_p": "-7.4923073701523677537749282325797436932237849033329018404440823288432690916567043",
+      "control_raw_gas_by_key": {
+        "opcode:0x01": "3",
+        "opcode:0x02": "5",
+        "opcode:0x50": "2"
+      },
+      "drift_ape": "0.00011103293917910324513455947236740774166370028322292289003749966016806372528469684",
+      "historical_raw_rows_sha256": "a209bd93df20f4243bbbccd1949286ac489688a2caa67e8be204c680c8e397ce",
+      "osaka_raw_rows_sha256": "d34aba1e211e13d671897f02e2bbbe228f3f2963dc5bc0681fc3e348ce9cdfbf",
+      "osaka_slope_p": "-7.4914754772438264789418779078178896951883466461580634599130414918485916833552887",
+      "program_sha256": "a557fe1c3666865945fb4c8d61eeaa52f4c2cbb85e8b9bc9dc9b797218ad28d1",
+      "relation_id": "opcode:0x5e:copy-32",
+      "repeat_count": 3,
+      "signed_raw_gas_by_key": {
+        "opcode:0x01": "-3",
+        "opcode:0x02": "-5",
+        "opcode:0x50": "-2",
+        "opcode:0x5e": "6"
+      },
+      "signed_residual_p": "0.0008318929085412748330503247618539980354382571748383805310408369946774083014156",
+      "target_raw_gas_by_key": {
+        "opcode:0x5e": "6"
+      }
+    }
+  ],
+  "schema_version": 1,
+  "status": "passed"
+}

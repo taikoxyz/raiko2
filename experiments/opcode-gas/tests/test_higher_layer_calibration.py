@@ -1068,5 +1068,1061 @@ class HigherLayerCampaignInterfaceTests(unittest.TestCase):
                     )
 
 
+class HigherLayerTask5FixedCostTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.manifest = opcode_gas.load_higher_layer_manifest(MANIFEST_PATH)
+        cls.coverage = json.loads(
+            (ROOT / cls.manifest.operation_coverage_ref["path"]).read_text()
+        )
+        cls.core = json.loads(
+            (ROOT / cls.manifest.augmented_core_ref["path"]).read_text()
+        )
+
+    def accepted_rounds(self):
+        fixture = HigherLayerFixedRoundTests()
+        fixture.manifest = self.manifest
+        fixture.coverage = self.coverage
+        fixture.core = self.core
+        validated = []
+        rounds = []
+        for bound in self.manifest.generator_rounds:
+            fit = fixture.evaluate(fixture.rows(bound), bound)
+            record = {
+                "generator_max_count": bound,
+                "raw_rows": f"raw/overhead-round-{bound}.jsonl",
+                "raw_rows_sha256": str(bound) * 64,
+                "fit": f"fit/overhead-round-{bound}.json",
+                "fit_sha256": str(bound + 1) * 64,
+                "decision": fit["decision"],
+            }
+            rounds.append(record)
+            validated.append({**record, "fit_payload": fit})
+        decisions = {
+            "schema_version": 1,
+            "identity_sha256": "1" * 64,
+            "rounds": rounds,
+        }
+        identity = {
+            "schema_version": 1,
+            "calibration_id": CALIBRATION_ID,
+            "identity_sha256": "1" * 64,
+            "identity": {},
+        }
+        return identity, decisions, validated
+
+    def fit(self, run, *, validated_mutator=None):
+        identity, decisions, validated = self.accepted_rounds()
+        if validated_mutator is not None:
+            validated_mutator(validated)
+        with mock.patch.object(
+            opcode_gas,
+            "_validate_current_higher_layer_identity",
+            return_value=(
+                identity,
+                self.manifest,
+                self.coverage,
+                self.core,
+            ),
+        ), mock.patch.object(
+            opcode_gas,
+            "_load_higher_layer_decisions",
+            return_value=(decisions, validated),
+        ):
+            return opcode_gas.fit_higher_layer_fixed_costs(run)
+
+    def test_fit_replays_first_accepted_round_and_seals_exact_fixed_costs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            run = pathlib.Path(temporary)
+            result = self.fit(run)
+
+            self.assertEqual(result["status"], "accepted")
+            self.assertEqual(result["selected_round"], 128)
+            self.assertEqual(result["fixed_cost_rank"], 4)
+            self.assertEqual(
+                result["fixed_costs"],
+                {
+                    "proposal_startup": "1000",
+                    "block_base": "2000",
+                    "tx_base": "300",
+                    "native_value_transfer": "40",
+                },
+            )
+            fixed_path = run / "fixed-costs.json"
+            self.assertEqual(
+                fixed_path.read_bytes(), opcode_gas._canonical_json_file_bytes(result)
+            )
+
+    def test_fit_rejects_nonaccepted_terminal_or_conflicting_existing_artifact(self):
+        def terminal_failure(validated):
+            validated[-1]["decision"] = "terminal_failure"
+            validated[-1]["fit_payload"] = {
+                **validated[-1]["fit_payload"],
+                "decision": "terminal_failure",
+                "status": "rejected",
+                "fixed_costs": {},
+            }
+
+        for setup, expected in (
+            (terminal_failure, "terminal accepted"),
+            (None, "different bytes"),
+        ):
+            with self.subTest(expected=expected), tempfile.TemporaryDirectory() as temporary:
+                run = pathlib.Path(temporary)
+                if setup is None:
+                    (run / "fixed-costs.json").write_text("{}\n")
+                with self.assertRaisesRegex(ValueError, expected):
+                    self.fit(run, validated_mutator=setup)
+
+
+class HigherLayerTask5StateVerdictTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.manifest = opcode_gas.load_higher_layer_manifest(MANIFEST_PATH)
+        cls.coverage = json.loads(
+            (ROOT / cls.manifest.operation_coverage_ref["path"]).read_text()
+        )
+        cls.core = json.loads(
+            (ROOT / cls.manifest.augmented_core_ref["path"]).read_text()
+        )
+        cls.fixed_costs = {
+            "proposal_startup": "1000",
+            "block_base": "2000",
+            "tx_base": "300",
+            "native_value_transfer": "40",
+        }
+        cls.fixed = {
+            "schema_version": 1,
+            "status": "accepted",
+            "identity_sha256": "1" * 64,
+            "calibration_id": CALIBRATION_ID,
+            "selected_round": 128,
+            "fixed_cost_rank": 4,
+            "fixed_costs": cls.fixed_costs,
+            "fixed_costs_sha256": opcode_gas.sha256_bytes(
+                opcode_gas.canonical_json(cls.fixed_costs)
+            ),
+            "source": {},
+            "fit": {},
+        }
+
+    @staticmethod
+    def pair_spec(pair):
+        return {
+            "kind": pair.kind,
+            "pair_id": pair.pair_id,
+            "scale": pair.scale,
+            "control": dict(pair.control),
+            "target": dict(pair.target),
+        }
+
+    def rows(self):
+        rows = []
+        for pair_index, pair in enumerate(self.manifest.state_holdouts, start=1):
+            tx_count = pair.scale if pair.kind == "dirty_accounts" else 0
+            features = {
+                "proposal_startup": 1,
+                "block_base": 1,
+                "tx_base": tx_count,
+                "native_value_transfer": tx_count,
+            }
+            observed_gas = 3000 + 340 * tx_count
+            spec = self.pair_spec(pair)
+            for lane_index, lane in enumerate(("control", "target")):
+                backend_input_sha256 = f"{pair_index * 2 + lane_index:064x}"
+                workload_spec = {
+                    "schema_version": 1,
+                    "pair_id": pair.pair_id,
+                    "lane": lane,
+                    "pair_spec": spec,
+                    "guest_input_canonical_sha256": backend_input_sha256,
+                }
+                workload_id = opcode_gas.controlled_workload_id(workload_spec)
+                observation = {
+                    "pair_id": pair.pair_id,
+                    "lane": lane,
+                    "backend_input_sha256": backend_input_sha256,
+                    "guest_input_sha256": "0x" + backend_input_sha256,
+                    "guest_input_bincode_length": 1000 + pair_index,
+                    "public_output": "0x" + f"{pair_index * 2 + lane_index + 20:064x}",
+                    "actual_final_state_root": "0x"
+                    + f"{pair_index * 2 + lane_index + 40:064x}",
+                    "actual_raw_gas_by_key": {},
+                    "actual_features": features,
+                    "actual_diagnostics": {
+                        "guest_input_bincode_length": 1000 + pair_index,
+                        "witness_node_count": 10 + lane_index,
+                        "witness_byte_count": 100 + lane_index,
+                        "blob_count": 0,
+                        "kzg_invocation_count": 0,
+                        "calldata_length": 0,
+                        "bytecode_length": 0,
+                        "touched_state_key_count": tx_count + lane_index,
+                    },
+                    "started_candidate_transaction_count": tx_count,
+                    "committed_candidate_transaction_count": tx_count,
+                    "unattempted_candidate_transaction_count": 0,
+                    "operation_phase_ownership": "transaction_non_anchor_only",
+                    "system_operation_ownership": "block_base",
+                    "anchor_operation_ownership": "block_base",
+                }
+                for repeat_index in range(3):
+                    rows.append(
+                        {
+                            "schema_version": 1,
+                            "calibration_run_id": CALIBRATION_ID,
+                            "pair_id": pair.pair_id,
+                            "lane": lane,
+                            "repeat_index": repeat_index,
+                            "status": "accepted",
+                            "spec": spec,
+                            "workload_spec": workload_spec,
+                            "workload_id": workload_id,
+                            "backend_input_sha256": backend_input_sha256,
+                            "guest_input_sha256": "0x" + backend_input_sha256,
+                            "guest_input_bincode_length": 1000 + pair_index,
+                            "execution_row_id": opcode_gas.controlled_execution_row_id(
+                                workload_id,
+                                backend="sp1",
+                                execution_engine="gas-estimator",
+                                run_id=CALIBRATION_ID,
+                                repeat_index=repeat_index,
+                                backend_input_sha256=backend_input_sha256,
+                            ),
+                            "prover_gas": str(observed_gas),
+                            "public_values": observation["public_output"],
+                            "sp1_execution_engine": "gas-estimator",
+                            "sp1_gas_trace_chunk_threshold": 134_217_728,
+                            "sp1_gas_trace_chunk_slots": 2,
+                            "observation": copy.deepcopy(observation),
+                        }
+                    )
+        return rows
+
+    def evaluate(self, rows):
+        return opcode_gas.evaluate_higher_layer_state_holdouts(
+            self.manifest,
+            self.coverage,
+            self.core,
+            self.fixed,
+            rows,
+        )
+
+    def verified_bundle(self):
+        fixture = HigherLayerFixedRoundTests()
+        fixture.manifest = self.manifest
+        fixture.coverage = self.coverage
+        fixture.core = self.core
+        rounds = []
+        evidence = []
+        for bound in self.manifest.generator_rounds:
+            rows = fixture.rows(bound)
+            fit = fixture.evaluate(rows, bound)
+            raw_bytes = b"".join(
+                opcode_gas.canonical_json(row) + b"\n" for row in rows
+            )
+            fit_bytes = opcode_gas._canonical_json_file_bytes(fit)
+            record = {
+                "generator_max_count": bound,
+                "raw_rows": f"raw/overhead-round-{bound}.jsonl",
+                "raw_rows_sha256": opcode_gas.sha256_bytes(raw_bytes),
+                "fit": f"fit/overhead-round-{bound}.json",
+                "fit_sha256": opcode_gas.sha256_bytes(fit_bytes),
+                "decision": fit["decision"],
+            }
+            rounds.append(record)
+            evidence.append({"record": record, "rows": rows, "fit": fit})
+        decisions = {
+            "schema_version": 1,
+            "identity_sha256": "1" * 64,
+            "rounds": rounds,
+        }
+        fixed = {
+            **self.fixed,
+            "source": {
+                "decision_ledger_sha256": opcode_gas.sha256_bytes(
+                    opcode_gas._higher_layer_decisions_bytes(decisions)
+                ),
+                "selected_fit_sha256": rounds[-1]["fit_sha256"],
+                "higher_layer_manifest_artifact_sha256": self.manifest.artifact_sha256,
+                "operation_coverage_artifact_sha256": self.manifest.operation_coverage_ref[
+                    "artifact_sha256"
+                ],
+                "augmented_core_artifact_sha256": self.manifest.augmented_core_ref[
+                    "artifact_sha256"
+                ],
+            },
+            "fit": evidence[-1]["fit"],
+        }
+        state_rows = self.rows()
+        return {
+            "identity": {
+                "schema_version": 1,
+                "calibration_id": CALIBRATION_ID,
+                "identity_sha256": "1" * 64,
+                "identity": {
+                    "guest_launcher": {
+                        "path": "target/release/guest-launcher",
+                        "file_sha256": "a" * 64,
+                    }
+                },
+            },
+            "decisions": decisions,
+            "round_evidence": evidence,
+            "fixed": fixed,
+            "state_rows": state_rows,
+            "final": opcode_gas.evaluate_higher_layer_state_holdouts(
+                self.manifest,
+                self.coverage,
+                self.core,
+                fixed,
+                state_rows,
+            ),
+        }
+
+    def trace_executor(self, rows):
+        def execute(**kwargs):
+            pair_id = kwargs["pair_spec"]["pair_id"]
+            return [
+                {
+                    "schema_version": 1,
+                    "pair_id": row["pair_id"],
+                    "lane": row["lane"],
+                    "spec": row["spec"],
+                    "observation": row["observation"],
+                }
+                for row in rows
+                if row["pair_id"] == pair_id and row["repeat_index"] == 0
+            ]
+
+        return execute
+
+    def test_all_state_statuses_use_decimal_metrics_and_preserve_fixed_digest(self):
+        accepted = self.evaluate(self.rows())
+        failed_rows = self.rows()
+        for row in failed_rows:
+            if row["pair_id"] == "witness_topology_1" and row["lane"] == "target":
+                row["prover_gas"] = "3600"
+        failed = self.evaluate(failed_rows)
+
+        rejected_rows = self.rows()
+        rejected = rejected_rows[0]
+        rejected_identity = {
+            key: rejected[key]
+            for key in (
+                "schema_version",
+                "calibration_run_id",
+                "pair_id",
+                "lane",
+                "repeat_index",
+                "spec",
+            )
+        }
+        rejected.clear()
+        rejected.update(
+            {
+                **rejected_identity,
+                "status": "rejected",
+                "reasons": ["execution_failure"],
+            }
+        )
+        inconclusive = self.evaluate(rejected_rows)
+
+        self.assertEqual(
+            accepted["coarse_state_trie"]["status"], "coarse_model_accepted"
+        )
+        self.assertEqual(failed["coarse_state_trie"]["status"], "needs_state_split")
+        self.assertEqual(inconclusive["coarse_state_trie"]["status"], "inconclusive")
+        self.assertEqual(
+            failed["fixed_costs_sha256"], accepted["fixed_costs_sha256"]
+        )
+        self.assertEqual(failed["fixed_costs"], accepted["fixed_costs"])
+        failed_pair = next(
+            pair
+            for pair in failed["state_holdouts"]
+            if pair["pair_id"] == "witness_topology_1"
+        )
+        with localcontext(opcode_gas._OPCODE_DECIMAL_CONTEXT):
+            expected_target_ape = Decimal(1) / Decimal(6)
+        self.assertEqual(Decimal(failed_pair["target_ape"]), expected_target_ape)
+        self.assertEqual(Decimal(failed_pair["effect_ratio"]), Decimal("0.2"))
+
+    def test_missing_inventory_rejects_but_complete_invalid_evidence_is_inconclusive(self):
+        missing = self.rows()
+        missing.pop()
+        with self.assertRaisesRegex(ValueError, "inventory"):
+            self.evaluate(missing)
+
+        unstable = self.rows()
+        unstable[0]["prover_gas"] = str(int(unstable[0]["prover_gas"]) + 1)
+        self.assertEqual(
+            self.evaluate(unstable)["coarse_state_trie"]["status"], "inconclusive"
+        )
+
+        coverage_invalid = self.rows()
+        for row in coverage_invalid:
+            if row["pair_id"] == "witness_topology_1":
+                row["observation"]["actual_raw_gas_by_key"] = {
+                    "opcode:0x00": {
+                        "pricing_basis": "raw_gas_slope",
+                        "units": 1,
+                        "event_count": 1,
+                    }
+                }
+        self.assertEqual(
+            self.evaluate(coverage_invalid)["coarse_state_trie"]["status"],
+            "inconclusive",
+        )
+
+    def test_structural_state_identity_tamper_raises_instead_of_becoming_inconclusive(self):
+        mutations = {
+            "execution": lambda row: row.__setitem__("execution_row_id", "0" * 64),
+            "gas-estimator": lambda row: row.__setitem__(
+                "sp1_execution_engine", "standard"
+            ),
+            "spec": lambda row: row["spec"]["control"].__setitem__(
+                "extra_account_count", 99
+            ),
+        }
+        for expected, mutate in mutations.items():
+            rows = self.rows()
+            mutate(rows[0])
+            with self.subTest(expected=expected), self.assertRaisesRegex(
+                ValueError, expected
+            ):
+                self.evaluate(rows)
+
+    @staticmethod
+    def report(row):
+        return {
+            "stage": "controlled-state-holdout",
+            "mode": "execute",
+            "sp1_execution_engine": "gas-estimator",
+            "sp1_gas_trace_chunk_threshold": 134_217_728,
+            "sp1_gas_trace_chunk_slots": 2,
+            "guest_input_sha256": row["guest_input_sha256"],
+            "guest_input_bincode_length": row["guest_input_bincode_length"],
+            "public_values": row["public_values"],
+            "gas": int(row["prover_gas"]),
+            "controlled_state_holdout": {
+                "status": "accepted",
+                "pair_id": row["pair_id"],
+                "lane": row["lane"],
+                "spec": row["spec"],
+                "reasons": [],
+                "observation": row["observation"],
+            },
+        }
+
+    def test_state_runner_is_fixed_gated_and_persists_exact_inventory(self):
+        rows = self.rows()
+        calls = []
+
+        def fake_executor(**kwargs):
+            pair_id = kwargs["pair_spec"]["pair_id"]
+            repeat_index = kwargs["repeat_index"]
+            calls.append((pair_id, repeat_index))
+            return [
+                self.report(row)
+                for row in rows
+                if row["pair_id"] == pair_id
+                and row["repeat_index"] == repeat_index
+            ]
+
+        identity = {
+            "calibration_id": CALIBRATION_ID,
+            "identity_sha256": "1" * 64,
+        }
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+            opcode_gas,
+            "_validate_current_higher_layer_identity",
+            return_value=(identity, self.manifest, self.coverage, self.core),
+        ), mock.patch.object(
+            opcode_gas,
+            "fit_higher_layer_fixed_costs",
+            return_value=self.fixed,
+        ):
+            run = pathlib.Path(temporary)
+            with self.assertRaisesRegex(ValueError, "fixed-cost artifact"):
+                opcode_gas.run_higher_layer_state_holdouts(
+                    run, executor=fake_executor
+                )
+            (run / "fixed-costs.json").write_bytes(
+                opcode_gas._canonical_json_file_bytes(self.fixed)
+            )
+            persisted = opcode_gas.run_higher_layer_state_holdouts(
+                run, executor=fake_executor
+            )
+
+            self.assertEqual(len(persisted), 36)
+            self.assertEqual(len({row["execution_row_id"] for row in persisted}), 36)
+            self.assertEqual(
+                calls,
+                [
+                    (pair.pair_id, repeat)
+                    for pair in self.manifest.state_holdouts
+                    for repeat in range(3)
+                ],
+            )
+            raw_path = run / "raw" / "state-holdouts.jsonl"
+            self.assertEqual(
+                raw_path.read_bytes(),
+                b"".join(
+                    opcode_gas.canonical_json(row) + b"\n" for row in persisted
+                ),
+            )
+            copied = copy.deepcopy(persisted)
+            copied[0]["calibration_run_id"] = "2" * 24
+            raw_path.write_bytes(
+                b"".join(opcode_gas.canonical_json(row) + b"\n" for row in copied)
+            )
+            with self.assertRaisesRegex(ValueError, "calibration identity"):
+                opcode_gas.run_higher_layer_state_holdouts(
+                    run, executor=fake_executor
+                )
+
+    def test_state_runner_sanitizes_execution_failure_paths_for_sealing(self):
+        identity = {
+            "calibration_id": CALIBRATION_ID,
+            "identity_sha256": "1" * 64,
+        }
+
+        def fail_with_path(**_kwargs):
+            raise OSError("failed to open /home/sample_user/private-input.json")
+
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+            opcode_gas,
+            "_validate_current_higher_layer_identity",
+            return_value=(identity, self.manifest, self.coverage, self.core),
+        ), mock.patch.object(
+            opcode_gas,
+            "fit_higher_layer_fixed_costs",
+            return_value=self.fixed,
+        ):
+            root = pathlib.Path(temporary)
+            run = root / "run"
+            run.mkdir()
+            (run / "fixed-costs.json").write_bytes(
+                opcode_gas._canonical_json_file_bytes(self.fixed)
+            )
+            rows = opcode_gas.run_higher_layer_state_holdouts(
+                run, executor=fail_with_path
+            )
+            self.assertEqual(len(rows), 36)
+            self.assertTrue(all(row["status"] == "rejected" for row in rows))
+            self.assertTrue(
+                all(row["reasons"] == ["state_holdout_io_failure"] for row in rows)
+            )
+            raw_text = (run / "raw" / "state-holdouts.jsonl").read_text()
+            self.assertNotIn("/home/", raw_text)
+            final = self.evaluate(rows)
+            self.assertEqual(final["coarse_state_trie"]["status"], "inconclusive")
+
+            verified = self.verified_bundle()
+            verified["state_rows"] = rows
+            verified["final"] = final
+            destination = opcode_gas.seal_higher_layer_calibration(
+                run,
+                root / "sealed",
+                root / "derivation-path",
+                verifier=lambda _path: verified,
+            )
+            self.assertNotIn(
+                "/home/", (destination / "state-holdout-evidence.json").read_text()
+            )
+
+    def test_state_report_requires_positive_integer_prover_gas(self):
+        pair = self.manifest.state_holdouts[0]
+        report = self.report(self.rows()[0])
+        del report["gas"]
+        with self.assertRaisesRegex(ValueError, "proverGas"):
+            opcode_gas._higher_layer_state_row_from_report(
+                report,
+                pair=pair,
+                repeat_index=0,
+                calibration_id=CALIBRATION_ID,
+            )
+
+    def test_normal_state_executor_uses_only_production_sp1_gas_estimator(self):
+        pair_spec = self.pair_spec(self.manifest.state_holdouts[0])
+
+        def inspect(command, **_kwargs):
+            self.assertEqual(
+                command[command.index("--stage") + 1], "controlled-state-holdout"
+            )
+            self.assertEqual(command[command.index("--proof-type") + 1], "sp1")
+            self.assertEqual(command[command.index("--mode") + 1], "execute")
+            self.assertEqual(command[command.index("--sp1-prover") + 1], "local")
+            self.assertEqual(
+                command[command.index("--sp1-execution-engine") + 1],
+                "gas-estimator",
+            )
+            raise RuntimeError("state command inspected")
+
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+            opcode_gas.subprocess, "run", side_effect=inspect
+        ), self.assertRaisesRegex(RuntimeError, "state command inspected"):
+            opcode_gas.run_controlled_state_holdout_pair(
+                guest_launcher=pathlib.Path("guest-launcher"),
+                pair_spec=pair_spec,
+                repeat_index=0,
+                out=pathlib.Path(temporary) / "state.jsonl",
+            )
+
+    def test_finalize_persists_byte_exact_verdict_and_rejects_missing_slot(self):
+        identity = {
+            "calibration_id": CALIBRATION_ID,
+            "identity_sha256": "1" * 64,
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            run = pathlib.Path(temporary)
+            raw_path = run / "raw" / "state-holdouts.jsonl"
+            raw_path.parent.mkdir()
+            rows = self.rows()
+            (run / "fixed-costs.json").write_bytes(
+                opcode_gas._canonical_json_file_bytes(self.fixed)
+            )
+            raw_path.write_bytes(
+                b"".join(opcode_gas.canonical_json(row) + b"\n" for row in rows)
+            )
+            with mock.patch.object(
+                opcode_gas,
+                "_validate_current_higher_layer_identity",
+                return_value=(identity, self.manifest, self.coverage, self.core),
+            ), mock.patch.object(
+                opcode_gas,
+                "fit_higher_layer_fixed_costs",
+                return_value=self.fixed,
+            ):
+                result = opcode_gas.finalize_higher_layer_calibration(run)
+                self.assertEqual(
+                    (run / "higher-layer-calibration.json").read_bytes(),
+                    opcode_gas._canonical_json_file_bytes(result),
+                )
+
+                raw_path.write_bytes(
+                    b"".join(
+                        opcode_gas.canonical_json(row) + b"\n" for row in rows[:-1]
+                    )
+                )
+                with self.assertRaisesRegex(ValueError, "inventory"):
+                    opcode_gas.finalize_higher_layer_calibration(run)
+
+    def test_verifier_uses_one_host_trace_per_pair_and_rejects_diagnostic_tamper(self):
+        identity = {
+            "calibration_id": CALIBRATION_ID,
+            "identity_sha256": "1" * 64,
+        }
+        rows = self.rows()
+        calls = []
+
+        def fake_trace(**kwargs):
+            pair_id = kwargs["pair_spec"]["pair_id"]
+            calls.append(pair_id)
+            return [
+                {
+                    "schema_version": 1,
+                    "pair_id": row["pair_id"],
+                    "lane": row["lane"],
+                    "spec": row["spec"],
+                    "observation": row["observation"],
+                }
+                for row in rows
+                if row["pair_id"] == pair_id and row["repeat_index"] == 0
+            ]
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            run = root / "run"
+            (run / "raw").mkdir(parents=True)
+            (run / "fixed-costs.json").write_bytes(
+                opcode_gas._canonical_json_file_bytes(self.fixed)
+            )
+            (run / "raw" / "state-holdouts.jsonl").write_bytes(
+                b"".join(opcode_gas.canonical_json(row) + b"\n" for row in rows)
+            )
+            final = self.evaluate(rows)
+            (run / "higher-layer-calibration.json").write_bytes(
+                opcode_gas._canonical_json_file_bytes(final)
+            )
+            run_path_file = root / "run-path"
+            run_path_file.write_text(str(run) + "\n")
+            with mock.patch.object(
+                opcode_gas,
+                "_validate_current_higher_layer_identity",
+                return_value=(identity, self.manifest, self.coverage, self.core),
+            ), mock.patch.object(
+                opcode_gas,
+                "fit_higher_layer_fixed_costs",
+                return_value=self.fixed,
+            ), mock.patch.object(
+                opcode_gas,
+                "_load_higher_layer_decisions",
+                return_value=({"schema_version": 1, "rounds": []}, []),
+            ):
+                verified = opcode_gas.verify_higher_layer_calibration(
+                    run_path_file, trace_executor=fake_trace
+                )
+                self.assertEqual(verified["final"], final)
+                self.assertEqual(
+                    calls, [pair.pair_id for pair in self.manifest.state_holdouts]
+                )
+
+                tampered = copy.deepcopy(rows)
+                tampered[0]["observation"]["actual_diagnostics"][
+                    "witness_node_count"
+                ] += 1
+                (run / "raw" / "state-holdouts.jsonl").write_bytes(
+                    b"".join(
+                        opcode_gas.canonical_json(row) + b"\n" for row in tampered
+                    )
+                )
+                with self.assertRaisesRegex(ValueError, "trace"):
+                    opcode_gas.verify_higher_layer_calibration(
+                        run_path_file, trace_executor=fake_trace
+                    )
+
+    def test_host_trace_verifier_command_is_native_and_has_no_sp1_flags(self):
+        pair_spec = self.pair_spec(self.manifest.state_holdouts[0])
+
+        def inspect(command, **_kwargs):
+            self.assertEqual(
+                command[command.index("--stage") + 1],
+                "controlled-state-holdout-trace",
+            )
+            self.assertEqual(command[command.index("--proof-type") + 1], "native")
+            self.assertEqual(command[command.index("--mode") + 1], "execute")
+            self.assertNotIn("--sp1-prover", command)
+            self.assertNotIn("--sp1-execution-engine", command)
+            self.assertNotIn("--elf", command)
+            raise RuntimeError("trace command inspected")
+
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+            opcode_gas.subprocess, "run", side_effect=inspect
+        ), self.assertRaisesRegex(RuntimeError, "trace command inspected"):
+            opcode_gas.run_controlled_state_holdout_trace(
+                guest_launcher=pathlib.Path("guest-launcher"),
+                pair_spec=pair_spec,
+                out=pathlib.Path(temporary) / "trace.jsonl",
+            )
+
+    def test_task5_parser_exposes_gated_command_order(self):
+        parser = opcode_gas.build_parser()
+        commands = {
+            "fit-higher-layer-fixed-costs": opcode_gas.cmd_fit_higher_layer_fixed_costs,
+            "run-higher-layer-state-holdouts": opcode_gas.cmd_run_higher_layer_state_holdouts,
+            "finalize-higher-layer-calibration": opcode_gas.cmd_finalize_higher_layer_calibration,
+            "verify-higher-layer-calibration": opcode_gas.cmd_verify_higher_layer_calibration,
+            "seal-higher-layer-calibration": opcode_gas.cmd_seal_higher_layer_calibration,
+        }
+        for command, expected in commands.items():
+            arguments = [command]
+            if command == "verify-higher-layer-calibration":
+                arguments += ["--run-path-file", "run-path"]
+            elif command == "seal-higher-layer-calibration":
+                arguments += [
+                    "--run",
+                    "run",
+                    "--out-root",
+                    "out",
+                    "--derivation-path-file",
+                    "derivation-path",
+                ]
+            else:
+                arguments += ["--run", "run"]
+            with self.subTest(command=command):
+                self.assertIs(parser.parse_args(arguments).func, expected)
+
+    def test_verifier_rejects_symlinked_state_or_final_artifact(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            run = root / "run"
+            external = root / "external"
+            (run / "raw").mkdir(parents=True)
+            external.mkdir()
+            (run / "fixed-costs.json").write_bytes(
+                opcode_gas._canonical_json_file_bytes(self.fixed)
+            )
+            rows = self.rows()
+            raw_bytes = b"".join(
+                opcode_gas.canonical_json(row) + b"\n" for row in rows
+            )
+            final_bytes = opcode_gas._canonical_json_file_bytes(self.evaluate(rows))
+            (external / "state.jsonl").write_bytes(raw_bytes)
+            (external / "final.json").write_bytes(final_bytes)
+            run_path_file = root / "run-path"
+            run_path_file.write_text(str(run) + "\n")
+            identity = {
+                "calibration_id": CALIBRATION_ID,
+                "identity_sha256": "1" * 64,
+            }
+            for artifact in ("state", "final"):
+                with self.subTest(artifact=artifact):
+                    raw_path = run / "raw" / "state-holdouts.jsonl"
+                    final_path = run / "higher-layer-calibration.json"
+                    for path in (raw_path, final_path):
+                        if path.exists() or path.is_symlink():
+                            path.unlink()
+                    raw_path.symlink_to(external / "state.jsonl") if artifact == "state" else raw_path.write_bytes(raw_bytes)
+                    final_path.symlink_to(external / "final.json") if artifact == "final" else final_path.write_bytes(final_bytes)
+                    with mock.patch.object(
+                        opcode_gas,
+                        "_validate_current_higher_layer_identity",
+                        return_value=(identity, self.manifest, self.coverage, self.core),
+                    ), mock.patch.object(
+                        opcode_gas,
+                        "fit_higher_layer_fixed_costs",
+                        return_value=self.fixed,
+                    ), mock.patch.object(
+                        opcode_gas,
+                        "_load_higher_layer_decisions",
+                        return_value=({"schema_version": 1, "rounds": []}, []),
+                    ), self.assertRaisesRegex(ValueError, "non-symlink"):
+                        opcode_gas.verify_higher_layer_calibration(
+                            run_path_file, trace_executor=lambda **_kwargs: []
+                        )
+            symlink_run = root / "symlink-run"
+            symlink_run.symlink_to(run, target_is_directory=True)
+            run_path_file.write_text(str(symlink_run) + "\n")
+            with self.assertRaisesRegex(ValueError, "symlink"):
+                opcode_gas._higher_layer_run_from_path_file(run_path_file)
+
+    def test_seal_is_create_only_exact_four_and_cleans_partial_publish(self):
+        verified = self.verified_bundle()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            run = root / "run"
+            run.mkdir()
+            output = root / "sealed"
+            path_file = root / "derivation-path"
+            destination = opcode_gas.seal_higher_layer_calibration(
+                run,
+                output,
+                path_file,
+                verifier=lambda _path: verified,
+            )
+            self.assertEqual(
+                {path.name for path in destination.iterdir()},
+                {
+                    "identity.json",
+                    "overhead-evidence.json",
+                    "state-holdout-evidence.json",
+                    "higher-layer-calibration.json",
+                },
+            )
+            self.assertEqual(path_file.read_text(), str(destination) + "\n")
+            with self.assertRaisesRegex(ValueError, "already exists"):
+                opcode_gas.seal_higher_layer_calibration(
+                    run,
+                    output,
+                    path_file,
+                    verifier=lambda _path: verified,
+                )
+
+            failing_output = root / "failing"
+            real_write = opcode_gas._write_derivation_json
+            writes = 0
+
+            def fail_second(path, value):
+                nonlocal writes
+                writes += 1
+                if writes == 2:
+                    raise OSError("injected publish failure")
+                real_write(path, value)
+
+            with mock.patch.object(
+                opcode_gas, "_write_derivation_json", side_effect=fail_second
+            ), self.assertRaisesRegex(OSError, "injected"):
+                opcode_gas.seal_higher_layer_calibration(
+                    run,
+                    failing_output,
+                    root / "unused-path",
+                    verifier=lambda _path: verified,
+                )
+            self.assertEqual(list(failing_output.iterdir()), [])
+
+    def test_seal_rejects_absolute_user_specific_persisted_path(self):
+        verified = self.verified_bundle()
+        verified["identity"]["identity"]["guest_launcher"][
+            "path"
+        ] = "/home/sample_user/tool"
+        with tempfile.TemporaryDirectory() as temporary, self.assertRaisesRegex(
+            ValueError, "portable"
+        ):
+            root = pathlib.Path(temporary)
+            run = root / "run"
+            run.mkdir()
+            opcode_gas.seal_higher_layer_calibration(
+                run,
+                root / "sealed",
+                root / "derivation-path",
+                verifier=lambda _path: verified,
+            )
+
+    def test_portable_package_replays_without_live_run_and_rejects_tamper(self):
+        verified = self.verified_bundle()
+        rows = verified["state_rows"]
+
+        def validate_source(identity):
+            if not opcode_gas._exact_json_equal(identity, verified["identity"]):
+                raise ValueError("sealed source identity differs")
+            return self.manifest, self.coverage, self.core
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            run = root / "run"
+            run.mkdir()
+            destination = opcode_gas.seal_higher_layer_calibration(
+                run,
+                root / "sealed",
+                root / "derivation-path",
+                verifier=lambda _path: verified,
+            )
+            copied = root / "copied-four-files"
+            copied.mkdir()
+            for source in destination.iterdir():
+                (copied / source.name).write_bytes(source.read_bytes())
+
+            replay = opcode_gas.verify_sealed_higher_layer_calibration(
+                copied,
+                trace_executor=self.trace_executor(rows),
+                source_validator=validate_source,
+            )
+            self.assertEqual(replay["fixed"], verified["fixed"])
+            self.assertEqual(replay["final"], verified["final"])
+            copied_path_file = root / "copied-path"
+            copied_path_file.write_text(str(copied) + "\n")
+            replay_from_path = opcode_gas.verify_higher_layer_calibration(
+                copied_path_file,
+                trace_executor=self.trace_executor(rows),
+                source_validator=validate_source,
+            )
+            self.assertEqual(replay_from_path["final"], verified["final"])
+
+            external_state = root / "external-state.json"
+            external_state.write_bytes(
+                (destination / "state-holdout-evidence.json").read_bytes()
+            )
+            symlinked_file = root / "symlinked-file-package"
+            symlinked_file.mkdir()
+            for source in destination.iterdir():
+                target = symlinked_file / source.name
+                if source.name == "state-holdout-evidence.json":
+                    target.symlink_to(external_state)
+                else:
+                    target.write_bytes(source.read_bytes())
+            with self.assertRaisesRegex(ValueError, "non-symlink"):
+                opcode_gas.verify_sealed_higher_layer_calibration(
+                    symlinked_file,
+                    trace_executor=self.trace_executor(rows),
+                    source_validator=validate_source,
+                )
+            symlinked_package = root / "symlinked-package"
+            symlinked_package.symlink_to(destination, target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, "exactly four"):
+                opcode_gas.verify_sealed_higher_layer_calibration(
+                    symlinked_package,
+                    trace_executor=self.trace_executor(rows),
+                    source_validator=validate_source,
+                )
+
+            tamper_cases = {
+                "source": lambda overhead, state, final: overhead["fixed_costs"][
+                    "source"
+                ].__setitem__("selected_fit_sha256", "0" * 64),
+                "raw repeat": lambda overhead, state, final: overhead["rounds"][
+                    -1
+                ]["rows"][0].__setitem__("prover_gas", "999999"),
+                "event count": lambda overhead, state, final: overhead["rounds"][
+                    -1
+                ]["rows"][0].setdefault("observed_operation_deltas", {}).setdefault(
+                    "opcode:0x5f",
+                    {
+                        "pricing_basis": "raw_gas_slope",
+                        "units": 0,
+                        "event_count": 0,
+                    },
+                ).__setitem__("event_count", 1),
+                "diagnostic": lambda overhead, state, final: state["rows"][0][
+                    "observation"
+                ]["actual_diagnostics"].__setitem__("witness_node_count", 99),
+                "verdict": lambda overhead, state, final: final[
+                    "coarse_state_trie"
+                ].__setitem__("status", "needs_state_split"),
+            }
+            for label, mutate in tamper_cases.items():
+                with self.subTest(label=label):
+                    overhead = json.loads(
+                        (destination / "overhead-evidence.json").read_text()
+                    )
+                    state = json.loads(
+                        (destination / "state-holdout-evidence.json").read_text()
+                    )
+                    final = json.loads(
+                        (destination / "higher-layer-calibration.json").read_text()
+                    )
+                    mutate(overhead, state, final)
+                    tampered = root / f"tampered-{label.replace(' ', '-')}"
+                    tampered.mkdir()
+                    for name, value in (
+                        ("overhead-evidence.json", overhead),
+                        ("state-holdout-evidence.json", state),
+                        ("higher-layer-calibration.json", final),
+                    ):
+                        (tampered / name).write_bytes(
+                            opcode_gas._canonical_json_file_bytes(value)
+                        )
+                    sealed_identity = json.loads(
+                        (destination / "identity.json").read_text()
+                    )
+                    for name in (
+                        "overhead-evidence.json",
+                        "state-holdout-evidence.json",
+                        "higher-layer-calibration.json",
+                    ):
+                        sealed_identity["identity"]["file_sha256s"][name] = (
+                            opcode_gas.sha256_file(tampered / name)
+                        )
+                    identity_sha256 = opcode_gas.sha256_bytes(
+                        opcode_gas.canonical_json(sealed_identity["identity"])
+                    )
+                    sealed_identity["identity_sha256"] = identity_sha256
+                    sealed_identity["derivation_id"] = identity_sha256[:24]
+                    (tampered / "identity.json").write_bytes(
+                        opcode_gas._canonical_json_file_bytes(sealed_identity)
+                    )
+                    with self.assertRaises(ValueError):
+                        opcode_gas.verify_sealed_higher_layer_calibration(
+                            tampered,
+                            trace_executor=self.trace_executor(rows),
+                            source_validator=validate_source,
+                        )
+
+            changed_source = root / "tampered-source-identity"
+            changed_source.mkdir()
+            for source in destination.iterdir():
+                (changed_source / source.name).write_bytes(source.read_bytes())
+            sealed_identity = json.loads(
+                (changed_source / "identity.json").read_text()
+            )
+            sealed_identity["identity"]["source_identity"]["identity"][
+                "guest_launcher"
+            ]["file_sha256"] = "b" * 64
+            identity_sha256 = opcode_gas.sha256_bytes(
+                opcode_gas.canonical_json(sealed_identity["identity"])
+            )
+            sealed_identity["identity_sha256"] = identity_sha256
+            sealed_identity["derivation_id"] = identity_sha256[:24]
+            (changed_source / "identity.json").write_bytes(
+                opcode_gas._canonical_json_file_bytes(sealed_identity)
+            )
+            with self.assertRaisesRegex(ValueError, "source identity"):
+                opcode_gas.verify_sealed_higher_layer_calibration(
+                    changed_source,
+                    trace_executor=self.trace_executor(rows),
+                    source_validator=validate_source,
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

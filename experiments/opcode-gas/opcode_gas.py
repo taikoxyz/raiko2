@@ -21036,6 +21036,15 @@ _HIGHER_LAYER_VK_PATH = pathlib.Path("crates/guests/elf/sp1_shasta_proposal.vk.b
 _HIGHER_LAYER_RUN_ROOT = pathlib.Path("experiments/opcode-gas/runs")
 _HIGHER_LAYER_IDENTITY_SCHEMA_VERSION = 1
 _HIGHER_LAYER_DECISIONS_SCHEMA_VERSION = 1
+_HIGHER_LAYER_FIXED_COST_SCHEMA_VERSION = 1
+_HIGHER_LAYER_SEALED_SCHEMA_VERSION = 1
+_HIGHER_LAYER_SEALED_PURPOSE = "sp1_higher_layer_fixed_cost_derivation"
+_HIGHER_LAYER_SEALED_FILES = (
+    "identity.json",
+    "overhead-evidence.json",
+    "state-holdout-evidence.json",
+    "higher-layer-calibration.json",
+)
 
 
 def _higher_layer_canonical_path(
@@ -21488,6 +21497,1347 @@ def run_higher_layer_calibration(
     raise ValueError("higher-layer campaign exhausted rounds without a terminal decision")
 
 
+def _higher_layer_fixed_cost_artifact(
+    identity: Mapping[str, Any],
+    manifest: HigherLayerManifest,
+    decisions: Mapping[str, Any],
+    validated: Sequence[Mapping[str, Any]],
+) -> Mapping[str, Any]:
+    """Build the sole fixed-cost artifact from already replayed round decisions."""
+    terminal = [
+        (index, record)
+        for index, record in enumerate(validated)
+        if record.get("decision") != "expand_next_round"
+    ]
+    if (
+        len(validated) != len(decisions.get("rounds", []))
+        or len(terminal) != 1
+        or terminal[0][0] != len(validated) - 1
+        or terminal[0][1].get("decision") != "accepted"
+    ):
+        raise ValueError("higher-layer fixed costs require exactly one terminal accepted round")
+    selected = terminal[0][1]
+    fit = selected.get("fit_payload")
+    fixed_costs = fit.get("fixed_costs") if isinstance(fit, Mapping) else None
+    if (
+        not isinstance(fit, Mapping)
+        or fit.get("status") != "accepted"
+        or fit.get("decision") != "accepted"
+        or not isinstance(fixed_costs, Mapping)
+        or tuple(fixed_costs) != manifest.q_formula
+    ):
+        raise ValueError("higher-layer terminal round does not contain accepted fixed costs")
+    parsed = {
+        key: _decimal(fixed_costs[key], label=f"higher-layer fixed cost {key}")
+        for key in manifest.q_formula
+    }
+    if any(value <= 0 for value in parsed.values()):
+        raise ValueError("higher-layer fixed costs must be positive")
+    canonical_costs = {
+        key: _decimal_text(parsed[key]) for key in manifest.q_formula
+    }
+    fixed_costs_sha256 = sha256_bytes(canonical_json(canonical_costs))
+    artifact = {
+        "schema_version": _HIGHER_LAYER_FIXED_COST_SCHEMA_VERSION,
+        "status": "accepted",
+        "identity_sha256": identity["identity_sha256"],
+        "calibration_id": identity["calibration_id"],
+        "selected_round": selected["generator_max_count"],
+        "fixed_cost_rank": len(canonical_costs),
+        "fixed_costs": canonical_costs,
+        "fixed_costs_sha256": fixed_costs_sha256,
+        "source": {
+            "decision_ledger_sha256": sha256_bytes(
+                _higher_layer_decisions_bytes(decisions)
+            ),
+            "selected_fit_sha256": selected["fit_sha256"],
+            "higher_layer_manifest_artifact_sha256": manifest.artifact_sha256,
+            "operation_coverage_artifact_sha256": manifest.operation_coverage_ref[
+                "artifact_sha256"
+            ],
+            "augmented_core_artifact_sha256": manifest.augmented_core_ref[
+                "artifact_sha256"
+            ],
+        },
+        "fit": dict(fit),
+    }
+    return artifact
+
+
+def fit_higher_layer_fixed_costs(run: pathlib.Path) -> Mapping[str, Any]:
+    """Replay the bounded campaign and seal its first accepted fixed-cost result."""
+    run = pathlib.Path(run)
+    identity, manifest, coverage, core = _validate_current_higher_layer_identity(run)
+    decisions, validated = _load_higher_layer_decisions(
+        run,
+        manifest,
+        coverage,
+        core,
+        identity["identity_sha256"],
+    )
+    artifact = _higher_layer_fixed_cost_artifact(
+        identity, manifest, decisions, validated
+    )
+    persist_immutable_bytes(
+        run / "fixed-costs.json", _canonical_json_file_bytes(artifact)
+    )
+    return artifact
+
+
+def _higher_layer_state_pair_spec(pair: StateHoldoutSpec) -> dict[str, Any]:
+    return {
+        "kind": pair.kind,
+        "pair_id": pair.pair_id,
+        "scale": pair.scale,
+        "control": dict(pair.control),
+        "target": dict(pair.target),
+    }
+
+
+def _higher_layer_fixed_cost_values(
+    manifest: HigherLayerManifest, fixed: Mapping[str, Any]
+) -> dict[str, Decimal]:
+    costs = fixed.get("fixed_costs") if isinstance(fixed, Mapping) else None
+    if (
+        fixed.get("schema_version") != _HIGHER_LAYER_FIXED_COST_SCHEMA_VERSION
+        or fixed.get("status") != "accepted"
+        or fixed.get("fixed_cost_rank") != len(manifest.q_formula)
+        or not isinstance(costs, Mapping)
+        or set(costs) != set(manifest.q_formula)
+        or fixed.get("fixed_costs_sha256") != sha256_bytes(canonical_json(costs))
+    ):
+        raise ValueError("higher-layer fixed-cost artifact is invalid")
+    parsed = {
+        key: _decimal(costs[key], label=f"higher-layer fixed cost {key}")
+        for key in manifest.q_formula
+    }
+    if any(value <= 0 for value in parsed.values()):
+        raise ValueError("higher-layer fixed costs must be positive")
+    return parsed
+
+
+def _higher_layer_state_inventory(
+    manifest: HigherLayerManifest, rows: list[Mapping[str, Any]]
+) -> None:
+    expected = {
+        canonical_json(
+            {
+                "pair_id": pair.pair_id,
+                "lane": lane,
+                "repeat_index": repeat_index,
+            }
+        )
+        for pair in manifest.state_holdouts
+        for lane in ("control", "target")
+        for repeat_index in range(manifest.repeats)
+    }
+    try:
+        actual = [
+            canonical_json(
+                {
+                    "pair_id": row.get("pair_id"),
+                    "lane": row.get("lane"),
+                    "repeat_index": row.get("repeat_index"),
+                }
+            )
+            for row in rows
+            if isinstance(row, Mapping)
+        ]
+    except (TypeError, ValueError) as error:
+        raise ValueError("higher-layer state holdout inventory differs") from error
+    if len(actual) != len(rows) or len(actual) != len(expected) or set(actual) != expected:
+        raise ValueError("higher-layer state holdout inventory differs")
+
+
+def _validate_higher_layer_state_row(
+    row: Mapping[str, Any],
+    pair: StateHoldoutSpec,
+    *,
+    calibration_id: str,
+) -> Mapping[str, Any]:
+    if row.get("calibration_run_id") != calibration_id:
+        raise ValueError("higher-layer state row calibration identity differs")
+    lane = row.get("lane")
+    repeat_index = row.get("repeat_index")
+    spec = _higher_layer_state_pair_spec(pair)
+    if (
+        row.get("schema_version") != 1
+        or row.get("pair_id") != pair.pair_id
+        or lane not in {"control", "target"}
+        or type(repeat_index) is not int
+        or repeat_index not in range(3)
+        or not _exact_json_equal(row.get("spec"), spec)
+    ):
+        raise ValueError("higher-layer state row spec or identity differs")
+    if row.get("status") == "rejected":
+        if set(row) != {
+            "schema_version",
+            "calibration_run_id",
+            "pair_id",
+            "lane",
+            "repeat_index",
+            "status",
+            "spec",
+            "reasons",
+        } or (
+            not isinstance(row.get("reasons"), list)
+            or not row["reasons"]
+            or any(not isinstance(reason, str) or not reason for reason in row["reasons"])
+        ):
+            raise ValueError("higher-layer rejected state row is malformed")
+        return {}
+    if row.get("status") != "accepted":
+        raise ValueError("higher-layer state row status differs")
+    if set(row) != {
+        "schema_version",
+        "calibration_run_id",
+        "pair_id",
+        "lane",
+        "repeat_index",
+        "status",
+        "spec",
+        "workload_spec",
+        "workload_id",
+        "backend_input_sha256",
+        "guest_input_sha256",
+        "guest_input_bincode_length",
+        "execution_row_id",
+        "prover_gas",
+        "public_values",
+        "sp1_execution_engine",
+        "sp1_gas_trace_chunk_threshold",
+        "sp1_gas_trace_chunk_slots",
+        "observation",
+    }:
+        raise ValueError("higher-layer accepted state row fields differ")
+    prover_gas = row.get("prover_gas")
+    if (
+        not isinstance(prover_gas, str)
+        or not prover_gas.isascii()
+        or not prover_gas.isdigit()
+        or prover_gas == "0"
+        or prover_gas.startswith("0")
+    ):
+        raise ValueError("higher-layer state proverGas is not a positive canonical integer")
+    validate_sp1_execution_provenance(
+        row, workload_kind="state_holdout", expected_engine="gas-estimator"
+    )
+    backend_input_sha256 = row.get("backend_input_sha256")
+    guest_input_sha256 = row.get("guest_input_sha256")
+    if (
+        not _is_sha256(backend_input_sha256)
+        or not isinstance(guest_input_sha256, str)
+        or guest_input_sha256.lower().removeprefix("0x") != backend_input_sha256
+    ):
+        raise ValueError("higher-layer state GuestInput identity differs")
+    workload_spec = {
+        "schema_version": 1,
+        "pair_id": pair.pair_id,
+        "lane": lane,
+        "pair_spec": spec,
+        "guest_input_canonical_sha256": backend_input_sha256,
+    }
+    workload_id = controlled_workload_id(workload_spec)
+    expected_execution_row_id = controlled_execution_row_id(
+        workload_id,
+        backend="sp1",
+        execution_engine="gas-estimator",
+        run_id=calibration_id,
+        repeat_index=repeat_index,
+        backend_input_sha256=backend_input_sha256,
+    )
+    if (
+        not _exact_json_equal(row.get("workload_spec"), workload_spec)
+        or row.get("workload_id") != workload_id
+        or row.get("execution_row_id") != expected_execution_row_id
+    ):
+        raise ValueError("higher-layer state workload or execution identity differs")
+    observation = row.get("observation")
+    if not isinstance(observation, Mapping):
+        raise ValueError("higher-layer state accepted row lacks an observation")
+    if set(observation) != {
+        "pair_id",
+        "lane",
+        "backend_input_sha256",
+        "guest_input_sha256",
+        "guest_input_bincode_length",
+        "public_output",
+        "actual_final_state_root",
+        "actual_raw_gas_by_key",
+        "actual_features",
+        "actual_diagnostics",
+        "started_candidate_transaction_count",
+        "committed_candidate_transaction_count",
+        "unattempted_candidate_transaction_count",
+        "operation_phase_ownership",
+        "system_operation_ownership",
+        "anchor_operation_ownership",
+    }:
+        raise ValueError("higher-layer state observation fields differ")
+    if (
+        observation.get("pair_id") != pair.pair_id
+        or observation.get("lane") != lane
+        or observation.get("backend_input_sha256") != backend_input_sha256
+        or observation.get("guest_input_sha256") != guest_input_sha256
+        or observation.get("guest_input_bincode_length")
+        != row.get("guest_input_bincode_length")
+        or observation.get("public_output") != row.get("public_values")
+        or observation.get("operation_phase_ownership")
+        != "transaction_non_anchor_only"
+        or observation.get("system_operation_ownership") != "block_base"
+        or observation.get("anchor_operation_ownership") != "block_base"
+        or any(
+            type(observation.get(field)) is not int or observation[field] < 0
+            for field in (
+                "started_candidate_transaction_count",
+                "committed_candidate_transaction_count",
+                "unattempted_candidate_transaction_count",
+            )
+        )
+    ):
+        raise ValueError("higher-layer state observation identity differs")
+    features = observation.get("actual_features")
+    if (
+        not isinstance(features, Mapping)
+        or set(features) != set(_HIGHER_LAYER_Q_FORMULA)
+        or any(type(value) is not int or value < 0 for value in features.values())
+    ):
+        raise ValueError("higher-layer state feature coverage differs")
+    ledger = observation.get("actual_raw_gas_by_key")
+    diagnostics = observation.get("actual_diagnostics")
+    diagnostic_fields = {
+        "guest_input_bincode_length",
+        "witness_node_count",
+        "witness_byte_count",
+        "blob_count",
+        "kzg_invocation_count",
+        "calldata_length",
+        "bytecode_length",
+        "touched_state_key_count",
+    }
+    if (
+        type(row.get("guest_input_bincode_length")) is not int
+        or row["guest_input_bincode_length"] <= 0
+        or not isinstance(observation.get("public_output"), str)
+        or not isinstance(observation.get("actual_final_state_root"), str)
+        or not isinstance(ledger, Mapping)
+        or any(
+            not isinstance(key, str)
+            or not isinstance(delta, Mapping)
+            or set(delta) != {"pricing_basis", "units", "event_count"}
+            or delta.get("pricing_basis") != "raw_gas_slope"
+            or type(delta.get("units")) is not int
+            or type(delta.get("event_count")) is not int
+            or delta.get("units", -1) < 0
+            or delta.get("event_count", -1) < 0
+            for key, delta in ledger.items()
+        )
+        or not isinstance(diagnostics, Mapping)
+        or set(diagnostics) != diagnostic_fields
+        or any(type(value) is not int or value < 0 for value in diagnostics.values())
+        or diagnostics.get("guest_input_bincode_length")
+        != row.get("guest_input_bincode_length")
+    ):
+        raise ValueError("higher-layer state operation or diagnostic evidence is missing")
+    return observation
+
+
+def _higher_layer_state_operation_cost(
+    core: Mapping[str, Any],
+    coverage: Mapping[str, Any],
+    ledger: Mapping[str, Any],
+) -> Decimal:
+    return sum(
+        (
+            resolve_static_operation_delta(core, coverage, key, delta)
+            for key, delta in sorted(ledger.items())
+        ),
+        Decimal(0),
+    )
+
+
+@_isolated_decimal_context
+def evaluate_higher_layer_state_holdouts(
+    manifest: HigherLayerManifest,
+    operation_coverage: Mapping[str, Any],
+    augmented_core: Mapping[str, Any],
+    fixed: Mapping[str, Any],
+    rows: Iterable[Mapping[str, Any]],
+) -> Mapping[str, Any]:
+    """Evaluate the frozen state pairs without modifying the accepted fixed costs."""
+    if not isinstance(manifest, HigherLayerManifest):
+        raise ValueError("higher-layer state evaluator requires the validated manifest")
+    _require_pinned_operation_artifact(
+        operation_coverage,
+        expected_sha256=manifest.operation_coverage_ref["artifact_sha256"],
+        label="pinned operation coverage",
+    )
+    _require_pinned_operation_artifact(
+        augmented_core,
+        expected_sha256=manifest.augmented_core_ref["artifact_sha256"],
+        label="pinned augmented core",
+    )
+    fixed_values = _higher_layer_fixed_cost_values(manifest, fixed)
+    calibration_id = _higher_layer_calibration_id(fixed.get("calibration_id"))
+    row_list = list(rows)
+    _higher_layer_state_inventory(manifest, row_list)
+    maximum_total_ape = Decimal(manifest.gates["maximum_state_total_ape"])
+    maximum_effect_ratio = Decimal(manifest.gates["maximum_state_effect_ratio"])
+    validated_rows: dict[str, list[tuple[Mapping[str, Any], Mapping[str, Any]]]] = {
+        pair.pair_id: [] for pair in manifest.state_holdouts
+    }
+    for pair in manifest.state_holdouts:
+        for row in (row for row in row_list if row.get("pair_id") == pair.pair_id):
+            validated_rows[pair.pair_id].append(
+                (
+                    row,
+                    _validate_higher_layer_state_row(
+                        row, pair, calibration_id=calibration_id
+                    ),
+                )
+            )
+    results = []
+    any_invalid = False
+    any_failed = False
+    for pair in manifest.state_holdouts:
+        pair_rows = [row for row, _observation in validated_rows[pair.pair_id]]
+        observations: dict[str, list[Mapping[str, Any]]] = {
+            "control": [],
+            "target": [],
+        }
+        invalid_reasons = []
+        for row, observation in validated_rows[pair.pair_id]:
+            if not observation:
+                invalid_reasons.append("rejected_execution")
+            else:
+                observations[str(row["lane"])].append(observation)
+        if invalid_reasons:
+            any_invalid = True
+            results.append(
+                {
+                    "pair_id": pair.pair_id,
+                    "kind": pair.kind,
+                    "scale": pair.scale,
+                    "status": "inconclusive",
+                    "reasons": list(dict.fromkeys(invalid_reasons)),
+                }
+            )
+            continue
+        lane_values = {}
+        lane_features = {}
+        lane_ledgers = {}
+        unstable_reasons = []
+        for lane in ("control", "target"):
+            lane_rows = sorted(
+                (row for row in pair_rows if row.get("lane") == lane),
+                key=lambda row: int(row["repeat_index"]),
+            )
+            lane_observations = observations[lane]
+            gas_values = [
+                _decimal(row.get("prover_gas"), label="state holdout proverGas")
+                for row in lane_rows
+            ]
+            if any(value <= 0 for value in gas_values):
+                raise ValueError("state holdout proverGas must be positive")
+            if len({canonical_json(value) for value in lane_observations}) != 1:
+                unstable_reasons.append("state holdout observation changed across repeats")
+            if len(set(gas_values)) != 1:
+                unstable_reasons.append("state holdout proverGas changed across repeats")
+            lane_values[lane] = gas_values[0]
+            lane_features[lane] = lane_observations[0]["actual_features"]
+            lane_ledgers[lane] = lane_observations[0]["actual_raw_gas_by_key"]
+        if unstable_reasons:
+            any_invalid = True
+            results.append(
+                {
+                    "pair_id": pair.pair_id,
+                    "kind": pair.kind,
+                    "scale": pair.scale,
+                    "status": "inconclusive",
+                    "reasons": list(dict.fromkeys(unstable_reasons)),
+                }
+            )
+            continue
+        if (
+            not _exact_json_equal(lane_features["target"], lane_features["control"])
+            or not _exact_json_equal(lane_ledgers["target"], lane_ledgers["control"])
+        ):
+            raise ValueError(
+                "state holdout target/control operation or fixed features differ"
+            )
+        try:
+            lane_costs = {
+                lane: _higher_layer_state_operation_cost(
+                    augmented_core, operation_coverage, lane_ledgers[lane]
+                )
+                for lane in ("control", "target")
+            }
+        except ValueError as error:
+            any_invalid = True
+            results.append(
+                {
+                    "pair_id": pair.pair_id,
+                    "kind": pair.kind,
+                    "scale": pair.scale,
+                    "status": "inconclusive",
+                    "reasons": [str(error)],
+                }
+            )
+            continue
+        if lane_costs["target"] != lane_costs["control"]:
+            raise ValueError(
+                "state holdout target/control operation or fixed features differ"
+            )
+        predictions = {
+            lane: lane_costs[lane]
+            + sum(
+                Decimal(lane_features[lane][key]) * fixed_values[key]
+                for key in manifest.q_formula
+            )
+            for lane in ("control", "target")
+        }
+        apes = {
+            lane: abs(predictions[lane] - lane_values[lane]) / lane_values[lane]
+            for lane in ("control", "target")
+        }
+        predicted_delta = predictions["target"] - predictions["control"]
+        observed_delta = lane_values["target"] - lane_values["control"]
+        effect_ratio = abs(observed_delta - predicted_delta) / lane_values["control"]
+        passed = (
+            max(apes.values()) <= maximum_total_ape
+            and effect_ratio <= maximum_effect_ratio
+        )
+        any_failed = any_failed or not passed
+        results.append(
+            {
+                "pair_id": pair.pair_id,
+                "kind": pair.kind,
+                "scale": pair.scale,
+                "status": "accepted" if passed else "needs_state_split",
+                "control_prediction": _decimal_text(predictions["control"]),
+                "control_observed": _decimal_text(lane_values["control"]),
+                "control_ape": _decimal_text(apes["control"]),
+                "target_prediction": _decimal_text(predictions["target"]),
+                "target_observed": _decimal_text(lane_values["target"]),
+                "target_ape": _decimal_text(apes["target"]),
+                "predicted_delta": _decimal_text(predicted_delta),
+                "observed_delta": _decimal_text(observed_delta),
+                "effect_ratio": _decimal_text(effect_ratio),
+            }
+        )
+    status = (
+        "inconclusive"
+        if any_invalid
+        else "needs_state_split"
+        if any_failed
+        else "coarse_model_accepted"
+    )
+    return {
+        "schema_version": 1,
+        "identity_sha256": fixed["identity_sha256"],
+        "calibration_id": calibration_id,
+        "fixed_costs": dict(fixed["fixed_costs"]),
+        "fixed_costs_sha256": fixed["fixed_costs_sha256"],
+        "selected_round": fixed["selected_round"],
+        "state_holdouts": results,
+        "coarse_state_trie": {
+            "status": status,
+            "maximum_total_ape": _decimal_text(maximum_total_ape),
+            "maximum_effect_ratio": _decimal_text(maximum_effect_ratio),
+        },
+    }
+
+
+def _load_higher_layer_fixed_costs(
+    run: pathlib.Path,
+    identity: Mapping[str, Any],
+    manifest: HigherLayerManifest,
+) -> Mapping[str, Any]:
+    path = _higher_layer_contained_regular_file(
+        run, pathlib.Path("fixed-costs.json"), label="higher-layer fixed-cost artifact"
+    )
+    try:
+        raw = path.read_bytes()
+        fixed = json.loads(raw)
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError("higher-layer fixed-cost artifact is invalid") from error
+    if (
+        not isinstance(fixed, Mapping)
+        or raw != _canonical_json_file_bytes(fixed)
+        or fixed.get("identity_sha256") != identity.get("identity_sha256")
+        or fixed.get("calibration_id") != identity.get("calibration_id")
+    ):
+        raise ValueError("higher-layer fixed-cost artifact identity differs")
+    _higher_layer_fixed_cost_values(manifest, fixed)
+    replay = fit_higher_layer_fixed_costs(run)
+    if raw != _canonical_json_file_bytes(replay):
+        raise ValueError("higher-layer fixed-cost artifact differs on replay")
+    return fixed
+
+
+def run_controlled_state_holdout_pair(
+    *,
+    guest_launcher: pathlib.Path,
+    pair_spec: Mapping[str, Any],
+    repeat_index: int,
+    out: pathlib.Path,
+) -> list[Mapping[str, Any]]:
+    """Run one frozen state pair through the normal production SP1 stage."""
+    if type(repeat_index) is not int or repeat_index not in range(3):
+        raise ValueError("state holdout repeat index must be 0, 1, or 2")
+    input_path = out.with_name(f"{out.stem}.input.json")
+    input_path.write_bytes(_canonical_json_file_bytes(pair_spec))
+    subprocess.run(
+        [
+            str(guest_launcher),
+            "--stage",
+            "controlled-state-holdout",
+            "--proof-type",
+            "sp1",
+            "--mode",
+            "execute",
+            "--sp1-prover",
+            "local",
+            "--sp1-execution-engine",
+            "gas-estimator",
+            "--input",
+            str(input_path),
+            "--jsonl-out",
+            str(out),
+        ],
+        check=True,
+    )
+    return list(iter_jsonl(out))
+
+
+def _higher_layer_state_row_from_report(
+    report: Mapping[str, Any],
+    *,
+    pair: StateHoldoutSpec,
+    repeat_index: int,
+    calibration_id: str,
+) -> dict[str, Any]:
+    validate_sp1_execution_provenance(
+        report, workload_kind="state_holdout", expected_engine="gas-estimator"
+    )
+    controlled = report.get("controlled_state_holdout")
+    spec = _higher_layer_state_pair_spec(pair)
+    if (
+        report.get("stage") != "controlled-state-holdout"
+        or report.get("mode") != "execute"
+        or not isinstance(controlled, Mapping)
+        or controlled.get("status") != "accepted"
+        or controlled.get("pair_id") != pair.pair_id
+        or controlled.get("lane") not in {"control", "target"}
+        or not _exact_json_equal(controlled.get("spec"), spec)
+    ):
+        raise ValueError("controlled state holdout report identity differs")
+    observation = controlled.get("observation")
+    if not isinstance(observation, Mapping):
+        raise ValueError("controlled state holdout report lacks an observation")
+    prover_gas = report.get("gas")
+    if type(prover_gas) is not int or prover_gas <= 0:
+        raise ValueError("controlled state holdout report proverGas is invalid")
+    lane = str(controlled["lane"])
+    backend_input_sha256 = observation.get("backend_input_sha256")
+    guest_input_sha256 = report.get("guest_input_sha256")
+    if (
+        not _is_sha256(backend_input_sha256)
+        or report.get("guest_input_bincode_length")
+        != observation.get("guest_input_bincode_length")
+        or guest_input_sha256 != observation.get("guest_input_sha256")
+        or not isinstance(guest_input_sha256, str)
+        or guest_input_sha256.lower().removeprefix("0x") != backend_input_sha256
+        or report.get("public_values") != observation.get("public_output")
+    ):
+        raise ValueError("controlled state holdout report observation differs")
+    workload_spec = {
+        "schema_version": 1,
+        "pair_id": pair.pair_id,
+        "lane": lane,
+        "pair_spec": spec,
+        "guest_input_canonical_sha256": backend_input_sha256,
+    }
+    workload_id = controlled_workload_id(workload_spec)
+    row = {
+        "schema_version": 1,
+        "calibration_run_id": calibration_id,
+        "pair_id": pair.pair_id,
+        "lane": lane,
+        "repeat_index": repeat_index,
+        "status": "accepted",
+        "spec": spec,
+        "workload_spec": workload_spec,
+        "workload_id": workload_id,
+        "backend_input_sha256": backend_input_sha256,
+        "guest_input_sha256": guest_input_sha256,
+        "guest_input_bincode_length": observation["guest_input_bincode_length"],
+        "execution_row_id": controlled_execution_row_id(
+            workload_id,
+            backend="sp1",
+            execution_engine="gas-estimator",
+            run_id=calibration_id,
+            repeat_index=repeat_index,
+            backend_input_sha256=backend_input_sha256,
+        ),
+        "prover_gas": str(prover_gas),
+        "public_values": report.get("public_values"),
+        "sp1_execution_engine": report.get("sp1_execution_engine"),
+        "sp1_gas_trace_chunk_threshold": report.get(
+            "sp1_gas_trace_chunk_threshold"
+        ),
+        "sp1_gas_trace_chunk_slots": report.get("sp1_gas_trace_chunk_slots"),
+        "observation": dict(observation),
+    }
+    _validate_higher_layer_state_row(row, pair, calibration_id=calibration_id)
+    return row
+
+
+def run_higher_layer_state_holdouts(
+    run: pathlib.Path,
+    *,
+    executor=run_controlled_state_holdout_pair,
+) -> list[Mapping[str, Any]]:
+    """Execute all frozen state pairs only after the accepted fixed-cost gate."""
+    run = pathlib.Path(run)
+    identity, manifest, _coverage, _core = _validate_current_higher_layer_identity(run)
+    _load_higher_layer_fixed_costs(run, identity, manifest)
+    raw_relative = pathlib.Path("raw/state-holdouts.jsonl")
+    raw_path = run / raw_relative
+    if raw_path.exists() or raw_path.is_symlink():
+        raw_path = _higher_layer_contained_regular_file(
+            run, raw_relative, label="higher-layer state holdout raw evidence"
+        )
+        rows = _read_higher_layer_rows(raw_path)
+        _higher_layer_state_inventory(manifest, rows)
+        for pair in manifest.state_holdouts:
+            for row in (row for row in rows if row.get("pair_id") == pair.pair_id):
+                _validate_higher_layer_state_row(
+                    row, pair, calibration_id=identity["calibration_id"]
+                )
+        return rows
+    raw_path.parent.mkdir(parents=True, exist_ok=True)
+    if raw_path.parent.is_symlink() or not raw_path.parent.is_dir():
+        raise ValueError("higher-layer state raw directory must be non-symlink")
+    rows: list[Mapping[str, Any]] = []
+    with tempfile.TemporaryDirectory(prefix="higher-layer-state-") as temporary:
+        temporary_root = pathlib.Path(temporary)
+        for pair in manifest.state_holdouts:
+            spec = _higher_layer_state_pair_spec(pair)
+            for repeat_index in range(manifest.repeats):
+                report_path = temporary_root / f"{pair.pair_id}-{repeat_index}.jsonl"
+                try:
+                    reports = executor(
+                        guest_launcher=(REPO_ROOT / _HIGHER_LAYER_LAUNCHER_PATH).resolve(),
+                        pair_spec=spec,
+                        repeat_index=repeat_index,
+                        out=report_path,
+                    )
+                    if len(reports) != 2:
+                        raise ValueError(
+                            "controlled state holdout must emit exactly two lane reports"
+                        )
+                    emitted = [
+                        _higher_layer_state_row_from_report(
+                            report,
+                            pair=pair,
+                            repeat_index=repeat_index,
+                            calibration_id=identity["calibration_id"],
+                        )
+                        for report in reports
+                    ]
+                    if [row["lane"] for row in emitted] != ["control", "target"]:
+                        raise ValueError(
+                            "controlled state holdout lane ordering differs"
+                        )
+                    rows.extend(emitted)
+                except (OSError, subprocess.SubprocessError) as error:
+                    reason = (
+                        "state_holdout_subprocess_failure"
+                        if isinstance(error, subprocess.SubprocessError)
+                        else "state_holdout_io_failure"
+                    )
+                    for lane in ("control", "target"):
+                        rows.append(
+                            {
+                                "schema_version": 1,
+                                "calibration_run_id": identity["calibration_id"],
+                                "pair_id": pair.pair_id,
+                                "lane": lane,
+                                "repeat_index": repeat_index,
+                                "status": "rejected",
+                                "spec": spec,
+                                "reasons": [reason],
+                            }
+                        )
+    _higher_layer_state_inventory(manifest, rows)
+    raw_bytes = b"".join(canonical_json(row) + b"\n" for row in rows)
+    persist_immutable_bytes(raw_path, raw_bytes)
+    return rows
+
+
+def finalize_higher_layer_calibration(run: pathlib.Path) -> Mapping[str, Any]:
+    """Replay all fixed and holdout evidence and persist the immutable verdict."""
+    run = pathlib.Path(run)
+    identity, manifest, coverage, core = _validate_current_higher_layer_identity(run)
+    fixed = _load_higher_layer_fixed_costs(run, identity, manifest)
+    raw_path = _higher_layer_contained_regular_file(
+        run,
+        pathlib.Path("raw/state-holdouts.jsonl"),
+        label="higher-layer state holdout raw evidence",
+    )
+    rows = _read_higher_layer_rows(raw_path)
+    result = evaluate_higher_layer_state_holdouts(
+        manifest, coverage, core, fixed, rows
+    )
+    persist_immutable_bytes(
+        run / "higher-layer-calibration.json",
+        _canonical_json_file_bytes(result),
+    )
+    return result
+
+
+def run_controlled_state_holdout_trace(
+    *,
+    guest_launcher: pathlib.Path,
+    pair_spec: Mapping[str, Any],
+    out: pathlib.Path,
+) -> list[Mapping[str, Any]]:
+    """Reconstruct one state pair through the reviewed host-only launcher stage."""
+    input_path = out.with_name(f"{out.stem}.input.json")
+    input_path.write_bytes(_canonical_json_file_bytes(pair_spec))
+    subprocess.run(
+        [
+            str(guest_launcher),
+            "--stage",
+            "controlled-state-holdout-trace",
+            "--proof-type",
+            "native",
+            "--mode",
+            "execute",
+            "--input",
+            str(input_path),
+            "--jsonl-out",
+            str(out),
+        ],
+        check=True,
+    )
+    return list(iter_jsonl(out))
+
+
+def _higher_layer_run_from_path_file(path: pathlib.Path) -> pathlib.Path:
+    try:
+        mode = path.stat(follow_symlinks=False).st_mode
+        raw = path.read_text()
+    except OSError as error:
+        raise ValueError("higher-layer run-path file is missing") from error
+    if path.is_symlink() or not stat.S_ISREG(mode):
+        raise ValueError("higher-layer run-path file must be a regular non-symlink file")
+    lines = raw.splitlines()
+    if len(lines) != 1 or not lines[0]:
+        raise ValueError("higher-layer run-path file must contain exactly one path")
+    value = pathlib.Path(lines[0])
+    candidate = value if value.is_absolute() else REPO_ROOT / value
+    candidate = pathlib.Path(os.path.abspath(candidate))
+    cursor = pathlib.Path(candidate.anchor)
+    for part in candidate.parts[1:]:
+        cursor /= part
+        if cursor.is_symlink():
+            raise ValueError("higher-layer verification path has a symlink component")
+    try:
+        return candidate.resolve(strict=True)
+    except OSError as error:
+        raise ValueError("higher-layer verification path is missing") from error
+
+
+def _validate_higher_layer_trace_pair(
+    pair: StateHoldoutSpec,
+    trace_rows: list[Mapping[str, Any]],
+    persisted_rows: list[Mapping[str, Any]],
+) -> None:
+    spec = _higher_layer_state_pair_spec(pair)
+    if len(trace_rows) != 2:
+        raise ValueError("higher-layer host trace must contain exactly two rows")
+    for trace, lane in zip(trace_rows, ("control", "target")):
+        if (
+            not isinstance(trace, Mapping)
+            or set(trace) != {"schema_version", "pair_id", "lane", "spec", "observation"}
+            or trace.get("schema_version") != 1
+            or trace.get("pair_id") != pair.pair_id
+            or trace.get("lane") != lane
+            or not _exact_json_equal(trace.get("spec"), spec)
+            or not isinstance(trace.get("observation"), Mapping)
+        ):
+            raise ValueError("higher-layer host trace identity differs")
+        accepted = [
+            row
+            for row in persisted_rows
+            if row.get("lane") == lane and row.get("status") == "accepted"
+        ]
+        if accepted and any(
+            not _exact_json_equal(row.get("observation"), trace["observation"])
+            for row in accepted
+        ):
+            raise ValueError("higher-layer host trace differs from persisted evidence")
+
+
+def verify_higher_layer_calibration(
+    run_path_file: pathlib.Path,
+    *,
+    trace_executor=run_controlled_state_holdout_trace,
+    source_validator=None,
+) -> Mapping[str, Any]:
+    """Semantically replay one live campaign without running SP1."""
+    run = _higher_layer_run_from_path_file(pathlib.Path(run_path_file))
+    try:
+        run_entries = {entry.name for entry in run.iterdir()}
+    except OSError as error:
+        raise ValueError("higher-layer verification path is missing") from error
+    if run_entries == set(_HIGHER_LAYER_SEALED_FILES):
+        options = {"trace_executor": trace_executor}
+        if source_validator is not None:
+            options["source_validator"] = source_validator
+        return verify_sealed_higher_layer_calibration(run, **options)
+    identity, manifest, coverage, core = _validate_current_higher_layer_identity(run)
+    decisions, validated = _load_higher_layer_decisions(
+        run, manifest, coverage, core, identity["identity_sha256"]
+    )
+    fixed = _load_higher_layer_fixed_costs(run, identity, manifest)
+    raw_path = _higher_layer_contained_regular_file(
+        run,
+        pathlib.Path("raw/state-holdouts.jsonl"),
+        label="higher-layer state holdout raw evidence",
+    )
+    final_path = _higher_layer_contained_regular_file(
+        run,
+        pathlib.Path("higher-layer-calibration.json"),
+        label="higher-layer final calibration",
+    )
+    rows = _read_higher_layer_rows(raw_path)
+    _higher_layer_state_inventory(manifest, rows)
+    with tempfile.TemporaryDirectory(prefix="higher-layer-trace-") as temporary:
+        temporary_root = pathlib.Path(temporary)
+        for pair in manifest.state_holdouts:
+            trace_rows = trace_executor(
+                guest_launcher=(REPO_ROOT / _HIGHER_LAYER_LAUNCHER_PATH).resolve(),
+                pair_spec=_higher_layer_state_pair_spec(pair),
+                out=temporary_root / f"{pair.pair_id}.jsonl",
+            )
+            _validate_higher_layer_trace_pair(
+                pair,
+                list(trace_rows),
+                [row for row in rows if row.get("pair_id") == pair.pair_id],
+            )
+    replay = evaluate_higher_layer_state_holdouts(
+        manifest, coverage, core, fixed, rows
+    )
+    if final_path.read_bytes() != _canonical_json_file_bytes(replay):
+        raise ValueError("higher-layer final calibration differs on replay")
+    round_evidence = []
+    for record in validated:
+        persisted = {
+            key: record[key]
+            for key in (
+                "generator_max_count",
+                "raw_rows",
+                "raw_rows_sha256",
+                "fit",
+                "fit_sha256",
+                "decision",
+            )
+        }
+        round_evidence.append(
+            {
+                "record": persisted,
+                "rows": _read_higher_layer_rows(run / persisted["raw_rows"]),
+                "fit": record["fit_payload"],
+            }
+        )
+    return {
+        "run": run,
+        "identity": identity,
+        "manifest": manifest,
+        "coverage": coverage,
+        "core": core,
+        "decisions": decisions,
+        "validated_rounds": validated,
+        "round_evidence": round_evidence,
+        "fixed": fixed,
+        "state_rows": rows,
+        "final": replay,
+    }
+
+
+def _require_portable_higher_layer_value(value: Any) -> None:
+    if isinstance(value, Mapping):
+        for key, nested in value.items():
+            _require_portable_higher_layer_value(key)
+            _require_portable_higher_layer_value(nested)
+        return
+    if isinstance(value, (list, tuple)):
+        for nested in value:
+            _require_portable_higher_layer_value(nested)
+        return
+    if isinstance(value, str):
+        tokens = value.translate(
+            str.maketrans({character: " " for character in "\"'()[]{}<>,;="})
+        ).split()
+        if any(
+            pathlib.PurePosixPath(token).is_absolute()
+            or pathlib.PureWindowsPath(token).is_absolute()
+            or token.startswith("~")
+            for token in tokens
+        ):
+            raise ValueError("higher-layer sealed evidence contains a non-portable path")
+
+
+def _validate_sealed_higher_layer_source_identity(
+    document: Mapping[str, Any],
+) -> tuple[HigherLayerManifest, Mapping[str, Any], Mapping[str, Any]]:
+    if set(document) != {
+        "schema_version",
+        "calibration_id",
+        "identity_sha256",
+        "identity",
+    }:
+        raise ValueError("higher-layer sealed source identity fields differ")
+    payload = document.get("identity")
+    digest = sha256_bytes(canonical_json(payload)) if isinstance(payload, Mapping) else None
+    if (
+        document.get("schema_version") != _HIGHER_LAYER_IDENTITY_SCHEMA_VERSION
+        or document.get("identity_sha256") != digest
+        or document.get("calibration_id") != str(digest)[:24]
+    ):
+        raise ValueError("higher-layer sealed source identity differs")
+    assert_generated_paths_only(git_worktree_status())
+    expected = _higher_layer_identity_payload(
+        implementation_revision=git_head(),
+        manifest_path=(REPO_ROOT / _HIGHER_LAYER_MANIFEST_PATH).resolve(),
+        operation_coverage_path=(REPO_ROOT / _HIGHER_LAYER_COVERAGE_PATH).resolve(),
+        augmented_core_path=(REPO_ROOT / _HIGHER_LAYER_CORE_PATH).resolve(),
+        guest_launcher=(REPO_ROOT / _HIGHER_LAYER_LAUNCHER_PATH).resolve(),
+        elf=(REPO_ROOT / _HIGHER_LAYER_ELF_PATH).resolve(),
+    )
+    if not _exact_json_equal(payload, expected):
+        raise ValueError("higher-layer sealed source files or implementation changed")
+    manifest = load_higher_layer_manifest(
+        (REPO_ROOT / _HIGHER_LAYER_MANIFEST_PATH).resolve()
+    )
+    coverage = _higher_layer_json_artifact(
+        (REPO_ROOT / _HIGHER_LAYER_COVERAGE_PATH).resolve(),
+        label="operation coverage",
+    )
+    core = _higher_layer_json_artifact(
+        (REPO_ROOT / _HIGHER_LAYER_CORE_PATH).resolve(), label="augmented core"
+    )
+    return manifest, coverage, core
+
+
+def _validate_packaged_higher_layer_rounds(
+    *,
+    identity: Mapping[str, Any],
+    manifest: HigherLayerManifest,
+    coverage: Mapping[str, Any],
+    core: Mapping[str, Any],
+    decisions: Mapping[str, Any],
+    evidence: Any,
+) -> list[dict[str, Any]]:
+    if set(decisions) != {"schema_version", "identity_sha256", "rounds"} or (
+        decisions.get("schema_version") != _HIGHER_LAYER_DECISIONS_SCHEMA_VERSION
+        or decisions.get("identity_sha256") != identity.get("identity_sha256")
+        or not isinstance(decisions.get("rounds"), list)
+        or not isinstance(evidence, list)
+        or len(evidence) != len(decisions["rounds"])
+        or not evidence
+    ):
+        raise ValueError("higher-layer packaged decision ledger differs")
+    rounds = decisions["rounds"]
+    bounds = [record.get("generator_max_count") for record in rounds]
+    if bounds != list(manifest.generator_rounds[: len(bounds)]):
+        raise ValueError("higher-layer packaged rounds are not contiguous")
+    validated = []
+    prior_decision = None
+    record_fields = {
+        "generator_max_count",
+        "raw_rows",
+        "raw_rows_sha256",
+        "fit",
+        "fit_sha256",
+        "decision",
+    }
+    for index, (record, packaged) in enumerate(zip(rounds, evidence)):
+        bound = manifest.generator_rounds[index]
+        if (
+            not isinstance(record, Mapping)
+            or set(record) != record_fields
+            or not isinstance(packaged, Mapping)
+            or set(packaged) != {"record", "rows", "fit"}
+            or not _exact_json_equal(packaged.get("record"), record)
+            or (index and prior_decision != "expand_next_round")
+            or record.get("raw_rows") != f"raw/overhead-round-{bound}.jsonl"
+            or record.get("fit") != f"fit/overhead-round-{bound}.json"
+            or not isinstance(packaged.get("rows"), list)
+            or not isinstance(packaged.get("fit"), Mapping)
+        ):
+            raise ValueError("higher-layer packaged round structure differs")
+        raw_bytes = b"".join(
+            canonical_json(row) + b"\n" for row in packaged["rows"]
+        )
+        replay = evaluate_higher_layer_fixed_round(
+            manifest,
+            coverage,
+            core,
+            packaged["rows"],
+            bound,
+            calibration_id=identity["calibration_id"],
+        )
+        fit_bytes = _canonical_json_file_bytes(replay)
+        if (
+            record.get("raw_rows_sha256") != sha256_bytes(raw_bytes)
+            or record.get("fit_sha256") != sha256_bytes(fit_bytes)
+            or record.get("decision") != replay.get("decision")
+            or not _exact_json_equal(packaged["fit"], replay)
+        ):
+            raise ValueError("higher-layer packaged round differs on replay")
+        validated.append({**record, "fit_payload": replay})
+        prior_decision = record["decision"]
+    return validated
+
+
+def _read_sealed_higher_layer_document(
+    package: pathlib.Path, name: str
+) -> Mapping[str, Any]:
+    path = _higher_layer_contained_regular_file(
+        package, pathlib.Path(name), label=f"higher-layer sealed {name}"
+    )
+    try:
+        raw = path.read_bytes()
+        value = json.loads(raw)
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"higher-layer sealed {name} is invalid") from error
+    if not isinstance(value, Mapping) or raw != _canonical_json_file_bytes(value):
+        raise ValueError(f"higher-layer sealed {name} is not canonical JSON")
+    return value
+
+
+def verify_sealed_higher_layer_calibration(
+    package: pathlib.Path,
+    *,
+    trace_executor=run_controlled_state_holdout_trace,
+    source_validator=_validate_sealed_higher_layer_source_identity,
+) -> Mapping[str, Any]:
+    """Replay a portable four-file derivation without depending on a live run."""
+    package = pathlib.Path(package)
+    try:
+        mode = package.stat(follow_symlinks=False).st_mode
+        names = {entry.name for entry in package.iterdir()}
+    except OSError as error:
+        raise ValueError("higher-layer sealed package is missing") from error
+    if package.is_symlink() or not stat.S_ISDIR(mode) or names != set(
+        _HIGHER_LAYER_SEALED_FILES
+    ):
+        raise ValueError("higher-layer sealed package must contain exactly four files")
+    documents = {
+        name: _read_sealed_higher_layer_document(package, name)
+        for name in _HIGHER_LAYER_SEALED_FILES
+    }
+    sealed_identity = documents["identity.json"]
+    payload = sealed_identity.get("identity")
+    if (
+        set(sealed_identity)
+        != {"schema_version", "derivation_id", "identity_sha256", "identity"}
+        or sealed_identity.get("schema_version") != _HIGHER_LAYER_SEALED_SCHEMA_VERSION
+        or not isinstance(payload, Mapping)
+        or set(payload)
+        != {"schema_version", "purpose", "source_identity", "file_sha256s"}
+        or payload.get("schema_version") != _HIGHER_LAYER_SEALED_SCHEMA_VERSION
+        or payload.get("purpose") != _HIGHER_LAYER_SEALED_PURPOSE
+        or sealed_identity.get("identity_sha256")
+        != sha256_bytes(canonical_json(payload))
+        or sealed_identity.get("derivation_id")
+        != str(sealed_identity.get("identity_sha256"))[:24]
+    ):
+        raise ValueError("higher-layer sealed identity differs")
+    file_hashes = payload.get("file_sha256s")
+    evidence_names = set(_HIGHER_LAYER_SEALED_FILES) - {"identity.json"}
+    if not isinstance(file_hashes, Mapping) or set(file_hashes) != evidence_names:
+        raise ValueError("higher-layer sealed file inventory differs")
+    for name in evidence_names:
+        if file_hashes.get(name) != sha256_file(package / name):
+            raise ValueError("higher-layer sealed file hash differs")
+    source_identity = payload.get("source_identity")
+    if not isinstance(source_identity, Mapping):
+        raise ValueError("higher-layer sealed source identity is missing")
+    _require_portable_higher_layer_value(documents)
+    manifest, coverage, core = source_validator(source_identity)
+
+    overhead = documents["overhead-evidence.json"]
+    state = documents["state-holdout-evidence.json"]
+    if set(overhead) != {
+        "schema_version",
+        "source_identity_sha256",
+        "decision_ledger",
+        "rounds",
+        "fixed_costs",
+    } or (
+        overhead.get("schema_version") != _HIGHER_LAYER_SEALED_SCHEMA_VERSION
+        or overhead.get("source_identity_sha256")
+        != source_identity.get("identity_sha256")
+        or not isinstance(overhead.get("decision_ledger"), Mapping)
+        or not isinstance(overhead.get("fixed_costs"), Mapping)
+    ):
+        raise ValueError("higher-layer sealed overhead evidence differs")
+    validated = _validate_packaged_higher_layer_rounds(
+        identity=source_identity,
+        manifest=manifest,
+        coverage=coverage,
+        core=core,
+        decisions=overhead["decision_ledger"],
+        evidence=overhead["rounds"],
+    )
+    expected_fixed = _higher_layer_fixed_cost_artifact(
+        source_identity, manifest, overhead["decision_ledger"], validated
+    )
+    if not _exact_json_equal(overhead["fixed_costs"], expected_fixed):
+        raise ValueError("higher-layer sealed fixed costs differ on replay")
+    if set(state) != {"schema_version", "source_identity_sha256", "rows"} or (
+        state.get("schema_version") != _HIGHER_LAYER_SEALED_SCHEMA_VERSION
+        or state.get("source_identity_sha256")
+        != source_identity.get("identity_sha256")
+        or not isinstance(state.get("rows"), list)
+    ):
+        raise ValueError("higher-layer sealed state evidence differs")
+    rows = state["rows"]
+    _higher_layer_state_inventory(manifest, rows)
+    with tempfile.TemporaryDirectory(prefix="higher-layer-sealed-trace-") as temporary:
+        temporary_root = pathlib.Path(temporary)
+        for pair in manifest.state_holdouts:
+            trace_rows = trace_executor(
+                guest_launcher=(REPO_ROOT / _HIGHER_LAYER_LAUNCHER_PATH).resolve(),
+                pair_spec=_higher_layer_state_pair_spec(pair),
+                out=temporary_root / f"{pair.pair_id}.jsonl",
+            )
+            _validate_higher_layer_trace_pair(
+                pair,
+                list(trace_rows),
+                [row for row in rows if row.get("pair_id") == pair.pair_id],
+            )
+    replay = evaluate_higher_layer_state_holdouts(
+        manifest, coverage, core, expected_fixed, rows
+    )
+    if not _exact_json_equal(documents["higher-layer-calibration.json"], replay):
+        raise ValueError("higher-layer sealed verdict differs on replay")
+    return {
+        "identity": sealed_identity,
+        "source_identity": source_identity,
+        "fixed": expected_fixed,
+        "final": replay,
+    }
+
+
+def seal_higher_layer_calibration(
+    run: pathlib.Path,
+    out_root: pathlib.Path,
+    derivation_path_file: pathlib.Path,
+    *,
+    verifier=verify_higher_layer_calibration,
+) -> pathlib.Path:
+    """Verify and atomically publish one create-only portable derivation."""
+    run = pathlib.Path(run)
+    with tempfile.TemporaryDirectory(prefix="higher-layer-seal-input-") as temporary:
+        run_path_file = pathlib.Path(temporary) / "run-path"
+        run_path_file.write_text(str(run) + "\n")
+        verified = verifier(run_path_file)
+    required = {
+        "identity",
+        "decisions",
+        "round_evidence",
+        "fixed",
+        "state_rows",
+        "final",
+    }
+    if not isinstance(verified, Mapping) or not required.issubset(verified):
+        raise ValueError("higher-layer verifier returned an incomplete package")
+    source_identity = verified["identity"]
+    overhead = {
+        "schema_version": _HIGHER_LAYER_SEALED_SCHEMA_VERSION,
+        "source_identity_sha256": source_identity["identity_sha256"],
+        "decision_ledger": verified["decisions"],
+        "rounds": verified["round_evidence"],
+        "fixed_costs": verified["fixed"],
+    }
+    state = {
+        "schema_version": _HIGHER_LAYER_SEALED_SCHEMA_VERSION,
+        "source_identity_sha256": source_identity["identity_sha256"],
+        "rows": verified["state_rows"],
+    }
+    final = verified["final"]
+    _require_portable_higher_layer_value(
+        {"source_identity": source_identity, "overhead": overhead, "state": state, "final": final}
+    )
+    file_values = {
+        "overhead-evidence.json": overhead,
+        "state-holdout-evidence.json": state,
+        "higher-layer-calibration.json": final,
+    }
+    sealed_payload = {
+        "schema_version": _HIGHER_LAYER_SEALED_SCHEMA_VERSION,
+        "purpose": _HIGHER_LAYER_SEALED_PURPOSE,
+        "source_identity": source_identity,
+        "file_sha256s": {
+            name: sha256_bytes(_canonical_json_file_bytes(value))
+            for name, value in file_values.items()
+        },
+    }
+    identity_sha256 = sha256_bytes(canonical_json(sealed_payload))
+    derivation_id = identity_sha256[:24]
+    identity = {
+        "schema_version": _HIGHER_LAYER_SEALED_SCHEMA_VERSION,
+        "derivation_id": derivation_id,
+        "identity_sha256": identity_sha256,
+        "identity": sealed_payload,
+    }
+
+    out_root = pathlib.Path(out_root)
+    if out_root.exists() and (out_root.is_symlink() or not out_root.is_dir()):
+        raise ValueError("higher-layer derivation root must be a non-symlink directory")
+    out_root.mkdir(parents=True, exist_ok=True)
+    target = out_root / derivation_id
+    lock_descriptor = os.open(out_root, os.O_RDONLY)
+    temporary_path: pathlib.Path | None = None
+    published = False
+    try:
+        fcntl.flock(lock_descriptor, fcntl.LOCK_EX)
+        if target.exists() or target.is_symlink():
+            raise ValueError(f"higher-layer derivation already exists: {target}")
+        temporary_path = pathlib.Path(
+            tempfile.mkdtemp(prefix=f".{derivation_id}.", dir=out_root)
+        )
+        _write_derivation_json(temporary_path / "identity.json", identity)
+        for name, value in file_values.items():
+            _write_derivation_json(temporary_path / name, value)
+        _fsync_directory(temporary_path)
+        if target.exists() or target.is_symlink():
+            raise ValueError(f"higher-layer derivation already exists: {target}")
+        os.rename(temporary_path, target)
+        temporary_path = None
+        published = True
+        _fsync_directory(out_root)
+        _atomic_write_bytes(
+            pathlib.Path(derivation_path_file), (str(target) + "\n").encode()
+        )
+        return target
+    except BaseException:
+        if published and target.exists() and target.is_dir() and not target.is_symlink():
+            shutil.rmtree(target)
+            _fsync_directory(out_root)
+        raise
+    finally:
+        if temporary_path is not None and temporary_path.exists():
+            shutil.rmtree(temporary_path)
+        os.close(lock_descriptor)
+
+
 def cmd_prepare_higher_layer_calibration(args: argparse.Namespace) -> None:
     run = prepare_higher_layer_calibration(
         manifest_path=args.manifest,
@@ -21509,6 +22859,38 @@ def cmd_run_higher_layer_calibration(args: argparse.Namespace) -> None:
         f"higher-layer calibration {result['decision']} at round "
         f"{result['generator_max_count']}"
     )
+
+
+def cmd_fit_higher_layer_fixed_costs(args: argparse.Namespace) -> None:
+    result = fit_higher_layer_fixed_costs(args.run)
+    print(
+        f"sealed higher-layer fixed costs at round {result['selected_round']} "
+        f"({result['fixed_costs_sha256']})"
+    )
+
+
+def cmd_run_higher_layer_state_holdouts(args: argparse.Namespace) -> None:
+    rows = run_higher_layer_state_holdouts(args.run)
+    print(f"persisted {len(rows)} higher-layer state holdout rows")
+
+
+def cmd_finalize_higher_layer_calibration(args: argparse.Namespace) -> None:
+    result = finalize_higher_layer_calibration(args.run)
+    print(result["coarse_state_trie"]["status"])
+
+
+def cmd_verify_higher_layer_calibration(args: argparse.Namespace) -> None:
+    result = verify_higher_layer_calibration(args.run_path_file)
+    print(result["final"]["coarse_state_trie"]["status"])
+
+
+def cmd_seal_higher_layer_calibration(args: argparse.Namespace) -> None:
+    result = seal_higher_layer_calibration(
+        args.run,
+        args.out_root,
+        args.derivation_path_file,
+    )
+    print(result)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -21536,6 +22918,45 @@ def build_parser() -> argparse.ArgumentParser:
     )
     higher_run.add_argument("--run", type=pathlib.Path, required=True)
     higher_run.set_defaults(func=cmd_run_higher_layer_calibration)
+
+    higher_fit = subcommands.add_parser(
+        "fit-higher-layer-fixed-costs",
+        help="replay and seal the accepted higher-layer fixed-cost result",
+    )
+    higher_fit.add_argument("--run", type=pathlib.Path, required=True)
+    higher_fit.set_defaults(func=cmd_fit_higher_layer_fixed_costs)
+
+    higher_state = subcommands.add_parser(
+        "run-higher-layer-state-holdouts",
+        help="run the frozen state holdouts after the fixed-cost gate",
+    )
+    higher_state.add_argument("--run", type=pathlib.Path, required=True)
+    higher_state.set_defaults(func=cmd_run_higher_layer_state_holdouts)
+
+    higher_finalize = subcommands.add_parser(
+        "finalize-higher-layer-calibration",
+        help="evaluate and persist the frozen state holdout verdict",
+    )
+    higher_finalize.add_argument("--run", type=pathlib.Path, required=True)
+    higher_finalize.set_defaults(func=cmd_finalize_higher_layer_calibration)
+
+    higher_verify = subcommands.add_parser(
+        "verify-higher-layer-calibration",
+        help="replay one higher-layer campaign without SP1 execution",
+    )
+    higher_verify.add_argument("--run-path-file", type=pathlib.Path, required=True)
+    higher_verify.set_defaults(func=cmd_verify_higher_layer_calibration)
+
+    higher_seal = subcommands.add_parser(
+        "seal-higher-layer-calibration",
+        help="atomically publish the verified higher-layer derivation",
+    )
+    higher_seal.add_argument("--run", type=pathlib.Path, required=True)
+    higher_seal.add_argument("--out-root", type=pathlib.Path, required=True)
+    higher_seal.add_argument(
+        "--derivation-path-file", type=pathlib.Path, required=True
+    )
+    higher_seal.set_defaults(func=cmd_seal_higher_layer_calibration)
 
     anchor_generate = subcommands.add_parser(
         "generate-anchor-probe",

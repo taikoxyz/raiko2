@@ -924,7 +924,28 @@ RUN_PATH_FILE="$(mktemp)"
 HIGHER_LAYER_RUN="$(<"$RUN_PATH_FILE")"
 ~/.venv/bin/python experiments/opcode-gas/opcode_gas.py \
   run-higher-layer-calibration --run "$HIGHER_LAYER_RUN"
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py \
+  fit-higher-layer-fixed-costs --run "$HIGHER_LAYER_RUN"
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py \
+  run-higher-layer-state-holdouts --run "$HIGHER_LAYER_RUN"
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py \
+  finalize-higher-layer-calibration --run "$HIGHER_LAYER_RUN"
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py \
+  verify-higher-layer-calibration --run-path-file "$RUN_PATH_FILE"
+DERIVATION_PATH_FILE="$(mktemp)"
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py \
+  seal-higher-layer-calibration \
+  --run "$HIGHER_LAYER_RUN" \
+  --out-root experiments/opcode-gas/derivations \
+  --derivation-path-file "$DERIVATION_PATH_FILE"
+DERIVATION_PATH="$(<"$DERIVATION_PATH_FILE")"
 ```
+
+The gated order is mandatory: fit the accepted overhead result, run all state holdouts, finalize,
+verify, and only then seal. A missing or conflicting predecessor is rejected. State holdouts are
+validation-only and never modify the fixed-cost artifact, its selected round, or its digest. The
+sealed content-addressed directory contains exactly four portable files and can be replayed at the
+frozen source revision without the live run directories.
 
 ## Follow-Up TODO
 

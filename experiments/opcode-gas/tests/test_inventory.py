@@ -76,7 +76,10 @@ class InventoryTests(unittest.TestCase):
         )
         self.assertEqual(schedule.opcode_multipliers[0x01], 7)
         self.assertEqual(len(schedule.opcode_multipliers), 256)
+        self.assertTrue(schedule.opcode_explicit[0x01])
+        self.assertFalse(schedule.opcode_explicit[0x02])
         self.assertEqual(schedule.precompile_multipliers, {0x100: 9})
+        self.assertEqual(schedule.precompile_explicit, {0x100: True})
         self.assertEqual(schedule.version_identity["revm_spec_id"], "OSAKA")
         with self.assertRaises(TypeError):
             schedule.opcode_multipliers[0x02] = 11

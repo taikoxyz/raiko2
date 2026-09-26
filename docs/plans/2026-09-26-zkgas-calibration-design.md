@@ -119,9 +119,11 @@ are:
 `NOT` and `JUMPDEST` currently use explicit dispatch-only approximations. Their frequency-dependent
 error remains visible in block validation and cannot be hidden in a fixed offset.
 
-Direct precompiles use their native-gas or declared semantic features. A confirmed spawned
-CALL/CREATE wrapper uses a fixed per-event model; forwarded child gas is never priced as wrapper
-work because child operations are counted independently.
+Direct precompiles use their native-gas or declared semantic features. For `CALL`/`CREATE`, a
+confirmed spawn replaces the pending opcode raw-gas row with one fixed wrapper row; the two rows are
+never both charged. Forwarded child gas is never priced as wrapper work because executed child
+operations are counted through ordinary operation coverage. `child_execution` is a derived grouping
+with zero additional charge.
 
 ### State And Trie Layer
 
@@ -257,9 +259,10 @@ transaction envelope processing, and Anchor/system work.
 
 An opcode identity may therefore have one execution model and emit separately owned events. `SSTORE`
 keeps its interpreter execution in the operation ledger while dirty-state/final-trie work belongs to
-the state/trie ledger. `CALL` keeps its opcode body while a confirmed spawn wrapper and all child
-execution are separate events. Exact-one ownership applies to each work component or event, never to
-the whole opcode identity.
+the state/trie ledger. For `CALL`/`CREATE`, a confirmed spawn replaces the pending opcode raw-gas row
+with one fixed wrapper row. Executed child operations keep their ordinary execution rows;
+`child_execution` is a derived grouping with zero additional charge. Exact-one ownership applies to
+each charged work component or derived grouping, never to the whole opcode identity.
 
 The inventory is complete when no active execution key or declared side-effect event is
 unclassified. Unsupported execution keys remain visible in proposal coverage; they never receive a

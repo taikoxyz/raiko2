@@ -4987,6 +4987,1008 @@ def inventory_report(manifest_path: pathlib.Path, out_dir: pathlib.Path) -> list
     return rows
 
 
+_OPERATION_COVERAGE_SCHEMA_VERSION = 1
+_OPERATION_COVERAGE_PURPOSE = "operation_coverage_ownership"
+_OPERATION_EXECUTION_CLASSIFICATIONS = frozenset(
+    {
+        "static_raw_gas",
+        "structured_opcode",
+        "direct_precompile",
+        "inactive_or_unreachable",
+        "explicitly_unsupported",
+    }
+)
+_OPERATION_SIDE_EFFECT_OWNERS = frozenset(
+    {"operation_wrapper", "state_trie", "transaction", "block"}
+)
+_OPERATION_STRUCTURED_MODEL_KINDS = frozenset(
+    {"exp", "keccak", "memory_access", "memory_copy"}
+)
+_OPERATION_AUGMENTATION_ID = "f945e67bb2c38c9c8ef50530"
+_OPERATION_AUGMENTATION_DIRECTORY_REF = (
+    f"experiments/opcode-gas/derivations/{_OPERATION_AUGMENTATION_ID}"
+)
+_OPERATION_AUGMENTED_CORE_REF = (
+    f"{_OPERATION_AUGMENTATION_DIRECTORY_REF}/core-opcode-submodel.json"
+)
+_OPERATION_AUGMENTED_CORE_ARTIFACT_SHA256 = (
+    "b66d7951bfa416810f93319f99c30ce91969026ee9fa3a402a74cbc2214f7e8b"
+)
+_OPERATION_AUGMENTED_CORE_FILE_SHA256 = (
+    "8bfcef84bf5b42a643bd98bcb7dd9a7a8122e0ce1f8a2a4ed6f18b082f16693e"
+)
+_OPERATION_AUGMENTATION_ARTIFACT_SHA256 = (
+    "0a7bf778812df87bf71d7ab3b0442948713b215d3d1e8eb2abfc5620a3c4feb9"
+)
+_OPERATION_AUGMENTATION_IDENTITY_SHA256 = (
+    "f945e67bb2c38c9c8ef5053085bd09174315486061ca2dae540726b378df36c4"
+)
+_OPERATION_SCHEDULE_SHA256 = (
+    "b27c29fb5fe482de4b3e22784de0cc6c49a5f1f0160ec8a6eaa6997869864927"
+)
+_OPERATION_TRACE_SOURCE_PATHS = (
+    "crates/zkgas-trace/src/inspector.rs",
+    "crates/zkgas-trace/src/transactions.rs",
+    "crates/zkgas-trace/src/reconstruct.rs",
+    "docs/plans/2026-09-26-zkgas-calibration-design.md",
+)
+_OPERATION_TRACE_SELECTORS = {
+    "non_anchor_started_transaction": {
+        "operation_phase": "transaction",
+        "join": "operation.tx_index == transaction.started_tx_index",
+        "transaction_started_tx_index": "present",
+        "transaction_is_anchor": False,
+        "transaction_disposition_excludes": ["unattempted"],
+    },
+    "opcode_raw_gas_execution": {
+        "scope": "non_anchor_started_transaction",
+        "component_kind": "opcode",
+        "pricing_basis": "raw_gas_slope",
+        "interpreter_raw_gas": "present_nonnegative_integer",
+        "spawned": False,
+        "dispatch_status": "not_applicable",
+    },
+    "precompile_raw_gas_execution": {
+        "scope": "non_anchor_started_transaction",
+        "component_kind": "precompile",
+        "pricing_basis": "raw_gas_slope",
+        "native_gas": "present_nonnegative_integer",
+    },
+    "confirmed_spawn_wrapper": {
+        "scope": "non_anchor_started_transaction",
+        "component_kind": "opcode",
+        "pricing_basis": "fixed_per_event",
+        "interpreter_raw_gas": "absent",
+        "spawned": True,
+        "dispatch_status": "confirmed",
+        "semantics": "substitutes_opcode_raw_gas",
+    },
+    "selected_not_dispatched_spawn": {
+        "scope": "non_anchor_started_transaction",
+        "component_kind": "opcode",
+        "pricing_basis": "absent",
+        "interpreter_raw_gas": "absent",
+        "spawned": True,
+        "dispatch_status": "selected_not_dispatched",
+        "semantics": "diagnostic_no_charge",
+    },
+    "child_execution": {
+        "scope": "matched_execution_coverage",
+        "derivation": "operation.frame_depth > 0",
+        "covered_by_execution_coverage": True,
+        "extra_charge": 0,
+    },
+    "transaction_envelope": {
+        "transaction_started_tx_index": "present",
+        "transaction_is_anchor": False,
+        "transaction_disposition_excludes": ["unattempted"],
+    },
+    "native_value_transfer": {
+        "scope": "transaction_envelope",
+        "transaction_disposition": "committed_success",
+        "native_value_transfer": True,
+    },
+    "anchor_transaction": {
+        "transaction_started_tx_index": "present",
+        "transaction_is_anchor": True,
+        "mutually_exclusive_with": ["transaction_envelope", "system_operation"],
+    },
+    "system_operation": {
+        "operation_phase": "system",
+        "operation_tx_index": "absent",
+        "mutually_exclusive_with": [
+            "non_anchor_started_transaction",
+            "anchor_transaction",
+        ],
+    },
+}
+_OPERATION_SIDE_EFFECT_DECLARATIONS = (
+    {
+        "event_id": "confirmed_spawn_wrapper",
+        "owner": "operation_wrapper",
+        "observation_status": "emitted_trace",
+        "source_path": "crates/zkgas-trace/src/inspector.rs",
+        "source_selectors": [
+            "OperationComponent::Opcode",
+            "DispatchStatus::Confirmed",
+            "PricingBasis::FixedPerEvent",
+        ],
+        "cost_treatment": "substitutes_spawn_opcode_raw_gas",
+        "selector_ref": "confirmed_spawn_wrapper",
+    },
+    {
+        "event_id": "selected_not_dispatched_spawn",
+        "owner": "operation_wrapper",
+        "observation_status": "emitted_trace",
+        "source_path": "crates/zkgas-trace/src/inspector.rs",
+        "source_selectors": [
+            "OperationComponent::Opcode",
+            "DispatchStatus::SelectedNotDispatched",
+        ],
+        "cost_treatment": "diagnostic_no_charge",
+        "selector_ref": "selected_not_dispatched_spawn",
+    },
+    {
+        "event_id": "child_execution",
+        "owner": "operation_wrapper",
+        "observation_status": "derived_grouping",
+        "source_path": "crates/zkgas-trace/src/inspector.rs",
+        "source_selectors": ["pub frame_depth: usize", "pub component: OperationComponent"],
+        "cost_treatment": "covered_by_execution_coverage_zero_extra_charge",
+        "selector_ref": "child_execution",
+    },
+    {
+        "event_id": "account_access",
+        "owner": "state_trie",
+        "observation_status": "declared_not_emitted",
+        "source_path": "docs/plans/2026-09-26-zkgas-calibration-design.md",
+        "source_selectors": ["### State And Trie Layer", "account or storage access"],
+        "cost_treatment": "next_layer_candidate",
+    },
+    {
+        "event_id": "storage_access",
+        "owner": "state_trie",
+        "observation_status": "declared_not_emitted",
+        "source_path": "docs/plans/2026-09-26-zkgas-calibration-design.md",
+        "source_selectors": ["### State And Trie Layer", "account or storage access"],
+        "cost_treatment": "next_layer_candidate",
+    },
+    {
+        "event_id": "dirty_state_update",
+        "owner": "state_trie",
+        "observation_status": "declared_not_emitted",
+        "source_path": "docs/plans/2026-09-26-zkgas-calibration-design.md",
+        "source_selectors": [
+            "### State And Trie Layer",
+            "dirty account/storage tracking",
+        ],
+        "cost_treatment": "next_layer_candidate",
+    },
+    {
+        "event_id": "final_trie_update",
+        "owner": "state_trie",
+        "observation_status": "declared_not_emitted",
+        "source_path": "docs/plans/2026-09-26-zkgas-calibration-design.md",
+        "source_selectors": [
+            "### State And Trie Layer",
+            "final trie update, hashing, and root computation",
+        ],
+        "cost_treatment": "next_layer_candidate",
+    },
+    {
+        "event_id": "witness_state_input_validation",
+        "owner": "state_trie",
+        "observation_status": "declared_not_emitted",
+        "source_path": "docs/plans/2026-09-26-zkgas-calibration-design.md",
+        "source_selectors": [
+            "### State And Trie Layer",
+            "witness/state input validation",
+        ],
+        "cost_treatment": "next_layer_candidate",
+    },
+    {
+        "event_id": "transaction_envelope",
+        "owner": "transaction",
+        "observation_status": "emitted_trace",
+        "source_path": "crates/zkgas-trace/src/transactions.rs",
+        "source_selectors": [
+            "pub struct TransactionTrace",
+            "pub enum TransactionDisposition",
+        ],
+        "cost_treatment": "transaction_work",
+        "selector_ref": "transaction_envelope",
+    },
+    {
+        "event_id": "native_value_transfer",
+        "owner": "transaction",
+        "observation_status": "emitted_trace",
+        "source_path": "crates/zkgas-trace/src/transactions.rs",
+        "source_selectors": [
+            "pub native_value_transfer: bool",
+            "TransactionDisposition::CommittedSuccess",
+            "!value.is_zero()",
+            "is_call",
+            "!has_operation_trace",
+        ],
+        "cost_treatment": "transaction_work",
+        "selector_ref": "native_value_transfer",
+    },
+    {
+        "event_id": "anchor_transaction",
+        "owner": "block",
+        "observation_status": "emitted_trace",
+        "source_path": "crates/zkgas-trace/src/transactions.rs",
+        "source_selectors": ["pub is_anchor: bool"],
+        "cost_treatment": "block_work",
+        "selector_ref": "anchor_transaction",
+    },
+    {
+        "event_id": "system_operation",
+        "owner": "block",
+        "observation_status": "emitted_trace",
+        "source_path": "crates/zkgas-trace/src/inspector.rs",
+        "source_selectors": ["OperationPhase::System"],
+        "cost_treatment": "block_work",
+        "selector_ref": "system_operation",
+    },
+    {
+        "event_id": "block_context",
+        "owner": "block",
+        "observation_status": "declared_not_emitted",
+        "source_path": "docs/plans/2026-09-26-zkgas-calibration-design.md",
+        "source_selectors": ["### Block Layer", "block context"],
+        "cost_treatment": "next_layer_candidate",
+    },
+)
+
+
+def _operation_active_execution_keys(schedule: UnzenSchedule) -> tuple[str, ...]:
+    named_opcodes = set(UZEN_OPCODE_NAMES)
+    explicit_opcodes = {
+        opcode for opcode, explicit in schedule.opcode_explicit.items() if explicit
+    }
+    if explicit_opcodes != named_opcodes:
+        raise ValueError("exported schedule active opcode domain differs from named inventory")
+    named_precompiles = set(UZEN_PRECOMPILE_NAMES)
+    explicit_precompiles = {
+        address for address, explicit in schedule.precompile_explicit.items() if explicit
+    }
+    if explicit_precompiles != named_precompiles:
+        raise ValueError(
+            "exported schedule active precompile domain differs from named inventory"
+        )
+    return (
+        *(f"opcode:0x{opcode:02x}" for opcode in sorted(named_opcodes)),
+        *(f"precompile:0x{address:02x}" for address in sorted(named_precompiles)),
+    )
+
+
+def _operation_pinned_regular_file(relative: str) -> pathlib.Path:
+    pure = pathlib.PurePosixPath(relative)
+    if pure.is_absolute() or ".." in pure.parts or str(pure) != relative:
+        raise ValueError("pinned augmented core reference is not canonical")
+    root = REPO_ROOT.resolve(strict=True)
+    candidate = REPO_ROOT.joinpath(*pure.parts)
+    cursor = REPO_ROOT
+    for part in pure.parts:
+        cursor = cursor / part
+        if cursor.is_symlink():
+            raise ValueError("pinned augmentation inputs must be regular non-symlink files")
+    try:
+        mode = candidate.stat(follow_symlinks=False).st_mode
+        resolved = candidate.resolve(strict=True)
+    except FileNotFoundError as error:
+        raise ValueError("pinned augmentation input is missing") from error
+    if not stat.S_ISREG(mode) or not resolved.is_relative_to(root):
+        raise ValueError("pinned augmentation inputs must be regular non-symlink files")
+    return candidate
+
+
+def _load_pinned_operation_core(
+    augmented_core: Mapping[str, Any], augmented_core_ref: str
+) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
+    if augmented_core_ref != _OPERATION_AUGMENTED_CORE_REF:
+        raise ValueError("operation coverage requires the pinned augmented core reference")
+    directory = REPO_ROOT / _OPERATION_AUGMENTATION_DIRECTORY_REF
+    expected_names = {
+        "augmentation.json",
+        "compatibility-canary.json",
+        "core-opcode-submodel.json",
+        "opcode-supplement.json",
+    }
+    try:
+        actual_names = {path.name for path in directory.iterdir()}
+    except (FileNotFoundError, NotADirectoryError) as error:
+        raise ValueError("pinned augmentation directory is missing") from error
+    if directory.is_symlink() or actual_names != expected_names:
+        raise ValueError("pinned augmentation directory inventory differs")
+    paths = {
+        name: _operation_pinned_regular_file(
+            f"{_OPERATION_AUGMENTATION_DIRECTORY_REF}/{name}"
+        )
+        for name in expected_names
+    }
+    if sha256_file(paths["core-opcode-submodel.json"]) != (
+        _OPERATION_AUGMENTED_CORE_FILE_SHA256
+    ):
+        raise ValueError("pinned core file SHA256 differs")
+    payloads: dict[str, Mapping[str, Any]] = {}
+    for name, path in paths.items():
+        try:
+            payload = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError) as error:
+            raise ValueError(f"pinned augmentation input is not valid JSON: {name}") from error
+        if not isinstance(payload, Mapping):
+            raise ValueError(f"pinned augmentation input is not an object: {name}")
+        _validate_content_addressed_artifact(payload, label=f"pinned {name}")
+        if path.read_bytes() != _canonical_json_file_bytes(payload):
+            raise ValueError(f"pinned augmentation input is not canonical JSON: {name}")
+        payloads[name] = payload
+    disk_core = payloads["core-opcode-submodel.json"]
+    if not _exact_json_equal(augmented_core, disk_core):
+        raise ValueError("caller augmented core differs from pinned core bytes")
+    if disk_core.get("artifact_sha256") != _OPERATION_AUGMENTED_CORE_ARTIFACT_SHA256:
+        raise ValueError("pinned core artifact SHA256 differs")
+    envelope = payloads["augmentation.json"]
+    canary = payloads["compatibility-canary.json"]
+    supplement = payloads["opcode-supplement.json"]
+    identity = envelope.get("augmentation_identity")
+    output_hashes = envelope.get("output_hashes")
+    core_augmentation = disk_core.get("osaka_augmentation")
+    if (
+        envelope.get("artifact_sha256") != _OPERATION_AUGMENTATION_ARTIFACT_SHA256
+        or envelope.get("augmentation_id") != _OPERATION_AUGMENTATION_ID
+        or envelope.get("augmentation_identity_sha256")
+        != _OPERATION_AUGMENTATION_IDENTITY_SHA256
+        or not isinstance(identity, Mapping)
+        or sha256_bytes(canonical_json(identity))
+        != _OPERATION_AUGMENTATION_IDENTITY_SHA256
+        or not isinstance(output_hashes, Mapping)
+        or output_hashes.get("core_artifact_sha256")
+        != _OPERATION_AUGMENTED_CORE_ARTIFACT_SHA256
+        or output_hashes.get("core_file_sha256")
+        != _OPERATION_AUGMENTED_CORE_FILE_SHA256
+        or not isinstance(core_augmentation, Mapping)
+    ):
+        raise ValueError("pinned Osaka augmentation envelope identity differs")
+    osaka_calibration = identity.get("osaka_calibration")
+    input_hashes = identity.get("input_hashes")
+    if (
+        not isinstance(osaka_calibration, Mapping)
+        or not _exact_json_equal(
+            osaka_calibration, core_augmentation.get("provenance")
+        )
+        or identity.get("analysis_implementation_revision")
+        != osaka_calibration.get("implementation_revision")
+        or osaka_calibration.get("complete_schedule_sha256")
+        != _OPERATION_SCHEDULE_SHA256
+        or not isinstance(input_hashes, Mapping)
+        or input_hashes.get("compatibility_canary_artifact_sha256")
+        != canary.get("artifact_sha256")
+        or input_hashes.get("compatibility_canary_file_sha256")
+        != sha256_file(paths["compatibility-canary.json"])
+        or input_hashes.get("opcode_supplement_artifact_sha256")
+        != supplement.get("artifact_sha256")
+        or input_hashes.get("opcode_supplement_file_sha256")
+        != sha256_file(paths["opcode-supplement.json"])
+        or core_augmentation.get("compatibility_canary_artifact_sha256")
+        != canary.get("artifact_sha256")
+        or core_augmentation.get("opcode_supplement_artifact_sha256")
+        != supplement.get("artifact_sha256")
+    ):
+        raise ValueError("pinned Osaka augmentation provenance differs")
+    return disk_core, envelope
+
+
+def classify_transaction_trace_ownership(
+    transaction: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Apply the exact tx-base/Anchor boundary to one serialized TransactionTrace."""
+    if not isinstance(transaction, Mapping):
+        raise ValueError("transaction trace must be an object")
+    disposition = transaction.get("disposition")
+    if disposition not in {
+        "committed_success",
+        "committed_failure",
+        "attempted",
+        "unattempted",
+    }:
+        raise ValueError("transaction trace disposition is invalid")
+    native_value_transfer = transaction.get("native_value_transfer")
+    if not isinstance(native_value_transfer, bool):
+        raise ValueError("transaction native_value_transfer must be boolean")
+    started = transaction.get("started_tx_index")
+    if started is None:
+        if disposition != "unattempted":
+            raise ValueError("transaction without started_tx_index must be unattempted")
+        if native_value_transfer:
+            raise ValueError("unattempted transaction cannot be a native value transfer")
+        return {
+            "transaction_envelope": False,
+            "anchor_transaction": False,
+            "native_value_transfer": False,
+            "owner": None,
+        }
+    if isinstance(started, bool) or not isinstance(started, int) or started < 0:
+        raise ValueError("transaction started_tx_index is invalid")
+    if disposition == "unattempted":
+        raise ValueError("unattempted transaction cannot have started_tx_index")
+    is_anchor = transaction.get("is_anchor")
+    if not isinstance(is_anchor, bool):
+        raise ValueError("transaction is_anchor must be boolean")
+    if is_anchor:
+        if native_value_transfer:
+            raise ValueError("Anchor transaction cannot be a native value transfer")
+        return {
+            "transaction_envelope": False,
+            "anchor_transaction": True,
+            "native_value_transfer": False,
+            "owner": "block",
+        }
+    if native_value_transfer and disposition != "committed_success":
+        raise ValueError(
+            "native value transfer requires a committed successful transaction"
+        )
+    return {
+        "transaction_envelope": True,
+        "anchor_transaction": False,
+        "native_value_transfer": native_value_transfer,
+        "owner": "transaction",
+    }
+
+
+def _joined_operation_transaction(
+    operation: Mapping[str, Any], transactions: Iterable[Mapping[str, Any]]
+) -> tuple[Mapping[str, Any] | None, dict[str, Any] | None]:
+    phase = operation.get("phase")
+    tx_index = operation.get("tx_index")
+    if phase == "system":
+        if tx_index is not None:
+            raise ValueError("system operation cannot have tx_index")
+        return None, {
+            "matches_execution_coverage": False,
+            "charge_source": "block",
+            "charge_count": 0,
+            "side_effect_event": "system_operation",
+        }
+    if phase != "transaction" or isinstance(tx_index, bool) or not isinstance(
+        tx_index, int
+    ):
+        raise ValueError("operation must declare a valid system or transaction phase")
+    joined = [
+        transaction
+        for transaction in transactions
+        if transaction.get("started_tx_index") == tx_index
+    ]
+    if len(joined) != 1:
+        raise ValueError("operation must join exactly one started transaction")
+    ownership = classify_transaction_trace_ownership(joined[0])
+    if ownership["anchor_transaction"]:
+        return joined[0], {
+            "matches_execution_coverage": False,
+            "charge_source": "block",
+            "charge_count": 0,
+            "side_effect_event": "anchor_transaction",
+        }
+    if not ownership["transaction_envelope"]:
+        raise ValueError("operation cannot join an unattempted transaction")
+    return joined[0], None
+
+
+def classify_operation_trace_charge(
+    operation: Mapping[str, Any], transactions: Iterable[Mapping[str, Any]]
+) -> dict[str, Any]:
+    """Classify one serialized OperationTrace without double-charging derived groups."""
+    if not isinstance(operation, Mapping):
+        raise ValueError("operation trace must be an object")
+    _transaction, scoped_result = _joined_operation_transaction(
+        operation, transactions
+    )
+    if scoped_result is not None:
+        return scoped_result
+    frame_depth = operation.get("frame_depth")
+    component = operation.get("component")
+    if (
+        isinstance(frame_depth, bool)
+        or not isinstance(frame_depth, int)
+        or frame_depth < 0
+        or not isinstance(component, Mapping)
+    ):
+        raise ValueError("operation frame or component is invalid")
+    kind = component.get("kind")
+    if kind == "opcode":
+        opcode = component.get("opcode")
+        if isinstance(opcode, bool) or not isinstance(opcode, int) or not 0 <= opcode <= 0xFF:
+            raise ValueError("operation opcode is invalid")
+        if opcode not in UZEN_OPCODE_NAMES:
+            raise ValueError("opcode is outside frozen execution coverage")
+        spawned = component.get("spawned")
+        basis = component.get("pricing_basis")
+        raw_gas = component.get("interpreter_raw_gas")
+        dispatch = component.get("dispatch_status")
+        if spawned is True:
+            if (
+                basis == "fixed_per_event"
+                and raw_gas is None
+                and dispatch == "confirmed"
+            ):
+                return {
+                    "matches_execution_coverage": False,
+                    "side_effect_event": "confirmed_spawn_wrapper",
+                    "charge_source": "operation_wrapper",
+                    "charge_count": 1,
+                    "wrapper_semantics": "substitutes_opcode_raw_gas",
+                }
+            if basis is None and raw_gas is None and dispatch == "selected_not_dispatched":
+                return {
+                    "matches_execution_coverage": False,
+                    "side_effect_event": "selected_not_dispatched_spawn",
+                    "charge_source": None,
+                    "charge_count": 0,
+                }
+            raise ValueError("spawned opcode trace does not match a declared selector")
+        if (
+            spawned is not False
+            or basis != "raw_gas_slope"
+            or isinstance(raw_gas, bool)
+            or not isinstance(raw_gas, int)
+            or raw_gas < 0
+            or dispatch != "not_applicable"
+        ):
+            raise ValueError("opcode trace does not match raw-gas execution selector")
+        execution_key = f"opcode:0x{opcode:02x}"
+    elif kind == "precompile":
+        address = component.get("address")
+        basis = component.get("pricing_basis")
+        native_gas = component.get("native_gas")
+        try:
+            address_value = parse_opcode(address)
+        except (TypeError, ValueError) as error:
+            raise ValueError("precompile trace address is invalid") from error
+        if address_value not in UZEN_PRECOMPILE_NAMES:
+            raise ValueError("precompile is outside frozen execution coverage")
+        if (
+            basis != "raw_gas_slope"
+            or isinstance(native_gas, bool)
+            or not isinstance(native_gas, int)
+            or native_gas < 0
+        ):
+            raise ValueError("precompile trace does not match raw-gas execution selector")
+        execution_key = f"precompile:0x{address_value:02x}"
+    else:
+        raise ValueError("operation component kind is unsupported")
+    result: dict[str, Any] = {
+        "matches_execution_coverage": True,
+        "execution_key": execution_key,
+        "charge_source": "execution_coverage",
+        "charge_count": 1,
+    }
+    if frame_depth > 0:
+        result.update(
+            {
+                "child_grouping_event": "child_execution",
+                "child_grouping_covered_by_execution_coverage": True,
+                "child_grouping_extra_charge": 0,
+            }
+        )
+    return result
+
+
+def _validate_operation_core_registry(
+    augmented_core: Mapping[str, Any], active_opcode_keys: set[str]
+) -> tuple[Mapping[str, Any], Mapping[str, Any], set[str]]:
+    _validate_content_addressed_artifact(
+        augmented_core, label="operation coverage augmented core"
+    )
+    if (
+        augmented_core.get("schema_version") != 4
+        or augmented_core.get("purpose") != "osaka_augmented_core_opcode_submodel"
+        or augmented_core.get("status")
+        != "supported_osaka_augmented_core_submodel"
+        or augmented_core.get("named_opcode_count") != len(active_opcode_keys)
+        or augmented_core.get("modeled_named_opcode_count") != 103
+        or augmented_core.get("unsupported_named_opcode_count") != 47
+    ):
+        raise ValueError("operation coverage requires the sealed 103-opcode Osaka registry")
+    registry = augmented_core.get("registry")
+    models = registry.get("models") if isinstance(registry, Mapping) else None
+    slots = registry.get("opcode_model_ids") if isinstance(registry, Mapping) else None
+    named = registry.get("named_opcode_keys") if isinstance(registry, Mapping) else None
+    unsupported = augmented_core.get("unsupported_named_opcode_keys")
+    reasons = augmented_core.get("unsupported_opcode_reasons")
+    if (
+        not isinstance(models, Mapping)
+        or not isinstance(slots, list)
+        or len(slots) != 256
+        or not isinstance(named, list)
+        or set(named) != active_opcode_keys
+        or len(named) != len(active_opcode_keys)
+        or not isinstance(unsupported, list)
+        or not isinstance(reasons, Mapping)
+    ):
+        raise ValueError("sealed Osaka opcode registry has invalid inventory evidence")
+    unsupported_keys = set(unsupported)
+    expected_model_keys = (active_opcode_keys - unsupported_keys) | {"invalid"}
+    if (
+        len(unsupported) != len(unsupported_keys)
+        or set(models) != expected_model_keys
+        or set(reasons) != unsupported_keys
+    ):
+        raise ValueError("sealed Osaka opcode registry coverage is inconsistent")
+    for key in active_opcode_keys:
+        opcode = int(key.removeprefix("opcode:0x"), 16)
+        model_id = slots[opcode]
+        if key in unsupported_keys:
+            if model_id is not None or not isinstance(reasons.get(key), str) or not reasons[key]:
+                raise ValueError("sealed Osaka unsupported opcode evidence is invalid")
+        elif model_id != key or key not in models:
+            raise ValueError("sealed Osaka measured opcode index is invalid")
+    return models, reasons, unsupported_keys
+
+
+def _operation_source_records() -> dict[str, str]:
+    records = {}
+    for relative in _OPERATION_TRACE_SOURCE_PATHS:
+        path = REPO_ROOT / relative
+        if not path.is_file():
+            raise ValueError(f"operation coverage source is missing: {relative}")
+        contents = path.read_text()
+        for declaration in _OPERATION_SIDE_EFFECT_DECLARATIONS:
+            if declaration["source_path"] != relative:
+                continue
+            for selector in declaration["source_selectors"]:
+                if selector not in contents:
+                    raise ValueError(
+                        "operation coverage source selector is missing: "
+                        f"{relative}: {selector}"
+                    )
+        records[relative] = sha256_bytes(contents.encode())
+    return records
+
+
+def _operation_precompile_inventory_sha256() -> str:
+    rows = [
+        {"address": f"0x{address:02x}", "name": name}
+        for address, name in sorted(UZEN_PRECOMPILE_NAMES.items())
+    ]
+    return sha256_bytes(canonical_json(rows))
+
+
+def _operation_side_effect_rows(source_records: Mapping[str, str]) -> list[dict[str, Any]]:
+    rows = []
+    for declaration in _OPERATION_SIDE_EFFECT_DECLARATIONS:
+        source_path = declaration["source_path"]
+        observation_status = declaration["observation_status"]
+        row = {
+            "event_id": declaration["event_id"],
+            "owner": declaration["owner"],
+            "observation_status": observation_status,
+            "cost_treatment": declaration["cost_treatment"],
+            "source_evidence": [
+                {
+                    "kind": (
+                        "emitted_trace_declaration"
+                        if observation_status == "emitted_trace"
+                        else "derived_trace_grouping"
+                        if observation_status == "derived_grouping"
+                        else "declared_ownership_boundary"
+                    ),
+                    "path": source_path,
+                    "sha256": source_records[source_path],
+                    "selectors": list(declaration["source_selectors"]),
+                }
+            ],
+        }
+        selector_ref = declaration.get("selector_ref")
+        if selector_ref is not None:
+            row["selector_ref"] = selector_ref
+        if declaration["event_id"] == "child_execution":
+            row["covered_by_execution_coverage"] = True
+            row["extra_charge"] = 0
+        rows.append(row)
+    return rows
+
+
+def build_operation_coverage_manifest(
+    *,
+    schedule: UnzenSchedule,
+    augmented_core: Mapping[str, Any],
+    augmented_core_ref: str,
+) -> dict[str, Any]:
+    """Build the exact operation and side-effect ownership boundary from sealed inputs."""
+    expected_version = {
+        "taiko_fork": "Unzen",
+        "production_schedule": "UNZEN_ZK_GAS_SCHEDULE",
+        "ethereum_upgrade": "Fusaka",
+        "revm_spec_id": "OSAKA",
+    }
+    if dict(schedule.version_identity) != expected_version:
+        raise ValueError("operation coverage requires Unzen/Fusaka/Osaka version identity")
+    disk_core, augmentation_envelope = _load_pinned_operation_core(
+        augmented_core, augmented_core_ref
+    )
+    augmented_core = disk_core
+    active_keys = _operation_active_execution_keys(schedule)
+    active_opcode_keys = {key for key in active_keys if key.startswith("opcode:")}
+    models, unsupported_reasons, unsupported_keys = _validate_operation_core_registry(
+        augmented_core, active_opcode_keys
+    )
+    schedule_hash = schedule_sha256(schedule)
+    if schedule_hash != _OPERATION_SCHEDULE_SHA256:
+        raise ValueError("operation coverage exported schedule differs from Task 3 identity")
+    precompile_inventory_hash = _operation_precompile_inventory_sha256()
+    source_records = _operation_source_records()
+    core_hash = augmented_core["artifact_sha256"]
+    trace_schema_hash = sha256_bytes(canonical_json(source_records))
+
+    execution_rows = []
+    for key in active_keys:
+        component, identifier = key.split(":", 1)
+        value = int(identifier, 16)
+        schedule_multiplier = (
+            schedule.opcode_multipliers[value]
+            if component == "opcode"
+            else schedule.precompile_multipliers[value]
+        )
+        schedule_evidence = {
+            "kind": "exported_unzen_schedule_entry",
+            "schedule_sha256": schedule_hash,
+            "explicit": True,
+            "multiplier": schedule_multiplier,
+        }
+        trace_evidence = {
+            "kind": "machine_trace_selector",
+            "path": "crates/zkgas-trace/src/inspector.rs",
+            "sha256": source_records["crates/zkgas-trace/src/inspector.rs"],
+            "selector_ref": (
+                "opcode_raw_gas_execution"
+                if component == "opcode"
+                else "precompile_raw_gas_execution"
+            ),
+        }
+        row: dict[str, Any] = {
+            "key": key,
+            "component": component,
+            "identifier": identifier,
+            "name": (
+                UZEN_OPCODE_NAMES[value]
+                if component == "opcode"
+                else UZEN_PRECOMPILE_NAMES[value]
+            ),
+            "transaction_scope_selector_ref": "non_anchor_started_transaction",
+            "trace_selector_ref": trace_evidence["selector_ref"],
+            "source_evidence": [schedule_evidence, trace_evidence],
+        }
+        if component == "precompile":
+            row.update(
+                {
+                    "classification": "direct_precompile",
+                    "model_status": "declared_unmeasured",
+                    "reason": {
+                        "code": "direct_precompile_cost_not_sealed",
+                        "detail": (
+                            "native-gas trace and body identity exist; "
+                            "no V1 cost artifact is sealed"
+                        ),
+                    },
+                }
+            )
+            row["source_evidence"].append(
+                {
+                    "kind": "named_precompile_inventory",
+                    "inventory_sha256": precompile_inventory_hash,
+                }
+            )
+        elif key in unsupported_keys:
+            row.update(
+                {
+                    "classification": "explicitly_unsupported",
+                    "model_status": "unsupported",
+                    "reason": {
+                        "code": "sealed_registry_unsupported",
+                        "detail": unsupported_reasons[key],
+                    },
+                }
+            )
+            row["source_evidence"].append(
+                {
+                    "kind": "sealed_registry_unsupported",
+                    "artifact_sha256": core_hash,
+                    "reason": unsupported_reasons[key],
+                }
+            )
+        else:
+            model = models[key]
+            model_kind = model.get("kind") if isinstance(model, Mapping) else None
+            if model_kind == "static_raw_gas":
+                classification = "static_raw_gas"
+            elif model_kind in _OPERATION_STRUCTURED_MODEL_KINDS:
+                classification = "structured_opcode"
+            else:
+                raise ValueError(f"unknown sealed opcode model kind for {key}: {model_kind}")
+            row.update(
+                {
+                    "classification": classification,
+                    "model_status": "measured",
+                    "artifact_ref": {
+                        "path": augmented_core_ref,
+                        "artifact_sha256": core_hash,
+                        "model_id": key,
+                        "model_kind": model_kind,
+                    },
+                }
+            )
+            row["source_evidence"].append(
+                {
+                    "kind": "sealed_registry_model",
+                    "artifact_sha256": core_hash,
+                    "model_id": key,
+                }
+            )
+        if component == "opcode" and value in SPAWN_WRAPPER_OPCODES:
+            row["spawn_trace_semantics"] = {
+                "confirmed": "wrapper_substitutes_opcode_raw_gas",
+                "selected_not_dispatched": "diagnostic_no_charge",
+            }
+        execution_rows.append(row)
+
+    side_effect_rows = _operation_side_effect_rows(source_records)
+    classification_counts = {
+        classification: sum(
+            row["classification"] == classification for row in execution_rows
+        )
+        for classification in sorted(_OPERATION_EXECUTION_CLASSIFICATIONS)
+    }
+    owner_counts = {
+        owner: sum(row["owner"] == owner for row in side_effect_rows)
+        for owner in sorted(_OPERATION_SIDE_EFFECT_OWNERS)
+    }
+    artifact = {
+        "schema_version": _OPERATION_COVERAGE_SCHEMA_VERSION,
+        "purpose": _OPERATION_COVERAGE_PURPOSE,
+        "status": "ownership_frozen",
+        "candidate_eligible": False,
+        "sources": {
+            "augmented_core_artifact": {
+                "path": augmented_core_ref,
+                "artifact_sha256": core_hash,
+                "file_sha256": _OPERATION_AUGMENTED_CORE_FILE_SHA256,
+                "modeled_named_opcode_count": 103,
+                "augmentation_id": _OPERATION_AUGMENTATION_ID,
+                "augmentation_artifact_sha256": augmentation_envelope[
+                    "artifact_sha256"
+                ],
+                "augmentation_identity_sha256": augmentation_envelope[
+                    "augmentation_identity_sha256"
+                ],
+            },
+            "exported_unzen_schedule": {
+                "schedule_sha256": schedule_hash,
+                "version_identity": expected_version,
+            },
+            "precompile_inventory": {
+                "source": "opcode_gas.UZEN_PRECOMPILE_NAMES",
+                "inventory_sha256": precompile_inventory_hash,
+            },
+            "trace_and_boundary_declarations": {
+                "source_sha256": dict(sorted(source_records.items())),
+                "schema_sha256": trace_schema_hash,
+            },
+        },
+        "trace_selectors": json.loads(json.dumps(_OPERATION_TRACE_SELECTORS)),
+        "execution_coverage": execution_rows,
+        "side_effect_ownership": side_effect_rows,
+        "summary": {
+            "active_named_execution_count": len(execution_rows),
+            "classification_counts": classification_counts,
+            "declared_side_effect_event_count": len(side_effect_rows),
+            "owner_counts": owner_counts,
+            "proposal_execution_opened": False,
+            "production_schedule_or_config_changed": False,
+        },
+    }
+    artifact["artifact_sha256"] = sha256_bytes(canonical_json(artifact))
+    return artifact
+
+
+def validate_operation_coverage_manifest(
+    artifact: Mapping[str, Any],
+    *,
+    schedule: UnzenSchedule,
+    augmented_core: Mapping[str, Any],
+    augmented_core_ref: str,
+) -> None:
+    """Fail closed unless the ownership manifest exactly replays its source inputs."""
+    _validate_content_addressed_artifact(artifact, label="operation coverage")
+    if (
+        artifact.get("schema_version") != _OPERATION_COVERAGE_SCHEMA_VERSION
+        or artifact.get("purpose") != _OPERATION_COVERAGE_PURPOSE
+        or artifact.get("status") != "ownership_frozen"
+        or artifact.get("candidate_eligible") is not False
+    ):
+        raise ValueError("operation coverage header is invalid")
+    expected_keys = set(_operation_active_execution_keys(schedule))
+    execution_rows = artifact.get("execution_coverage")
+    if not isinstance(execution_rows, list):
+        raise ValueError("operation execution coverage must be a list")
+    seen_execution = set()
+    for row in execution_rows:
+        if not isinstance(row, Mapping) or not isinstance(row.get("key"), str):
+            raise ValueError("operation execution coverage row is invalid")
+        key = row["key"]
+        if key not in expected_keys:
+            raise ValueError(f"unknown execution key: {key}")
+        if key in seen_execution:
+            raise ValueError(f"duplicate execution key: {key}")
+        seen_execution.add(key)
+        if row.get("classification") not in _OPERATION_EXECUTION_CLASSIFICATIONS:
+            raise ValueError(f"unknown execution classification for {key}")
+        evidence = row.get("source_evidence")
+        if not isinstance(evidence, list) or not evidence:
+            raise ValueError(f"missing source evidence for execution {key}")
+        if any(field in row for field in ("owner", "side_effect_owner", "delegated_owner")):
+            raise ValueError("opcode execution cannot be assigned wholesale to a higher layer")
+        if row.get("model_status") == "measured" and not isinstance(
+            row.get("artifact_ref"), Mapping
+        ):
+            raise ValueError(f"measured execution {key} is missing artifact reference")
+        if row.get("classification") == "explicitly_unsupported" and not isinstance(
+            row.get("reason"), Mapping
+        ):
+            raise ValueError(f"unsupported execution {key} is missing machine-readable reason")
+        if row.get("classification") == "inactive_or_unreachable" and not isinstance(
+            row.get("reason"), Mapping
+        ):
+            raise ValueError(f"inactive execution {key} is missing machine-readable reason")
+    missing_execution = expected_keys - seen_execution
+    if missing_execution:
+        raise ValueError(f"missing execution keys: {sorted(missing_execution)!r}")
+
+    expected_events = {
+        declaration["event_id"] for declaration in _OPERATION_SIDE_EFFECT_DECLARATIONS
+    }
+    side_effect_rows = artifact.get("side_effect_ownership")
+    if not isinstance(side_effect_rows, list):
+        raise ValueError("side-effect ownership must be a list")
+    seen_events = set()
+    for row in side_effect_rows:
+        if not isinstance(row, Mapping) or not isinstance(row.get("event_id"), str):
+            raise ValueError("side-effect ownership row is invalid")
+        event_id = row["event_id"]
+        if event_id not in expected_events:
+            raise ValueError(f"unknown side-effect event: {event_id}")
+        if event_id in seen_events:
+            raise ValueError(f"duplicate side-effect event: {event_id}")
+        seen_events.add(event_id)
+        if row.get("owner") not in _OPERATION_SIDE_EFFECT_OWNERS:
+            raise ValueError(f"unknown side-effect owner for {event_id}")
+        evidence = row.get("source_evidence")
+        if not isinstance(evidence, list) or not evidence:
+            raise ValueError(f"missing source evidence for side-effect {event_id}")
+    missing_events = expected_events - seen_events
+    if missing_events:
+        raise ValueError(f"missing side-effect events: {sorted(missing_events)!r}")
+
+    expected = build_operation_coverage_manifest(
+        schedule=schedule,
+        augmented_core=augmented_core,
+        augmented_core_ref=augmented_core_ref,
+    )
+    sources = artifact.get("sources")
+    expected_sources = expected["sources"]
+    if not isinstance(sources, Mapping):
+        raise ValueError("operation coverage sources are missing")
+    if sources.get("exported_unzen_schedule") != expected_sources[
+        "exported_unzen_schedule"
+    ]:
+        raise ValueError("operation coverage schedule source differs")
+    if not _exact_json_equal(artifact, expected):
+        actual_rows = artifact.get("side_effect_ownership")
+        if actual_rows != expected["side_effect_ownership"]:
+            raise ValueError("side-effect declaration differs from exact source replay")
+        raise ValueError("execution coverage differs from exact source replay")
+
+
 def damage_report(
     *,
     fit_path: pathlib.Path,

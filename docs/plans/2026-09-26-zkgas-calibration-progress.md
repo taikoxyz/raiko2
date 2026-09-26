@@ -62,7 +62,7 @@ Osaka execution semantics while continuing to bind the actual exported Unzen sch
 | --- | --- | --- |
 | Experiment framework | Core scope complete | Preserve its identity and replay invariants |
 | Opcode core | Complete at partial coverage | Preserve sealed 101-plus-2 augmentation |
-| Remaining operations | Pending | Seal execution coverage and event ownership |
+| Remaining operations | Complete at frozen classification | Preserve the sealed coverage and ownership ledgers |
 | State/trie | Pending | Pass a coarse holdout or justify a split model |
 | Transaction | Pending | Pass controlled fit and holdout |
 | Block | Pending | Pass frozen block holdouts without proposal fitting |
@@ -146,12 +146,56 @@ implementation revision and replayed the sealed augmentation from the staged pac
 verifier intentionally rejects later documentation edits; portable post-result verification uses
 the self-contained augmentation verifier.
 
+## Completed Milestone: Operation Coverage Ownership
+
+The operation boundary is frozen in
+`experiments/opcode-gas/manifests/operation-coverage-v1.json`, artifact SHA256
+`fbb4817d50b04147d0d9c86a25c82324d5e36ce9d6acbf49c51dd165cf1905a3`.
+
+- Execution coverage contains all 168 active named schedule entries exactly once: 97 sealed static
+  opcode models, six sealed structured opcode models, 18 direct precompile bodies, and 47 explicitly
+  unsupported opcode executions. The precompiles are classified by execution shape but remain
+  `declared_unmeasured`; this milestone does not treat the current schedule multiplier as a measured
+  proving-cost artifact.
+- Side-effect ownership contains 13 declared events exactly once: three operation-wrapper, five
+  state/trie, two transaction, and three block events.
+- Emitted trace fields are distinguished from ownership boundaries that are not yet emitted. In
+  particular, account/storage access, dirty-state update, final-trie update, witness/state input
+  validation, and block context are `declared_not_emitted`; the manifest does not claim they were
+  observed by the current trace crate.
+- `SSTORE` remains an unsupported operation-execution key while storage access, dirty-state update,
+  and final-trie update are separately owned by the state/trie layer. `CALL` likewise remains an
+  unsupported operation-execution key. For a confirmed spawned `CALL`, the current inspector emits
+  one fixed wrapper row that substitutes for the opcode raw-gas row; it does not emit and charge both
+  body and wrapper. Executed child operations match normal execution coverage, while
+  `child_execution` is only a derived grouping with zero additional charge.
+- The manifest is replayed from the exported Unzen schedule, the sealed 103-opcode Osaka registry,
+  its exact four-file Task 3 augmentation envelope, the named precompile inventory, and exact
+  trace/design source hashes. The core reference is pinned to a repo-contained regular non-symlink
+  file with exact canonical bytes. Validation rejects caller-resealed core forgeries, path or disk
+  drift, unknown, duplicate, or missing execution/event identities, missing evidence, measured
+  entries without an artifact, unsupported entries without a machine-readable reason, and
+  whole-opcode ownership delegation.
+- Operation charging selectors require a transaction-phase operation joined to exactly one started
+  non-Anchor transaction. Unattempted transactions do not match `tx_base`; Anchor and system work
+  remain mutually exclusive block-owned paths. Native-transfer work additionally requires the
+  trace's committed-success predicate, and operation rows outside the frozen named opcode/precompile
+  inventory fail closed instead of creating an unclassified execution key.
+- Proposal execution remained closed. No sampling was performed and no production table, schedule,
+  runtime configuration, block limit, or Boundless configuration changed.
+- The first independent adversarial review found two source-replay and trace-selector blockers. Both
+  were fixed. The updated focused suite passed 37 tests with one skip, and the complete opcode-gas
+  Python suite passed 402 tests with one skip. A second review round found and then verified the
+  native-transfer selector, frozen-key rejection, and authoritative CALL wording fixes; the final
+  focused review suite passed 41 tests with one skip and reported no remaining findings. The fresh
+  complete opcode-gas Python suite passed 406 tests with one skip.
+
 ## Next Gate
 
-Execute Task 4 to freeze the remaining operation-layer classification and exact ownership ledger.
-Do not invent coefficients for the 47 unsupported named opcodes: classify each as a static relation,
-typed function, separately owned wrapper/precompile event, inactive/unreachable operation, or
-explicitly unsupported key. Proposal execution remains closed.
+Write the next implementation plan for the smallest controlled state/trie and transaction
+calibration. Start with the coarse block/state model, started non-Anchor transaction count, and
+native value-transfer count; open finer state features only if the predeclared holdout rejects the
+coarse model. Proposal execution remains closed.
 
 ## Next Milestones
 

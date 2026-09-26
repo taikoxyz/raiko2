@@ -21,6 +21,7 @@ MANIFEST_PATH = (
     / "manifests"
     / "sp1-higher-layer-v1.json"
 )
+CALIBRATION_ID = "1" * 24
 
 
 def reseal(manifest):
@@ -403,23 +404,24 @@ class HigherLayerFixedRoundTests(unittest.TestCase):
                             and lane == "target"
                         ):
                             row_gas += 1
-                        rows.append(
-                            {
-                                "case": case_id,
-                                "overhead_key_id": key_id,
-                                "lane": lane,
-                                "target_count": count,
-                                "generator_max_count": bound,
-                                "repeat_index": repeat,
-                                "status": "accepted",
-                                "prover_gas": str(row_gas),
-                                "expected_feature_deltas": feature_deltas,
-                                "observed_operation_deltas": operation_deltas,
-                                "sp1_execution_engine": "gas-estimator",
-                                "sp1_gas_trace_chunk_threshold": 134_217_728,
-                                "sp1_gas_trace_chunk_slots": 2,
-                            }
-                        )
+                        row = {
+                            "case": case_id,
+                            "overhead_key_id": key_id,
+                            "lane": lane,
+                            "baseline_kind": None,
+                            "target_count": count,
+                            "generator_max_count": bound,
+                            "repeat_index": repeat,
+                            "status": "accepted",
+                            "prover_gas": str(row_gas),
+                            "expected_feature_deltas": feature_deltas,
+                            "observed_operation_deltas": operation_deltas,
+                            "sp1_execution_engine": "gas-estimator",
+                            "sp1_gas_trace_chunk_threshold": 134_217_728,
+                            "sp1_gas_trace_chunk_slots": 2,
+                        }
+                        self.bind_identity(row)
+                        rows.append(row)
 
         startup_cases = (
             ("startup_minimal_no_candidate_tx", 0),
@@ -432,33 +434,93 @@ class HigherLayerFixedRoundTests(unittest.TestCase):
                 + costs["tx_base"] * tx_count
             )
             for repeat in range(3):
-                rows.append(
-                    {
-                        "case": case_id,
-                        "overhead_key_id": "proposal_startup",
-                        "lane": "target",
-                        "target_count": 1,
-                        "generator_max_count": bound,
-                        "repeat_index": repeat,
-                        "status": "accepted",
-                        "prover_gas": str(gas),
-                        "expected_feature_deltas": {
-                            "proposal_startup": 1,
-                            "block_base": 1,
-                            "tx_base": tx_count,
-                            "native_value_transfer": 0,
-                        },
-                        "observed_operation_deltas": {},
-                        "sp1_execution_engine": "gas-estimator",
-                        "sp1_gas_trace_chunk_threshold": 134_217_728,
-                        "sp1_gas_trace_chunk_slots": 2,
-                    }
-                )
+                row = {
+                    "case": case_id,
+                    "overhead_key_id": "proposal_startup",
+                    "lane": "target",
+                    "baseline_kind": "mathematical_zero_baseline",
+                    "target_count": 1,
+                    "generator_max_count": bound,
+                    "repeat_index": repeat,
+                    "status": "accepted",
+                    "prover_gas": str(gas),
+                    "expected_feature_deltas": {
+                        "proposal_startup": 1,
+                        "block_base": 1,
+                        "tx_base": tx_count,
+                        "native_value_transfer": 0,
+                    },
+                    "observed_operation_deltas": {},
+                    "sp1_execution_engine": "gas-estimator",
+                    "sp1_gas_trace_chunk_threshold": 134_217_728,
+                    "sp1_gas_trace_chunk_slots": 2,
+                }
+                self.bind_identity(row)
+                rows.append(row)
         return rows
+
+    def bind_identity(self, row, *, calibration_id=CALIBRATION_ID):
+        row.update(
+            {
+                "expected_operation_deltas": copy.deepcopy(
+                    row["observed_operation_deltas"]
+                ),
+                "operation_phase_ownership": "transaction_non_anchor_only",
+                "system_operation_ownership": "block_base",
+                "anchor_operation_ownership": "block_base",
+            }
+        )
+        backend_input_sha256 = opcode_gas.sha256_bytes(
+            opcode_gas.canonical_json(
+                {
+                    "case": row["case"],
+                    "lane": row["lane"],
+                    "target_count": row["target_count"],
+                }
+            )
+        )
+        workload_spec = {
+            "schema_version": 2,
+            "overhead_key_id": row["overhead_key_id"],
+            "case_id": row["case"],
+            "lane": row["lane"],
+            "target_count": row["target_count"],
+            "guest_input_canonical_sha256": backend_input_sha256,
+            "expected_operation_deltas": row["expected_operation_deltas"],
+            "expected_feature_deltas": row["expected_feature_deltas"],
+            "operation_phase_ownership": "transaction_non_anchor_only",
+            "system_operation_ownership": "block_base",
+            "anchor_operation_ownership": "block_base",
+        }
+        if row.get("baseline_kind") is not None:
+            workload_spec["baseline_kind"] = row["baseline_kind"]
+        workload_id = opcode_gas.controlled_workload_id(workload_spec)
+        row.update(
+            {
+                "calibration_run_id": calibration_id,
+                "workload_spec": workload_spec,
+                "workload_id": workload_id,
+                "backend_input_sha256": backend_input_sha256,
+                "guest_input_sha256": "0x" + backend_input_sha256,
+                "execution_row_id": opcode_gas.controlled_execution_row_id(
+                    workload_id,
+                    backend="sp1",
+                    execution_engine="gas-estimator",
+                    run_id=calibration_id,
+                    repeat_index=row["repeat_index"],
+                    backend_input_sha256=backend_input_sha256,
+                ),
+            }
+        )
 
     def evaluate(self, rows, bound):
         return opcode_gas.evaluate_higher_layer_fixed_round(
-            self.manifest, self.coverage, self.core, rows, bound
+            self.manifest,
+            self.coverage,
+            self.core,
+            rows,
+            bound,
+            calibration_id=CALIBRATION_ID,
         )
 
     def test_exactly_recovers_known_costs_and_accepts_round_128(self):
@@ -556,6 +618,64 @@ class HigherLayerFixedRoundTests(unittest.TestCase):
         self.assertTrue(
             any("gas-estimator" in reason for reason in result["root_rejection_reasons"])
         )
+
+    def test_rejects_foreign_or_mutated_raw_row_identity(self):
+        def replace_backend_identity(row):
+            backend_input_sha256 = "0" * 64
+            row["backend_input_sha256"] = backend_input_sha256
+            row["guest_input_sha256"] = "0x" + backend_input_sha256
+            row["execution_row_id"] = opcode_gas.controlled_execution_row_id(
+                row["workload_id"],
+                backend="sp1",
+                execution_engine="gas-estimator",
+                run_id=CALIBRATION_ID,
+                repeat_index=row["repeat_index"],
+                backend_input_sha256=backend_input_sha256,
+            )
+
+        mutations = {
+            "calibration": lambda row: row.__setitem__(
+                "calibration_run_id", "2" * 24
+            ),
+            "execution row": lambda row: row.__setitem__(
+                "execution_row_id", "0" * 64
+            ),
+            "workload ID": lambda row: row.__setitem__("workload_id", "0" * 64),
+            "workload spec": lambda row: row["workload_spec"].__setitem__(
+                "target_count", row["target_count"] + 1
+            ),
+            "repeat": lambda row: row.__setitem__("repeat_index", 7),
+            "backend input": lambda row: row.__setitem__(
+                "backend_input_sha256", "0" * 64
+            ),
+            "workload spec guest input": replace_backend_identity,
+        }
+        for expected, mutate in mutations.items():
+            rows = self.rows(128)
+            mutate(rows[0])
+            with self.subTest(expected=expected), self.assertRaisesRegex(
+                ValueError, expected
+            ):
+                self.evaluate(rows, 128)
+
+    def test_rejected_preexecution_row_is_bound_to_current_calibration(self):
+        rejected = {
+            "case": "block_base_one_vs_two_minimal_blocks",
+            "overhead_key_id": "block_base",
+            "lane": "target",
+            "target_count": 8,
+            "generator_max_count": 8,
+            "repeat_index": 0,
+            "status": "rejected",
+            "calibration_run_id": "2" * 24,
+            "sp1_execution_engine": "gas-estimator",
+            "sp1_gas_trace_chunk_threshold": 134_217_728,
+            "sp1_gas_trace_chunk_slots": 2,
+            "reasons": ["generation_failure"],
+        }
+
+        with self.assertRaisesRegex(ValueError, "calibration"):
+            self.evaluate([rejected], 8)
 
 
 class HigherLayerCampaignInterfaceTests(unittest.TestCase):
@@ -674,6 +794,30 @@ class HigherLayerCampaignInterfaceTests(unittest.TestCase):
             },
         )
 
+    def test_load_identity_rejects_symlinked_artifact(self):
+        payload = {"implementation_revision": "1" * 40}
+        identity_sha256 = opcode_gas.sha256_bytes(opcode_gas.canonical_json(payload))
+        document = {
+            "schema_version": opcode_gas._HIGHER_LAYER_IDENTITY_SCHEMA_VERSION,
+            "calibration_id": identity_sha256[:24],
+            "identity_sha256": identity_sha256,
+            "identity": payload,
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            run = root / identity_sha256[:24]
+            run.mkdir()
+            external = root / "external-identity.json"
+            external.write_bytes(opcode_gas._canonical_json_file_bytes(document))
+            (run / "identity.json").symlink_to(external)
+
+            with mock.patch.object(
+                opcode_gas, "_HIGHER_LAYER_RUN_ROOT", root
+            ), mock.patch.object(
+                opcode_gas, "_resolve_repo_path", return_value=run
+            ), self.assertRaisesRegex(ValueError, "non-symlink"):
+                opcode_gas._load_higher_layer_identity(run)
+
     def test_higher_layer_executor_command_selects_gas_estimator(self):
         def inspect_command(command, **_kwargs):
             engine_index = command.index("--sp1-execution-engine")
@@ -714,7 +858,10 @@ class HigherLayerCampaignInterfaceTests(unittest.TestCase):
         run_root.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(dir=run_root) as temporary:
             run = pathlib.Path(temporary)
-            identity = {"calibration_id": "a" * 24, "identity_sha256": "b" * 64}
+            identity = {
+                "calibration_id": CALIBRATION_ID,
+                "identity_sha256": "1" * 64,
+            }
             with mock.patch.object(
                 opcode_gas,
                 "_validate_current_higher_layer_identity",
@@ -751,6 +898,145 @@ class HigherLayerCampaignInterfaceTests(unittest.TestCase):
                     self.core,
                     "b" * 64,
                 )
+
+    def test_load_decisions_rejects_symlinked_ledger_seal_and_parent(self):
+        decisions = {
+            "schema_version": opcode_gas._HIGHER_LAYER_DECISIONS_SCHEMA_VERSION,
+            "identity_sha256": "1" * 64,
+            "rounds": [],
+        }
+        decision_bytes = opcode_gas._higher_layer_decisions_bytes(decisions)
+        seal_bytes = (opcode_gas.sha256_bytes(decision_bytes) + "\n").encode()
+        for symlink_name in (
+            "overhead-decisions.json",
+            "overhead-decisions.sha256",
+            "parent",
+        ):
+            with self.subTest(
+                symlink_name=symlink_name
+            ), tempfile.TemporaryDirectory() as temporary:
+                root = pathlib.Path(temporary)
+                external = root / "external"
+                external.mkdir()
+                (external / "overhead-decisions.json").write_bytes(decision_bytes)
+                (external / "overhead-decisions.sha256").write_bytes(seal_bytes)
+                if symlink_name == "parent":
+                    run = root / "run"
+                    run.symlink_to(external, target_is_directory=True)
+                else:
+                    run = root / "run"
+                    run.mkdir()
+                    other_name = (
+                        "overhead-decisions.sha256"
+                        if symlink_name == "overhead-decisions.json"
+                        else "overhead-decisions.json"
+                    )
+                    (run / other_name).write_bytes(
+                        seal_bytes
+                        if other_name.endswith(".sha256")
+                        else decision_bytes
+                    )
+                    (run / symlink_name).symlink_to(external / symlink_name)
+
+                with self.assertRaisesRegex(ValueError, "non-symlink"):
+                    opcode_gas._load_higher_layer_decisions(
+                        run,
+                        self.manifest,
+                        self.coverage,
+                        self.core,
+                        "1" * 64,
+                    )
+
+    def round_artifacts(self, destination, *, row_calibration_id=CALIBRATION_ID):
+        fixture = HigherLayerFixedRoundTests()
+        fixture.manifest = self.manifest
+        fixture.coverage = self.coverage
+        fixture.core = self.core
+        rows = fixture.rows(8)
+        if row_calibration_id != CALIBRATION_ID:
+            for row in rows:
+                fixture.bind_identity(row, calibration_id=row_calibration_id)
+        fit = opcode_gas.evaluate_higher_layer_fixed_round(
+            self.manifest,
+            self.coverage,
+            self.core,
+            rows,
+            8,
+            calibration_id=row_calibration_id,
+        )
+        raw_bytes = b"".join(
+            opcode_gas.canonical_json(row) + b"\n" for row in rows
+        )
+        fit_bytes = opcode_gas._canonical_json_file_bytes(fit)
+        raw_path = destination / "raw" / "overhead-round-8.jsonl"
+        fit_path = destination / "fit" / "overhead-round-8.json"
+        raw_path.parent.mkdir(parents=True, exist_ok=True)
+        fit_path.parent.mkdir(parents=True, exist_ok=True)
+        raw_path.write_bytes(raw_bytes)
+        fit_path.write_bytes(fit_bytes)
+        return {
+            "schema_version": 1,
+            "identity_sha256": "1" * 64,
+            "rounds": [
+                {
+                    "generator_max_count": 8,
+                    "raw_rows": "raw/overhead-round-8.jsonl",
+                    "raw_rows_sha256": opcode_gas.sha256_bytes(raw_bytes),
+                    "fit": "fit/overhead-round-8.json",
+                    "fit_sha256": opcode_gas.sha256_bytes(fit_bytes),
+                    "decision": fit["decision"],
+                }
+            ],
+        }
+
+    def test_persisted_replay_rejects_resealed_foreign_raw_rows(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            run = pathlib.Path(temporary) / "run"
+            run.mkdir()
+            decisions = self.round_artifacts(run, row_calibration_id="2" * 24)
+
+            with self.assertRaisesRegex(ValueError, "calibration"):
+                opcode_gas.validate_persisted_higher_layer_decisions(
+                    run,
+                    decisions,
+                    self.manifest,
+                    self.coverage,
+                    self.core,
+                    "1" * 64,
+                )
+
+    def test_persisted_replay_rejects_symlinked_round_files_and_parents(self):
+        for symlink_parent in (False, True):
+            with self.subTest(
+                symlink_parent=symlink_parent
+            ), tempfile.TemporaryDirectory() as temporary:
+                root = pathlib.Path(temporary)
+                external = root / "external"
+                decisions = self.round_artifacts(external)
+                run = root / "run"
+                run.mkdir()
+                if symlink_parent:
+                    (run / "raw").symlink_to(external / "raw", target_is_directory=True)
+                    (run / "fit").symlink_to(external / "fit", target_is_directory=True)
+                else:
+                    (run / "raw").mkdir()
+                    (run / "fit").mkdir()
+                    (run / "raw" / "overhead-round-8.jsonl").symlink_to(
+                        external / "raw" / "overhead-round-8.jsonl"
+                    )
+                    (run / "fit" / "overhead-round-8.json").symlink_to(
+                        external / "fit" / "overhead-round-8.json"
+                    )
+
+                with self.assertRaisesRegex(ValueError, "non-symlink"):
+                    opcode_gas.validate_persisted_higher_layer_decisions(
+                        run,
+                        decisions,
+                        self.manifest,
+                        self.coverage,
+                        self.core,
+                        "1" * 64,
+                    )
 
 
 if __name__ == "__main__":

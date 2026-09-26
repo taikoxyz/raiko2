@@ -8957,6 +8957,102 @@ def _higher_layer_operation_cost(
     )
 
 
+def _higher_layer_calibration_id(value: Any) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 24
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ValueError("higher-layer calibration ID is invalid")
+    return value
+
+
+def _validate_higher_layer_raw_row_identity(
+    row: Mapping[str, Any], *, calibration_id: str
+) -> None:
+    if row.get("calibration_run_id") != calibration_id:
+        raise ValueError("higher-layer row calibration identity differs")
+    repeat_index = row.get("repeat_index")
+    if (
+        isinstance(repeat_index, bool)
+        or not isinstance(repeat_index, int)
+        or repeat_index not in {0, 1, 2}
+    ):
+        raise ValueError("higher-layer row repeat identity differs")
+    status = row.get("status")
+    if status == "rejected":
+        validate_sp1_execution_provenance(
+            row, workload_kind="overhead", expected_engine="gas-estimator"
+        )
+        return
+    if status != "accepted":
+        raise ValueError("higher-layer row status is invalid")
+
+    workload_spec = row.get("workload_spec")
+    required_spec_fields = {
+        "schema_version",
+        "overhead_key_id",
+        "case_id",
+        "lane",
+        "target_count",
+        "guest_input_canonical_sha256",
+        "expected_operation_deltas",
+        "expected_feature_deltas",
+        "operation_phase_ownership",
+        "system_operation_ownership",
+        "anchor_operation_ownership",
+    }
+    if not isinstance(workload_spec, Mapping):
+        raise ValueError("higher-layer workload spec fields differ")
+    spec_fields = frozenset(workload_spec)
+    if spec_fields not in {
+        frozenset(required_spec_fields),
+        frozenset({*required_spec_fields, "baseline_kind"}),
+    }:
+        raise ValueError("higher-layer workload spec fields differ")
+    if workload_spec.get("schema_version") != 2:
+        raise ValueError("higher-layer workload spec schema differs")
+    for spec_field, row_field in (
+        ("overhead_key_id", "overhead_key_id"),
+        ("case_id", "case"),
+        ("lane", "lane"),
+        ("target_count", "target_count"),
+        ("baseline_kind", "baseline_kind"),
+        ("expected_operation_deltas", "expected_operation_deltas"),
+        ("expected_feature_deltas", "expected_feature_deltas"),
+        ("operation_phase_ownership", "operation_phase_ownership"),
+        ("system_operation_ownership", "system_operation_ownership"),
+        ("anchor_operation_ownership", "anchor_operation_ownership"),
+    ):
+        if not _exact_json_equal(workload_spec.get(spec_field), row.get(row_field)):
+            raise ValueError(f"higher-layer workload spec {spec_field} differs")
+
+    workload_id = row.get("workload_id")
+    if not _is_sha256(workload_id) or controlled_workload_id(workload_spec) != workload_id:
+        raise ValueError("higher-layer workload ID differs")
+    backend_input_sha256 = row.get("backend_input_sha256")
+    if not _is_sha256(backend_input_sha256):
+        raise ValueError("higher-layer backend input identity differs")
+    guest_input_sha256 = row.get("guest_input_sha256")
+    if (
+        not isinstance(guest_input_sha256, str)
+        or guest_input_sha256.lower().removeprefix("0x") != backend_input_sha256
+    ):
+        raise ValueError("higher-layer backend input identity differs")
+    if workload_spec.get("guest_input_canonical_sha256") != backend_input_sha256:
+        raise ValueError("higher-layer workload spec guest input differs")
+    expected_execution_row_id = controlled_execution_row_id(
+        workload_id,
+        backend="sp1",
+        execution_engine="gas-estimator",
+        run_id=calibration_id,
+        repeat_index=repeat_index,
+        backend_input_sha256=backend_input_sha256,
+    )
+    if row.get("execution_row_id") != expected_execution_row_id:
+        raise ValueError("higher-layer execution row identity differs")
+
+
 def _higher_layer_sweep_case(
     *,
     case_id: str,
@@ -9074,12 +9170,15 @@ def evaluate_higher_layer_fixed_round(
     augmented_core: Mapping[str, Any],
     rows: Iterable[Mapping[str, Any]],
     generator_max_count: int,
+    *,
+    calibration_id: str,
 ) -> Mapping[str, Any]:
     """Fit one bounded higher-layer round without executing or writing files."""
     if not isinstance(manifest, HigherLayerManifest):
         raise ValueError("higher-layer evaluator requires the validated manifest")
     if generator_max_count not in manifest.generator_rounds:
         raise ValueError("higher-layer generator bound must be one of 8, 32, or 128")
+    calibration_id = _higher_layer_calibration_id(calibration_id)
     _require_pinned_operation_artifact(
         operation_coverage,
         expected_sha256=manifest.operation_coverage_ref["artifact_sha256"],
@@ -9092,11 +9191,16 @@ def evaluate_higher_layer_fixed_round(
     )
     row_list = list(rows)
     if any(
-        row.get("case") not in manifest.overhead_case_ids
+        not isinstance(row, Mapping)
+        or row.get("case") not in manifest.overhead_case_ids
         or row.get("generator_max_count") != generator_max_count
         for row in row_list
     ):
         raise ValueError("higher-layer row identity or generator bound differs")
+    for row in row_list:
+        _validate_higher_layer_raw_row_identity(
+            row, calibration_id=calibration_id
+        )
 
     accepted: dict[str, Decimal] = {}
     case_results: list[dict[str, Any]] = []
@@ -18605,7 +18709,14 @@ def run_controlled_overhead_round(
                             "generator_max_count": generator_max_count,
                             "repeat_index": repeat_index,
                             "status": "rejected",
+                            "calibration_run_id": calibration_run_id,
                             "sp1_execution_engine": report["sp1_execution_engine"],
+                            "sp1_gas_trace_chunk_threshold": report.get(
+                                "sp1_gas_trace_chunk_threshold"
+                            ),
+                            "sp1_gas_trace_chunk_slots": report.get(
+                                "sp1_gas_trace_chunk_slots"
+                            ),
                             "reasons": controlled.get("reasons", []),
                             "error": controlled.get("error"),
                         }
@@ -18641,6 +18752,7 @@ def run_controlled_overhead_round(
                     "generator_max_count": generator_max_count,
                     "repeat_index": repeat_index,
                     "status": "accepted",
+                    "calibration_run_id": calibration_run_id,
                     "workload_id": workload_id,
                     "workload_spec": workload_spec,
                     "backend_input_sha256": backend_input_sha256,
@@ -21010,7 +21122,9 @@ def _load_higher_layer_identity(run: pathlib.Path) -> tuple[dict[str, Any], dict
     canonical_root = (REPO_ROOT / _HIGHER_LAYER_RUN_ROOT).resolve()
     if run.parent != canonical_root or run.name == "" or run.is_symlink():
         raise ValueError("higher-layer run path is not canonical")
-    identity_path = run / "identity.json"
+    identity_path = _higher_layer_contained_regular_file(
+        run, pathlib.Path("identity.json"), label="higher-layer identity"
+    )
     try:
         raw = identity_path.read_bytes()
         document = json.loads(raw)
@@ -21086,6 +21200,34 @@ def _read_higher_layer_rows(path: pathlib.Path) -> list[Mapping[str, Any]]:
         raise ValueError(f"higher-layer raw rows are invalid: {path}") from error
 
 
+def _higher_layer_contained_regular_file(
+    run: pathlib.Path, relative: pathlib.Path, *, label: str
+) -> pathlib.Path:
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ValueError(f"{label} path is not canonical")
+    try:
+        run_mode = run.stat(follow_symlinks=False).st_mode
+    except OSError as error:
+        raise ValueError("higher-layer run directory is missing") from error
+    if run.is_symlink() or not stat.S_ISDIR(run_mode):
+        raise ValueError("higher-layer run must be a contained non-symlink directory")
+    root = run.resolve(strict=True)
+    cursor = run
+    for index, part in enumerate(relative.parts):
+        cursor = cursor / part
+        try:
+            mode = cursor.stat(follow_symlinks=False).st_mode
+        except OSError as error:
+            raise ValueError(f"{label} must be a contained regular non-symlink file") from error
+        if cursor.is_symlink():
+            raise ValueError(f"{label} must be a contained regular non-symlink file")
+        if index < len(relative.parts) - 1 and not stat.S_ISDIR(mode):
+            raise ValueError(f"{label} must be a contained regular non-symlink file")
+    if not stat.S_ISREG(mode) or not cursor.resolve(strict=True).is_relative_to(root):
+        raise ValueError(f"{label} must be a contained regular non-symlink file")
+    return cursor
+
+
 def validate_persisted_higher_layer_decisions(
     run: pathlib.Path,
     decisions: Mapping[str, Any],
@@ -21125,18 +21267,25 @@ def validate_persisted_higher_layer_decisions(
             expected_fit
         ):
             raise ValueError("higher-layer round artifact path is not canonical")
-        raw_path = run / expected_raw
-        fit_path = run / expected_fit
+        raw_path = _higher_layer_contained_regular_file(
+            run, expected_raw, label="higher-layer raw round"
+        )
+        fit_path = _higher_layer_contained_regular_file(
+            run, expected_fit, label="higher-layer fit round"
+        )
         if (
-            not raw_path.is_file()
-            or sha256_file(raw_path) != record.get("raw_rows_sha256")
-            or not fit_path.is_file()
+            sha256_file(raw_path) != record.get("raw_rows_sha256")
             or sha256_file(fit_path) != record.get("fit_sha256")
         ):
             raise ValueError("higher-layer round artifact hash differs")
         rows = _read_higher_layer_rows(raw_path)
         replay = evaluate_higher_layer_fixed_round(
-            manifest, coverage, core, rows, bound
+            manifest,
+            coverage,
+            core,
+            rows,
+            bound,
+            calibration_id=identity_sha256[:24],
         )
         fit_bytes = _canonical_json_file_bytes(replay)
         if fit_path.read_bytes() != fit_bytes or record.get("decision") != replay.get(
@@ -21158,7 +21307,9 @@ def _load_higher_layer_decisions(
     path = run / "overhead-decisions.json"
     seal = run / "overhead-decisions.sha256"
     artifacts_exist = any((run / directory).exists() for directory in ("raw", "fit"))
-    if not path.exists() and not seal.exists():
+    path_exists = path.exists() or path.is_symlink()
+    seal_exists = seal.exists() or seal.is_symlink()
+    if not path_exists and not seal_exists:
         if artifacts_exist:
             raise ValueError("higher-layer raw evidence is missing prior round decisions")
         decisions = {
@@ -21167,8 +21318,16 @@ def _load_higher_layer_decisions(
             "rounds": [],
         }
         return decisions, []
-    if not path.is_file() or not seal.is_file():
-        raise ValueError("higher-layer decision ledger or seal is missing")
+    path = _higher_layer_contained_regular_file(
+        run,
+        pathlib.Path("overhead-decisions.json"),
+        label="higher-layer decision ledger",
+    )
+    seal = _higher_layer_contained_regular_file(
+        run,
+        pathlib.Path("overhead-decisions.sha256"),
+        label="higher-layer decision ledger seal",
+    )
     raw = path.read_bytes()
     if seal.read_text().strip() != sha256_bytes(raw):
         raise ValueError("higher-layer decision ledger seal differs")
@@ -21224,7 +21383,12 @@ def run_higher_layer_calibration(
             rows = _read_higher_layer_rows(temporary_raw)
         raw_bytes = b"".join(canonical_json(row) + b"\n" for row in rows)
         fit = evaluate_higher_layer_fixed_round(
-            manifest, coverage, core, rows, bound
+            manifest,
+            coverage,
+            core,
+            rows,
+            bound,
+            calibration_id=identity["calibration_id"],
         )
         fit_bytes = _canonical_json_file_bytes(fit)
         persist_immutable_bytes(raw_path, raw_bytes)

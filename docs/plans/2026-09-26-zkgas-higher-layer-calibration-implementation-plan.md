@@ -400,16 +400,34 @@ Expected: FAIL because neither holdout fixture kind exists.
 
 - [ ] **Step 4: Implement deterministic topology builders**
 
-Add an input schema owned by the existing controlled-workload module:
+The launcher input must be the exact canonical Task 1 pair object; Task 5 must not translate it to
+a second compact wire schema. Add a strict externally tagged schema owned by the existing
+controlled-workload module:
 
 ```rust
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
-pub enum ControlledStateHoldout {
-    WitnessTopology { extra_account_count: usize },
-    DirtyAccounts { transaction_count: u64, value: u64 },
+pub enum ControlledStateHoldoutPairSpec {
+    WitnessTopology {
+        pair_id: String,
+        scale: usize,
+        control: WitnessTopologyLaneSpec,
+        target: WitnessTopologyLaneSpec,
+    },
+    DirtyAccounts {
+        pair_id: String,
+        scale: u64,
+        control: DirtyAccountsLaneSpec,
+        target: DirtyAccountsLaneSpec,
+    },
 }
 ```
+
+The lane structs use `deny_unknown_fields` and exactly match the manifest's
+`extra_account_count` or `recipient_mode/transaction_count/value` objects. Reject every pair that
+is not one of the six frozen canonical shapes, including mismatched `pair_id`, `scale`, control,
+target, transaction count, value, or recipient mode. A compact enum may be used only as an
+internal normalized builder representation after validation; it is not an accepted CLI format.
 
 Derive extra accounts and unique recipients from fixed domain-separated hashes of the zero-based
 index. Do not use random keys, wall-clock data, local paths, or network input. Extend the existing
@@ -417,10 +435,11 @@ prestate and candidate builders; do not create another proposal reconstruction p
 
 - [ ] **Step 5: Add the launcher surface**
 
-Add `--stage controlled-state-holdout`. It accepts one JSON pair spec, constructs both lanes,
-validates each through `trace_shasta_proposal`, and emits two typed observations. It must support
-only local SP1 execute mode with the gas-estimator engine, matching the current controlled-block
-guard.
+Add `--stage controlled-state-holdout`. It accepts one complete canonical JSON pair spec in the
+same shape returned by Task 1's `StateHoldoutSpec`, constructs both lanes without Python-side
+field translation, validates each through `trace_shasta_proposal`, and emits two typed
+observations. It must support only local SP1 execute mode with the gas-estimator engine, matching
+the current controlled-block guard.
 
 - [ ] **Step 6: Run focused Rust tests and formatting**
 

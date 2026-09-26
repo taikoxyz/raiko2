@@ -8980,13 +8980,13 @@ def _validate_higher_layer_raw_row_identity(
     ):
         raise ValueError("higher-layer row repeat identity differs")
     status = row.get("status")
-    if status == "rejected":
-        validate_sp1_execution_provenance(
-            row, workload_kind="overhead", expected_engine="gas-estimator"
-        )
-        return
-    if status != "accepted":
+    if status not in {"accepted", "rejected"}:
         raise ValueError("higher-layer row status is invalid")
+    validate_sp1_execution_provenance(
+        row, workload_kind="overhead", expected_engine="gas-estimator"
+    )
+    if status == "rejected":
+        return
 
     workload_spec = row.get("workload_spec")
     required_spec_fields = {
@@ -9051,6 +9051,84 @@ def _validate_higher_layer_raw_row_identity(
     )
     if row.get("execution_row_id") != expected_execution_row_id:
         raise ValueError("higher-layer execution row identity differs")
+
+
+def _validate_higher_layer_row_inventory(
+    manifest: HigherLayerManifest,
+    rows: list[Mapping[str, Any]],
+    generator_max_count: int,
+) -> None:
+    def inventory_key(
+        case_id: Any,
+        overhead_key_id: Any,
+        lane: Any,
+        baseline_kind: Any,
+        target_count: Any,
+        repeat_index: Any,
+    ) -> bytes:
+        return canonical_json(
+            {
+                "case": case_id,
+                "overhead_key_id": overhead_key_id,
+                "lane": lane,
+                "baseline_kind": baseline_kind,
+                "target_count": target_count,
+                "repeat_index": repeat_index,
+            }
+        )
+
+    expected = set()
+    sweep_keys = (
+        "tx_base",
+        "tx_base",
+        "native_value_transfer",
+        "block_base",
+    )
+    for case_id, overhead_key_id in zip(
+        manifest.overhead_case_ids[:4], sweep_keys
+    ):
+        for target_count in controlled_round_counts(generator_max_count):
+            for lane in ("target", "control"):
+                for repeat_index in range(3):
+                    expected.add(
+                        inventory_key(
+                            case_id,
+                            overhead_key_id,
+                            lane,
+                            None,
+                            target_count,
+                            repeat_index,
+                        )
+                    )
+    for case_id in manifest.overhead_case_ids[4:]:
+        for repeat_index in range(3):
+            expected.add(
+                inventory_key(
+                    case_id,
+                    "proposal_startup",
+                    "target",
+                    "mathematical_zero_baseline",
+                    1,
+                    repeat_index,
+                )
+            )
+
+    try:
+        actual = [
+            inventory_key(
+                row.get("case"),
+                row.get("overhead_key_id"),
+                row.get("lane"),
+                row.get("baseline_kind"),
+                row.get("target_count"),
+                row.get("repeat_index"),
+            )
+            for row in rows
+        ]
+    except (TypeError, ValueError) as error:
+        raise ValueError("higher-layer row inventory differs") from error
+    if len(actual) != len(expected) or set(actual) != expected:
+        raise ValueError("higher-layer row inventory differs")
 
 
 def _higher_layer_sweep_case(
@@ -9192,15 +9270,17 @@ def evaluate_higher_layer_fixed_round(
     row_list = list(rows)
     if any(
         not isinstance(row, Mapping)
-        or row.get("case") not in manifest.overhead_case_ids
         or row.get("generator_max_count") != generator_max_count
         for row in row_list
     ):
-        raise ValueError("higher-layer row identity or generator bound differs")
+        raise ValueError("higher-layer row inventory differs")
     for row in row_list:
         _validate_higher_layer_raw_row_identity(
             row, calibration_id=calibration_id
         )
+    _validate_higher_layer_row_inventory(
+        manifest, row_list, generator_max_count
+    )
 
     accepted: dict[str, Decimal] = {}
     case_results: list[dict[str, Any]] = []

@@ -612,12 +612,41 @@ class HigherLayerFixedRoundTests(unittest.TestCase):
             row["sp1_gas_trace_chunk_threshold"] = None
             row["sp1_gas_trace_chunk_slots"] = None
 
-        result = self.evaluate(rows, 128)
+        with self.assertRaisesRegex(ValueError, "gas-estimator"):
+            self.evaluate(rows, 128)
 
-        self.assertEqual(result["decision"], "terminal_failure")
-        self.assertTrue(
-            any("gas-estimator" in reason for reason in result["root_rejection_reasons"])
-        )
+    def test_rejects_unused_or_incomplete_row_inventory(self):
+        def bogus_lane(rows):
+            row = copy.deepcopy(rows[0])
+            row["lane"] = "ignored"
+            self.bind_identity(row)
+            rows.append(row)
+
+        def startup_control(rows):
+            row = copy.deepcopy(
+                next(
+                    row
+                    for row in rows
+                    if row["case"] == "startup_minimal_no_candidate_tx"
+                )
+            )
+            row["lane"] = "control"
+            self.bind_identity(row)
+            rows.append(row)
+
+        mutations = {
+            "bogus lane": bogus_lane,
+            "startup control": startup_control,
+            "duplicate": lambda rows: rows.append(copy.deepcopy(rows[0])),
+            "missing": lambda rows: rows.pop(0),
+        }
+        for label, mutate in mutations.items():
+            rows = self.rows(128)
+            mutate(rows)
+            with self.subTest(label=label), self.assertRaisesRegex(
+                ValueError, "inventory"
+            ):
+                self.evaluate(rows, 128)
 
     def test_rejects_foreign_or_mutated_raw_row_identity(self):
         def replace_backend_identity(row):

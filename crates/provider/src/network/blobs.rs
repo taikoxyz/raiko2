@@ -141,6 +141,11 @@ impl NetworkProvider {
                     "failed to decode beacon blobs response for slot {slot} from GET {endpoint_route}: {err}; {compatibility_hint}"
                 ))
             })?;
+        if payload.data.is_empty() {
+            return Err(RaikoError::RPC(format!(
+                "beacon blobs response for slot {slot} was empty from GET {endpoint_route}; {compatibility_hint}"
+            )));
+        }
 
         let mut blobs_by_hash = BTreeMap::new();
         for (response_idx, encoded_blob) in payload.data.iter().enumerate() {
@@ -150,7 +155,7 @@ impl NetworkProvider {
                 ))
             })?;
             let commitment = blob_to_commitment(&blob).map_err(|err| {
-                RaikoError::RPC(format!(
+                RaikoError::Preflight(format!(
                     "malformed beacon blob at response index {response_idx} for slot {slot} from GET {endpoint_route}: failed to compute KZG commitment: {err}; {compatibility_hint}"
                 ))
             })?;
@@ -223,7 +228,7 @@ impl NetworkProvider {
             let mut blob_proofs = Vec::with_capacity(blob_hashes.len());
             for (blob_idx, expected_hash) in blob_hashes.iter().enumerate() {
                 let resolved = blobs_by_hash.get(expected_hash).ok_or_else(|| {
-                    RaikoError::RPC(format!(
+                    RaikoError::Preflight(format!(
                         "beacon blobs response for slot {slot} is missing requested versioned hash {expected_hash} for source {source_idx}, blob {blob_idx} after recomputing returned KZG commitments; {}",
                         beacon_blobs_compatibility_hint(slot)
                     ))
@@ -260,7 +265,7 @@ impl NetworkProvider {
 mod tests {
     use super::{source_timestamp, timestamp_to_slot};
     use alloy_primitives::{B256, hex};
-    use raiko2_primitives::{ChainSpec, blob::util::blob_to_commitment};
+    use raiko2_primitives::{ChainSpec, RaikoError, blob::util::blob_to_commitment};
     use raiko2_protocol::BlobProofType;
     use raiko2_protocol_shasta::shasta::{BlobSlice, DerivationSource, Proposal, ShastaEventData};
     use tokio::{
@@ -479,6 +484,7 @@ mod tests {
             )
             .await
             .expect_err("a blob with the wrong recomputed hash should be rejected");
+        assert!(matches!(err, RaikoError::Preflight(_)), "{err:?}");
         let message = err.to_string();
 
         assert!(
@@ -490,7 +496,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn empty_blob_response_reports_the_missing_requested_hash() {
+    async fn empty_blob_response_remains_retryable() {
         let requested_hash = B256::repeat_byte(0x42);
         let (beacon_rpc, _) = serve_once("200 OK", blobs_response(&[])).await;
         let event = proposal_event(vec![source(124, vec![requested_hash])]);
@@ -503,13 +509,13 @@ mod tests {
             )
             .await
             .expect_err("an omitted requested blob should be rejected");
+        assert!(matches!(err, RaikoError::RPC(_)), "{err:?}");
         let message = err.to_string();
 
         assert!(
-            message.contains("missing requested versioned hash"),
+            message.contains("response for slot 2 was empty"),
             "{message}"
         );
-        assert!(message.contains(&requested_hash.to_string()), "{message}");
         assert!(message.contains("Prysm >= 7.1.8"), "{message}");
     }
 
@@ -527,6 +533,7 @@ mod tests {
             )
             .await
             .expect_err("a malformed blob should be rejected");
+        assert!(matches!(err, RaikoError::Preflight(_)), "{err:?}");
         let message = err.to_string();
 
         assert!(message.contains("malformed beacon blob"), "{message}");

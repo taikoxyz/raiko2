@@ -1832,6 +1832,81 @@ class HigherLayerTask5StateVerdictTests(unittest.TestCase):
                         run_path_file, trace_executor=fake_trace
                     )
 
+    def test_verifier_packages_the_validated_round_snapshot_without_rereading(self):
+        identity = {
+            "calibration_id": CALIBRATION_ID,
+            "identity_sha256": "1" * 64,
+        }
+        state_rows = self.rows()
+        original_round_rows = [{"snapshot": "validated"}]
+        record = {
+            "generator_max_count": 8,
+            "raw_rows": "raw/overhead-round-8.jsonl",
+            "raw_rows_sha256": "2" * 64,
+            "fit": "fit/overhead-round-8.json",
+            "fit_sha256": "3" * 64,
+            "decision": "expand_next_round",
+        }
+        validated = [
+            {
+                **record,
+                "fit_payload": {"decision": "expand_next_round"},
+                "raw_rows_payload": original_round_rows,
+            }
+        ]
+        decisions = {
+            "schema_version": 1,
+            "identity_sha256": "1" * 64,
+            "rounds": [record],
+        }
+        final = self.evaluate(state_rows)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            run = root / "run"
+            (run / "raw").mkdir(parents=True)
+            (run / "fixed-costs.json").write_bytes(
+                opcode_gas._canonical_json_file_bytes(self.fixed)
+            )
+            state_path = run / "raw" / "state-holdouts.jsonl"
+            state_path.write_bytes(
+                b"".join(
+                    opcode_gas.canonical_json(row) + b"\n" for row in state_rows
+                )
+            )
+            (run / "higher-layer-calibration.json").write_bytes(
+                opcode_gas._canonical_json_file_bytes(final)
+            )
+            run_path_file = root / "run-path"
+            run_path_file.write_text(str(run) + "\n")
+
+            def read_rows(path):
+                if pathlib.Path(path) == state_path:
+                    return state_rows
+                return [{"snapshot": "mutated-second-read"}]
+
+            with mock.patch.object(
+                opcode_gas,
+                "_validate_current_higher_layer_identity",
+                return_value=(identity, self.manifest, self.coverage, self.core),
+            ), mock.patch.object(
+                opcode_gas,
+                "fit_higher_layer_fixed_costs",
+                return_value=self.fixed,
+            ), mock.patch.object(
+                opcode_gas,
+                "_load_higher_layer_decisions",
+                return_value=(decisions, validated),
+            ), mock.patch.object(
+                opcode_gas, "_read_higher_layer_rows", side_effect=read_rows
+            ):
+                verified = opcode_gas.verify_higher_layer_calibration(
+                    run_path_file,
+                    trace_executor=self.trace_executor(state_rows),
+                )
+            self.assertEqual(
+                verified["round_evidence"][0]["rows"], original_round_rows
+            )
+
     def test_host_trace_verifier_command_is_native_and_has_no_sp1_flags(self):
         pair_spec = self.pair_spec(self.manifest.state_holdouts[0])
 

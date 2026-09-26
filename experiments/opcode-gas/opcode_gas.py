@@ -21384,7 +21384,13 @@ def validate_persisted_higher_layer_decisions(
             "decision"
         ):
             raise ValueError("higher-layer round fit or decision differs on replay")
-        validated.append({**record, "fit_payload": replay})
+        validated.append(
+            {
+                **record,
+                "fit_payload": replay,
+                "raw_rows_payload": rows,
+            }
+        )
         prior_decision = record["decision"]
     return validated
 
@@ -22468,7 +22474,7 @@ def verify_higher_layer_calibration(
         round_evidence.append(
             {
                 "record": persisted,
-                "rows": _read_higher_layer_rows(run / persisted["raw_rows"]),
+                "rows": record["raw_rows_payload"],
                 "fit": record["fit_payload"],
             }
         )

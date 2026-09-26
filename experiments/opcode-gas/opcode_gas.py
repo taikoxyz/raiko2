@@ -21846,10 +21846,14 @@ def _validate_higher_layer_state_row(
             raise ValueError("higher-layer state operation delta fields differ")
         units = delta["units"]
         event_count = delta["event_count"]
-        if units < 0 or event_count < 0:
-            raise ValueError("higher-layer state operation counts must be nonnegative")
         if units == 0 and event_count == 0:
             raise ValueError("higher-layer state operation delta must omit a zero row")
+        if units <= 0:
+            raise ValueError("higher-layer state operation requires positive units")
+        if event_count <= 0:
+            raise ValueError(
+                "higher-layer state operation requires positive event_count"
+            )
         if units > (1 << 63) - 1 or event_count > (1 << 63) - 1:
             raise ValueError("higher-layer state operation counts exceed i64")
     return observation

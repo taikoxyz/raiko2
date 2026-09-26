@@ -1508,6 +1508,20 @@ class HigherLayerTask5StateVerdictTests(unittest.TestCase):
                     "event_count": 0,
                 }
             },
+            "positive units": {
+                "opcode:0x5f": {
+                    "pricing_basis": "raw_gas_slope",
+                    "units": 0,
+                    "event_count": 1,
+                }
+            },
+            "positive event_count": {
+                "opcode:0x5f": {
+                    "pricing_basis": "raw_gas_slope",
+                    "units": 1,
+                    "event_count": 0,
+                }
+            },
             "i64": {
                 "opcode:0x5f": {
                     "pricing_basis": "raw_gas_slope",

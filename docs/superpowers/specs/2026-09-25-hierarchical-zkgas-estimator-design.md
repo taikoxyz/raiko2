@@ -2,10 +2,14 @@
 
 ## Status
 
-Approved in chat on 2026-09-25 and written for final review. This document defines the architecture
-and experimental boundary for the first complete SP1 `proverGas` estimator. It does not authorize a
-production Alethia zkGas schedule, block-limit, Boundless, deployment, or proposal-derived fitting
-change.
+Superseded.
+
+Replaced by
+[`docs/plans/2026-09-26-zkgas-calibration-design.md`](../../plans/2026-09-26-zkgas-calibration-design.md).
+The current task order and verified status live in the matching
+[execution plan](../../plans/2026-09-26-zkgas-calibration-execution-plan.md) and
+[progress ledger](../../plans/2026-09-26-zkgas-calibration-progress.md). This document is retained as
+historical rationale and must not be treated as the current architecture source of truth.
 
 This design supersedes the candidate-promotion parts of the June recalibration design and the
 September relative-opcode design that assume the existing 102-key scalar reconstruction can become a

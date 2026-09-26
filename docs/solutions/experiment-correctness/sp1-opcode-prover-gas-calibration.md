@@ -360,7 +360,6 @@ as a RISC0/Boundless conversion.
 ## Related Documentation
 
 - [Opcode workload metric experiment](../../../experiments/opcode-gas/README.md)
-- [SP1 opcode proverGas experiment implementation plan][implementation-plan]
-- [zkGas multiplier recalibration design](../../plans/2026-09-06-zkgas-multiplier-recalibration-experiment-design.md)
-
-[implementation-plan]: ../../plans/2026-06-08-sp1-opcode-prover-gas-experiment-implementation-plan.md
+- [Current ZKGas calibration design](../../plans/2026-09-26-zkgas-calibration-design.md)
+- [Current Osaka supplement execution plan](../../plans/2026-09-26-zkgas-calibration-execution-plan.md)
+- [Current calibration progress](../../plans/2026-09-26-zkgas-calibration-progress.md)

@@ -2,9 +2,11 @@
 
 ## Status
 
-Approved in principle on 2026-09-22. This document freezes the design delta before implementation.
-It does not authorize a production zkGas schedule change, block-limit change, or proposal-derived
-fit.
+Superseded.
+
+Replaced by the current
+[ZKGas calibration design](../../plans/2026-09-26-zkgas-calibration-design.md). This document is
+retained as historical relative-relation rationale and is not a current architecture contract.
 
 This design supersedes the parts of the existing recalibration documents that require every opcode
 to have an independently measured absolute `proverGas / operation` slope before block overhead can

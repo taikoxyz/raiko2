@@ -4,6 +4,14 @@
 > (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use
 > checkbox (`- [ ]`) syntax for tracking.
 
+## Status
+
+Superseded. Do not resume this plan.
+
+Use the current [design](../../plans/2026-09-26-zkgas-calibration-design.md),
+[execution plan](../../plans/2026-09-26-zkgas-calibration-execution-plan.md), and
+[progress ledger](../../plans/2026-09-26-zkgas-calibration-progress.md).
+
 **Goal:** Produce and seal a review-only SP1 proving-cost mapping model whose opcode multipliers are
 derived from formal relative measurements, a synthetic four-anchor body-cost prior, and six
 parameters calibrated on controlled production-guest blocks: body scale, common per-opcode

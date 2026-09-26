@@ -4,6 +4,18 @@
 > superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement
 > this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+## Status
+
+Implemented.
+
+This plan is historical. Do not resume it.
+
+Its output is the sealed 101-opcode baseline recorded in
+[`docs/plans/2026-09-26-zkgas-calibration-progress.md`](../../plans/2026-09-26-zkgas-calibration-progress.md).
+Remaining work moved to the current
+[design](../../plans/2026-09-26-zkgas-calibration-design.md) and
+[execution plan](../../plans/2026-09-26-zkgas-calibration-execution-plan.md).
+
 **Goal:** Produce a content-addressed, replayable SP1 core-opcode submodel with nonnegative static
 opcode bodies, separated common dispatch, typed dynamic evaluation, and complete EXP input-domain
 coverage.

@@ -2,12 +2,16 @@
 
 ## Status
 
-Approved for implementation as an offline experiment design. This document defines how measurement
-runs are made and reported. It does not authorize or implement a production zk gas schedule or
-Boundless quote-model change.
+Superseded.
 
-The earlier SP1 opcode lab, coverage inventory, and workload damage documents remain useful component
-designs. This document is the authoritative contract for a complete multiplier recalibration run.
+Replaced by [ZKGas Calibration Architecture Design](2026-09-26-zkgas-calibration-design.md).
+
+This document is retained as historical experiment rationale. It contains the earlier complete-run,
+102-key relative-matrix, and raw-gas-only candidate assumptions and is no longer the execution source
+of truth. Use the current design, execution plan, and progress ledger for new work.
+
+The earlier SP1 opcode lab, coverage inventory, and workload damage documents remain useful
+historical component designs. Nothing below is a current execution instruction.
 
 ## Goal
 

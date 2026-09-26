@@ -2,9 +2,18 @@
 
 ## Status
 
-Ready for implementation as amended by the approved relative-opcode and controlled-block model. This
-plan defers to `docs/plans/2026-09-06-zkgas-multiplier-recalibration-experiment-design.md` for the
-primary candidate model. V1 removes
+Superseded.
+
+Remaining work moved to `docs/plans/2026-09-26-zkgas-calibration-execution-plan.md`.
+
+This plan is retained as historical implementation detail. It describes the route that created much
+of the current experiment framework, but its complete 102-key rerun and raw-gas-only candidate model
+do not describe the current baseline-plus-supplement execution path. The remainder below is
+historical and must not be executed as the current plan.
+
+The historical plan deferred to
+`docs/plans/2026-09-06-zkgas-multiplier-recalibration-experiment-design.md` for the primary candidate
+model. V1 removed
 every proposal-derived normalization, coefficient, residual fit, feature-selection, and
 model-selection path. It calibrates one SP1 `proverGas` candidate on controlled fixtures:
 raw-gas opcode/precompile multipliers, fixed spawned-wrapper event costs, plus proposal-startup,

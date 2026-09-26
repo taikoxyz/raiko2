@@ -37,3 +37,16 @@ Every plan should include a `## Status` section near the top with one of these v
 | `2026-05-26-prediction-market-friendly-chain-to-investigate.md` | Draft research note | Early feasibility notes for prediction-market chain needs. |
 | `2026-05-27-tdx-remote-provider-image-identity-design.md` | Draft for discussion | TDX provider identity and image-attestation model. |
 | `2026-06-09-tdx-gce-smoke-runbook.md` | Draft runbook | First GCE TDX validation runbook. |
+
+## Current ZKGas Calibration Documents
+
+| File | Status | Responsibility |
+| --- | --- | --- |
+| `2026-09-26-zkgas-calibration-design.md` | Accepted | Authoritative architecture, ownership boundaries, units, and experiment invariants. |
+| `2026-09-26-zkgas-calibration-execution-plan.md` | In progress | Current Osaka operation-supplement tasks and gates. |
+| `2026-09-26-zkgas-calibration-progress.md` | In progress | Verified evidence, active milestone, next gate, and explicit non-goals. |
+
+The earlier `2026-09-06-zkgas-multiplier-recalibration-experiment-design.md` and
+`2026-06-08-sp1-opcode-prover-gas-experiment-implementation-plan.md` are superseded historical
+documents, not current execution instructions. The September 22 relative-opcode and September 25
+hierarchical spec/plan files under `docs/superpowers/` carry the same explicit historical status.

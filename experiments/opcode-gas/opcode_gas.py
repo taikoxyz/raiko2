@@ -15381,9 +15381,23 @@ def verify_osaka_augmentation_directory(
         "opcode-supplement.json",
         "core-opcode-submodel.json",
     }
-    if not directory.is_dir() or {path.name for path in directory.iterdir()} != expected_names:
+    directory_absolute = directory.absolute()
+    if (
+        not directory.is_dir()
+        or directory.is_symlink()
+        or directory_absolute != directory.resolve()
+        or {path.name for path in directory.iterdir()} != expected_names
+    ):
         raise ValueError("Osaka augmentation directory inventory differs")
     paths = {name: directory / name for name in expected_names}
+    if any(
+        path.is_symlink()
+        or not path.is_file()
+        or path.absolute().parent != directory_absolute
+        or not path.resolve().is_relative_to(directory_absolute)
+        for path in paths.values()
+    ):
+        raise ValueError("Osaka augmentation directory inventory differs")
     envelope = json.loads(paths["augmentation.json"].read_text())
     canary = json.loads(paths["compatibility-canary.json"].read_text())
     supplement = json.loads(paths["opcode-supplement.json"].read_text())
@@ -18053,6 +18067,16 @@ def _run_osaka_canary_rounds(
     args: argparse.Namespace,
     allow_execution: bool = True,
 ) -> list[dict[str, Any]]:
+    if not output_root.exists() and allow_execution:
+        output_root.mkdir(parents=True)
+    output_absolute = output_root.absolute()
+    if (
+        not output_root.is_dir()
+        or output_root.is_symlink()
+        or output_absolute != output_root.resolve()
+        or not output_absolute.is_relative_to(calibration_run.resolve())
+    ):
+        raise ValueError("Osaka supplement output must be a contained non-symlink directory")
     decisions_path = output_root / "canary-decisions.json"
     seal_path = output_root / "canary-decisions.sha256"
     decisions = {
@@ -18454,6 +18478,13 @@ def verify_osaka_opcode_supplement_run(
     calibration_run = _read_durable_directory_path(
         args.run_path_file, label="calibration run"
     )
+    output_root = calibration_run / "osaka-opcode-supplement"
+    if (
+        not output_root.is_dir()
+        or output_root.is_symlink()
+        or output_root.absolute() != output_root.resolve()
+    ):
+        raise ValueError("Osaka supplement output is missing or invalid")
     execution_identity = validate_calibration_execution_identity(calibration_run)
     controlled_manifest = _resolve_repo_path(
         args.controlled_manifest, field_name="controlled_manifest"
@@ -18474,9 +18505,6 @@ def verify_osaka_opcode_supplement_run(
         OSAKA_CANARY_RELATION_IDS,
         OSAKA_SUPPLEMENT_RELATION_IDS,
     )
-    output_root = calibration_run / "osaka-opcode-supplement"
-    if not output_root.is_dir():
-        raise ValueError("Osaka supplement output is missing")
     provenance = {
         "calibration_id": calibration_run.name,
         "calibration_identity_sha256": sha256_bytes(canonical_json(execution_identity)),

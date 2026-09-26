@@ -704,6 +704,49 @@ class OsakaCliContractTests(unittest.TestCase):
 
 
 class OsakaRunnerTests(unittest.TestCase):
+    def test_supplement_verifier_rejects_symlinked_output_root_before_replay(self):
+        manifest = opcode_gas.load_manifest(CURRENT_MANIFEST)
+        identity = {
+            "implementation_revision": "a" * 40,
+            "controlled_manifest_sha256": "b" * 64,
+            "controlled_manifest_rows_sha256": "c" * 64,
+            "complete_schedule_sha256": "d" * 64,
+            "guest_artifacts": {
+                "crates/guests/elf/sp1_revm_opcode_lab.elf": "e" * 64,
+            },
+            "version_identity": {
+                field: f"value-{field}"
+                for field in opcode_gas.CALIBRATION_VERSION_IDENTITY_FIELDS
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            run = root / ("a" * 24)
+            run.mkdir()
+            outside = root / "outside"
+            outside.mkdir()
+            (run / "osaka-opcode-supplement").symlink_to(outside, target_is_directory=True)
+            args = Namespace(
+                run_path_file=root / "run-path",
+                controlled_manifest=CURRENT_MANIFEST,
+                baseline_derivation=DERIVATION,
+                historical_manifest=FIXTURE,
+            )
+            with mock.patch.object(opcode_gas, "_read_durable_directory_path", return_value=run), mock.patch.object(
+                opcode_gas, "validate_calibration_execution_identity", return_value=identity
+            ), mock.patch.object(
+                opcode_gas, "_resolve_repo_path", side_effect=[CURRENT_MANIFEST, DERIVATION, FIXTURE]
+            ), mock.patch.object(
+                opcode_gas, "verify_frozen_controlled_manifest", return_value=(manifest, identity)
+            ), mock.patch.object(
+                opcode_gas, "validate_calibration_version_identity", return_value=identity["version_identity"]
+            ), mock.patch.object(
+                opcode_gas, "validate_historical_core_opcode_baseline", return_value={"manifest": manifest}
+            ), mock.patch.object(opcode_gas, "_run_osaka_canary_rounds") as replay:
+                with self.assertRaisesRegex(ValueError, "output is missing"):
+                    opcode_gas.verify_osaka_opcode_supplement_run(args)
+            replay.assert_not_called()
+
     def test_bounded_campaign_replays_without_full_dynamic_preflight(self):
         current = opcode_gas.load_manifest(CURRENT_MANIFEST)
         manifest = opcode_gas._osaka_relation_manifest(
@@ -1168,6 +1211,37 @@ class AugmentationSealTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 opcode_gas.verify_osaka_augmentation_directory(
                     pathlib.Path(sealed["directory"]),
+                    historical_manifest=FIXTURE,
+                    expected_historical_manifest_sha256=opcode_gas.HISTORICAL_CORE_MANIFEST_SHA256,
+                )
+
+    def test_directory_verifier_rejects_symlinked_directory_and_json_child(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            sealed = self._seal(root)
+            directory = pathlib.Path(sealed["directory"])
+            outside = root / "outside-package"
+            directory.rename(outside)
+            directory.symlink_to(outside, target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, "directory inventory"):
+                opcode_gas.verify_osaka_augmentation_directory(
+                    directory,
+                    historical_manifest=FIXTURE,
+                    expected_historical_manifest_sha256=opcode_gas.HISTORICAL_CORE_MANIFEST_SHA256,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            sealed = self._seal(root)
+            directory = pathlib.Path(sealed["directory"])
+            child = directory / "compatibility-canary.json"
+            outside = root / "outside-canary.json"
+            shutil.copy2(child, outside)
+            child.unlink()
+            child.symlink_to(outside)
+            with self.assertRaisesRegex(ValueError, "directory inventory"):
+                opcode_gas.verify_osaka_augmentation_directory(
+                    directory,
                     historical_manifest=FIXTURE,
                     expected_historical_manifest_sha256=opcode_gas.HISTORICAL_CORE_MANIFEST_SHA256,
                 )

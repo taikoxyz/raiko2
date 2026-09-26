@@ -21658,6 +21658,27 @@ def _higher_layer_state_inventory(
         raise ValueError("higher-layer state holdout inventory differs")
 
 
+_HIGHER_LAYER_U64_MAX = (1 << 64) - 1
+_HIGHER_LAYER_I64_MAX = (1 << 63) - 1
+
+
+def _higher_layer_is_u64(value: Any) -> bool:
+    return type(value) is int and 0 <= value <= _HIGHER_LAYER_U64_MAX
+
+
+def _higher_layer_is_nonnegative_i64(value: Any) -> bool:
+    return type(value) is int and 0 <= value <= _HIGHER_LAYER_I64_MAX
+
+
+def _higher_layer_is_canonical_b256(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 66
+        and value.startswith("0x")
+        and all(char in "0123456789abcdef" for char in value[2:])
+    )
+
+
 def _validate_higher_layer_state_row(
     row: Mapping[str, Any],
     pair: StateHoldoutSpec,
@@ -21728,6 +21749,8 @@ def _validate_higher_layer_state_row(
         or prover_gas.startswith("0")
     ):
         raise ValueError("higher-layer state proverGas is not a positive canonical integer")
+    if int(prover_gas) > _HIGHER_LAYER_U64_MAX:
+        raise ValueError("higher-layer state proverGas exceeds u64")
     validate_sp1_execution_provenance(
         row, workload_kind="state_holdout", expected_engine="gas-estimator"
     )
@@ -21735,10 +21758,14 @@ def _validate_higher_layer_state_row(
     guest_input_sha256 = row.get("guest_input_sha256")
     if (
         not _is_sha256(backend_input_sha256)
-        or not isinstance(guest_input_sha256, str)
-        or guest_input_sha256.lower().removeprefix("0x") != backend_input_sha256
+        or guest_input_sha256 != "0x" + backend_input_sha256
     ):
         raise ValueError("higher-layer state GuestInput identity differs")
+    if (
+        not _higher_layer_is_u64(row.get("guest_input_bincode_length"))
+        or row["guest_input_bincode_length"] == 0
+    ):
+        raise ValueError("higher-layer state bincode length is not a positive u64")
     workload_spec = {
         "schema_version": 1,
         "pair_id": pair.pair_id,
@@ -21795,23 +21822,41 @@ def _validate_higher_layer_state_row(
         != "transaction_non_anchor_only"
         or observation.get("system_operation_ownership") != "block_base"
         or observation.get("anchor_operation_ownership") != "block_base"
-        or any(
-            type(observation.get(field)) is not int or observation[field] < 0
-            for field in (
-                "started_candidate_transaction_count",
-                "committed_candidate_transaction_count",
-                "unattempted_candidate_transaction_count",
-            )
-        )
     ):
         raise ValueError("higher-layer state observation identity differs")
+    if not _higher_layer_is_canonical_b256(
+        row.get("public_values")
+    ) or not _higher_layer_is_canonical_b256(observation.get("public_output")):
+        raise ValueError("higher-layer state requires canonical B256 public values")
+    if not _higher_layer_is_canonical_b256(
+        observation.get("actual_final_state_root")
+    ):
+        raise ValueError("higher-layer state requires a canonical B256 final root")
+    counter_fields = (
+        "started_candidate_transaction_count",
+        "committed_candidate_transaction_count",
+        "unattempted_candidate_transaction_count",
+    )
+    if any(
+        not _higher_layer_is_u64(observation.get(field)) for field in counter_fields
+    ):
+        raise ValueError("higher-layer state transaction counter exceeds u64")
     features = observation.get("actual_features")
     if (
         not isinstance(features, Mapping)
         or set(features) != set(_HIGHER_LAYER_Q_FORMULA)
-        or any(type(value) is not int or value < 0 for value in features.values())
+        or any(
+            not _higher_layer_is_nonnegative_i64(value) for value in features.values()
+        )
     ):
-        raise ValueError("higher-layer state feature coverage differs")
+        raise ValueError("higher-layer state feature is outside nonnegative i64")
+    if (
+        features["tx_base"]
+        != observation["started_candidate_transaction_count"]
+        or observation["committed_candidate_transaction_count"]
+        > observation["started_candidate_transaction_count"]
+    ):
+        raise ValueError("higher-layer state transaction counter consistency differs")
     ledger = observation.get("actual_raw_gas_by_key")
     diagnostics = observation.get("actual_diagnostics")
     diagnostic_fields = {
@@ -21825,18 +21870,19 @@ def _validate_higher_layer_state_row(
         "touched_state_key_count",
     }
     if (
-        type(row.get("guest_input_bincode_length")) is not int
-        or row["guest_input_bincode_length"] <= 0
-        or not isinstance(observation.get("public_output"), str)
-        or not isinstance(observation.get("actual_final_state_root"), str)
-        or not isinstance(ledger, Mapping)
+        not isinstance(ledger, Mapping)
         or not isinstance(diagnostics, Mapping)
         or set(diagnostics) != diagnostic_fields
-        or any(type(value) is not int or value < 0 for value in diagnostics.values())
+        or any(
+            not _higher_layer_is_nonnegative_i64(value)
+            for value in diagnostics.values()
+        )
         or diagnostics.get("guest_input_bincode_length")
         != row.get("guest_input_bincode_length")
     ):
-        raise ValueError("higher-layer state operation or diagnostic evidence is missing")
+        raise ValueError(
+            "higher-layer state operation evidence or diagnostic nonnegative i64 differs"
+        )
     for key, delta in ledger.items():
         if not isinstance(key, str) or not key or key != key.strip():
             raise ValueError(
@@ -21860,7 +21906,7 @@ def _validate_higher_layer_state_row(
             raise ValueError(
                 "higher-layer state operation requires positive event_count"
             )
-        if units > (1 << 63) - 1 or event_count > (1 << 63) - 1:
+        if units > _HIGHER_LAYER_I64_MAX or event_count > _HIGHER_LAYER_I64_MAX:
             raise ValueError("higher-layer state operation counts exceed i64")
     return observation
 
@@ -22161,6 +22207,8 @@ def _higher_layer_state_row_from_report(
     prover_gas = report.get("gas")
     if type(prover_gas) is not int or prover_gas <= 0:
         raise ValueError("controlled state holdout report proverGas is invalid")
+    if prover_gas > _HIGHER_LAYER_U64_MAX:
+        raise ValueError("controlled state holdout report proverGas exceeds u64")
     lane = str(controlled["lane"])
     backend_input_sha256 = observation.get("backend_input_sha256")
     guest_input_sha256 = report.get("guest_input_sha256")

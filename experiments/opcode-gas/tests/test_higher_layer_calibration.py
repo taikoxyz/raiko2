@@ -1492,6 +1492,112 @@ class HigherLayerTask5StateVerdictTests(unittest.TestCase):
             ):
                 self.evaluate(rows)
 
+    def test_state_rows_enforce_rust_numeric_and_hash_domains(self):
+        u64_max = (1 << 64) - 1
+        i64_max = (1 << 63) - 1
+
+        boundary_rows = self.rows()
+        for row in boundary_rows:
+            row["prover_gas"] = str(u64_max)
+            row["observation"]["actual_features"]["block_base"] = i64_max
+            row["observation"]["actual_features"]["tx_base"] = i64_max
+            row["observation"]["started_candidate_transaction_count"] = i64_max
+            row["observation"]["committed_candidate_transaction_count"] = i64_max
+            row["guest_input_bincode_length"] = i64_max
+            row["observation"]["guest_input_bincode_length"] = i64_max
+            row["observation"]["actual_diagnostics"][
+                "guest_input_bincode_length"
+            ] = i64_max
+            row["observation"]["actual_diagnostics"][
+                "witness_node_count"
+            ] = i64_max
+        self.evaluate(boundary_rows)
+
+        def mutate_all(mutate):
+            rows = self.rows()
+            for row in rows:
+                mutate(row)
+            return rows
+
+        invalid = {
+            "proverGas.*u64": mutate_all(
+                lambda row: row.__setitem__("prover_gas", str(u64_max + 1))
+            ),
+            "feature.*i64": mutate_all(
+                lambda row: row["observation"]["actual_features"].__setitem__(
+                    "block_base", i64_max + 1
+                )
+            ),
+            "diagnostic.*i64": mutate_all(
+                lambda row: row["observation"]["actual_diagnostics"].__setitem__(
+                    "witness_node_count", i64_max + 1
+                )
+            ),
+            "bincode.*u64": mutate_all(
+                lambda row: (
+                    row.__setitem__("guest_input_bincode_length", u64_max + 1),
+                    row["observation"].__setitem__(
+                        "guest_input_bincode_length", u64_max + 1
+                    ),
+                    row["observation"]["actual_diagnostics"].__setitem__(
+                        "guest_input_bincode_length", u64_max + 1
+                    ),
+                )
+            ),
+            "counter.*u64": mutate_all(
+                lambda row: row["observation"].__setitem__(
+                    "committed_candidate_transaction_count", u64_max + 1
+                )
+            ),
+            "canonical B256": mutate_all(
+                lambda row: row["observation"].__setitem__(
+                    "actual_final_state_root", "not-a-b256"
+                )
+            ),
+            "canonical B256 public": mutate_all(
+                lambda row: (
+                    row.__setitem__("public_values", "0xAB" + "00" * 31),
+                    row["observation"].__setitem__(
+                        "public_output", "0xAB" + "00" * 31
+                    ),
+                )
+            ),
+            "GuestInput identity": mutate_all(
+                lambda row: (
+                    row.__setitem__(
+                        "guest_input_sha256", row["guest_input_sha256"].upper()
+                    ),
+                    row["observation"].__setitem__(
+                        "guest_input_sha256",
+                        row["observation"]["guest_input_sha256"].upper(),
+                    ),
+                )
+            ),
+        }
+        for expected, rows in invalid.items():
+            with self.subTest(expected=expected), self.assertRaisesRegex(
+                ValueError, expected
+            ):
+                self.evaluate(rows)
+
+    def test_state_row_counter_consistency_is_structural(self):
+        mutations = (
+            lambda observation: observation.__setitem__(
+                "started_candidate_transaction_count",
+                observation["started_candidate_transaction_count"] + 1,
+            ),
+            lambda observation: observation.__setitem__(
+                "committed_candidate_transaction_count",
+                observation["started_candidate_transaction_count"] + 1,
+            ),
+        )
+        for mutate in mutations:
+            inconsistent = self.rows()
+            for row in inconsistent:
+                mutate(row["observation"])
+            with self.assertRaisesRegex(ValueError, "counter consistency"):
+                self.evaluate(inconsistent)
+
     def test_malformed_operation_ledgers_raise_instead_of_becoming_inconclusive(self):
         malformed = {
             "nonempty": {
@@ -1686,6 +1792,16 @@ class HigherLayerTask5StateVerdictTests(unittest.TestCase):
         report = self.report(self.rows()[0])
         del report["gas"]
         with self.assertRaisesRegex(ValueError, "proverGas"):
+            opcode_gas._higher_layer_state_row_from_report(
+                report,
+                pair=pair,
+                repeat_index=0,
+                calibration_id=CALIBRATION_ID,
+            )
+
+        report = self.report(self.rows()[0])
+        report["gas"] = 1 << 64
+        with self.assertRaisesRegex(ValueError, "proverGas.*u64"):
             opcode_gas._higher_layer_state_row_from_report(
                 report,
                 pair=pair,

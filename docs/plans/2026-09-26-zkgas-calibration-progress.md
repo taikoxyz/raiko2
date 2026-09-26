@@ -112,20 +112,23 @@ resample.
 
 Current worktree state at the last update:
 
-- the bounded Osaka/CLZ/SWAP1 source portion is implemented but uncommitted;
-- structured Unzen/Fusaka/Osaka calibration identity is specified but not implemented;
-- implementer verification reported 344 Python tests passing with one skip and 14 SP1 guest library
-  tests passing;
-- touched Rust-file formatting and `git diff --check` passed;
-- no sampling ran and no guest ELF was generated;
-- independent root verification, adversarial review, guest rebuild, and source commit remain open.
+- Task 1 landed in `3ea7a8d4` with review fix `c6b64e23`;
+- the bounded Osaka/CLZ/SWAP1 inputs and structured Unzen/Fusaka/Osaka calibration identity are
+  implemented;
+- root verification passed 345 Python tests with one skip, 15 SP1 guest library tests, 24 chain-spec
+  tests, and four schedule-exporter tests;
+- the SP1 artifact provenance check is current; two forced builds were deterministic;
+- the REVM lab ELF/VK changed as expected, while the opcode-lab VK and all its `PT_LOAD` segments
+  remained byte-identical despite deterministic non-loaded ELF metadata churn;
+- independent review found one missing Prague-negative CLZ regression, verified its fix, and ended
+  with both spec-compliance and correctness verdicts passing;
+- no sampling or proposal execution ran, and no production schedule or configuration changed.
 
 ## Next Gate
 
-Implement and verify the structured version identity, independently verify the complete Task 1
-source diff, build the SP1 guest artifacts, review the source-and-artifact diff, fix any confirmed
-findings, and commit the Osaka input change. Do not begin Task 2 tooling or any sampling before this
-gate closes.
+Implement Task 2's historical-schema validator, exact compatibility-canary subset, bounded
+ISZERO/CLZ supplement runner, and create-only augmentation sealer. Complete its full test suite and
+independent review before running any sampling. Proposal execution remains closed.
 
 ## Next Milestones
 

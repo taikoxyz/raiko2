@@ -22,9 +22,9 @@ gas-estimator execution path, exact `Fraction`/80-digit `Decimal` artifact math,
 
 ## Status
 
-In progress. Task 1's Osaka/CLZ/SWAP1 portion is implemented in the working tree but remains
-uncommitted. Structured version identity, independent root verification, guest artifact rebuild,
-and adversarial review remain open.
+In progress. Task 1 is complete at `3ea7a8d4` plus review fix `c6b64e23`; its source, structured
+version identity, generated artifacts, root verification, and independent adversarial review all
+passed. Task 2 is the active gate. No sampling has run.
 
 ## Global Constraints
 
@@ -89,6 +89,7 @@ and adversarial review remain open.
 - Modify: `experiments/opcode-gas/tests/test_hierarchical_model.py`
 - Modify: `experiments/opcode-gas/tests/test_sp1_candidate_report.py`
 - Modify: `experiments/opcode-gas/tests/test_run_manifest.py`
+- Modify: `experiments/opcode-gas/tests/test_runner.py`
 - Modify: `experiments/opcode-gas/README.md`
 - Modify: `crates/primitives/src/chain_spec.rs`
 - Modify: `xtask/src/export_unzen_zk_gas_schedule.rs`
@@ -102,7 +103,7 @@ and adversarial review remain open.
   rank-99 relation contract; formal ISZERO/CLZ relations controlled by one `SWAP1` each; structured
   Unzen/Fusaka/Osaka calibration identity.
 
-- [ ] **Step 1: Keep the failing fixture and rank tests**
+- [x] **Step 1: Keep the failing fixture and rank tests**
 
 The tests must assert these exact signed raw-gas maps:
 
@@ -117,7 +118,7 @@ They must also assert one target/control opcode per repetition, two input stack 
 height two, no `NOT` coefficient, ordered core length 103, and exact matrix rank 99 with the four
 natural anchors unchanged.
 
-- [ ] **Step 2: Keep the real Osaka CLZ activation regression**
+- [x] **Step 2: Keep the real Osaka CLZ activation regression**
 
 The library test executes bytecode `PUSH1 1; CLZ; STOP` and asserts that the accumulator's encoded
 transaction-success bit is `1`. This proves REVM recognizes and successfully executes CLZ under
@@ -125,13 +126,13 @@ Osaka; it does not claim that `CLZ(1) == 1`. The same bytecode must not report s
 and a parser-only test is not sufficient. Name the test
 `revm_opcode_lab_accepts_osaka_clz_opcode` to reflect that contract.
 
-- [ ] **Step 3: Implement the smallest production change**
+- [x] **Step 3: Implement the smallest production change**
 
 Set the opcode lab to `SpecId::OSAKA`, add `PURE_OPCODE_DEFAULTS[0x1E]`, materialize the CLZ case and
 measurement key, and special-case only ISZERO/CLZ to use `SWAP1`. Leave every other historical
 control unchanged.
 
-- [ ] **Step 4: Add structured version identity to the exported source of truth**
+- [x] **Step 4: Add structured version identity to the exported source of truth**
 
 Make `TaikoFork` expose the single shared fork-to-REVM-spec mapping used by `ForkId::as_spec_id`, so
 both runtime chain selection and the exporter obtain `TaikoFork::Unzen -> SpecId::OSAKA` from
@@ -160,7 +161,7 @@ Include that object in the calibration ID. Tests mutate each field independently
 different calibration ID plus mismatch rejection during run, supplement, and seal validation. Do
 not reconstruct these labels independently in the supplement command.
 
-- [ ] **Step 5: Run the focused and complete source tests**
+- [x] **Step 5: Run the focused and complete source tests**
 
 Run:
 
@@ -180,7 +181,7 @@ Expected: all Python and Rust tests pass; the touched Rust files and the complet
 Any unrelated pre-existing formatting failure must be recorded separately rather than reported as a
 pass.
 
-- [ ] **Step 6: Build and verify the reviewed SP1 artifacts**
+- [x] **Step 6: Build and verify the reviewed SP1 artifacts**
 
 Run:
 
@@ -190,20 +191,22 @@ cargo test --manifest-path guests/sp1/Cargo.toml --lib
 git diff --check
 ```
 
-The only SP1 binary artifacts allowed to change are `sp1_revm_opcode_lab.elf` and
-`sp1_revm_opcode_lab.vk.bin`; `sp1.provenance.json` must change only to record their new identities.
-Require byte-identical SHA256 values for `sp1_opcode_lab`, `sp1_precompile_lab`,
-`sp1_shasta_proposal`, and `sp1_shasta_aggregation` ELF/VK pairs. Do not hand-edit any generated
-file.
+The semantic guest changes are limited to `sp1_revm_opcode_lab.elf` and
+`sp1_revm_opcode_lab.vk.bin`; `sp1.provenance.json` changes to record the rebuilt source and artifact
+identities. The official builder also produces deterministic non-loaded metadata churn in
+`sp1_opcode_lab.elf`: accept it only when two forced builds are byte-identical, its VK is
+byte-identical to the baseline, and every `PT_LOAD` segment is byte-identical to the baseline.
+Require byte-identical ELF/VK pairs for `sp1_precompile_lab`, `sp1_shasta_proposal`, and
+`sp1_shasta_aggregation`. Do not hand-edit any generated file.
 
-- [ ] **Step 7: Independently review the complete source and artifact diff**
+- [x] **Step 7: Independently review the complete source and artifact diff**
 
 The reviewer must verify Osaka execution, CLZ manifest identity, exact SWAP1 control shape, absence
 of NOT in both new equations, 103-key ordering/rank, historical wording, and the explicit absence of
 sampling or full-resample behavior. The review also verifies the structured version identity and
 that every generated artifact matches the reviewed guest source.
 
-- [ ] **Step 8: Commit the verified change**
+- [x] **Step 8: Commit the verified change**
 
 ```bash
 git add guests/sp1/src/lib.rs guests/sp1/src/revm_opcode_lab_impl.rs \
@@ -214,6 +217,9 @@ git add guests/sp1/src/lib.rs guests/sp1/src/revm_opcode_lab_impl.rs \
   crates/guests/elf
 git commit -m "feat(zkgas): add Osaka opcode supplement inputs"
 ```
+
+Completed by `3ea7a8d4`; the review-requested explicit Prague-negative CLZ regression and its rebuilt
+REVM artifacts landed separately in `c6b64e23`.
 
 ---
 

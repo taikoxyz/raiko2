@@ -625,6 +625,7 @@ git commit -m "feat(zkgas): add bounded higher-layer campaign"
 ### Task 5: Seal Fixed Costs And Evaluate The Coarse State Model
 
 **Files:**
+- Modify: `bin/guest-launcher/src/main.rs`
 - Modify: `experiments/opcode-gas/opcode_gas.py`
 - Modify: `experiments/opcode-gas/tests/test_higher_layer_calibration.py`
 - Modify: `experiments/opcode-gas/README.md`
@@ -692,6 +693,14 @@ artifact is accepted and its source hashes match the run identity. Execute all s
 execution row ID, proverGas, public output, final state root, operation ledger, four-term feature
 counts, and diagnostics. Do not fit or select a state feature.
 
+Before wiring Python verification, add a host-native launcher stage named
+`controlled-state-holdout-trace`. It accepts the same complete canonical pair object, supports only
+native execute mode, invokes the existing Task 3 builder and validator, and emits exactly two typed
+JSONL rows containing schema version, pair ID, lane, exact pair spec, and observation. It must not
+load an ELF, construct an SP1 prover, or expose proverGas. Refactor shared pre-execution work rather
+than copying fixture or validation logic. Keep the normal `controlled-state-holdout` stage restricted
+to local SP1 execute with the gas-estimator engine.
+
 - [ ] **Step 6: Implement state holdout evaluation**
 
 Validate target/control identity before opening proverGas. Require identical `Q_formula` counts and
@@ -703,9 +712,12 @@ cannot rewrite the fixed costs, selected rounds, thresholds, or source identitie
 - [ ] **Step 7: Implement exact artifact replay**
 
 Add `verify-higher-layer-calibration --run-path-file PATH`. It reconstructs fixtures without SP1
-execution, checks every GuestInput hash, replays fitting from raw observations, and requires exact
-equality with the persisted result. Reject copied results, missing raw rows, duplicate execution
-IDs, edited diagnostics, changed source files, symlinks, and any absolute/user-specific path.
+execution by invoking `controlled-state-holdout-trace` for every frozen pair, checks every GuestInput
+hash, final root, operation ledger, fixed feature count, and diagnostic against persisted evidence,
+replays fitting from raw observations, and requires exact equality with the persisted result. Reject
+copied results, missing raw rows, duplicate execution IDs, edited diagnostics, changed source files,
+symlinks, and any absolute/user-specific path. Python must not reconstruct GuestInput or duplicate
+the Rust fixture rules.
 
 - [ ] **Step 8: Implement create-only sealing**
 
@@ -738,7 +750,8 @@ Expected: PASS with only the existing explicitly opt-in skip.
 - [ ] **Step 11: Commit Task 5**
 
 ```bash
-git add experiments/opcode-gas/opcode_gas.py \
+git add bin/guest-launcher/src/main.rs \
+  experiments/opcode-gas/opcode_gas.py \
   experiments/opcode-gas/tests/test_higher_layer_calibration.py \
   experiments/opcode-gas/README.md
 git commit -m "feat(zkgas): fit higher-layer fixed costs"

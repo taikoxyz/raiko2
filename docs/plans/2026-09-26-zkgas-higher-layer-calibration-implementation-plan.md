@@ -489,7 +489,7 @@ Test rejection of dirty implementation files, wrong manifest/core/coverage hashe
 wrong ELF, noncanonical output path, rerunning a completed round with different bytes, missing prior
 round decisions, any generator bound outside `8,32,128`, copied/resealed raw rows from another
 calibration identity, changed execution-row/workload identity, and symlinked or externally resolved
-raw/fit artifacts.
+identity/decision/seal/raw/fit artifacts or their parent components.
 
 Also write pure fixed-round evaluator tests with synthetic Decimal rows for the known costs
 `proposal_startup=1000`, `block_base=2000`, `tx_base=300`, and
@@ -560,7 +560,9 @@ either expansion reason at round 128, is terminal. The evaluator is deterministi
 file writes or execution. Every accepted raw row must replay its workload ID and execution-row ID
 against the supplied current calibration identity, SP1 backend, gas-estimator engine, repeat index,
 and backend-input hash. Pre-execution rejected rows must also carry and match the current
-calibration identity; no row may be attributed to a run only because it is stored below that run.
+calibration identity. The workload spec's canonical GuestInput hash must equal the normalized
+backend-input and report GuestInput hashes; coordinated edits to all outer row hashes do not make a
+different input valid. No row may be attributed to a run only because it is stored below that run.
 
 Refactor `run_controlled_overhead_round` only enough to bind the new identity and event-count schema.
 Do not copy its target/control construction or SP1 invocation loop. Execute round 8 first, call the
@@ -568,9 +570,9 @@ shared evaluator, and immutably persist that round's raw rows, canonical fit pay
 decision. Run 32 and then 128 only after an exact persisted `expand_next_round` decision. Any other
 decision terminates the campaign with preserved evidence. Replay the entire contiguous decision
 ledger before resuming; no decision may be inferred from raw rows without the evaluator. Raw and
-fit artifacts and every path component below the run must be regular non-symlink entries whose
-resolved path remains inside the exact run directory; matching hashes do not make external or
-symlinked bytes acceptable.
+fit artifacts, identity/decision metadata and seal, and every path component below the run must be
+regular non-symlink entries whose resolved path remains inside the exact run directory; matching
+hashes do not make external or symlinked bytes acceptable.
 
 - [ ] **Step 5: Enforce the fixed-cost gate**
 

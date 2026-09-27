@@ -1,0 +1,72 @@
+{
+  "derivation_id": "3e4de6eecb5e92aa59a6a4b9",
+  "identity": {
+    "file_sha256s": {
+      "higher-layer-calibration.json": "e06e90546f48b59f52670ceb320c63a5da64e910c7154efc95bafc4fa5579a54",
+      "overhead-evidence.json": "e990deed7cf0e04153e716165e67ec1028c5c3479e8e99cda0d8f9872c826979",
+      "state-holdout-evidence.json": "1004cb82af8a67fe9a3794044bc8b88f62a08fc095d528454940745c83690ec6"
+    },
+    "purpose": "sp1_higher_layer_fixed_cost_derivation",
+    "schema_version": 2,
+    "source_identity": {
+      "calibration_id": "91d461f0a817446a80223798",
+      "identity": {
+        "augmented_core": {
+          "artifact_sha256": "b66d7951bfa416810f93319f99c30ce91969026ee9fa3a402a74cbc2214f7e8b",
+          "file_sha256": "8bfcef84bf5b42a643bd98bcb7dd9a7a8122e0ce1f8a2a4ed6f18b082f16693e",
+          "path": "experiments/opcode-gas/derivations/f945e67bb2c38c9c8ef50530/core-opcode-submodel.json"
+        },
+        "guest_launcher": {
+          "file_sha256": "80f5d04b607ccc650c0e99714453b90c81d7d272af9e3bfc63f8e4b24c28ff53",
+          "path": "target/release/guest-launcher"
+        },
+        "higher_layer_manifest": {
+          "artifact_sha256": "a748f12c0db6753d860a59141af747240123e28b7f62e32bd5ff2cfb0b4a792f",
+          "file_sha256": "250f58dd1b9accc21b300bd859942fc66865936316a91619d35672b9964e70aa",
+          "path": "experiments/opcode-gas/manifests/sp1-higher-layer-v2.json"
+        },
+        "implementation_revision": "29497a4c8f8bf851e5d572924c6bf616d727e37b",
+        "operation_coverage": {
+          "artifact_sha256": "35fd25a7878dd407522ab676c8a9965c663c6885e3190df0fd51f6c497b84e77",
+          "file_sha256": "75fec3c4307c59539cc6180e6511dd7fc1111197746c6b0abd9a872902c665a3",
+          "path": "experiments/opcode-gas/manifests/operation-coverage-v2.json"
+        },
+        "purpose": "sp1_higher_layer_fixed_cost_calibration",
+        "schema_version": 1,
+        "sp1_execution_parameters": {
+          "engines": {
+            "block": "gas-estimator",
+            "opcode": "gas-estimator",
+            "overhead": "gas-estimator",
+            "precompile": "standard"
+          },
+          "gas_estimator": {
+            "gas_trace_chunk_slots": 2,
+            "gas_trace_chunk_threshold": 134217728
+          },
+          "mode": "execute",
+          "primary_api": "ExecutionReport::gas",
+          "prover": "local"
+        },
+        "sp1_proposal_guest": {
+          "elf_path": "crates/guests/elf/sp1_shasta_proposal.elf",
+          "elf_sha256": "e32daf0bf9e981162c95c95e4004996a9be153357c503dd6373d647559b41bf1",
+          "vk_path": "crates/guests/elf/sp1_shasta_proposal.vk.bin",
+          "vk_sha256": "f7ddfdf9434ef7a4569922cd54714dd39a182c945e4d37e65a51a4bb89e7f97e"
+        },
+        "version_identity": {
+          "ethereum_upgrade": "Fusaka",
+          "primary_metric": "proverGas",
+          "production_schedule": "UNZEN_ZK_GAS_SCHEDULE",
+          "proving_backend": "sp1",
+          "revm_spec_id": "OSAKA",
+          "taiko_fork": "Unzen"
+        }
+      },
+      "identity_sha256": "91d461f0a817446a802237987c08f1290c571d19b245e7655084600ba05b68ff",
+      "schema_version": 1
+    }
+  },
+  "identity_sha256": "3e4de6eecb5e92aa59a6a4b9d380765b94ddf9b1b8198479659393a878694f24",
+  "schema_version": 2
+}

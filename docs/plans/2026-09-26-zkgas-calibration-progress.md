@@ -63,9 +63,9 @@ Osaka execution semantics while continuing to bind the actual exported Unzen sch
 | Experiment framework | Core scope complete | Preserve its identity and replay invariants |
 | Opcode core | Complete at partial coverage | Preserve sealed 101-plus-2 augmentation |
 | Remaining operations | Complete at frozen classification | Preserve the sealed coverage and ownership ledgers |
-| State/trie | Closed pending approximation implementation | Pass a coarse holdout or justify a split model |
-| Transaction | Approximation policy accepted | Implement and validate the frozen native upper bound |
-| Block | Pending | Pass frozen block holdouts without proposal fitting |
+| State/trie | Coarse model accepted | Preserve the sealed holdout evidence; split only after a new predeclared experiment |
+| Transaction | Declared approximation accepted and sealed | Preserve `5017` and its `0.002` materiality budget |
+| Block | Fixed base accepted and sealed | Preserve the selected round-128 fixed-cost artifact |
 | Proposal | Closed | Seal every lower layer before opening the corpus |
 | Other ZKVM backends | Future | Measure natively or validate an explicit bridge |
 
@@ -286,12 +286,94 @@ native counts are equal. A later holdout failure remains evidence for a predecla
 split; it cannot tune this approximation. Final proposal validation and production changes remain
 closed.
 
+## Completed Milestone: Higher-Layer Fixed Costs And Coarse State Holdouts
+
+Fresh production-SP1 calibration run `91d461f0a817446a80223798` accepted the frozen native-transfer
+approximation, all three ordinary fixed costs, and all six coarse state holdout pairs. It sealed
+portable derivation `3e4de6eecb5e92aa59a6a4b9`. This result did not open proposal inputs and did
+not change a production table, schedule, runtime configuration, block limit, or Boundless behavior.
+
+Execution identity:
+
+- implementation revision: `29497a4c8f8bf851e5d572924c6bf616d727e37b`;
+- full run identity SHA256:
+  `91d461f0a817446a802237987c08f1290c571d19b245e7655084600ba05b68ff`;
+- production guest-launcher SHA256:
+  `80f5d04b607ccc650c0e99714453b90c81d7d272af9e3bfc63f8e4b24c28ff53`;
+- SP1 Shasta proposal ELF SHA256:
+  `e32daf0bf9e981162c95c95e4004996a9be153357c503dd6373d647559b41bf1`;
+- SP1 Shasta proposal VK SHA256:
+  `f7ddfdf9434ef7a4569922cd54714dd39a182c945e4d37e65a51a4bb89e7f97e`;
+- higher-layer manifest artifact/file SHA256:
+  `a748f12c0db6753d860a59141af747240123e28b7f62e32bd5ff2cfb0b4a792f` /
+  `250f58dd1b9accc21b300bd859942fc66865936316a91619d35672b9964e70aa`;
+- operation-coverage artifact/file SHA256:
+  `35fd25a7878dd407522ab676c8a9965c663c6885e3190df0fd51f6c497b84e77` /
+  `75fec3c4307c59539cc6180e6511dd7fc1111197746c6b0abd9a872902c665a3`;
+- augmented Osaka core artifact SHA256:
+  `b66d7951bfa416810f93319f99c30ce91969026ee9fa3a402a74cbc2214f7e8b`.
+
+The bounded overhead ledger is:
+
+| Bound | Decision | Raw rows SHA256 | Fit SHA256 | Root reasons |
+| ---: | --- | --- | --- | --- |
+| 8 | `expand_next_round` | `7541b8927fd734597b399361fe1568704b5fedda44b1984535857cbbe113b4ba` | `24cdcd7f015fdd52c90d760a2a8efcc1eb56c35c53b76fb17e4675a990614cbe` | `exhausted_sweep`, `native_approximation_requires_bound_128` |
+| 32 | `expand_next_round` | `06936504f01d7a097d17f3a1127c1c087473b731fe64ba62487b670e05e523ec` | `f08eae73d042afc2b5d80019c864741f1bcd69addecf2505e7a70ff982ec3deb` | `exhausted_sweep`, `native_approximation_requires_bound_128` |
+| 128 | `accepted` | `32fb52656c98b1588c50f8df7a1cb2836c8a7f7c721d681faf15994c4a4db801` | `027c23e2c7af3fdd24ba155376112285715fda7f7597541806c9a2ca89ae49fb` | none |
+
+The frozen coefficient remained exactly `5017`, the materiality budget remained exactly `0.002`,
+and the eight whole-guest materialities were:
+
+| Native count | Materiality |
+| ---: | ---: |
+| 1 | `0` |
+| 2 | `0.000007554867839990185077431617738608631482351357724047267423142344976466932079703391` |
+| 4 | `0.000027876573185804334126037224379546367388020983484248833873882372791251510513641118` |
+| 8 | `0.000023787124289764379831303436342997830449570285880434646719469216616446077115798266` |
+| 16 | `0.00013528094442461295455196570719268505132454650506160174283064638202377757539606129` |
+| 32 | `0.00027000102029296007402087728646646224453107197554341421320801122870611113292575235` |
+| 64 | `0.00046191126123284270273615019917317454981086970405520195032831874844199106833571755` |
+| 128 | `0.001212086866909957323751545310565049718961351250973108255112754533149736199044165` |
+
+The maximum occurred at count 128 and remained below the budget. The accepted fixed model has
+status `accepted_with_declared_approximation`, rank four, selected round 128, and digest
+`b2f63b3c5624009b6116de095ea9d1e8607a1bfc8372578136c1fb4e2b535587`:
+
+- `tx_base = 172458.52776158196293291840525518983976157762777355659715869882250567609245941806`,
+  status `accepted`;
+- `block_base = 2507390.6829493087557603686635944700460829493087557603686635944700460829493087559`,
+  status `accepted`;
+- `proposal_startup = 156283811.55316990026277317213377793503403626187735746133275705611870107900446154`,
+  status `accepted`;
+- `native_value_transfer = 5017`, status `declared_approximation`.
+
+The state campaign produced exactly 36 successful execution rows, SHA256
+`bf2b836e20a305eb8ec0b280568eea7f59f1cbb9e1a2219c9369e5117196e141`. Every predeclared pair was
+accepted: `witness_topology_1`, `witness_topology_8`, `witness_topology_32`, `dirty_accounts_2`,
+`dirty_accounts_8`, and `dirty_accounts_32`. The aggregate verdict is `coarse_model_accepted`; the
+largest target APE was
+`0.0091781895650865294983267566242553804960841536557328913471317871584700116890910893`
+on `dirty_accounts_32`, below the frozen `0.1` gate.
+
+Portable derivation identity SHA256 is
+`3e4de6eecb5e92aa59a6a4b9d380765b94ddf9b1b8198479659393a878694f24`. Its exact files are:
+
+- `identity.json`: `b68c892a25cec824cc5805b9f20baee163287caa91b0d146261e4497b042391e`;
+- `overhead-evidence.json`: `e990deed7cf0e04153e716165e67ec1028c5c3479e8e99cda0d8f9872c826979`;
+- `state-holdout-evidence.json`: `1004cb82af8a67fe9a3794044bc8b88f62a08fc095d528454940745c83690ec6`;
+- `higher-layer-calibration.json`: `e06e90546f48b59f52670ceb320c63a5da64e910c7154efc95bafc4fa5579a54`.
+
+Both live-run semantic replay and directory-only portable replay returned
+`coarse_model_accepted`. Fresh validation passed 68 higher-layer Python tests, the complete 476-test
+opcode-gas Python suite with one existing opt-in skip, and all 27 controlled-workload Rust tests.
+The controller's independent post-commit replay and adversarial review remain the next gate before
+this evidence is used to open any proposal input.
+
 ## Next Gate
 
-Implement and independently verify the declared native-transfer approximation, dependency-aware
-fixed-term evaluator, artifact status, replay, and sealing rules. Then execute a new clean
-production-SP1 campaign. Open the six existing state holdouts only if the three ordinary fixed terms
-pass and the frozen native materiality gate passes. Proposal execution remains closed.
+Independently replay and adversarially review derivation `3e4de6eecb5e92aa59a6a4b9`. After that
+review closes, consolidate the complete lower-layer estimator and its coverage statement before
+authorizing the fixed proposal-validation corpus. Proposal execution remains closed.
 
 ## Next Milestones
 

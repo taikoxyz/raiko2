@@ -1,0 +1,2958 @@
+{
+  "rows": [
+    {
+      "backend_input_sha256": "3e62f4463b864fbb7732bb9392a099a0113bcbef49eb93ec6889d5e2ab78a429",
+      "calibration_run_id": "91d461f0a817446a80223798",
+      "execution_row_id": "e32584676332ce38aba60f5d3be0dc9c7c3f2382421424e27c3425aee73aa213",
+      "guest_input_bincode_length": 331684,
+      "guest_input_sha256": "0x3e62f4463b864fbb7732bb9392a099a0113bcbef49eb93ec6889d5e2ab78a429",
+      "lane": "control",
+      "observation": {
+        "actual_diagnostics": {
+          "blob_count": 1,
+          "bytecode_length": 0,
+          "calldata_length": 0,
+          "guest_input_bincode_length": 331684,
+          "kzg_invocation_count": 1,
+          "touched_state_key_count": 7,
+          "witness_byte_count": 297,
+          "witness_node_count": 3
+        },
+        "actual_features": {
+          "block_base": 1,
+          "native_value_transfer": 0,
+          "proposal_startup": 1,
+          "tx_base": 0
+        },
+        "actual_final_state_root": "0x1b80f5db83bf61df48fb29054f54a40c1d530ac98931e77a76dd4f5514cd9d4c",
+        "actual_raw_gas_by_key": {},
+        "anchor_operation_ownership": "block_base",
+        "backend_input_sha256": "3e62f4463b864fbb7732bb9392a099a0113bcbef49eb93ec6889d5e2ab78a429",
+        "committed_candidate_transaction_count": 0,
+        "guest_input_bincode_length": 331684,
+        "guest_input_sha256": "0x3e62f4463b864fbb7732bb9392a099a0113bcbef49eb93ec6889d5e2ab78a429",
+        "lane": "control",
+        "operation_phase_ownership": "transaction_non_anchor_only",
+        "pair_id": "witness_topology_1",
+        "public_output": "0x9ad5e1a7cc4e9824f5e7dab77b890bc4133103c82ac85d97dc7617e0c245e379",
+        "started_candidate_transaction_count": 0,
+        "system_operation_ownership": "block_base",
+        "unattempted_candidate_transaction_count": 0
+      },
+      "pair_id": "witness_topology_1",
+      "prover_gas": "158721330",
+      "public_values": "0x9ad5e1a7cc4e9824f5e7dab77b890bc4133103c82ac85d97dc7617e0c245e379",
+      "repeat_index": 0,
+      "schema_version": 1,
+      "sp1_execution_engine": "gas-estimator",
+      "sp1_gas_trace_chunk_slots": 2,
+      "sp1_gas_trace_chunk_threshold": 134217728,
+      "spec": {
+        "control": {
+          "extra_account_count": 0
+        },
+        "kind": "witness_topology",
+        "pair_id": "witness_topology_1",
+        "scale": 1,
+        "target": {
+          "extra_account_count": 1
+        }
+      },
+      "status": "accepted",
+      "workload_id": "afca21ea0080141153067de6f1430296d84344d9d8d6bee57ff403ddd8c9c641",
+      "workload_spec": {
+        "guest_input_canonical_sha256": "3e62f4463b864fbb7732bb9392a099a0113bcbef49eb93ec6889d5e2ab78a429",
+        "lane": "control",
+        "pair_id": "witness_topology_1",
+        "pair_spec": {
+          "control": {
+            "extra_account_count": 0
+          },
+          "kind": "witness_topology",
+          "pair_id": "witness_topology_1",
+          "scale": 1,
+          "target": {
+            "extra_account_count": 1
+          }
+        },
+        "schema_version": 1
+      }
+    },
+    {
+      "backend_input_sha256": "b940d5ccbe2737a3b297536822f42b3009e1b78943a277c87e0a4844da531532",
+      "calibration_run_id": "91d461f0a817446a80223798",
+      "execution_row_id": "9908ec09105facdc0b6b82ce1aeb463cb401ab83869bbb09931f5b37ad1e39c5",
+      "guest_input_bincode_length": 331875,
+      "guest_input_sha256": "0xb940d5ccbe2737a3b297536822f42b3009e1b78943a277c87e0a4844da531532",
+      "lane": "target",
+      "observation": {
+        "actual_diagnostics": {
+          "blob_count": 1,
+          "bytecode_length": 0,
+          "calldata_length": 0,
+          "guest_input_bincode_length": 331875,
+          "kzg_invocation_count": 1,
+          "touched_state_key_count": 8,
+          "witness_byte_count": 436,
+          "witness_node_count": 4
+        },
+        "actual_features": {
+          "block_base": 1,
+          "native_value_transfer": 0,
+          "proposal_startup": 1,
+          "tx_base": 0
+        },
+        "actual_final_state_root": "0x793d4e1119e04ed1abe72629f12ec595dbf17248392cc764d585e01e1070b432",
+        "actual_raw_gas_by_key": {},
+        "anchor_operation_ownership": "block_base",
+        "backend_input_sha256": "b940d5ccbe2737a3b297536822f42b3009e1b78943a277c87e0a4844da531532",
+        "committed_candidate_transaction_count": 0,
+        "guest_input_bincode_length": 331875,
+        "guest_input_sha256": "0xb940d5ccbe2737a3b297536822f42b3009e1b78943a277c87e0a4844da531532",
+        "lane": "target",
+        "operation_phase_ownership": "transaction_non_anchor_only",
+        "pair_id": "witness_topology_1",
+        "public_output": "0xbc5f510436e58b5e04f60fc67b17cf1bf986b461c9826508d2914fee594232fd",
+        "started_candidate_transaction_count": 0,
+        "system_operation_ownership": "block_base",
+        "unattempted_candidate_transaction_count": 0
+      },
+      "pair_id": "witness_topology_1",
+      "prover_gas": "158748141",
+      "public_values": "0xbc5f510436e58b5e04f60fc67b17cf1bf986b461c9826508d2914fee594232fd",
+      "repeat_index": 0,
+      "schema_version": 1,
+      "sp1_execution_engine": "gas-estimator",
+      "sp1_gas_trace_chunk_slots": 2,
+      "sp1_gas_trace_chunk_threshold": 134217728,
+      "spec": {
+        "control": {
+          "extra_account_count": 0
+        },
+        "kind": "witness_topology",
+        "pair_id": "witness_topology_1",
+        "scale": 1,
+        "target": {
+          "extra_account_count": 1
+        }
+      },
+      "status": "accepted",
+      "workload_id": "1a9c7bad87ad4c4fcfda5ac6d5ba725d5cae66427b2ec7f337e280e0d3556edc",
+      "workload_spec": {
+        "guest_input_canonical_sha256": "b940d5ccbe2737a3b297536822f42b3009e1b78943a277c87e0a4844da531532",
+        "lane": "target",
+        "pair_id": "witness_topology_1",
+        "pair_spec": {
+          "control": {
+            "extra_account_count": 0
+          },
+          "kind": "witness_topology",
+          "pair_id": "witness_topology_1",
+          "scale": 1,
+          "target": {
+            "extra_account_count": 1
+          }
+        },
+        "schema_version": 1
+      }
+    },
+    {
+      "backend_input_sha256": "3e62f4463b864fbb7732bb9392a099a0113bcbef49eb93ec6889d5e2ab78a429",
+      "calibration_run_id": "91d461f0a817446a80223798",
+      "execution_row_id": "4726e7f410d8a1463329dcf2b0531d420d2c1ca9bc75e1a221794d8dd13eaf09",
+      "guest_input_bincode_length": 331684,
+      "guest_input_sha256": "0x3e62f4463b864fbb7732bb9392a099a0113bcbef49eb93ec6889d5e2ab78a429",
+      "lane": "control",
+      "observation": {
+        "actual_diagnostics": {
+          "blob_count": 1,
+          "bytecode_length": 0,
+          "calldata_length": 0,
+          "guest_input_bincode_length": 331684,
+          "kzg_invocation_count": 1,
+          "touched_state_key_count": 7,
+          "witness_byte_count": 297,
+          "witness_node_count": 3
+        },
+        "actual_features": {
+          "block_base": 1,
+          "native_value_transfer": 0,
+          "proposal_startup": 1,
+          "tx_base": 0
+        },
+        "actual_final_state_root": "0x1b80f5db83bf61df48fb29054f54a40c1d530ac98931e77a76dd4f5514cd9d4c",
+        "actual_raw_gas_by_key": {},
+        "anchor_operation_ownership": "block_base",
+        "backend_input_sha256": "3e62f4463b864fbb7732bb9392a099a0113bcbef49eb93ec6889d5e2ab78a429",
+        "committed_candidate_transaction_count": 0,
+        "guest_input_bincode_length": 331684,
+        "guest_input_sha256": "0x3e62f4463b864fbb7732bb9392a099a0113bcbef49eb93ec6889d5e2ab78a429",
+        "lane": "control",
+        "operation_phase_ownership": "transaction_non_anchor_only",
+        "pair_id": "witness_topology_1",
+        "public_output": "0x9ad5e1a7cc4e9824f5e7dab77b890bc4133103c82ac85d97dc7617e0c245e379",
+        "started_candidate_transaction_count": 0,
+        "system_operation_ownership": "block_base",
+        "unattempted_candidate_transaction_count": 0
+      },
+      "pair_id": "witness_topology_1",
+      "prover_gas": "158721330",
+      "public_values": "0x9ad5e1a7cc4e9824f5e7dab77b890bc4133103c82ac85d97dc7617e0c245e379",
+      "repeat_index": 1,
+      "schema_version": 1,
+      "sp1_execution_engine": "gas-estimator",
+      "sp1_gas_trace_chunk_slots": 2,
+      "sp1_gas_trace_chunk_threshold": 134217728,
+      "spec": {
+        "control": {
+          "extra_account_count": 0
+        },
+        "kind": "witness_topology",
+        "pair_id": "witness_topology_1",
+        "scale": 1,
+        "target": {
+          "extra_account_count": 1
+        }
+      },
+      "status": "accepted",
+      "workload_id": "afca21ea0080141153067de6f1430296d84344d9d8d6bee57ff403ddd8c9c641",
+      "workload_spec": {
+        "guest_input_canonical_sha256": "3e62f4463b864fbb7732bb9392a099a0113bcbef49eb93ec6889d5e2ab78a429",
+        "lane": "control",
+        "pair_id": "witness_topology_1",
+        "pair_spec": {
+          "control": {
+            "extra_account_count": 0
+          },
+          "kind": "witness_topology",
+          "pair_id": "witness_topology_1",
+          "scale": 1,
+          "target": {
+            "extra_account_count": 1
+          }
+        },
+        "schema_version": 1
+      }
+    },
+    {
+      "backend_input_sha256": "b940d5ccbe2737a3b297536822f42b3009e1b78943a277c87e0a4844da531532",
+      "calibration_run_id": "91d461f0a817446a80223798",
+      "execution_row_id": "ca133330001c0db8096121c2b8d0650a2ac7bfe30b1673ae155f7a4ba57a866f",
+      "guest_input_bincode_length": 331875,
+      "guest_input_sha256": "0xb940d5ccbe2737a3b297536822f42b3009e1b78943a277c87e0a4844da531532",
+      "lane": "target",
+      "observation": {
+        "actual_diagnostics": {
+          "blob_count": 1,
+          "bytecode_length": 0,
+          "calldata_length": 0,
+          "guest_input_bincode_length": 331875,
+          "kzg_invocation_count": 1,
+          "touched_state_key_count": 8,
+          "witness_byte_count": 436,
+          "witness_node_count": 4
+        },
+        "actual_features": {
+          "block_base": 1,
+          "native_value_transfer": 0,
+          "proposal_startup": 1,
+          "tx_base": 0
+        },
+        "actual_final_state_root": "0x793d4e1119e04ed1abe72629f12ec595dbf17248392cc764d585e01e1070b432",
+        "actual_raw_gas_by_key": {},
+        "anchor_operation_ownership": "block_base",
+        "backend_input_sha256": "b940d5ccbe2737a3b297536822f42b3009e1b78943a277c87e0a4844da531532",
+        "committed_candidate_transaction_count": 0,
+        "guest_input_bincode_length": 331875,
+        "guest_input_sha256": "0xb940d5ccbe2737a3b297536822f42b3009e1b78943a277c87e0a4844da531532",
+        "lane": "target",
+        "operation_phase_ownership": "transaction_non_anchor_only",
+        "pair_id": "witness_topology_1",
+        "public_output": "0xbc5f510436e58b5e04f60fc67b17cf1bf986b461c9826508d2914fee594232fd",
+        "started_candidate_transaction_count": 0,
+        "system_operation_ownership": "block_base",
+        "unattempted_candidate_transaction_count": 0
+      },
+      "pair_id": "witness_topology_1",
+      "prover_gas": "158748141",
+      "public_values": "0xbc5f510436e58b5e04f60fc67b17cf1bf986b461c9826508d2914fee594232fd",
+      "repeat_index": 1,
+      "schema_version": 1,
+      "sp1_execution_engine": "gas-estimator",
+      "sp1_gas_trace_chunk_slots": 2,
+      "sp1_gas_trace_chunk_threshold": 134217728,
+      "spec": {
+        "control": {
+          "extra_account_count": 0
+        },
+        "kind": "witness_topology",
+        "pair_id": "witness_topology_1",
+        "scale": 1,
+        "target": {
+          "extra_account_count": 1
+        }
+      },
+      "status": "accepted",
+      "workload_id": "1a9c7bad87ad4c4fcfda5ac6d5ba725d5cae66427b2ec7f337e280e0d3556edc",
+      "workload_spec": {
+        "guest_input_canonical_sha256": "b940d5ccbe2737a3b297536822f42b3009e1b78943a277c87e0a4844da531532",
+        "lane": "target",
+        "pair_id": "witness_topology_1",
+        "pair_spec": {
+          "control": {
+            "extra_account_count": 0
+          },
+          "kind": "witness_topology",
+          "pair_id": "witness_topology_1",
+          "scale": 1,
+          "target": {
+            "extra_account_count": 1
+          }
+        },
+        "schema_version": 1
+      }
+    },
+    {
+      "backend_input_sha256": "3e62f4463b864fbb7732bb9392a099a0113bcbef49eb93ec6889d5e2ab78a429",
+      "calibration_run_id": "91d461f0a817446a80223798",
+      "execution_row_id": "174aa2bfb5bbb98ede5f4a19cb4150bee1dac9339cde74b37aba96fc1329eefc",
+      "guest_input_bincode_length": 331684,
+      "guest_input_sha256": "0x3e62f4463b864fbb7732bb9392a099a0113bcbef49eb93ec6889d5e2ab78a429",
+      "lane": "control",
+      "observation": {
+        "actual_diagnostics": {
+          "blob_count": 1,
+          "bytecode_length": 0,
+          "calldata_length": 0,
+          "guest_input_bincode_length": 331684,
+          "kzg_invocation_count": 1,
+          "touched_state_key_count": 7,
+          "witness_byte_count": 297,
+          "witness_node_count": 3
+        },
+        "actual_features": {
+          "block_base": 1,
+          "native_value_transfer": 0,
+          "proposal_startup": 1,
+          "tx_base": 0
+        },
+        "actual_final_state_root": "0x1b80f5db83bf61df48fb29054f54a40c1d530ac98931e77a76dd4f5514cd9d4c",
+        "actual_raw_gas_by_key": {},
+        "anchor_operation_ownership": "block_base",
+        "backend_input_sha256": "3e62f4463b864fbb7732bb9392a099a0113bcbef49eb93ec6889d5e2ab78a429",
+        "committed_candidate_transaction_count": 0,
+        "guest_input_bincode_length": 331684,
+        "guest_input_sha256": "0x3e62f4463b864fbb7732bb9392a099a0113bcbef49eb93ec6889d5e2ab78a429",
+        "lane": "control",
+        "operation_phase_ownership": "transaction_non_anchor_only",
+        "pair_id": "witness_topology_1",
+        "public_output": "0x9ad5e1a7cc4e9824f5e7dab77b890bc4133103c82ac85d97dc7617e0c245e379",
+        "started_candidate_transaction_count": 0,
+        "system_operation_ownership": "block_base",
+        "unattempted_candidate_transaction_count": 0
+      },
+      "pair_id": "witness_topology_1",
+      "prover_gas": "158721330",
+      "public_values": "0x9ad5e1a7cc4e9824f5e7dab77b890bc4133103c82ac85d97dc7617e0c245e379",
+      "repeat_index": 2,
+      "schema_version": 1,
+      "sp1_execution_engine": "gas-estimator",
+      "sp1_gas_trace_chunk_slots": 2,
+      "sp1_gas_trace_chunk_threshold": 134217728,
+      "spec": {
+        "control": {
+          "extra_account_count": 0
+        },
+        "kind": "witness_topology",
+        "pair_id": "witness_topology_1",
+        "scale": 1,
+        "target": {
+          "extra_account_count": 1
+        }
+      },
+      "status": "accepted",
+      "workload_id": "afca21ea0080141153067de6f1430296d84344d9d8d6bee57ff403ddd8c9c641",
+      "workload_spec": {
+        "guest_input_canonical_sha256": "3e62f4463b864fbb7732bb9392a099a0113bcbef49eb93ec6889d5e2ab78a429",
+        "lane": "control",
+        "pair_id": "witness_topology_1",
+        "pair_spec": {
+          "control": {
+            "extra_account_count": 0
+          },
+          "kind": "witness_topology",
+          "pair_id": "witness_topology_1",
+          "scale": 1,
+          "target": {
+            "extra_account_count": 1
+          }
+        },
+        "schema_version": 1
+      }
+    },
+    {
+      "backend_input_sha256": "b940d5ccbe2737a3b297536822f42b3009e1b78943a277c87e0a4844da531532",
+      "calibration_run_id": "91d461f0a817446a80223798",
+      "execution_row_id": "96393ba0747fe49e66797e8d2acc141b877012114a82f6c030ca366f3020dc6a",
+      "guest_input_bincode_length": 331875,
+      "guest_input_sha256": "0xb940d5ccbe2737a3b297536822f42b3009e1b78943a277c87e0a4844da531532",
+      "lane": "target",
+      "observation": {
+        "actual_diagnostics": {
+          "blob_count": 1,
+          "bytecode_length": 0,
+          "calldata_length": 0,
+          "guest_input_bincode_length": 331875,
+          "kzg_invocation_count": 1,
+          "touched_state_key_count": 8,
+          "witness_byte_count": 436,
+          "witness_node_count": 4
+        },
+        "actual_features": {
+          "block_base": 1,
+          "native_value_transfer": 0,
+          "proposal_startup": 1,
+          "tx_base": 0
+        },
+        "actual_final_state_root": "0x793d4e1119e04ed1abe72629f12ec595dbf17248392cc764d585e01e1070b432",
+        "actual_raw_gas_by_key": {},
+        "anchor_operation_ownership": "block_base",
+        "backend_input_sha256": "b940d5ccbe2737a3b297536822f42b3009e1b78943a277c87e0a4844da531532",
+        "committed_candidate_transaction_count": 0,
+        "guest_input_bincode_length": 331875,
+        "guest_input_sha256": "0xb940d5ccbe2737a3b297536822f42b3009e1b78943a277c87e0a4844da531532",
+        "lane": "target",
+        "operation_phase_ownership": "transaction_non_anchor_only",
+        "pair_id": "witness_topology_1",
+        "public_output": "0xbc5f510436e58b5e04f60fc67b17cf1bf986b461c9826508d2914fee594232fd",
+        "started_candidate_transaction_count": 0,
+        "system_operation_ownership": "block_base",
+        "unattempted_candidate_transaction_count": 0
+      },
+      "pair_id": "witness_topology_1",
+      "prover_gas": "158748141",
+      "public_values": "0xbc5f510436e58b5e04f60fc67b17cf1bf986b461c9826508d2914fee594232fd",
+      "repeat_index": 2,
+      "schema_version": 1,
+      "sp1_execution_engine": "gas-estimator",
+      "sp1_gas_trace_chunk_slots": 2,
+      "sp1_gas_trace_chunk_threshold": 134217728,
+      "spec": {
+        "control": {
+          "extra_account_count": 0
+        },
+        "kind": "witness_topology",
+        "pair_id": "witness_topology_1",
+        "scale": 1,
+        "target": {
+          "extra_account_count": 1
+        }
+      },
+      "status": "accepted",
+      "workload_id": "1a9c7bad87ad4c4fcfda5ac6d5ba725d5cae66427b2ec7f337e280e0d3556edc",
+      "workload_spec": {
+        "guest_input_canonical_sha256": "b940d5ccbe2737a3b297536822f42b3009e1b78943a277c87e0a4844da531532",
+        "lane": "target",
+        "pair_id": "witness_topology_1",
+        "pair_spec": {
+          "control": {
+            "extra_account_count": 0
+          },
+          "kind": "witness_topology",
+          "pair_id": "witness_topology_1",
+          "scale": 1,
+          "target": {
+            "extra_account_count": 1
+          }
+        },
+        "schema_version": 1
+      }
+    },
+    {
+      "backend_input_sha256": "3e62f4463b864fbb7732bb9392a099a0113bcbef49eb93ec6889d5e2ab78a429",
+      "calibration_run_id": "91d461f0a817446a80223798",
+      "execution_row_id": "2aae7d6d694dee1412c1a37169f30ac5e23d6eb7671ef873a1de5f6c0ce3df25",
+      "guest_input_bincode_length": 331684,
+      "guest_input_sha256": "0x3e62f4463b864fbb7732bb9392a099a0113bcbef49eb93ec6889d5e2ab78a429",
+      "lane": "control",
+      "observation": {
+        "actual_diagnostics": {
+          "blob_count": 1,
+          "bytecode_length": 0,
+          "calldata_length": 0,
+          "guest_input_bincode_length": 331684,
+          "kzg_invocation_count": 1,
+          "touched_state_key_count": 7,
+          "witness_byte_count": 297,
+          "witness_node_count": 3
+        },
+        "actual_features": {
+          "block_base": 1,
+          "native_value_transfer": 0,
+          "proposal_startup": 1,
+          "tx_base": 0
+        },
+        "actual_final_state_root": "0x1b80f5db83bf61df48fb29054f54a40c1d530ac98931e77a76dd4f5514cd9d4c",
+        "actual_raw_gas_by_key": {},
+        "anchor_operation_ownership": "block_base",
+        "backend_input_sha256": "3e62f4463b864fbb7732bb9392a099a0113bcbef49eb93ec6889d5e2ab78a429",
+        "committed_candidate_transaction_count": 0,
+        "guest_input_bincode_length": 331684,
+        "guest_input_sha256": "0x3e62f4463b864fbb7732bb9392a099a0113bcbef49eb93ec6889d5e2ab78a429",
+        "lane": "control",
+        "operation_phase_ownership": "transaction_non_anchor_only",
+        "pair_id": "witness_topology_8",
+        "public_output": "0x9ad5e1a7cc4e9824f5e7dab77b890bc4133103c82ac85d97dc7617e0c245e379",
+        "started_candidate_transaction_count": 0,
+        "system_operation_ownership": "block_base",
+        "unattempted_candidate_transaction_count": 0
+      },
+      "pair_id": "witness_topology_8",
+      "prover_gas": "158721330",
+      "public_values": "0x9ad5e1a7cc4e9824f5e7dab77b890bc4133103c82ac85d97dc7617e0c245e379",
+      "repeat_index": 0,
+      "schema_version": 1,
+      "sp1_execution_engine": "gas-estimator",
+      "sp1_gas_trace_chunk_slots": 2,
+      "sp1_gas_trace_chunk_threshold": 134217728,
+      "spec": {
+        "control": {
+          "extra_account_count": 0
+        },
+        "kind": "witness_topology",
+        "pair_id": "witness_topology_8",
+        "scale": 8,
+        "target": {
+          "extra_account_count": 8
+        }
+      },
+      "status": "accepted",
+      "workload_id": "032fb58dad911d40f1c3c4cbae4f724f35e91cc3902f8ebe97ca733f3e6b614e",
+      "workload_spec": {
+        "guest_input_canonical_sha256": "3e62f4463b864fbb7732bb9392a099a0113bcbef49eb93ec6889d5e2ab78a429",
+        "lane": "control",
+        "pair_id": "witness_topology_8",
+        "pair_spec": {
+          "control": {
+            "extra_account_count": 0
+          },
+          "kind": "witness_topology",
+          "pair_id": "witness_topology_8",
+          "scale": 8,
+          "target": {
+            "extra_account_count": 8
+          }
+        },
+        "schema_version": 1
+      }
+    },
+    {
+      "backend_input_sha256": "7a502109f6034db7734869afcd929a26d389df6a9203fce3567643fcc6527756",
+      "calibration_run_id": "91d461f0a817446a80223798",
+      "execution_row_id": "de243df4cb502437603fc0075f3f7bb6a32a6ac97e1e399dab45d86e4b598f23",
+      "guest_input_bincode_length": 333316,
+      "guest_input_sha256": "0x7a502109f6034db7734869afcd929a26d389df6a9203fce3567643fcc6527756",
+      "lane": "target",
+      "observation": {
+        "actual_diagnostics": {
+          "blob_count": 1,
+          "bytecode_length": 0,
+          "calldata_length": 0,
+          "guest_input_bincode_length": 333316,
+          "kzg_invocation_count": 1,
+          "touched_state_key_count": 15,
+          "witness_byte_count": 1461,
+          "witness_node_count": 12
+        },
+        "actual_features": {
+          "block_base": 1,
+          "native_value_transfer": 0,
+          "proposal_startup": 1,
+          "tx_base": 0
+        },
+        "actual_final_state_root": "0x72ae992e8ebb63c590f46e97bb072db1c2c977ddf79955f3e19a40f4d2a75d76",
+        "actual_raw_gas_by_key": {},
+        "anchor_operation_ownership": "block_base",
+        "backend_input_sha256": "7a502109f6034db7734869afcd929a26d389df6a9203fce3567643fcc6527756",
+        "committed_candidate_transaction_count": 0,
+        "guest_input_bincode_length": 333316,
+        "guest_input_sha256": "0x7a502109f6034db7734869afcd929a26d389df6a9203fce3567643fcc6527756",
+        "lane": "target",
+        "operation_phase_ownership": "transaction_non_anchor_only",
+        "pair_id": "witness_topology_8",
+        "public_output": "0x71f43f19ac92cc7a38102e2282cf6d5ef126f05c36643062be00bbd1c295c1d1",
+        "started_candidate_transaction_count": 0,
+        "system_operation_ownership": "block_base",
+        "unattempted_candidate_transaction_count": 0
+      },
+      "pair_id": "witness_topology_8",
+      "prover_gas": "158912053",
+      "public_values": "0x71f43f19ac92cc7a38102e2282cf6d5ef126f05c36643062be00bbd1c295c1d1",
+      "repeat_index": 0,
+      "schema_version": 1,
+      "sp1_execution_engine": "gas-estimator",
+      "sp1_gas_trace_chunk_slots": 2,
+      "sp1_gas_trace_chunk_threshold": 134217728,
+      "spec": {
+        "control": {
+          "extra_account_count": 0
+        },
+        "kind": "witness_topology",
+        "pair_id": "witness_topology_8",
+        "scale": 8,
+        "target": {
+          "extra_account_count": 8
+        }
+      },
+      "status": "accepted",
+      "workload_id": "29975b3d50a3e2c978c5b9af233269f208ad75f237b650d06f8359d7be89a7db",
+      "workload_spec": {
+        "guest_input_canonical_sha256": "7a502109f6034db7734869afcd929a26d389df6a9203fce3567643fcc6527756",
+        "lane": "target",
+        "pair_id": "witness_topology_8",
+        "pair_spec": {
+          "control": {
+            "extra_account_count": 0
+          },
+          "kind": "witness_topology",
+          "pair_id": "witness_topology_8",
+          "scale": 8,
+          "target": {
+            "extra_account_count": 8
+          }
+        },
+        "schema_version": 1
+      }
+    },
+    {
+      "backend_input_sha256": "3e62f4463b864fbb7732bb9392a099a0113bcbef49eb93ec6889d5e2ab78a429",
+      "calibration_run_id": "91d461f0a817446a80223798",
+      "execution_row_id": "ec4d503a14e35db0b9ac84567ef461bc4a9dc6321872ce72bb59769d88a65f57",
+      "guest_input_bincode_length": 331684,
+      "guest_input_sha256": "0x3e62f4463b864fbb7732bb9392a099a0113bcbef49eb93ec6889d5e2ab78a429",
+      "lane": "control",
+      "observation": {
+        "actual_diagnostics": {
+          "blob_count": 1,
+          "bytecode_length": 0,
+          "calldata_length": 0,
+          "guest_input_bincode_length": 331684,
+          "kzg_invocation_count": 1,
+          "touched_state_key_count": 7,
+          "witness_byte_count": 297,
+          "witness_node_count": 3
+        },
+        "actual_features": {
+          "block_base": 1,
+          "native_value_transfer": 0,
+          "proposal_startup": 1,
+          "tx_base": 0
+        },
+        "actual_final_state_root": "0x1b80f5db83bf61df48fb29054f54a40c1d530ac98931e77a76dd4f5514cd9d4c",
+        "actual_raw_gas_by_key": {},
+        "anchor_operation_ownership": "block_base",
+        "backend_input_sha256": "3e62f4463b864fbb7732bb9392a099a0113bcbef49eb93ec6889d5e2ab78a429",
+        "committed_candidate_transaction_count": 0,
+        "guest_input_bincode_length": 331684,
+        "guest_input_sha256": "0x3e62f4463b864fbb7732bb9392a099a0113bcbef49eb93ec6889d5e2ab78a429",
+        "lane": "control",
+        "operation_phase_ownership": "transaction_non_anchor_only",
+        "pair_id": "witness_topology_8",
+        "public_output": "0x9ad5e1a7cc4e9824f5e7dab77b890bc4133103c82ac85d97dc7617e0c245e379",
+        "started_candidate_transaction_count": 0,
+        "system_operation_ownership": "block_base",
+        "unattempted_candidate_transaction_count": 0
+      },
+      "pair_id": "witness_topology_8",
+      "prover_gas": "158721330",
+      "public_values": "0x9ad5e1a7cc4e9824f5e7dab77b890bc4133103c82ac85d97dc7617e0c245e379",
+      "repeat_index": 1,
+      "schema_version": 1,
+      "sp1_execution_engine": "gas-estimator",
+      "sp1_gas_trace_chunk_slots": 2,
+      "sp1_gas_trace_chunk_threshold": 134217728,
+      "spec": {
+        "control": {
+          "extra_account_count": 0
+        },
+        "kind": "witness_topology",
+        "pair_id": "witness_topology_8",
+        "scale": 8,
+        "target": {
+          "extra_account_count": 8
+        }
+      },
+      "status": "accepted",
+      "workload_id": "032fb58dad911d40f1c3c4cbae4f724f35e91cc3902f8ebe97ca733f3e6b614e",
+      "workload_spec": {
+        "guest_input_canonical_sha256": "3e62f4463b864fbb7732bb9392a099a0113bcbef49eb93ec6889d5e2ab78a429",
+        "lane": "control",
+        "pair_id": "witness_topology_8",
+        "pair_spec": {
+          "control": {
+            "extra_account_count": 0
+          },
+          "kind": "witness_topology",
+          "pair_id": "witness_topology_8",
+          "scale": 8,
+          "target": {
+            "extra_account_count": 8
+          }
+        },
+        "schema_version": 1
+      }
+    },
+    {
+      "backend_input_sha256": "7a502109f6034db7734869afcd929a26d389df6a9203fce3567643fcc6527756",
+      "calibration_run_id": "91d461f0a817446a80223798",
+      "execution_row_id": "2e72c94fb7a7786d0ecae504c349005c6505997095fdeb8b51e05a41d0fb7317",
+      "guest_input_bincode_length": 333316,
+      "guest_input_sha256": "0x7a502109f6034db7734869afcd929a26d389df6a9203fce3567643fcc6527756",
+      "lane": "target",
+      "observation": {
+        "actual_diagnostics": {
+          "blob_count": 1,
+          "bytecode_length": 0,
+          "calldata_length": 0,
+          "guest_input_bincode_length": 333316,
+          "kzg_invocation_count": 1,
+          "touched_state_key_count": 15,
+          "witness_byte_count": 1461,
+          "witness_node_count": 12
+        },
+        "actual_features": {
+          "block_base": 1,
+          "native_value_transfer": 0,
+          "proposal_startup": 1,
+          "tx_base": 0
+        },
+        "actual_final_state_root": "0x72ae992e8ebb63c590f46e97bb072db1c2c977ddf79955f3e19a40f4d2a75d76",
+        "actual_raw_gas_by_key": {},
+        "anchor_operation_ownership": "block_base",
+        "backend_input_sha256": "7a502109f6034db7734869afcd929a26d389df6a9203fce3567643fcc6527756",
+        "committed_candidate_transaction_count": 0,
+        "guest_input_bincode_length": 333316,
+        "guest_input_sha256": "0x7a502109f6034db7734869afcd929a26d389df6a9203fce3567643fcc6527756",
+        "lane": "target",
+        "operation_phase_ownership": "transaction_non_anchor_only",
+        "pair_id": "witness_topology_8",
+        "public_output": "0x71f43f19ac92cc7a38102e2282cf6d5ef126f05c36643062be00bbd1c295c1d1",
+        "started_candidate_transaction_count": 0,
+        "system_operation_ownership": "block_base",
+        "unattempted_candidate_transaction_count": 0
+      },
+      "pair_id": "witness_topology_8",
+      "prover_gas": "158912053",
+      "public_values": "0x71f43f19ac92cc7a38102e2282cf6d5ef126f05c36643062be00bbd1c295c1d1",
+      "repeat_index": 1,
+      "schema_version": 1,
+      "sp1_execution_engine": "gas-estimator",
+      "sp1_gas_trace_chunk_slots": 2,
+      "sp1_gas_trace_chunk_threshold": 134217728,
+      "spec": {
+        "control": {
+          "extra_account_count": 0
+        },
+        "kind": "witness_topology",
+        "pair_id": "witness_topology_8",
+        "scale": 8,
+        "target": {
+          "extra_account_count": 8
+        }
+      },
+      "status": "accepted",
+      "workload_id": "29975b3d50a3e2c978c5b9af233269f208ad75f237b650d06f8359d7be89a7db",
+      "workload_spec": {
+        "guest_input_canonical_sha256": "7a502109f6034db7734869afcd929a26d389df6a9203fce3567643fcc6527756",
+        "lane": "target",
+        "pair_id": "witness_topology_8",
+        "pair_spec": {
+          "control": {
+            "extra_account_count": 0
+          },
+          "kind": "witness_topology",
+          "pair_id": "witness_topology_8",
+          "scale": 8,
+          "target": {
+            "extra_account_count": 8
+          }
+        },
+        "schema_version": 1
+      }
+    },
+    {
+      "backend_input_sha256": "3e62f4463b864fbb7732bb9392a099a0113bcbef49eb93ec6889d5e2ab78a429",
+      "calibration_run_id": "91d461f0a817446a80223798",
+      "execution_row_id": "c45f1db0f8eb73bc0668e6557060b336bdac6658124c03e6f01298f595f56fd1",
+      "guest_input_bincode_length": 331684,
+      "guest_input_sha256": "0x3e62f4463b864fbb7732bb9392a099a0113bcbef49eb93ec6889d5e2ab78a429",
+      "lane": "control",
+      "observation": {
+        "actual_diagnostics": {
+          "blob_count": 1,
+          "bytecode_length": 0,
+          "calldata_length": 0,
+          "guest_input_bincode_length": 331684,
+          "kzg_invocation_count": 1,
+          "touched_state_key_count": 7,
+          "witness_byte_count": 297,
+          "witness_node_count": 3
+        },
+        "actual_features": {
+          "block_base": 1,
+          "native_value_transfer": 0,
+          "proposal_startup": 1,
+          "tx_base": 0
+        },
+        "actual_final_state_root": "0x1b80f5db83bf61df48fb29054f54a40c1d530ac98931e77a76dd4f5514cd9d4c",
+        "actual_raw_gas_by_key": {},
+        "anchor_operation_ownership": "block_base",
+        "backend_input_sha256": "3e62f4463b864fbb7732bb9392a099a0113bcbef49eb93ec6889d5e2ab78a429",
+        "committed_candidate_transaction_count": 0,
+        "guest_input_bincode_length": 331684,
+        "guest_input_sha256": "0x3e62f4463b864fbb7732bb9392a099a0113bcbef49eb93ec6889d5e2ab78a429",
+        "lane": "control",
+        "operation_phase_ownership": "transaction_non_anchor_only",
+        "pair_id": "witness_topology_8",
+        "public_output": "0x9ad5e1a7cc4e9824f5e7dab77b890bc4133103c82ac85d97dc7617e0c245e379",
+        "started_candidate_transaction_count": 0,
+        "system_operation_ownership": "block_base",
+        "unattempted_candidate_transaction_count": 0
+      },
+      "pair_id": "witness_topology_8",
+      "prover_gas": "158721330",
+      "public_values": "0x9ad5e1a7cc4e9824f5e7dab77b890bc4133103c82ac85d97dc7617e0c245e379",
+      "repeat_index": 2,
+      "schema_version": 1,
+      "sp1_execution_engine": "gas-estimator",
+      "sp1_gas_trace_chunk_slots": 2,
+      "sp1_gas_trace_chunk_threshold": 134217728,
+      "spec": {
+        "control": {
+          "extra_account_count": 0
+        },
+        "kind": "witness_topology",
+        "pair_id": "witness_topology_8",
+        "scale": 8,
+        "target": {
+          "extra_account_count": 8
+        }
+      },
+      "status": "accepted",
+      "workload_id": "032fb58dad911d40f1c3c4cbae4f724f35e91cc3902f8ebe97ca733f3e6b614e",
+      "workload_spec": {
+        "guest_input_canonical_sha256": "3e62f4463b864fbb7732bb9392a099a0113bcbef49eb93ec6889d5e2ab78a429",
+        "lane": "control",
+        "pair_id": "witness_topology_8",
+        "pair_spec": {
+          "control": {
+            "extra_account_count": 0
+          },
+          "kind": "witness_topology",
+          "pair_id": "witness_topology_8",
+          "scale": 8,
+          "target": {
+            "extra_account_count": 8
+          }
+        },
+        "schema_version": 1
+      }
+    },
+    {
+      "backend_input_sha256": "7a502109f6034db7734869afcd929a26d389df6a9203fce3567643fcc6527756",
+      "calibration_run_id": "91d461f0a817446a80223798",
+      "execution_row_id": "8e31a9a712c77cefe180e8b07b8acaf44b17524e3d9b8dece14566f6458aa3b5",
+      "guest_input_bincode_length": 333316,
+      "guest_input_sha256": "0x7a502109f6034db7734869afcd929a26d389df6a9203fce3567643fcc6527756",
+      "lane": "target",
+      "observation": {
+        "actual_diagnostics": {
+          "blob_count": 1,
+          "bytecode_length": 0,
+          "calldata_length": 0,
+          "guest_input_bincode_length": 333316,
+          "kzg_invocation_count": 1,
+          "touched_state_key_count": 15,
+          "witness_byte_count": 1461,
+          "witness_node_count": 12
+        },
+        "actual_features": {
+          "block_base": 1,
+          "native_value_transfer": 0,
+          "proposal_startup": 1,
+          "tx_base": 0
+        },
+        "actual_final_state_root": "0x72ae992e8ebb63c590f46e97bb072db1c2c977ddf79955f3e19a40f4d2a75d76",
+        "actual_raw_gas_by_key": {},
+        "anchor_operation_ownership": "block_base",
+        "backend_input_sha256": "7a502109f6034db7734869afcd929a26d389df6a9203fce3567643fcc6527756",
+        "committed_candidate_transaction_count": 0,
+        "guest_input_bincode_length": 333316,
+        "guest_input_sha256": "0x7a502109f6034db7734869afcd929a26d389df6a9203fce3567643fcc6527756",
+        "lane": "target",
+        "operation_phase_ownership": "transaction_non_anchor_only",
+        "pair_id": "witness_topology_8",
+        "public_output": "0x71f43f19ac92cc7a38102e2282cf6d5ef126f05c36643062be00bbd1c295c1d1",
+        "started_candidate_transaction_count": 0,
+        "system_operation_ownership": "block_base",
+        "unattempted_candidate_transaction_count": 0
+      },
+      "pair_id": "witness_topology_8",
+      "prover_gas": "158912053",
+      "public_values": "0x71f43f19ac92cc7a38102e2282cf6d5ef126f05c36643062be00bbd1c295c1d1",
+      "repeat_index": 2,
+      "schema_version": 1,
+      "sp1_execution_engine": "gas-estimator",
+      "sp1_gas_trace_chunk_slots": 2,
+      "sp1_gas_trace_chunk_threshold": 134217728,
+      "spec": {
+        "control": {
+          "extra_account_count": 0
+        },
+        "kind": "witness_topology",
+        "pair_id": "witness_topology_8",
+        "scale": 8,
+        "target": {
+          "extra_account_count": 8
+        }
+      },
+      "status": "accepted",
+      "workload_id": "29975b3d50a3e2c978c5b9af233269f208ad75f237b650d06f8359d7be89a7db",
+      "workload_spec": {
+        "guest_input_canonical_sha256": "7a502109f6034db7734869afcd929a26d389df6a9203fce3567643fcc6527756",
+        "lane": "target",
+        "pair_id": "witness_topology_8",
+        "pair_spec": {
+          "control": {
+            "extra_account_count": 0
+          },
+          "kind": "witness_topology",
+          "pair_id": "witness_topology_8",
+          "scale": 8,
+          "target": {
+            "extra_account_count": 8
+          }
+        },
+        "schema_version": 1
+      }
+    },
+    {
+      "backend_input_sha256": "3e62f4463b864fbb7732bb9392a099a0113bcbef49eb93ec6889d5e2ab78a429",
+      "calibration_run_id": "91d461f0a817446a80223798",
+      "execution_row_id": "e13fc344e4f6ebb10f10518b6a326b945196445c869d29681c435b340f66233f",
+      "guest_input_bincode_length": 331684,
+      "guest_input_sha256": "0x3e62f4463b864fbb7732bb9392a099a0113bcbef49eb93ec6889d5e2ab78a429",
+      "lane": "control",
+      "observation": {
+        "actual_diagnostics": {
+          "blob_count": 1,
+          "bytecode_length": 0,
+          "calldata_length": 0,
+          "guest_input_bincode_length": 331684,
+          "kzg_invocation_count": 1,
+          "touched_state_key_count": 7,
+          "witness_byte_count": 297,
+          "witness_node_count": 3
+        },
+        "actual_features": {
+          "block_base": 1,
+          "native_value_transfer": 0,
+          "proposal_startup": 1,
+          "tx_base": 0
+        },
+        "actual_final_state_root": "0x1b80f5db83bf61df48fb29054f54a40c1d530ac98931e77a76dd4f5514cd9d4c",
+        "actual_raw_gas_by_key": {},
+        "anchor_operation_ownership": "block_base",
+        "backend_input_sha256": "3e62f4463b864fbb7732bb9392a099a0113bcbef49eb93ec6889d5e2ab78a429",
+        "committed_candidate_transaction_count": 0,
+        "guest_input_bincode_length": 331684,
+        "guest_input_sha256": "0x3e62f4463b864fbb7732bb9392a099a0113bcbef49eb93ec6889d5e2ab78a429",
+        "lane": "control",
+        "operation_phase_ownership": "transaction_non_anchor_only",
+        "pair_id": "witness_topology_32",
+        "public_output": "0x9ad5e1a7cc4e9824f5e7dab77b890bc4133103c82ac85d97dc7617e0c245e379",
+        "started_candidate_transaction_count": 0,
+        "system_operation_ownership": "block_base",
+        "unattempted_candidate_transaction_count": 0
+      },
+      "pair_id": "witness_topology_32",
+      "prover_gas": "158721330",
+      "public_values": "0x9ad5e1a7cc4e9824f5e7dab77b890bc4133103c82ac85d97dc7617e0c245e379",
+      "repeat_index": 0,
+      "schema_version": 1,
+      "sp1_execution_engine": "gas-estimator",
+      "sp1_gas_trace_chunk_slots": 2,
+      "sp1_gas_trace_chunk_threshold": 134217728,
+      "spec": {
+        "control": {
+          "extra_account_count": 0
+        },
+        "kind": "witness_topology",
+        "pair_id": "witness_topology_32",
+        "scale": 32,
+        "target": {
+          "extra_account_count": 32
+        }
+      },
+      "status": "accepted",
+      "workload_id": "857d952bf2945cfdf01e6939a7ecf2cb9062323d92b4016504a016f7a2f90c33",
+      "workload_spec": {
+        "guest_input_canonical_sha256": "3e62f4463b864fbb7732bb9392a099a0113bcbef49eb93ec6889d5e2ab78a429",
+        "lane": "control",
+        "pair_id": "witness_topology_32",
+        "pair_spec": {
+          "control": {
+            "extra_account_count": 0
+          },
+          "kind": "witness_topology",
+          "pair_id": "witness_topology_32",
+          "scale": 32,
+          "target": {
+            "extra_account_count": 32
+          }
+        },
+        "schema_version": 1
+      }
+    },
+    {
+      "backend_input_sha256": "87e87f397d7bfe9119459c55040ed9494f6865539db5a7ba30167a5f2863b7db",
+      "calibration_run_id": "91d461f0a817446a80223798",
+      "execution_row_id": "6cbbecfcde8d6d6b8c795083ce2cc55e6998b3ec9455ee36abc517fb37704e1c",
+      "guest_input_bincode_length": 339029,
+      "guest_input_sha256": "0x87e87f397d7bfe9119459c55040ed9494f6865539db5a7ba30167a5f2863b7db",
+      "lane": "target",
+      "observation": {
+        "actual_diagnostics": {
+          "blob_count": 1,
+          "bytecode_length": 0,
+          "calldata_length": 0,
+          "guest_input_bincode_length": 339029,
+          "kzg_invocation_count": 1,
+          "touched_state_key_count": 39,
+          "witness_byte_count": 5354,
+          "witness_node_count": 47
+        },
+        "actual_features": {
+          "block_base": 1,
+          "native_value_transfer": 0,
+          "proposal_startup": 1,
+          "tx_base": 0
+        },
+        "actual_final_state_root": "0x180274b0ba7d031d8277ca0439cf2cb22a41c0da481d4a57971a314e4adaea79",
+        "actual_raw_gas_by_key": {},
+        "anchor_operation_ownership": "block_base",
+        "backend_input_sha256": "87e87f397d7bfe9119459c55040ed9494f6865539db5a7ba30167a5f2863b7db",
+        "committed_candidate_transaction_count": 0,
+        "guest_input_bincode_length": 339029,
+        "guest_input_sha256": "0x87e87f397d7bfe9119459c55040ed9494f6865539db5a7ba30167a5f2863b7db",
+        "lane": "target",
+        "operation_phase_ownership": "transaction_non_anchor_only",
+        "pair_id": "witness_topology_32",
+        "public_output": "0x112a7b6b1c725a74bbca79971646db973fd7501e5dab3e59e9b418f91f0a2198",
+        "started_candidate_transaction_count": 0,
+        "system_operation_ownership": "block_base",
+        "unattempted_candidate_transaction_count": 0
+      },
+      "pair_id": "witness_topology_32",
+      "prover_gas": "159610893",
+      "public_values": "0x112a7b6b1c725a74bbca79971646db973fd7501e5dab3e59e9b418f91f0a2198",
+      "repeat_index": 0,
+      "schema_version": 1,
+      "sp1_execution_engine": "gas-estimator",
+      "sp1_gas_trace_chunk_slots": 2,
+      "sp1_gas_trace_chunk_threshold": 134217728,
+      "spec": {
+        "control": {
+          "extra_account_count": 0
+        },
+        "kind": "witness_topology",
+        "pair_id": "witness_topology_32",
+        "scale": 32,
+        "target": {
+          "extra_account_count": 32
+        }
+      },
+      "status": "accepted",
+      "workload_id": "bdc8d42a415060ee1658054b4526ed6b091219d8275a799257a04cf49ce2fb26",
+      "workload_spec": {
+        "guest_input_canonical_sha256": "87e87f397d7bfe9119459c55040ed9494f6865539db5a7ba30167a5f2863b7db",
+        "lane": "target",
+        "pair_id": "witness_topology_32",
+        "pair_spec": {
+          "control": {
+            "extra_account_count": 0
+          },
+          "kind": "witness_topology",
+          "pair_id": "witness_topology_32",
+          "scale": 32,
+          "target": {
+            "extra_account_count": 32
+          }
+        },
+        "schema_version": 1
+      }
+    },
+    {
+      "backend_input_sha256": "3e62f4463b864fbb7732bb9392a099a0113bcbef49eb93ec6889d5e2ab78a429",
+      "calibration_run_id": "91d461f0a817446a80223798",
+      "execution_row_id": "e3089d5cde3c5d95f35fba6d4be324bb9669209a6b1fcfc8b158bea2e0dee730",
+      "guest_input_bincode_length": 331684,
+      "guest_input_sha256": "0x3e62f4463b864fbb7732bb9392a099a0113bcbef49eb93ec6889d5e2ab78a429",
+      "lane": "control",
+      "observation": {
+        "actual_diagnostics": {
+          "blob_count": 1,
+          "bytecode_length": 0,
+          "calldata_length": 0,
+          "guest_input_bincode_length": 331684,
+          "kzg_invocation_count": 1,
+          "touched_state_key_count": 7,
+          "witness_byte_count": 297,
+          "witness_node_count": 3
+        },
+        "actual_features": {
+          "block_base": 1,
+          "native_value_transfer": 0,
+          "proposal_startup": 1,
+          "tx_base": 0
+        },
+        "actual_final_state_root": "0x1b80f5db83bf61df48fb29054f54a40c1d530ac98931e77a76dd4f5514cd9d4c",
+        "actual_raw_gas_by_key": {},
+        "anchor_operation_ownership": "block_base",
+        "backend_input_sha256": "3e62f4463b864fbb7732bb9392a099a0113bcbef49eb93ec6889d5e2ab78a429",
+        "committed_candidate_transaction_count": 0,
+        "guest_input_bincode_length": 331684,
+        "guest_input_sha256": "0x3e62f4463b864fbb7732bb9392a099a0113bcbef49eb93ec6889d5e2ab78a429",
+        "lane": "control",
+        "operation_phase_ownership": "transaction_non_anchor_only",
+        "pair_id": "witness_topology_32",
+        "public_output": "0x9ad5e1a7cc4e9824f5e7dab77b890bc4133103c82ac85d97dc7617e0c245e379",
+        "started_candidate_transaction_count": 0,
+        "system_operation_ownership": "block_base",
+        "unattempted_candidate_transaction_count": 0
+      },
+      "pair_id": "witness_topology_32",
+      "prover_gas": "158721330",
+      "public_values": "0x9ad5e1a7cc4e9824f5e7dab77b890bc4133103c82ac85d97dc7617e0c245e379",
+      "repeat_index": 1,
+      "schema_version": 1,
+      "sp1_execution_engine": "gas-estimator",
+      "sp1_gas_trace_chunk_slots": 2,
+      "sp1_gas_trace_chunk_threshold": 134217728,
+      "spec": {
+        "control": {
+          "extra_account_count": 0
+        },
+        "kind": "witness_topology",
+        "pair_id": "witness_topology_32",
+        "scale": 32,
+        "target": {
+          "extra_account_count": 32
+        }
+      },
+      "status": "accepted",
+      "workload_id": "857d952bf2945cfdf01e6939a7ecf2cb9062323d92b4016504a016f7a2f90c33",
+      "workload_spec": {
+        "guest_input_canonical_sha256": "3e62f4463b864fbb7732bb9392a099a0113bcbef49eb93ec6889d5e2ab78a429",
+        "lane": "control",
+        "pair_id": "witness_topology_32",
+        "pair_spec": {
+          "control": {
+            "extra_account_count": 0
+          },
+          "kind": "witness_topology",
+          "pair_id": "witness_topology_32",
+          "scale": 32,
+          "target": {
+            "extra_account_count": 32
+          }
+        },
+        "schema_version": 1
+      }
+    },
+    {
+      "backend_input_sha256": "87e87f397d7bfe9119459c55040ed9494f6865539db5a7ba30167a5f2863b7db",
+      "calibration_run_id": "91d461f0a817446a80223798",
+      "execution_row_id": "ed4b3e0b1761c0a0039d40c7b73d610a98dab6dc64d5a3f8080462980c2172a8",
+      "guest_input_bincode_length": 339029,
+      "guest_input_sha256": "0x87e87f397d7bfe9119459c55040ed9494f6865539db5a7ba30167a5f2863b7db",
+      "lane": "target",
+      "observation": {
+        "actual_diagnostics": {
+          "blob_count": 1,
+          "bytecode_length": 0,
+          "calldata_length": 0,
+          "guest_input_bincode_length": 339029,
+          "kzg_invocation_count": 1,
+          "touched_state_key_count": 39,
+          "witness_byte_count": 5354,
+          "witness_node_count": 47
+        },
+        "actual_features": {
+          "block_base": 1,
+          "native_value_transfer": 0,
+          "proposal_startup": 1,
+          "tx_base": 0
+        },
+        "actual_final_state_root": "0x180274b0ba7d031d8277ca0439cf2cb22a41c0da481d4a57971a314e4adaea79",
+        "actual_raw_gas_by_key": {},
+        "anchor_operation_ownership": "block_base",
+        "backend_input_sha256": "87e87f397d7bfe9119459c55040ed9494f6865539db5a7ba30167a5f2863b7db",
+        "committed_candidate_transaction_count": 0,
+        "guest_input_bincode_length": 339029,
+        "guest_input_sha256": "0x87e87f397d7bfe9119459c55040ed9494f6865539db5a7ba30167a5f2863b7db",
+        "lane": "target",
+        "operation_phase_ownership": "transaction_non_anchor_only",
+        "pair_id": "witness_topology_32",
+        "public_output": "0x112a7b6b1c725a74bbca79971646db973fd7501e5dab3e59e9b418f91f0a2198",
+        "started_candidate_transaction_count": 0,
+        "system_operation_ownership": "block_base",
+        "unattempted_candidate_transaction_count": 0
+      },
+      "pair_id": "witness_topology_32",
+      "prover_gas": "159610893",
+      "public_values": "0x112a7b6b1c725a74bbca79971646db973fd7501e5dab3e59e9b418f91f0a2198",
+      "repeat_index": 1,
+      "schema_version": 1,
+      "sp1_execution_engine": "gas-estimator",
+      "sp1_gas_trace_chunk_slots": 2,
+      "sp1_gas_trace_chunk_threshold": 134217728,
+      "spec": {
+        "control": {
+          "extra_account_count": 0
+        },
+        "kind": "witness_topology",
+        "pair_id": "witness_topology_32",
+        "scale": 32,
+        "target": {
+          "extra_account_count": 32
+        }
+      },
+      "status": "accepted",
+      "workload_id": "bdc8d42a415060ee1658054b4526ed6b091219d8275a799257a04cf49ce2fb26",
+      "workload_spec": {
+        "guest_input_canonical_sha256": "87e87f397d7bfe9119459c55040ed9494f6865539db5a7ba30167a5f2863b7db",
+        "lane": "target",
+        "pair_id": "witness_topology_32",
+        "pair_spec": {
+          "control": {
+            "extra_account_count": 0
+          },
+          "kind": "witness_topology",
+          "pair_id": "witness_topology_32",
+          "scale": 32,
+          "target": {
+            "extra_account_count": 32
+          }
+        },
+        "schema_version": 1
+      }
+    },
+    {
+      "backend_input_sha256": "3e62f4463b864fbb7732bb9392a099a0113bcbef49eb93ec6889d5e2ab78a429",
+      "calibration_run_id": "91d461f0a817446a80223798",
+      "execution_row_id": "2b6e199d782a3dbd01d39eabed5a3ab667c280ff935c60a7c9d7e0c177ad7e40",
+      "guest_input_bincode_length": 331684,
+      "guest_input_sha256": "0x3e62f4463b864fbb7732bb9392a099a0113bcbef49eb93ec6889d5e2ab78a429",
+      "lane": "control",
+      "observation": {
+        "actual_diagnostics": {
+          "blob_count": 1,
+          "bytecode_length": 0,
+          "calldata_length": 0,
+          "guest_input_bincode_length": 331684,
+          "kzg_invocation_count": 1,
+          "touched_state_key_count": 7,
+          "witness_byte_count": 297,
+          "witness_node_count": 3
+        },
+        "actual_features": {
+          "block_base": 1,
+          "native_value_transfer": 0,
+          "proposal_startup": 1,
+          "tx_base": 0
+        },
+        "actual_final_state_root": "0x1b80f5db83bf61df48fb29054f54a40c1d530ac98931e77a76dd4f5514cd9d4c",
+        "actual_raw_gas_by_key": {},
+        "anchor_operation_ownership": "block_base",
+        "backend_input_sha256": "3e62f4463b864fbb7732bb9392a099a0113bcbef49eb93ec6889d5e2ab78a429",
+        "committed_candidate_transaction_count": 0,
+        "guest_input_bincode_length": 331684,
+        "guest_input_sha256": "0x3e62f4463b864fbb7732bb9392a099a0113bcbef49eb93ec6889d5e2ab78a429",
+        "lane": "control",
+        "operation_phase_ownership": "transaction_non_anchor_only",
+        "pair_id": "witness_topology_32",
+        "public_output": "0x9ad5e1a7cc4e9824f5e7dab77b890bc4133103c82ac85d97dc7617e0c245e379",
+        "started_candidate_transaction_count": 0,
+        "system_operation_ownership": "block_base",
+        "unattempted_candidate_transaction_count": 0
+      },
+      "pair_id": "witness_topology_32",
+      "prover_gas": "158721330",
+      "public_values": "0x9ad5e1a7cc4e9824f5e7dab77b890bc4133103c82ac85d97dc7617e0c245e379",
+      "repeat_index": 2,
+      "schema_version": 1,
+      "sp1_execution_engine": "gas-estimator",
+      "sp1_gas_trace_chunk_slots": 2,
+      "sp1_gas_trace_chunk_threshold": 134217728,
+      "spec": {
+        "control": {
+          "extra_account_count": 0
+        },
+        "kind": "witness_topology",
+        "pair_id": "witness_topology_32",
+        "scale": 32,
+        "target": {
+          "extra_account_count": 32
+        }
+      },
+      "status": "accepted",
+      "workload_id": "857d952bf2945cfdf01e6939a7ecf2cb9062323d92b4016504a016f7a2f90c33",
+      "workload_spec": {
+        "guest_input_canonical_sha256": "3e62f4463b864fbb7732bb9392a099a0113bcbef49eb93ec6889d5e2ab78a429",
+        "lane": "control",
+        "pair_id": "witness_topology_32",
+        "pair_spec": {
+          "control": {
+            "extra_account_count": 0
+          },
+          "kind": "witness_topology",
+          "pair_id": "witness_topology_32",
+          "scale": 32,
+          "target": {
+            "extra_account_count": 32
+          }
+        },
+        "schema_version": 1
+      }
+    },
+    {
+      "backend_input_sha256": "87e87f397d7bfe9119459c55040ed9494f6865539db5a7ba30167a5f2863b7db",
+      "calibration_run_id": "91d461f0a817446a80223798",
+      "execution_row_id": "ee31cf1be9646ce585100191ab992bced951e964998f32816efa6c3f4e8e5fa3",
+      "guest_input_bincode_length": 339029,
+      "guest_input_sha256": "0x87e87f397d7bfe9119459c55040ed9494f6865539db5a7ba30167a5f2863b7db",
+      "lane": "target",
+      "observation": {
+        "actual_diagnostics": {
+          "blob_count": 1,
+          "bytecode_length": 0,
+          "calldata_length": 0,
+          "guest_input_bincode_length": 339029,
+          "kzg_invocation_count": 1,
+          "touched_state_key_count": 39,
+          "witness_byte_count": 5354,
+          "witness_node_count": 47
+        },
+        "actual_features": {
+          "block_base": 1,
+          "native_value_transfer": 0,
+          "proposal_startup": 1,
+          "tx_base": 0
+        },
+        "actual_final_state_root": "0x180274b0ba7d031d8277ca0439cf2cb22a41c0da481d4a57971a314e4adaea79",
+        "actual_raw_gas_by_key": {},
+        "anchor_operation_ownership": "block_base",
+        "backend_input_sha256": "87e87f397d7bfe9119459c55040ed9494f6865539db5a7ba30167a5f2863b7db",
+        "committed_candidate_transaction_count": 0,
+        "guest_input_bincode_length": 339029,
+        "guest_input_sha256": "0x87e87f397d7bfe9119459c55040ed9494f6865539db5a7ba30167a5f2863b7db",
+        "lane": "target",
+        "operation_phase_ownership": "transaction_non_anchor_only",
+        "pair_id": "witness_topology_32",
+        "public_output": "0x112a7b6b1c725a74bbca79971646db973fd7501e5dab3e59e9b418f91f0a2198",
+        "started_candidate_transaction_count": 0,
+        "system_operation_ownership": "block_base",
+        "unattempted_candidate_transaction_count": 0
+      },
+      "pair_id": "witness_topology_32",
+      "prover_gas": "159610893",
+      "public_values": "0x112a7b6b1c725a74bbca79971646db973fd7501e5dab3e59e9b418f91f0a2198",
+      "repeat_index": 2,
+      "schema_version": 1,
+      "sp1_execution_engine": "gas-estimator",
+      "sp1_gas_trace_chunk_slots": 2,
+      "sp1_gas_trace_chunk_threshold": 134217728,
+      "spec": {
+        "control": {
+          "extra_account_count": 0
+        },
+        "kind": "witness_topology",
+        "pair_id": "witness_topology_32",
+        "scale": 32,
+        "target": {
+          "extra_account_count": 32
+        }
+      },
+      "status": "accepted",
+      "workload_id": "bdc8d42a415060ee1658054b4526ed6b091219d8275a799257a04cf49ce2fb26",
+      "workload_spec": {
+        "guest_input_canonical_sha256": "87e87f397d7bfe9119459c55040ed9494f6865539db5a7ba30167a5f2863b7db",
+        "lane": "target",
+        "pair_id": "witness_topology_32",
+        "pair_spec": {
+          "control": {
+            "extra_account_count": 0
+          },
+          "kind": "witness_topology",
+          "pair_id": "witness_topology_32",
+          "scale": 32,
+          "target": {
+            "extra_account_count": 32
+          }
+        },
+        "schema_version": 1
+      }
+    },
+    {
+      "backend_input_sha256": "9a7663442b94db245ea79275e46b7bd45dfbfb417fa9ab5174e3719e9ec39c84",
+      "calibration_run_id": "91d461f0a817446a80223798",
+      "execution_row_id": "b5a4740279881f4fc7ee9863249a0e4ffde14bb514c61f9c0432a76307b8cc57",
+      "guest_input_bincode_length": 332761,
+      "guest_input_sha256": "0x9a7663442b94db245ea79275e46b7bd45dfbfb417fa9ab5174e3719e9ec39c84",
+      "lane": "control",
+      "observation": {
+        "actual_diagnostics": {
+          "blob_count": 1,
+          "bytecode_length": 0,
+          "calldata_length": 0,
+          "guest_input_bincode_length": 332761,
+          "kzg_invocation_count": 1,
+          "touched_state_key_count": 10,
+          "witness_byte_count": 684,
+          "witness_node_count": 7
+        },
+        "actual_features": {
+          "block_base": 1,
+          "native_value_transfer": 2,
+          "proposal_startup": 1,
+          "tx_base": 2
+        },
+        "actual_final_state_root": "0xdcc0e0e04dfcd09918d0ac7b5d330a4bf8bff8fe3adb12be8b65fac924cb782c",
+        "actual_raw_gas_by_key": {},
+        "anchor_operation_ownership": "block_base",
+        "backend_input_sha256": "9a7663442b94db245ea79275e46b7bd45dfbfb417fa9ab5174e3719e9ec39c84",
+        "committed_candidate_transaction_count": 2,
+        "guest_input_bincode_length": 332761,
+        "guest_input_sha256": "0x9a7663442b94db245ea79275e46b7bd45dfbfb417fa9ab5174e3719e9ec39c84",
+        "lane": "control",
+        "operation_phase_ownership": "transaction_non_anchor_only",
+        "pair_id": "dirty_accounts_2",
+        "public_output": "0x406c4a330638a95dd481ff746af6cd252a1fd486058f1de63d4701a4e1cf05cc",
+        "started_candidate_transaction_count": 2,
+        "system_operation_ownership": "block_base",
+        "unattempted_candidate_transaction_count": 0
+      },
+      "pair_id": "dirty_accounts_2",
+      "prover_gas": "159267336",
+      "public_values": "0x406c4a330638a95dd481ff746af6cd252a1fd486058f1de63d4701a4e1cf05cc",
+      "repeat_index": 0,
+      "schema_version": 1,
+      "sp1_execution_engine": "gas-estimator",
+      "sp1_gas_trace_chunk_slots": 2,
+      "sp1_gas_trace_chunk_threshold": 134217728,
+      "spec": {
+        "control": {
+          "recipient_mode": "single",
+          "transaction_count": 2,
+          "value": 1
+        },
+        "kind": "dirty_accounts",
+        "pair_id": "dirty_accounts_2",
+        "scale": 2,
+        "target": {
+          "recipient_mode": "distinct",
+          "transaction_count": 2,
+          "value": 1
+        }
+      },
+      "status": "accepted",
+      "workload_id": "991f037513fbe66ba9f3059f898feb281860068cf931001fe18e3b14b6d7ffe5",
+      "workload_spec": {
+        "guest_input_canonical_sha256": "9a7663442b94db245ea79275e46b7bd45dfbfb417fa9ab5174e3719e9ec39c84",
+        "lane": "control",
+        "pair_id": "dirty_accounts_2",
+        "pair_spec": {
+          "control": {
+            "recipient_mode": "single",
+            "transaction_count": 2,
+            "value": 1
+          },
+          "kind": "dirty_accounts",
+          "pair_id": "dirty_accounts_2",
+          "scale": 2,
+          "target": {
+            "recipient_mode": "distinct",
+            "transaction_count": 2,
+            "value": 1
+          }
+        },
+        "schema_version": 1
+      }
+    },
+    {
+      "backend_input_sha256": "22535e7c7a554d4dcc8e0d71f743254a610069edbe6a3a0c64c5bf3cd22c3390",
+      "calibration_run_id": "91d461f0a817446a80223798",
+      "execution_row_id": "1c51cfce1877eed833d743a6f825d387ec9f3d9c419bbec52bbf7581c3df2c86",
+      "guest_input_bincode_length": 332952,
+      "guest_input_sha256": "0x22535e7c7a554d4dcc8e0d71f743254a610069edbe6a3a0c64c5bf3cd22c3390",
+      "lane": "target",
+      "observation": {
+        "actual_diagnostics": {
+          "blob_count": 1,
+          "bytecode_length": 0,
+          "calldata_length": 0,
+          "guest_input_bincode_length": 332952,
+          "kzg_invocation_count": 1,
+          "touched_state_key_count": 11,
+          "witness_byte_count": 823,
+          "witness_node_count": 8
+        },
+        "actual_features": {
+          "block_base": 1,
+          "native_value_transfer": 2,
+          "proposal_startup": 1,
+          "tx_base": 2
+        },
+        "actual_final_state_root": "0x00199335aec202bb65f04f9b220c8c137b57fd7a53efbb842ba75753cab1473f",
+        "actual_raw_gas_by_key": {},
+        "anchor_operation_ownership": "block_base",
+        "backend_input_sha256": "22535e7c7a554d4dcc8e0d71f743254a610069edbe6a3a0c64c5bf3cd22c3390",
+        "committed_candidate_transaction_count": 2,
+        "guest_input_bincode_length": 332952,
+        "guest_input_sha256": "0x22535e7c7a554d4dcc8e0d71f743254a610069edbe6a3a0c64c5bf3cd22c3390",
+        "lane": "target",
+        "operation_phase_ownership": "transaction_non_anchor_only",
+        "pair_id": "dirty_accounts_2",
+        "public_output": "0x7b513d3c01043cfe2b2d555bffa8858ade6fa06eda4d9a1f78e385c37785fa5c",
+        "started_candidate_transaction_count": 2,
+        "system_operation_ownership": "block_base",
+        "unattempted_candidate_transaction_count": 0
+      },
+      "pair_id": "dirty_accounts_2",
+      "prover_gas": "159305533",
+      "public_values": "0x7b513d3c01043cfe2b2d555bffa8858ade6fa06eda4d9a1f78e385c37785fa5c",
+      "repeat_index": 0,
+      "schema_version": 1,
+      "sp1_execution_engine": "gas-estimator",
+      "sp1_gas_trace_chunk_slots": 2,
+      "sp1_gas_trace_chunk_threshold": 134217728,
+      "spec": {
+        "control": {
+          "recipient_mode": "single",
+          "transaction_count": 2,
+          "value": 1
+        },
+        "kind": "dirty_accounts",
+        "pair_id": "dirty_accounts_2",
+        "scale": 2,
+        "target": {
+          "recipient_mode": "distinct",
+          "transaction_count": 2,
+          "value": 1
+        }
+      },
+      "status": "accepted",
+      "workload_id": "2851add221c22b7b6789c43b832f33a44bb8906dbd7d3f6c374e9724d0f9e528",
+      "workload_spec": {
+        "guest_input_canonical_sha256": "22535e7c7a554d4dcc8e0d71f743254a610069edbe6a3a0c64c5bf3cd22c3390",
+        "lane": "target",
+        "pair_id": "dirty_accounts_2",
+        "pair_spec": {
+          "control": {
+            "recipient_mode": "single",
+            "transaction_count": 2,
+            "value": 1
+          },
+          "kind": "dirty_accounts",
+          "pair_id": "dirty_accounts_2",
+          "scale": 2,
+          "target": {
+            "recipient_mode": "distinct",
+            "transaction_count": 2,
+            "value": 1
+          }
+        },
+        "schema_version": 1
+      }
+    },
+    {
+      "backend_input_sha256": "9a7663442b94db245ea79275e46b7bd45dfbfb417fa9ab5174e3719e9ec39c84",
+      "calibration_run_id": "91d461f0a817446a80223798",
+      "execution_row_id": "5d0b598e63efe8540c546aa72075e238ceef874647ef92f7d99929ab2e51cbc5",
+      "guest_input_bincode_length": 332761,
+      "guest_input_sha256": "0x9a7663442b94db245ea79275e46b7bd45dfbfb417fa9ab5174e3719e9ec39c84",
+      "lane": "control",
+      "observation": {
+        "actual_diagnostics": {
+          "blob_count": 1,
+          "bytecode_length": 0,
+          "calldata_length": 0,
+          "guest_input_bincode_length": 332761,
+          "kzg_invocation_count": 1,
+          "touched_state_key_count": 10,
+          "witness_byte_count": 684,
+          "witness_node_count": 7
+        },
+        "actual_features": {
+          "block_base": 1,
+          "native_value_transfer": 2,
+          "proposal_startup": 1,
+          "tx_base": 2
+        },
+        "actual_final_state_root": "0xdcc0e0e04dfcd09918d0ac7b5d330a4bf8bff8fe3adb12be8b65fac924cb782c",
+        "actual_raw_gas_by_key": {},
+        "anchor_operation_ownership": "block_base",
+        "backend_input_sha256": "9a7663442b94db245ea79275e46b7bd45dfbfb417fa9ab5174e3719e9ec39c84",
+        "committed_candidate_transaction_count": 2,
+        "guest_input_bincode_length": 332761,
+        "guest_input_sha256": "0x9a7663442b94db245ea79275e46b7bd45dfbfb417fa9ab5174e3719e9ec39c84",
+        "lane": "control",
+        "operation_phase_ownership": "transaction_non_anchor_only",
+        "pair_id": "dirty_accounts_2",
+        "public_output": "0x406c4a330638a95dd481ff746af6cd252a1fd486058f1de63d4701a4e1cf05cc",
+        "started_candidate_transaction_count": 2,
+        "system_operation_ownership": "block_base",
+        "unattempted_candidate_transaction_count": 0
+      },
+      "pair_id": "dirty_accounts_2",
+      "prover_gas": "159267336",
+      "public_values": "0x406c4a330638a95dd481ff746af6cd252a1fd486058f1de63d4701a4e1cf05cc",
+      "repeat_index": 1,
+      "schema_version": 1,
+      "sp1_execution_engine": "gas-estimator",
+      "sp1_gas_trace_chunk_slots": 2,
+      "sp1_gas_trace_chunk_threshold": 134217728,
+      "spec": {
+        "control": {
+          "recipient_mode": "single",
+          "transaction_count": 2,
+          "value": 1
+        },
+        "kind": "dirty_accounts",
+        "pair_id": "dirty_accounts_2",
+        "scale": 2,
+        "target": {
+          "recipient_mode": "distinct",
+          "transaction_count": 2,
+          "value": 1
+        }
+      },
+      "status": "accepted",
+      "workload_id": "991f037513fbe66ba9f3059f898feb281860068cf931001fe18e3b14b6d7ffe5",
+      "workload_spec": {
+        "guest_input_canonical_sha256": "9a7663442b94db245ea79275e46b7bd45dfbfb417fa9ab5174e3719e9ec39c84",
+        "lane": "control",
+        "pair_id": "dirty_accounts_2",
+        "pair_spec": {
+          "control": {
+            "recipient_mode": "single",
+            "transaction_count": 2,
+            "value": 1
+          },
+          "kind": "dirty_accounts",
+          "pair_id": "dirty_accounts_2",
+          "scale": 2,
+          "target": {
+            "recipient_mode": "distinct",
+            "transaction_count": 2,
+            "value": 1
+          }
+        },
+        "schema_version": 1
+      }
+    },
+    {
+      "backend_input_sha256": "22535e7c7a554d4dcc8e0d71f743254a610069edbe6a3a0c64c5bf3cd22c3390",
+      "calibration_run_id": "91d461f0a817446a80223798",
+      "execution_row_id": "1d05d4cbef13058b6f936f9896f8e7f2c0ff5547745f683d65e8130222088af4",
+      "guest_input_bincode_length": 332952,
+      "guest_input_sha256": "0x22535e7c7a554d4dcc8e0d71f743254a610069edbe6a3a0c64c5bf3cd22c3390",
+      "lane": "target",
+      "observation": {
+        "actual_diagnostics": {
+          "blob_count": 1,
+          "bytecode_length": 0,
+          "calldata_length": 0,
+          "guest_input_bincode_length": 332952,
+          "kzg_invocation_count": 1,
+          "touched_state_key_count": 11,
+          "witness_byte_count": 823,
+          "witness_node_count": 8
+        },
+        "actual_features": {
+          "block_base": 1,
+          "native_value_transfer": 2,
+          "proposal_startup": 1,
+          "tx_base": 2
+        },
+        "actual_final_state_root": "0x00199335aec202bb65f04f9b220c8c137b57fd7a53efbb842ba75753cab1473f",
+        "actual_raw_gas_by_key": {},
+        "anchor_operation_ownership": "block_base",
+        "backend_input_sha256": "22535e7c7a554d4dcc8e0d71f743254a610069edbe6a3a0c64c5bf3cd22c3390",
+        "committed_candidate_transaction_count": 2,
+        "guest_input_bincode_length": 332952,
+        "guest_input_sha256": "0x22535e7c7a554d4dcc8e0d71f743254a610069edbe6a3a0c64c5bf3cd22c3390",
+        "lane": "target",
+        "operation_phase_ownership": "transaction_non_anchor_only",
+        "pair_id": "dirty_accounts_2",
+        "public_output": "0x7b513d3c01043cfe2b2d555bffa8858ade6fa06eda4d9a1f78e385c37785fa5c",
+        "started_candidate_transaction_count": 2,
+        "system_operation_ownership": "block_base",
+        "unattempted_candidate_transaction_count": 0
+      },
+      "pair_id": "dirty_accounts_2",
+      "prover_gas": "159305533",
+      "public_values": "0x7b513d3c01043cfe2b2d555bffa8858ade6fa06eda4d9a1f78e385c37785fa5c",
+      "repeat_index": 1,
+      "schema_version": 1,
+      "sp1_execution_engine": "gas-estimator",
+      "sp1_gas_trace_chunk_slots": 2,
+      "sp1_gas_trace_chunk_threshold": 134217728,
+      "spec": {
+        "control": {
+          "recipient_mode": "single",
+          "transaction_count": 2,
+          "value": 1
+        },
+        "kind": "dirty_accounts",
+        "pair_id": "dirty_accounts_2",
+        "scale": 2,
+        "target": {
+          "recipient_mode": "distinct",
+          "transaction_count": 2,
+          "value": 1
+        }
+      },
+      "status": "accepted",
+      "workload_id": "2851add221c22b7b6789c43b832f33a44bb8906dbd7d3f6c374e9724d0f9e528",
+      "workload_spec": {
+        "guest_input_canonical_sha256": "22535e7c7a554d4dcc8e0d71f743254a610069edbe6a3a0c64c5bf3cd22c3390",
+        "lane": "target",
+        "pair_id": "dirty_accounts_2",
+        "pair_spec": {
+          "control": {
+            "recipient_mode": "single",
+            "transaction_count": 2,
+            "value": 1
+          },
+          "kind": "dirty_accounts",
+          "pair_id": "dirty_accounts_2",
+          "scale": 2,
+          "target": {
+            "recipient_mode": "distinct",
+            "transaction_count": 2,
+            "value": 1
+          }
+        },
+        "schema_version": 1
+      }
+    },
+    {
+      "backend_input_sha256": "9a7663442b94db245ea79275e46b7bd45dfbfb417fa9ab5174e3719e9ec39c84",
+      "calibration_run_id": "91d461f0a817446a80223798",
+      "execution_row_id": "fe5709cac8bdae5ff0de5ab1f20c817f2ea555349c25089fc23f8e14c252033a",
+      "guest_input_bincode_length": 332761,
+      "guest_input_sha256": "0x9a7663442b94db245ea79275e46b7bd45dfbfb417fa9ab5174e3719e9ec39c84",
+      "lane": "control",
+      "observation": {
+        "actual_diagnostics": {
+          "blob_count": 1,
+          "bytecode_length": 0,
+          "calldata_length": 0,
+          "guest_input_bincode_length": 332761,
+          "kzg_invocation_count": 1,
+          "touched_state_key_count": 10,
+          "witness_byte_count": 684,
+          "witness_node_count": 7
+        },
+        "actual_features": {
+          "block_base": 1,
+          "native_value_transfer": 2,
+          "proposal_startup": 1,
+          "tx_base": 2
+        },
+        "actual_final_state_root": "0xdcc0e0e04dfcd09918d0ac7b5d330a4bf8bff8fe3adb12be8b65fac924cb782c",
+        "actual_raw_gas_by_key": {},
+        "anchor_operation_ownership": "block_base",
+        "backend_input_sha256": "9a7663442b94db245ea79275e46b7bd45dfbfb417fa9ab5174e3719e9ec39c84",
+        "committed_candidate_transaction_count": 2,
+        "guest_input_bincode_length": 332761,
+        "guest_input_sha256": "0x9a7663442b94db245ea79275e46b7bd45dfbfb417fa9ab5174e3719e9ec39c84",
+        "lane": "control",
+        "operation_phase_ownership": "transaction_non_anchor_only",
+        "pair_id": "dirty_accounts_2",
+        "public_output": "0x406c4a330638a95dd481ff746af6cd252a1fd486058f1de63d4701a4e1cf05cc",
+        "started_candidate_transaction_count": 2,
+        "system_operation_ownership": "block_base",
+        "unattempted_candidate_transaction_count": 0
+      },
+      "pair_id": "dirty_accounts_2",
+      "prover_gas": "159267336",
+      "public_values": "0x406c4a330638a95dd481ff746af6cd252a1fd486058f1de63d4701a4e1cf05cc",
+      "repeat_index": 2,
+      "schema_version": 1,
+      "sp1_execution_engine": "gas-estimator",
+      "sp1_gas_trace_chunk_slots": 2,
+      "sp1_gas_trace_chunk_threshold": 134217728,
+      "spec": {
+        "control": {
+          "recipient_mode": "single",
+          "transaction_count": 2,
+          "value": 1
+        },
+        "kind": "dirty_accounts",
+        "pair_id": "dirty_accounts_2",
+        "scale": 2,
+        "target": {
+          "recipient_mode": "distinct",
+          "transaction_count": 2,
+          "value": 1
+        }
+      },
+      "status": "accepted",
+      "workload_id": "991f037513fbe66ba9f3059f898feb281860068cf931001fe18e3b14b6d7ffe5",
+      "workload_spec": {
+        "guest_input_canonical_sha256": "9a7663442b94db245ea79275e46b7bd45dfbfb417fa9ab5174e3719e9ec39c84",
+        "lane": "control",
+        "pair_id": "dirty_accounts_2",
+        "pair_spec": {
+          "control": {
+            "recipient_mode": "single",
+            "transaction_count": 2,
+            "value": 1
+          },
+          "kind": "dirty_accounts",
+          "pair_id": "dirty_accounts_2",
+          "scale": 2,
+          "target": {
+            "recipient_mode": "distinct",
+            "transaction_count": 2,
+            "value": 1
+          }
+        },
+        "schema_version": 1
+      }
+    },
+    {
+      "backend_input_sha256": "22535e7c7a554d4dcc8e0d71f743254a610069edbe6a3a0c64c5bf3cd22c3390",
+      "calibration_run_id": "91d461f0a817446a80223798",
+      "execution_row_id": "a1337790a7c71af0197b8a9c2cc636e26e32a4bae928524d900be9e0a4f09b11",
+      "guest_input_bincode_length": 332952,
+      "guest_input_sha256": "0x22535e7c7a554d4dcc8e0d71f743254a610069edbe6a3a0c64c5bf3cd22c3390",
+      "lane": "target",
+      "observation": {
+        "actual_diagnostics": {
+          "blob_count": 1,
+          "bytecode_length": 0,
+          "calldata_length": 0,
+          "guest_input_bincode_length": 332952,
+          "kzg_invocation_count": 1,
+          "touched_state_key_count": 11,
+          "witness_byte_count": 823,
+          "witness_node_count": 8
+        },
+        "actual_features": {
+          "block_base": 1,
+          "native_value_transfer": 2,
+          "proposal_startup": 1,
+          "tx_base": 2
+        },
+        "actual_final_state_root": "0x00199335aec202bb65f04f9b220c8c137b57fd7a53efbb842ba75753cab1473f",
+        "actual_raw_gas_by_key": {},
+        "anchor_operation_ownership": "block_base",
+        "backend_input_sha256": "22535e7c7a554d4dcc8e0d71f743254a610069edbe6a3a0c64c5bf3cd22c3390",
+        "committed_candidate_transaction_count": 2,
+        "guest_input_bincode_length": 332952,
+        "guest_input_sha256": "0x22535e7c7a554d4dcc8e0d71f743254a610069edbe6a3a0c64c5bf3cd22c3390",
+        "lane": "target",
+        "operation_phase_ownership": "transaction_non_anchor_only",
+        "pair_id": "dirty_accounts_2",
+        "public_output": "0x7b513d3c01043cfe2b2d555bffa8858ade6fa06eda4d9a1f78e385c37785fa5c",
+        "started_candidate_transaction_count": 2,
+        "system_operation_ownership": "block_base",
+        "unattempted_candidate_transaction_count": 0
+      },
+      "pair_id": "dirty_accounts_2",
+      "prover_gas": "159305533",
+      "public_values": "0x7b513d3c01043cfe2b2d555bffa8858ade6fa06eda4d9a1f78e385c37785fa5c",
+      "repeat_index": 2,
+      "schema_version": 1,
+      "sp1_execution_engine": "gas-estimator",
+      "sp1_gas_trace_chunk_slots": 2,
+      "sp1_gas_trace_chunk_threshold": 134217728,
+      "spec": {
+        "control": {
+          "recipient_mode": "single",
+          "transaction_count": 2,
+          "value": 1
+        },
+        "kind": "dirty_accounts",
+        "pair_id": "dirty_accounts_2",
+        "scale": 2,
+        "target": {
+          "recipient_mode": "distinct",
+          "transaction_count": 2,
+          "value": 1
+        }
+      },
+      "status": "accepted",
+      "workload_id": "2851add221c22b7b6789c43b832f33a44bb8906dbd7d3f6c374e9724d0f9e528",
+      "workload_spec": {
+        "guest_input_canonical_sha256": "22535e7c7a554d4dcc8e0d71f743254a610069edbe6a3a0c64c5bf3cd22c3390",
+        "lane": "target",
+        "pair_id": "dirty_accounts_2",
+        "pair_spec": {
+          "control": {
+            "recipient_mode": "single",
+            "transaction_count": 2,
+            "value": 1
+          },
+          "kind": "dirty_accounts",
+          "pair_id": "dirty_accounts_2",
+          "scale": 2,
+          "target": {
+            "recipient_mode": "distinct",
+            "transaction_count": 2,
+            "value": 1
+          }
+        },
+        "schema_version": 1
+      }
+    },
+    {
+      "backend_input_sha256": "282adb6ac3150a7d4843ca7d9663cc94b4a8bf6d41c54afff1623f99ca2b162f",
+      "calibration_run_id": "91d461f0a817446a80223798",
+      "execution_row_id": "cc696a51feffe411c681822a35197249d05b4ac6f683d1d887d2a61ff3f273f6",
+      "guest_input_bincode_length": 334207,
+      "guest_input_sha256": "0x282adb6ac3150a7d4843ca7d9663cc94b4a8bf6d41c54afff1623f99ca2b162f",
+      "lane": "control",
+      "observation": {
+        "actual_diagnostics": {
+          "blob_count": 1,
+          "bytecode_length": 0,
+          "calldata_length": 0,
+          "guest_input_bincode_length": 334207,
+          "kzg_invocation_count": 1,
+          "touched_state_key_count": 10,
+          "witness_byte_count": 684,
+          "witness_node_count": 7
+        },
+        "actual_features": {
+          "block_base": 1,
+          "native_value_transfer": 8,
+          "proposal_startup": 1,
+          "tx_base": 8
+        },
+        "actual_final_state_root": "0xb68132e7cc16f7531b07ec266cca317d41f013b2a756ea8739fedcd48e446134",
+        "actual_raw_gas_by_key": {},
+        "anchor_operation_ownership": "block_base",
+        "backend_input_sha256": "282adb6ac3150a7d4843ca7d9663cc94b4a8bf6d41c54afff1623f99ca2b162f",
+        "committed_candidate_transaction_count": 8,
+        "guest_input_bincode_length": 334207,
+        "guest_input_sha256": "0x282adb6ac3150a7d4843ca7d9663cc94b4a8bf6d41c54afff1623f99ca2b162f",
+        "lane": "control",
+        "operation_phase_ownership": "transaction_non_anchor_only",
+        "pair_id": "dirty_accounts_8",
+        "public_output": "0x91e75dd3ec1258aacb89fd4458f013df7bba58c08f75f7501fe8bcc11ae21a8d",
+        "started_candidate_transaction_count": 8,
+        "system_operation_ownership": "block_base",
+        "unattempted_candidate_transaction_count": 0
+      },
+      "pair_id": "dirty_accounts_8",
+      "prover_gas": "160319611",
+      "public_values": "0x91e75dd3ec1258aacb89fd4458f013df7bba58c08f75f7501fe8bcc11ae21a8d",
+      "repeat_index": 0,
+      "schema_version": 1,
+      "sp1_execution_engine": "gas-estimator",
+      "sp1_gas_trace_chunk_slots": 2,
+      "sp1_gas_trace_chunk_threshold": 134217728,
+      "spec": {
+        "control": {
+          "recipient_mode": "single",
+          "transaction_count": 8,
+          "value": 1
+        },
+        "kind": "dirty_accounts",
+        "pair_id": "dirty_accounts_8",
+        "scale": 8,
+        "target": {
+          "recipient_mode": "distinct",
+          "transaction_count": 8,
+          "value": 1
+        }
+      },
+      "status": "accepted",
+      "workload_id": "b40c49c921a0eecd767828ce8f3aecceb0e9f5dad5ff0719f9a6ca03daeda19d",
+      "workload_spec": {
+        "guest_input_canonical_sha256": "282adb6ac3150a7d4843ca7d9663cc94b4a8bf6d41c54afff1623f99ca2b162f",
+        "lane": "control",
+        "pair_id": "dirty_accounts_8",
+        "pair_spec": {
+          "control": {
+            "recipient_mode": "single",
+            "transaction_count": 8,
+            "value": 1
+          },
+          "kind": "dirty_accounts",
+          "pair_id": "dirty_accounts_8",
+          "scale": 8,
+          "target": {
+            "recipient_mode": "distinct",
+            "transaction_count": 8,
+            "value": 1
+          }
+        },
+        "schema_version": 1
+      }
+    },
+    {
+      "backend_input_sha256": "5b4b22bd1644bee22520b318e368ce32a5457bc99b8b3a2b4bc08913e3ec93b6",
+      "calibration_run_id": "91d461f0a817446a80223798",
+      "execution_row_id": "7ff4b55b642c19b35af939c9bef88ea454fc47f755cfe281185649be27fc9418",
+      "guest_input_bincode_length": 335545,
+      "guest_input_sha256": "0x5b4b22bd1644bee22520b318e368ce32a5457bc99b8b3a2b4bc08913e3ec93b6",
+      "lane": "target",
+      "observation": {
+        "actual_diagnostics": {
+          "blob_count": 1,
+          "bytecode_length": 0,
+          "calldata_length": 0,
+          "guest_input_bincode_length": 335545,
+          "kzg_invocation_count": 1,
+          "touched_state_key_count": 17,
+          "witness_byte_count": 1658,
+          "witness_node_count": 14
+        },
+        "actual_features": {
+          "block_base": 1,
+          "native_value_transfer": 8,
+          "proposal_startup": 1,
+          "tx_base": 8
+        },
+        "actual_final_state_root": "0x1632a446ed17a519702698da11e07078324840464a5b735127d1389eed42cfc3",
+        "actual_raw_gas_by_key": {},
+        "anchor_operation_ownership": "block_base",
+        "backend_input_sha256": "5b4b22bd1644bee22520b318e368ce32a5457bc99b8b3a2b4bc08913e3ec93b6",
+        "committed_candidate_transaction_count": 8,
+        "guest_input_bincode_length": 335545,
+        "guest_input_sha256": "0x5b4b22bd1644bee22520b318e368ce32a5457bc99b8b3a2b4bc08913e3ec93b6",
+        "lane": "target",
+        "operation_phase_ownership": "transaction_non_anchor_only",
+        "pair_id": "dirty_accounts_8",
+        "public_output": "0xade2e66d5ff29898f276c461a926703a8adf61309a51e3905a58a850e2f13404",
+        "started_candidate_transaction_count": 8,
+        "system_operation_ownership": "block_base",
+        "unattempted_candidate_transaction_count": 0
+      },
+      "pair_id": "dirty_accounts_8",
+      "prover_gas": "160626283",
+      "public_values": "0xade2e66d5ff29898f276c461a926703a8adf61309a51e3905a58a850e2f13404",
+      "repeat_index": 0,
+      "schema_version": 1,
+      "sp1_execution_engine": "gas-estimator",
+      "sp1_gas_trace_chunk_slots": 2,
+      "sp1_gas_trace_chunk_threshold": 134217728,
+      "spec": {
+        "control": {
+          "recipient_mode": "single",
+          "transaction_count": 8,
+          "value": 1
+        },
+        "kind": "dirty_accounts",
+        "pair_id": "dirty_accounts_8",
+        "scale": 8,
+        "target": {
+          "recipient_mode": "distinct",
+          "transaction_count": 8,
+          "value": 1
+        }
+      },
+      "status": "accepted",
+      "workload_id": "645525b28aef6c60293fd26f1291eb8397fc374a6d8e24606a6dcb1c85c5f718",
+      "workload_spec": {
+        "guest_input_canonical_sha256": "5b4b22bd1644bee22520b318e368ce32a5457bc99b8b3a2b4bc08913e3ec93b6",
+        "lane": "target",
+        "pair_id": "dirty_accounts_8",
+        "pair_spec": {
+          "control": {
+            "recipient_mode": "single",
+            "transaction_count": 8,
+            "value": 1
+          },
+          "kind": "dirty_accounts",
+          "pair_id": "dirty_accounts_8",
+          "scale": 8,
+          "target": {
+            "recipient_mode": "distinct",
+            "transaction_count": 8,
+            "value": 1
+          }
+        },
+        "schema_version": 1
+      }
+    },
+    {
+      "backend_input_sha256": "282adb6ac3150a7d4843ca7d9663cc94b4a8bf6d41c54afff1623f99ca2b162f",
+      "calibration_run_id": "91d461f0a817446a80223798",
+      "execution_row_id": "8906fc26a10dbaf775376b9c7681212d58734408a2b1d454419b1d5808b94538",
+      "guest_input_bincode_length": 334207,
+      "guest_input_sha256": "0x282adb6ac3150a7d4843ca7d9663cc94b4a8bf6d41c54afff1623f99ca2b162f",
+      "lane": "control",
+      "observation": {
+        "actual_diagnostics": {
+          "blob_count": 1,
+          "bytecode_length": 0,
+          "calldata_length": 0,
+          "guest_input_bincode_length": 334207,
+          "kzg_invocation_count": 1,
+          "touched_state_key_count": 10,
+          "witness_byte_count": 684,
+          "witness_node_count": 7
+        },
+        "actual_features": {
+          "block_base": 1,
+          "native_value_transfer": 8,
+          "proposal_startup": 1,
+          "tx_base": 8
+        },
+        "actual_final_state_root": "0xb68132e7cc16f7531b07ec266cca317d41f013b2a756ea8739fedcd48e446134",
+        "actual_raw_gas_by_key": {},
+        "anchor_operation_ownership": "block_base",
+        "backend_input_sha256": "282adb6ac3150a7d4843ca7d9663cc94b4a8bf6d41c54afff1623f99ca2b162f",
+        "committed_candidate_transaction_count": 8,
+        "guest_input_bincode_length": 334207,
+        "guest_input_sha256": "0x282adb6ac3150a7d4843ca7d9663cc94b4a8bf6d41c54afff1623f99ca2b162f",
+        "lane": "control",
+        "operation_phase_ownership": "transaction_non_anchor_only",
+        "pair_id": "dirty_accounts_8",
+        "public_output": "0x91e75dd3ec1258aacb89fd4458f013df7bba58c08f75f7501fe8bcc11ae21a8d",
+        "started_candidate_transaction_count": 8,
+        "system_operation_ownership": "block_base",
+        "unattempted_candidate_transaction_count": 0
+      },
+      "pair_id": "dirty_accounts_8",
+      "prover_gas": "160319611",
+      "public_values": "0x91e75dd3ec1258aacb89fd4458f013df7bba58c08f75f7501fe8bcc11ae21a8d",
+      "repeat_index": 1,
+      "schema_version": 1,
+      "sp1_execution_engine": "gas-estimator",
+      "sp1_gas_trace_chunk_slots": 2,
+      "sp1_gas_trace_chunk_threshold": 134217728,
+      "spec": {
+        "control": {
+          "recipient_mode": "single",
+          "transaction_count": 8,
+          "value": 1
+        },
+        "kind": "dirty_accounts",
+        "pair_id": "dirty_accounts_8",
+        "scale": 8,
+        "target": {
+          "recipient_mode": "distinct",
+          "transaction_count": 8,
+          "value": 1
+        }
+      },
+      "status": "accepted",
+      "workload_id": "b40c49c921a0eecd767828ce8f3aecceb0e9f5dad5ff0719f9a6ca03daeda19d",
+      "workload_spec": {
+        "guest_input_canonical_sha256": "282adb6ac3150a7d4843ca7d9663cc94b4a8bf6d41c54afff1623f99ca2b162f",
+        "lane": "control",
+        "pair_id": "dirty_accounts_8",
+        "pair_spec": {
+          "control": {
+            "recipient_mode": "single",
+            "transaction_count": 8,
+            "value": 1
+          },
+          "kind": "dirty_accounts",
+          "pair_id": "dirty_accounts_8",
+          "scale": 8,
+          "target": {
+            "recipient_mode": "distinct",
+            "transaction_count": 8,
+            "value": 1
+          }
+        },
+        "schema_version": 1
+      }
+    },
+    {
+      "backend_input_sha256": "5b4b22bd1644bee22520b318e368ce32a5457bc99b8b3a2b4bc08913e3ec93b6",
+      "calibration_run_id": "91d461f0a817446a80223798",
+      "execution_row_id": "c8a7e82cbf49c35f45c8813699823ac4190a0e01f0af4176d9d2a3ceb1f7b632",
+      "guest_input_bincode_length": 335545,
+      "guest_input_sha256": "0x5b4b22bd1644bee22520b318e368ce32a5457bc99b8b3a2b4bc08913e3ec93b6",
+      "lane": "target",
+      "observation": {
+        "actual_diagnostics": {
+          "blob_count": 1,
+          "bytecode_length": 0,
+          "calldata_length": 0,
+          "guest_input_bincode_length": 335545,
+          "kzg_invocation_count": 1,
+          "touched_state_key_count": 17,
+          "witness_byte_count": 1658,
+          "witness_node_count": 14
+        },
+        "actual_features": {
+          "block_base": 1,
+          "native_value_transfer": 8,
+          "proposal_startup": 1,
+          "tx_base": 8
+        },
+        "actual_final_state_root": "0x1632a446ed17a519702698da11e07078324840464a5b735127d1389eed42cfc3",
+        "actual_raw_gas_by_key": {},
+        "anchor_operation_ownership": "block_base",
+        "backend_input_sha256": "5b4b22bd1644bee22520b318e368ce32a5457bc99b8b3a2b4bc08913e3ec93b6",
+        "committed_candidate_transaction_count": 8,
+        "guest_input_bincode_length": 335545,
+        "guest_input_sha256": "0x5b4b22bd1644bee22520b318e368ce32a5457bc99b8b3a2b4bc08913e3ec93b6",
+        "lane": "target",
+        "operation_phase_ownership": "transaction_non_anchor_only",
+        "pair_id": "dirty_accounts_8",
+        "public_output": "0xade2e66d5ff29898f276c461a926703a8adf61309a51e3905a58a850e2f13404",
+        "started_candidate_transaction_count": 8,
+        "system_operation_ownership": "block_base",
+        "unattempted_candidate_transaction_count": 0
+      },
+      "pair_id": "dirty_accounts_8",
+      "prover_gas": "160626283",
+      "public_values": "0xade2e66d5ff29898f276c461a926703a8adf61309a51e3905a58a850e2f13404",
+      "repeat_index": 1,
+      "schema_version": 1,
+      "sp1_execution_engine": "gas-estimator",
+      "sp1_gas_trace_chunk_slots": 2,
+      "sp1_gas_trace_chunk_threshold": 134217728,
+      "spec": {
+        "control": {
+          "recipient_mode": "single",
+          "transaction_count": 8,
+          "value": 1
+        },
+        "kind": "dirty_accounts",
+        "pair_id": "dirty_accounts_8",
+        "scale": 8,
+        "target": {
+          "recipient_mode": "distinct",
+          "transaction_count": 8,
+          "value": 1
+        }
+      },
+      "status": "accepted",
+      "workload_id": "645525b28aef6c60293fd26f1291eb8397fc374a6d8e24606a6dcb1c85c5f718",
+      "workload_spec": {
+        "guest_input_canonical_sha256": "5b4b22bd1644bee22520b318e368ce32a5457bc99b8b3a2b4bc08913e3ec93b6",
+        "lane": "target",
+        "pair_id": "dirty_accounts_8",
+        "pair_spec": {
+          "control": {
+            "recipient_mode": "single",
+            "transaction_count": 8,
+            "value": 1
+          },
+          "kind": "dirty_accounts",
+          "pair_id": "dirty_accounts_8",
+          "scale": 8,
+          "target": {
+            "recipient_mode": "distinct",
+            "transaction_count": 8,
+            "value": 1
+          }
+        },
+        "schema_version": 1
+      }
+    },
+    {
+      "backend_input_sha256": "282adb6ac3150a7d4843ca7d9663cc94b4a8bf6d41c54afff1623f99ca2b162f",
+      "calibration_run_id": "91d461f0a817446a80223798",
+      "execution_row_id": "56b2bf0e63c066c7aa451310d07321183120ac96804694d1d7767fe3a2464091",
+      "guest_input_bincode_length": 334207,
+      "guest_input_sha256": "0x282adb6ac3150a7d4843ca7d9663cc94b4a8bf6d41c54afff1623f99ca2b162f",
+      "lane": "control",
+      "observation": {
+        "actual_diagnostics": {
+          "blob_count": 1,
+          "bytecode_length": 0,
+          "calldata_length": 0,
+          "guest_input_bincode_length": 334207,
+          "kzg_invocation_count": 1,
+          "touched_state_key_count": 10,
+          "witness_byte_count": 684,
+          "witness_node_count": 7
+        },
+        "actual_features": {
+          "block_base": 1,
+          "native_value_transfer": 8,
+          "proposal_startup": 1,
+          "tx_base": 8
+        },
+        "actual_final_state_root": "0xb68132e7cc16f7531b07ec266cca317d41f013b2a756ea8739fedcd48e446134",
+        "actual_raw_gas_by_key": {},
+        "anchor_operation_ownership": "block_base",
+        "backend_input_sha256": "282adb6ac3150a7d4843ca7d9663cc94b4a8bf6d41c54afff1623f99ca2b162f",
+        "committed_candidate_transaction_count": 8,
+        "guest_input_bincode_length": 334207,
+        "guest_input_sha256": "0x282adb6ac3150a7d4843ca7d9663cc94b4a8bf6d41c54afff1623f99ca2b162f",
+        "lane": "control",
+        "operation_phase_ownership": "transaction_non_anchor_only",
+        "pair_id": "dirty_accounts_8",
+        "public_output": "0x91e75dd3ec1258aacb89fd4458f013df7bba58c08f75f7501fe8bcc11ae21a8d",
+        "started_candidate_transaction_count": 8,
+        "system_operation_ownership": "block_base",
+        "unattempted_candidate_transaction_count": 0
+      },
+      "pair_id": "dirty_accounts_8",
+      "prover_gas": "160319611",
+      "public_values": "0x91e75dd3ec1258aacb89fd4458f013df7bba58c08f75f7501fe8bcc11ae21a8d",
+      "repeat_index": 2,
+      "schema_version": 1,
+      "sp1_execution_engine": "gas-estimator",
+      "sp1_gas_trace_chunk_slots": 2,
+      "sp1_gas_trace_chunk_threshold": 134217728,
+      "spec": {
+        "control": {
+          "recipient_mode": "single",
+          "transaction_count": 8,
+          "value": 1
+        },
+        "kind": "dirty_accounts",
+        "pair_id": "dirty_accounts_8",
+        "scale": 8,
+        "target": {
+          "recipient_mode": "distinct",
+          "transaction_count": 8,
+          "value": 1
+        }
+      },
+      "status": "accepted",
+      "workload_id": "b40c49c921a0eecd767828ce8f3aecceb0e9f5dad5ff0719f9a6ca03daeda19d",
+      "workload_spec": {
+        "guest_input_canonical_sha256": "282adb6ac3150a7d4843ca7d9663cc94b4a8bf6d41c54afff1623f99ca2b162f",
+        "lane": "control",
+        "pair_id": "dirty_accounts_8",
+        "pair_spec": {
+          "control": {
+            "recipient_mode": "single",
+            "transaction_count": 8,
+            "value": 1
+          },
+          "kind": "dirty_accounts",
+          "pair_id": "dirty_accounts_8",
+          "scale": 8,
+          "target": {
+            "recipient_mode": "distinct",
+            "transaction_count": 8,
+            "value": 1
+          }
+        },
+        "schema_version": 1
+      }
+    },
+    {
+      "backend_input_sha256": "5b4b22bd1644bee22520b318e368ce32a5457bc99b8b3a2b4bc08913e3ec93b6",
+      "calibration_run_id": "91d461f0a817446a80223798",
+      "execution_row_id": "a6da198d3d8cb9243a1a8df7264b68045976b5e78e8a9055ebc17560e18d6754",
+      "guest_input_bincode_length": 335545,
+      "guest_input_sha256": "0x5b4b22bd1644bee22520b318e368ce32a5457bc99b8b3a2b4bc08913e3ec93b6",
+      "lane": "target",
+      "observation": {
+        "actual_diagnostics": {
+          "blob_count": 1,
+          "bytecode_length": 0,
+          "calldata_length": 0,
+          "guest_input_bincode_length": 335545,
+          "kzg_invocation_count": 1,
+          "touched_state_key_count": 17,
+          "witness_byte_count": 1658,
+          "witness_node_count": 14
+        },
+        "actual_features": {
+          "block_base": 1,
+          "native_value_transfer": 8,
+          "proposal_startup": 1,
+          "tx_base": 8
+        },
+        "actual_final_state_root": "0x1632a446ed17a519702698da11e07078324840464a5b735127d1389eed42cfc3",
+        "actual_raw_gas_by_key": {},
+        "anchor_operation_ownership": "block_base",
+        "backend_input_sha256": "5b4b22bd1644bee22520b318e368ce32a5457bc99b8b3a2b4bc08913e3ec93b6",
+        "committed_candidate_transaction_count": 8,
+        "guest_input_bincode_length": 335545,
+        "guest_input_sha256": "0x5b4b22bd1644bee22520b318e368ce32a5457bc99b8b3a2b4bc08913e3ec93b6",
+        "lane": "target",
+        "operation_phase_ownership": "transaction_non_anchor_only",
+        "pair_id": "dirty_accounts_8",
+        "public_output": "0xade2e66d5ff29898f276c461a926703a8adf61309a51e3905a58a850e2f13404",
+        "started_candidate_transaction_count": 8,
+        "system_operation_ownership": "block_base",
+        "unattempted_candidate_transaction_count": 0
+      },
+      "pair_id": "dirty_accounts_8",
+      "prover_gas": "160626283",
+      "public_values": "0xade2e66d5ff29898f276c461a926703a8adf61309a51e3905a58a850e2f13404",
+      "repeat_index": 2,
+      "schema_version": 1,
+      "sp1_execution_engine": "gas-estimator",
+      "sp1_gas_trace_chunk_slots": 2,
+      "sp1_gas_trace_chunk_threshold": 134217728,
+      "spec": {
+        "control": {
+          "recipient_mode": "single",
+          "transaction_count": 8,
+          "value": 1
+        },
+        "kind": "dirty_accounts",
+        "pair_id": "dirty_accounts_8",
+        "scale": 8,
+        "target": {
+          "recipient_mode": "distinct",
+          "transaction_count": 8,
+          "value": 1
+        }
+      },
+      "status": "accepted",
+      "workload_id": "645525b28aef6c60293fd26f1291eb8397fc374a6d8e24606a6dcb1c85c5f718",
+      "workload_spec": {
+        "guest_input_canonical_sha256": "5b4b22bd1644bee22520b318e368ce32a5457bc99b8b3a2b4bc08913e3ec93b6",
+        "lane": "target",
+        "pair_id": "dirty_accounts_8",
+        "pair_spec": {
+          "control": {
+            "recipient_mode": "single",
+            "transaction_count": 8,
+            "value": 1
+          },
+          "kind": "dirty_accounts",
+          "pair_id": "dirty_accounts_8",
+          "scale": 8,
+          "target": {
+            "recipient_mode": "distinct",
+            "transaction_count": 8,
+            "value": 1
+          }
+        },
+        "schema_version": 1
+      }
+    },
+    {
+      "backend_input_sha256": "fe914df8cea57335b4c0e695b3ac3531029c4aba3a4580e558f5d3388375e3df",
+      "calibration_run_id": "91d461f0a817446a80223798",
+      "execution_row_id": "760568e88a5c8cea04afe4395cd9518c010195e9961c358d007b456c9413b5bf",
+      "guest_input_bincode_length": 339991,
+      "guest_input_sha256": "0xfe914df8cea57335b4c0e695b3ac3531029c4aba3a4580e558f5d3388375e3df",
+      "lane": "control",
+      "observation": {
+        "actual_diagnostics": {
+          "blob_count": 1,
+          "bytecode_length": 0,
+          "calldata_length": 0,
+          "guest_input_bincode_length": 339991,
+          "kzg_invocation_count": 1,
+          "touched_state_key_count": 10,
+          "witness_byte_count": 684,
+          "witness_node_count": 7
+        },
+        "actual_features": {
+          "block_base": 1,
+          "native_value_transfer": 32,
+          "proposal_startup": 1,
+          "tx_base": 32
+        },
+        "actual_final_state_root": "0x93758f28e2ef7229cbe37e4b2cb5c58ec0160fc46f8fb2d63a3ca67e1392be6b",
+        "actual_raw_gas_by_key": {},
+        "anchor_operation_ownership": "block_base",
+        "backend_input_sha256": "fe914df8cea57335b4c0e695b3ac3531029c4aba3a4580e558f5d3388375e3df",
+        "committed_candidate_transaction_count": 32,
+        "guest_input_bincode_length": 339991,
+        "guest_input_sha256": "0xfe914df8cea57335b4c0e695b3ac3531029c4aba3a4580e558f5d3388375e3df",
+        "lane": "control",
+        "operation_phase_ownership": "transaction_non_anchor_only",
+        "pair_id": "dirty_accounts_32",
+        "public_output": "0xd0ec58e606c0a5dafb3d6e648645d2d0ebdafbdd1cd63de216c12be621767b90",
+        "started_candidate_transaction_count": 32,
+        "system_operation_ownership": "block_base",
+        "unattempted_candidate_transaction_count": 0
+      },
+      "pair_id": "dirty_accounts_32",
+      "prover_gas": "164520547",
+      "public_values": "0xd0ec58e606c0a5dafb3d6e648645d2d0ebdafbdd1cd63de216c12be621767b90",
+      "repeat_index": 0,
+      "schema_version": 1,
+      "sp1_execution_engine": "gas-estimator",
+      "sp1_gas_trace_chunk_slots": 2,
+      "sp1_gas_trace_chunk_threshold": 134217728,
+      "spec": {
+        "control": {
+          "recipient_mode": "single",
+          "transaction_count": 32,
+          "value": 1
+        },
+        "kind": "dirty_accounts",
+        "pair_id": "dirty_accounts_32",
+        "scale": 32,
+        "target": {
+          "recipient_mode": "distinct",
+          "transaction_count": 32,
+          "value": 1
+        }
+      },
+      "status": "accepted",
+      "workload_id": "8359fd977393722c01ddd6e461035bdbec4ad3b4a32bee01574d5f24987c45aa",
+      "workload_spec": {
+        "guest_input_canonical_sha256": "fe914df8cea57335b4c0e695b3ac3531029c4aba3a4580e558f5d3388375e3df",
+        "lane": "control",
+        "pair_id": "dirty_accounts_32",
+        "pair_spec": {
+          "control": {
+            "recipient_mode": "single",
+            "transaction_count": 32,
+            "value": 1
+          },
+          "kind": "dirty_accounts",
+          "pair_id": "dirty_accounts_32",
+          "scale": 32,
+          "target": {
+            "recipient_mode": "distinct",
+            "transaction_count": 32,
+            "value": 1
+          }
+        },
+        "schema_version": 1
+      }
+    },
+    {
+      "backend_input_sha256": "8d566e4e1981b6d682f02032b3ab898d68bc334902cea9b650b137c5ad55e204",
+      "calibration_run_id": "91d461f0a817446a80223798",
+      "execution_row_id": "5039776ff342e8953da933cb0a80def1860f11cdd688e65117b4b4e4e3cd9738",
+      "guest_input_bincode_length": 346733,
+      "guest_input_sha256": "0x8d566e4e1981b6d682f02032b3ab898d68bc334902cea9b650b137c5ad55e204",
+      "lane": "target",
+      "observation": {
+        "actual_diagnostics": {
+          "blob_count": 1,
+          "bytecode_length": 0,
+          "calldata_length": 0,
+          "guest_input_bincode_length": 346733,
+          "kzg_invocation_count": 1,
+          "touched_state_key_count": 41,
+          "witness_byte_count": 5398,
+          "witness_node_count": 46
+        },
+        "actual_features": {
+          "block_base": 1,
+          "native_value_transfer": 32,
+          "proposal_startup": 1,
+          "tx_base": 32
+        },
+        "actual_final_state_root": "0xd18772c49ddff220ec5f89ce1b20578c5ada553282c80604cb9a4ad3e925403b",
+        "actual_raw_gas_by_key": {},
+        "anchor_operation_ownership": "block_base",
+        "backend_input_sha256": "8d566e4e1981b6d682f02032b3ab898d68bc334902cea9b650b137c5ad55e204",
+        "committed_candidate_transaction_count": 32,
+        "guest_input_bincode_length": 346733,
+        "guest_input_sha256": "0x8d566e4e1981b6d682f02032b3ab898d68bc334902cea9b650b137c5ad55e204",
+        "lane": "target",
+        "operation_phase_ownership": "transaction_non_anchor_only",
+        "pair_id": "dirty_accounts_32",
+        "public_output": "0xa6213a4ad306cbfad117f8ac38ff666125b9a811abba336c207836823b376244",
+        "started_candidate_transaction_count": 32,
+        "system_operation_ownership": "block_base",
+        "unattempted_candidate_transaction_count": 0
+      },
+      "pair_id": "dirty_accounts_32",
+      "prover_gas": "165993943",
+      "public_values": "0xa6213a4ad306cbfad117f8ac38ff666125b9a811abba336c207836823b376244",
+      "repeat_index": 0,
+      "schema_version": 1,
+      "sp1_execution_engine": "gas-estimator",
+      "sp1_gas_trace_chunk_slots": 2,
+      "sp1_gas_trace_chunk_threshold": 134217728,
+      "spec": {
+        "control": {
+          "recipient_mode": "single",
+          "transaction_count": 32,
+          "value": 1
+        },
+        "kind": "dirty_accounts",
+        "pair_id": "dirty_accounts_32",
+        "scale": 32,
+        "target": {
+          "recipient_mode": "distinct",
+          "transaction_count": 32,
+          "value": 1
+        }
+      },
+      "status": "accepted",
+      "workload_id": "7ca96bb37121b85f97421a9e55b837658d65710707d2648aafb598eb33cec192",
+      "workload_spec": {
+        "guest_input_canonical_sha256": "8d566e4e1981b6d682f02032b3ab898d68bc334902cea9b650b137c5ad55e204",
+        "lane": "target",
+        "pair_id": "dirty_accounts_32",
+        "pair_spec": {
+          "control": {
+            "recipient_mode": "single",
+            "transaction_count": 32,
+            "value": 1
+          },
+          "kind": "dirty_accounts",
+          "pair_id": "dirty_accounts_32",
+          "scale": 32,
+          "target": {
+            "recipient_mode": "distinct",
+            "transaction_count": 32,
+            "value": 1
+          }
+        },
+        "schema_version": 1
+      }
+    },
+    {
+      "backend_input_sha256": "fe914df8cea57335b4c0e695b3ac3531029c4aba3a4580e558f5d3388375e3df",
+      "calibration_run_id": "91d461f0a817446a80223798",
+      "execution_row_id": "a27d63874b445f6887ee0e83cbf046122db4e481f5f0a7da2bdc4d9939fd76a5",
+      "guest_input_bincode_length": 339991,
+      "guest_input_sha256": "0xfe914df8cea57335b4c0e695b3ac3531029c4aba3a4580e558f5d3388375e3df",
+      "lane": "control",
+      "observation": {
+        "actual_diagnostics": {
+          "blob_count": 1,
+          "bytecode_length": 0,
+          "calldata_length": 0,
+          "guest_input_bincode_length": 339991,
+          "kzg_invocation_count": 1,
+          "touched_state_key_count": 10,
+          "witness_byte_count": 684,
+          "witness_node_count": 7
+        },
+        "actual_features": {
+          "block_base": 1,
+          "native_value_transfer": 32,
+          "proposal_startup": 1,
+          "tx_base": 32
+        },
+        "actual_final_state_root": "0x93758f28e2ef7229cbe37e4b2cb5c58ec0160fc46f8fb2d63a3ca67e1392be6b",
+        "actual_raw_gas_by_key": {},
+        "anchor_operation_ownership": "block_base",
+        "backend_input_sha256": "fe914df8cea57335b4c0e695b3ac3531029c4aba3a4580e558f5d3388375e3df",
+        "committed_candidate_transaction_count": 32,
+        "guest_input_bincode_length": 339991,
+        "guest_input_sha256": "0xfe914df8cea57335b4c0e695b3ac3531029c4aba3a4580e558f5d3388375e3df",
+        "lane": "control",
+        "operation_phase_ownership": "transaction_non_anchor_only",
+        "pair_id": "dirty_accounts_32",
+        "public_output": "0xd0ec58e606c0a5dafb3d6e648645d2d0ebdafbdd1cd63de216c12be621767b90",
+        "started_candidate_transaction_count": 32,
+        "system_operation_ownership": "block_base",
+        "unattempted_candidate_transaction_count": 0
+      },
+      "pair_id": "dirty_accounts_32",
+      "prover_gas": "164520547",
+      "public_values": "0xd0ec58e606c0a5dafb3d6e648645d2d0ebdafbdd1cd63de216c12be621767b90",
+      "repeat_index": 1,
+      "schema_version": 1,
+      "sp1_execution_engine": "gas-estimator",
+      "sp1_gas_trace_chunk_slots": 2,
+      "sp1_gas_trace_chunk_threshold": 134217728,
+      "spec": {
+        "control": {
+          "recipient_mode": "single",
+          "transaction_count": 32,
+          "value": 1
+        },
+        "kind": "dirty_accounts",
+        "pair_id": "dirty_accounts_32",
+        "scale": 32,
+        "target": {
+          "recipient_mode": "distinct",
+          "transaction_count": 32,
+          "value": 1
+        }
+      },
+      "status": "accepted",
+      "workload_id": "8359fd977393722c01ddd6e461035bdbec4ad3b4a32bee01574d5f24987c45aa",
+      "workload_spec": {
+        "guest_input_canonical_sha256": "fe914df8cea57335b4c0e695b3ac3531029c4aba3a4580e558f5d3388375e3df",
+        "lane": "control",
+        "pair_id": "dirty_accounts_32",
+        "pair_spec": {
+          "control": {
+            "recipient_mode": "single",
+            "transaction_count": 32,
+            "value": 1
+          },
+          "kind": "dirty_accounts",
+          "pair_id": "dirty_accounts_32",
+          "scale": 32,
+          "target": {
+            "recipient_mode": "distinct",
+            "transaction_count": 32,
+            "value": 1
+          }
+        },
+        "schema_version": 1
+      }
+    },
+    {
+      "backend_input_sha256": "8d566e4e1981b6d682f02032b3ab898d68bc334902cea9b650b137c5ad55e204",
+      "calibration_run_id": "91d461f0a817446a80223798",
+      "execution_row_id": "ccbe2121c1b6a9c0ff2aa1a4aeb07fcbbcef4b6c39d9afc8bcc018a211dab196",
+      "guest_input_bincode_length": 346733,
+      "guest_input_sha256": "0x8d566e4e1981b6d682f02032b3ab898d68bc334902cea9b650b137c5ad55e204",
+      "lane": "target",
+      "observation": {
+        "actual_diagnostics": {
+          "blob_count": 1,
+          "bytecode_length": 0,
+          "calldata_length": 0,
+          "guest_input_bincode_length": 346733,
+          "kzg_invocation_count": 1,
+          "touched_state_key_count": 41,
+          "witness_byte_count": 5398,
+          "witness_node_count": 46
+        },
+        "actual_features": {
+          "block_base": 1,
+          "native_value_transfer": 32,
+          "proposal_startup": 1,
+          "tx_base": 32
+        },
+        "actual_final_state_root": "0xd18772c49ddff220ec5f89ce1b20578c5ada553282c80604cb9a4ad3e925403b",
+        "actual_raw_gas_by_key": {},
+        "anchor_operation_ownership": "block_base",
+        "backend_input_sha256": "8d566e4e1981b6d682f02032b3ab898d68bc334902cea9b650b137c5ad55e204",
+        "committed_candidate_transaction_count": 32,
+        "guest_input_bincode_length": 346733,
+        "guest_input_sha256": "0x8d566e4e1981b6d682f02032b3ab898d68bc334902cea9b650b137c5ad55e204",
+        "lane": "target",
+        "operation_phase_ownership": "transaction_non_anchor_only",
+        "pair_id": "dirty_accounts_32",
+        "public_output": "0xa6213a4ad306cbfad117f8ac38ff666125b9a811abba336c207836823b376244",
+        "started_candidate_transaction_count": 32,
+        "system_operation_ownership": "block_base",
+        "unattempted_candidate_transaction_count": 0
+      },
+      "pair_id": "dirty_accounts_32",
+      "prover_gas": "165993943",
+      "public_values": "0xa6213a4ad306cbfad117f8ac38ff666125b9a811abba336c207836823b376244",
+      "repeat_index": 1,
+      "schema_version": 1,
+      "sp1_execution_engine": "gas-estimator",
+      "sp1_gas_trace_chunk_slots": 2,
+      "sp1_gas_trace_chunk_threshold": 134217728,
+      "spec": {
+        "control": {
+          "recipient_mode": "single",
+          "transaction_count": 32,
+          "value": 1
+        },
+        "kind": "dirty_accounts",
+        "pair_id": "dirty_accounts_32",
+        "scale": 32,
+        "target": {
+          "recipient_mode": "distinct",
+          "transaction_count": 32,
+          "value": 1
+        }
+      },
+      "status": "accepted",
+      "workload_id": "7ca96bb37121b85f97421a9e55b837658d65710707d2648aafb598eb33cec192",
+      "workload_spec": {
+        "guest_input_canonical_sha256": "8d566e4e1981b6d682f02032b3ab898d68bc334902cea9b650b137c5ad55e204",
+        "lane": "target",
+        "pair_id": "dirty_accounts_32",
+        "pair_spec": {
+          "control": {
+            "recipient_mode": "single",
+            "transaction_count": 32,
+            "value": 1
+          },
+          "kind": "dirty_accounts",
+          "pair_id": "dirty_accounts_32",
+          "scale": 32,
+          "target": {
+            "recipient_mode": "distinct",
+            "transaction_count": 32,
+            "value": 1
+          }
+        },
+        "schema_version": 1
+      }
+    },
+    {
+      "backend_input_sha256": "fe914df8cea57335b4c0e695b3ac3531029c4aba3a4580e558f5d3388375e3df",
+      "calibration_run_id": "91d461f0a817446a80223798",
+      "execution_row_id": "eef7477b69febe347a27eb5cc4f36c85af81012e87200398b9026d3d6bc08572",
+      "guest_input_bincode_length": 339991,
+      "guest_input_sha256": "0xfe914df8cea57335b4c0e695b3ac3531029c4aba3a4580e558f5d3388375e3df",
+      "lane": "control",
+      "observation": {
+        "actual_diagnostics": {
+          "blob_count": 1,
+          "bytecode_length": 0,
+          "calldata_length": 0,
+          "guest_input_bincode_length": 339991,
+          "kzg_invocation_count": 1,
+          "touched_state_key_count": 10,
+          "witness_byte_count": 684,
+          "witness_node_count": 7
+        },
+        "actual_features": {
+          "block_base": 1,
+          "native_value_transfer": 32,
+          "proposal_startup": 1,
+          "tx_base": 32
+        },
+        "actual_final_state_root": "0x93758f28e2ef7229cbe37e4b2cb5c58ec0160fc46f8fb2d63a3ca67e1392be6b",
+        "actual_raw_gas_by_key": {},
+        "anchor_operation_ownership": "block_base",
+        "backend_input_sha256": "fe914df8cea57335b4c0e695b3ac3531029c4aba3a4580e558f5d3388375e3df",
+        "committed_candidate_transaction_count": 32,
+        "guest_input_bincode_length": 339991,
+        "guest_input_sha256": "0xfe914df8cea57335b4c0e695b3ac3531029c4aba3a4580e558f5d3388375e3df",
+        "lane": "control",
+        "operation_phase_ownership": "transaction_non_anchor_only",
+        "pair_id": "dirty_accounts_32",
+        "public_output": "0xd0ec58e606c0a5dafb3d6e648645d2d0ebdafbdd1cd63de216c12be621767b90",
+        "started_candidate_transaction_count": 32,
+        "system_operation_ownership": "block_base",
+        "unattempted_candidate_transaction_count": 0
+      },
+      "pair_id": "dirty_accounts_32",
+      "prover_gas": "164520547",
+      "public_values": "0xd0ec58e606c0a5dafb3d6e648645d2d0ebdafbdd1cd63de216c12be621767b90",
+      "repeat_index": 2,
+      "schema_version": 1,
+      "sp1_execution_engine": "gas-estimator",
+      "sp1_gas_trace_chunk_slots": 2,
+      "sp1_gas_trace_chunk_threshold": 134217728,
+      "spec": {
+        "control": {
+          "recipient_mode": "single",
+          "transaction_count": 32,
+          "value": 1
+        },
+        "kind": "dirty_accounts",
+        "pair_id": "dirty_accounts_32",
+        "scale": 32,
+        "target": {
+          "recipient_mode": "distinct",
+          "transaction_count": 32,
+          "value": 1
+        }
+      },
+      "status": "accepted",
+      "workload_id": "8359fd977393722c01ddd6e461035bdbec4ad3b4a32bee01574d5f24987c45aa",
+      "workload_spec": {
+        "guest_input_canonical_sha256": "fe914df8cea57335b4c0e695b3ac3531029c4aba3a4580e558f5d3388375e3df",
+        "lane": "control",
+        "pair_id": "dirty_accounts_32",
+        "pair_spec": {
+          "control": {
+            "recipient_mode": "single",
+            "transaction_count": 32,
+            "value": 1
+          },
+          "kind": "dirty_accounts",
+          "pair_id": "dirty_accounts_32",
+          "scale": 32,
+          "target": {
+            "recipient_mode": "distinct",
+            "transaction_count": 32,
+            "value": 1
+          }
+        },
+        "schema_version": 1
+      }
+    },
+    {
+      "backend_input_sha256": "8d566e4e1981b6d682f02032b3ab898d68bc334902cea9b650b137c5ad55e204",
+      "calibration_run_id": "91d461f0a817446a80223798",
+      "execution_row_id": "9f9f6311c8ecc0cb15ca110790602a121068ef399045802acd22e5e12c9c4fd4",
+      "guest_input_bincode_length": 346733,
+      "guest_input_sha256": "0x8d566e4e1981b6d682f02032b3ab898d68bc334902cea9b650b137c5ad55e204",
+      "lane": "target",
+      "observation": {
+        "actual_diagnostics": {
+          "blob_count": 1,
+          "bytecode_length": 0,
+          "calldata_length": 0,
+          "guest_input_bincode_length": 346733,
+          "kzg_invocation_count": 1,
+          "touched_state_key_count": 41,
+          "witness_byte_count": 5398,
+          "witness_node_count": 46
+        },
+        "actual_features": {
+          "block_base": 1,
+          "native_value_transfer": 32,
+          "proposal_startup": 1,
+          "tx_base": 32
+        },
+        "actual_final_state_root": "0xd18772c49ddff220ec5f89ce1b20578c5ada553282c80604cb9a4ad3e925403b",
+        "actual_raw_gas_by_key": {},
+        "anchor_operation_ownership": "block_base",
+        "backend_input_sha256": "8d566e4e1981b6d682f02032b3ab898d68bc334902cea9b650b137c5ad55e204",
+        "committed_candidate_transaction_count": 32,
+        "guest_input_bincode_length": 346733,
+        "guest_input_sha256": "0x8d566e4e1981b6d682f02032b3ab898d68bc334902cea9b650b137c5ad55e204",
+        "lane": "target",
+        "operation_phase_ownership": "transaction_non_anchor_only",
+        "pair_id": "dirty_accounts_32",
+        "public_output": "0xa6213a4ad306cbfad117f8ac38ff666125b9a811abba336c207836823b376244",
+        "started_candidate_transaction_count": 32,
+        "system_operation_ownership": "block_base",
+        "unattempted_candidate_transaction_count": 0
+      },
+      "pair_id": "dirty_accounts_32",
+      "prover_gas": "165993943",
+      "public_values": "0xa6213a4ad306cbfad117f8ac38ff666125b9a811abba336c207836823b376244",
+      "repeat_index": 2,
+      "schema_version": 1,
+      "sp1_execution_engine": "gas-estimator",
+      "sp1_gas_trace_chunk_slots": 2,
+      "sp1_gas_trace_chunk_threshold": 134217728,
+      "spec": {
+        "control": {
+          "recipient_mode": "single",
+          "transaction_count": 32,
+          "value": 1
+        },
+        "kind": "dirty_accounts",
+        "pair_id": "dirty_accounts_32",
+        "scale": 32,
+        "target": {
+          "recipient_mode": "distinct",
+          "transaction_count": 32,
+          "value": 1
+        }
+      },
+      "status": "accepted",
+      "workload_id": "7ca96bb37121b85f97421a9e55b837658d65710707d2648aafb598eb33cec192",
+      "workload_spec": {
+        "guest_input_canonical_sha256": "8d566e4e1981b6d682f02032b3ab898d68bc334902cea9b650b137c5ad55e204",
+        "lane": "target",
+        "pair_id": "dirty_accounts_32",
+        "pair_spec": {
+          "control": {
+            "recipient_mode": "single",
+            "transaction_count": 32,
+            "value": 1
+          },
+          "kind": "dirty_accounts",
+          "pair_id": "dirty_accounts_32",
+          "scale": 32,
+          "target": {
+            "recipient_mode": "distinct",
+            "transaction_count": 32,
+            "value": 1
+          }
+        },
+        "schema_version": 1
+      }
+    }
+  ],
+  "schema_version": 2,
+  "source_identity_sha256": "91d461f0a817446a802237987c08f1290c571d19b245e7655084600ba05b68ff"
+}

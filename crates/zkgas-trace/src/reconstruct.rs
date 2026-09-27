@@ -31,6 +31,8 @@ use crate::{
     },
 };
 
+pub const OPERATION_TRACE_SCHEMA_VERSION: u32 = 2;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExecutionParityRecord {
     pub committed_transaction_hashes: Vec<B256>,
@@ -325,6 +327,7 @@ pub struct ParityStatus {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProposalTrace {
+    pub schema_version: u32,
     pub guest_input_sha256: String,
     pub guest_input_bincode_length: usize,
     pub status: ProposalTraceStatus,
@@ -360,7 +363,7 @@ impl ProposalTrace {
     #[must_use]
     pub fn summary(&self) -> ProposalTraceSummary {
         ProposalTraceSummary {
-            schema_version: 1,
+            schema_version: self.schema_version,
             full_trace_encoding: "json+gzip".to_string(),
             guest_input_sha256: self.guest_input_sha256.clone(),
             guest_input_bincode_length: self.guest_input_bincode_length,
@@ -587,6 +590,7 @@ where
             .map(|block| block.block_index)
             .or_else(|| blocks.last().map(|block| block.block_index));
         return Ok(ProposalTrace {
+            schema_version: OPERATION_TRACE_SCHEMA_VERSION,
             guest_input_sha256: input_hash,
             guest_input_bincode_length: input_length,
             status: ProposalTraceStatus::Failed,
@@ -612,6 +616,7 @@ where
             .map(|block| block.block_index)
             .or_else(|| blocks.last().map(|block| block.block_index));
         return Ok(ProposalTrace {
+            schema_version: OPERATION_TRACE_SCHEMA_VERSION,
             guest_input_sha256: input_hash,
             guest_input_bincode_length: input_length,
             status: ProposalTraceStatus::Failed,
@@ -642,6 +647,7 @@ where
     );
     let passed = mismatch_fields.is_empty();
     Ok(ProposalTrace {
+        schema_version: OPERATION_TRACE_SCHEMA_VERSION,
         guest_input_sha256: input_hash,
         guest_input_bincode_length: input_length,
         status: if passed {

@@ -158,6 +158,9 @@ fn repository_fixture_passes_fresh_state_ab_gate_and_traces_adjacent_transaction
     let input = serde_json::from_slice(&bytes).expect("parse proposal fixture");
 
     let trace = trace_shasta_proposal(&input).expect("trace proposal");
+    let serialized = serde_json::to_value(&trace).expect("serialize versioned trace");
+    assert_eq!(serialized["schema_version"], 2);
+    assert_eq!(trace.summary().schema_version, 2);
     assert_eq!(
         trace.status,
         ProposalTraceStatus::Complete,

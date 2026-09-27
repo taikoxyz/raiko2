@@ -7,8 +7,8 @@ use alethia_reth_evm::{
 use alloy_evm::{Evm, EvmEnv, EvmFactory};
 use alloy_primitives::{Address, address};
 use raiko2_zkgas_trace::{
-    DispatchStatus, OperationComponent, OperationPhase, PricingBasis, TraceCollector,
-    TraceInspector, TraceSink,
+    DispatchStatus, OpcodeModelInput, OperationComponent, OperationPhase, PricingBasis,
+    TraceCollector, TraceInspector, TraceSink,
 };
 use reth_revm::{
     context::TxEnv,
@@ -16,6 +16,7 @@ use reth_revm::{
     primitives::{Bytes, TxKind},
     state::{AccountInfo, Bytecode, bytecode::opcode},
 };
+use serde_json::{Value, json};
 
 const CALLER: Address = address!("1000000000000000000000000000000000000000");
 const TARGET: Address = address!("2000000000000000000000000000000000000000");
@@ -206,11 +207,36 @@ fn execute(bytecode: Bytecode, gas_limit: u64) -> (TraceSink, bool) {
     (sink, result.result.is_success())
 }
 
+fn executed_opcode_component(bytecode: Vec<u8>, expected_opcode: u8) -> Value {
+    let (sink, success) = execute(Bytecode::new_raw(Bytes::from(bytecode)), 1_000_000);
+    assert!(success, "opcode 0x{expected_opcode:02x} execution");
+    let collector = sink.snapshot();
+    let operation = collector
+        .operations()
+        .iter()
+        .rev()
+        .find(|operation| {
+            matches!(
+                operation.component,
+                OperationComponent::Opcode { opcode, spawned: Some(false), .. }
+                    if opcode == expected_opcode
+            )
+        })
+        .unwrap_or_else(|| panic!("opcode 0x{expected_opcode:02x} operation"));
+    serde_json::to_value(&operation.component).expect("serialize opcode component")
+}
+
 #[test]
 fn pending_spawn_is_promoted_only_by_dispatch_callback() {
     let mut collector = TraceCollector::default();
     collector.start_transaction(0);
-    collector.record_opcode(0xf1, 0, 17, true);
+    collector.record_opcode(
+        0xf1,
+        0,
+        17,
+        OpcodeModelInput::StaticRawGas { raw_gas: 17 },
+        true,
+    );
 
     assert_eq!(collector.operations().len(), 0, "spawn remains pending");
     collector.confirm_spawn(0);
@@ -226,6 +252,7 @@ fn pending_spawn_is_promoted_only_by_dispatch_callback() {
             opcode: 0xf1,
             pricing_basis: Some(PricingBasis::FixedPerEvent),
             interpreter_raw_gas: None,
+            model_input: None,
             spawned: Some(true),
             dispatch_status: DispatchStatus::Confirmed,
         }
@@ -236,8 +263,20 @@ fn pending_spawn_is_promoted_only_by_dispatch_callback() {
 fn rejected_spawn_is_explicitly_unmeasured_and_child_work_is_independent() {
     let mut collector = TraceCollector::default();
     collector.start_transaction(0);
-    collector.record_opcode(0xf5, 0, 32_000, true);
-    collector.record_opcode(0x01, 0, 3, false);
+    collector.record_opcode(
+        0xf5,
+        0,
+        32_000,
+        OpcodeModelInput::StaticRawGas { raw_gas: 32_000 },
+        true,
+    );
+    collector.record_opcode(
+        0x01,
+        0,
+        3,
+        OpcodeModelInput::StaticRawGas { raw_gas: 3 },
+        false,
+    );
 
     assert_eq!(collector.operations().len(), 2);
     assert_eq!(
@@ -246,6 +285,7 @@ fn rejected_spawn_is_explicitly_unmeasured_and_child_work_is_independent() {
             opcode: 0xf5,
             pricing_basis: None,
             interpreter_raw_gas: None,
+            model_input: None,
             spawned: Some(true),
             dispatch_status: DispatchStatus::SelectedNotDispatched,
         }
@@ -256,6 +296,7 @@ fn rejected_spawn_is_explicitly_unmeasured_and_child_work_is_independent() {
             opcode: 0x01,
             pricing_basis: Some(PricingBasis::RawGasSlope),
             interpreter_raw_gas: Some(3),
+            model_input: Some(OpcodeModelInput::StaticRawGas { raw_gas: 3 }),
             spawned: Some(false),
             dispatch_status: DispatchStatus::NotApplicable,
         }
@@ -265,7 +306,13 @@ fn rejected_spawn_is_explicitly_unmeasured_and_child_work_is_independent() {
 #[test]
 fn system_opcode_and_precompile_native_gas_have_monotonic_ids() {
     let mut collector = TraceCollector::default();
-    collector.record_opcode(0x60, 0, 3, false);
+    collector.record_opcode(
+        0x60,
+        0,
+        3,
+        OpcodeModelInput::StaticRawGas { raw_gas: 3 },
+        false,
+    );
     collector.start_transaction(0);
     collector.record_precompile(
         address!("0000000000000000000000000000000000000001"),
@@ -310,6 +357,7 @@ fn real_inspector_covers_all_spawn_and_nonspawn_families() {
                 opcode: family.opcode(),
                 pricing_basis: Some(PricingBasis::FixedPerEvent),
                 interpreter_raw_gas: None,
+                model_input: None,
                 spawned: Some(true),
                 dispatch_status: DispatchStatus::Confirmed,
             },
@@ -459,6 +507,7 @@ fn real_inspector_marks_limit_rejected_spawn_as_not_dispatched() {
                 opcode: family.opcode(),
                 pricing_basis: None,
                 interpreter_raw_gas: None,
+                model_input: None,
                 spawned: Some(true),
                 dispatch_status: DispatchStatus::SelectedNotDispatched,
             }
@@ -473,4 +522,343 @@ fn real_inspector_marks_limit_rejected_spawn_as_not_dispatched() {
             collector.operations()
         );
     }
+}
+
+#[test]
+fn static_opcode_emits_explicit_tagged_model_input() {
+    let component = executed_opcode_component(
+        vec![
+            opcode::PUSH1,
+            1,
+            opcode::PUSH1,
+            2,
+            opcode::ADD,
+            opcode::STOP,
+        ],
+        opcode::ADD,
+    );
+
+    assert_eq!(
+        component["model_input"],
+        json!({"kind": "static_raw_gas", "raw_gas": 3})
+    );
+}
+
+#[test]
+fn undefined_opcode_emits_explicit_invalid_model_input() {
+    let (sink, success) = execute(Bytecode::new_raw(Bytes::from(vec![0x0c])), 100_000);
+    assert!(!success);
+    let collector = sink.snapshot();
+    let operation = collector
+        .operations()
+        .iter()
+        .find(|operation| {
+            matches!(
+                operation.component,
+                OperationComponent::Opcode { opcode: 0x0c, .. }
+            )
+        })
+        .expect("undefined opcode operation");
+    let component = serde_json::to_value(&operation.component).unwrap();
+    assert_eq!(component["model_input"], json!({"kind": "invalid"}));
+}
+
+#[test]
+fn malformed_structured_opcode_emits_feature_error_instead_of_static_fallback() {
+    let (sink, success) = execute(Bytecode::new_raw(Bytes::from(vec![opcode::EXP])), 100_000);
+    assert!(!success);
+    let collector = sink.snapshot();
+    let component = collector
+        .operations()
+        .iter()
+        .find(|operation| {
+            matches!(
+                operation.component,
+                OperationComponent::OpcodeFeatureError {
+                    opcode: opcode::EXP,
+                    ..
+                }
+            )
+        })
+        .expect("EXP feature error");
+    assert_eq!(
+        serde_json::to_value(&component.component).unwrap(),
+        json!({
+            "kind": "opcode_feature_error",
+            "opcode": opcode::EXP,
+            "interpreter_raw_gas": 10,
+            "error": {
+                "kind": "stack_underflow",
+                "feature": "exponent_byte_length",
+            },
+        })
+    );
+    assert!(collector.operations().iter().all(|operation| {
+        !matches!(
+            operation.component,
+            OperationComponent::Opcode {
+                opcode: opcode::EXP,
+                model_input: Some(OpcodeModelInput::StaticRawGas { .. }),
+                ..
+            }
+        )
+    }));
+}
+
+#[test]
+fn exp_captures_exponent_byte_length_from_the_pre_step_stack() {
+    let component = executed_opcode_component(
+        vec![
+            opcode::PUSH5,
+            1,
+            0,
+            0,
+            0,
+            0,
+            opcode::PUSH1,
+            2,
+            opcode::EXP,
+            opcode::STOP,
+        ],
+        opcode::EXP,
+    );
+
+    assert_eq!(
+        component["model_input"],
+        json!({"kind": "exp", "exponent_byte_length": 5})
+    );
+}
+
+#[test]
+fn keccak_captures_input_length_and_exact_memory_growth_features() {
+    let component = executed_opcode_component(
+        vec![
+            opcode::PUSH1,
+            137,
+            opcode::PUSH2,
+            0x10,
+            0x00,
+            opcode::KECCAK256,
+            opcode::STOP,
+        ],
+        opcode::KECCAK256,
+    );
+
+    assert_eq!(
+        component["model_input"],
+        json!({
+            "kind": "keccak",
+            "input_length": 137,
+            "memory_growth_event": 1,
+            "memory_evm_gas_delta": 433,
+            "memory_4k_boundary_event": 1,
+        })
+    );
+}
+
+#[test]
+fn all_memory_access_opcodes_emit_the_shared_memory_input() {
+    let cases = [
+        (
+            opcode::MLOAD,
+            vec![opcode::PUSH2, 0x10, 0x00, opcode::MLOAD, opcode::STOP],
+        ),
+        (
+            opcode::MSTORE,
+            vec![
+                opcode::PUSH1,
+                1,
+                opcode::PUSH2,
+                0x10,
+                0x00,
+                opcode::MSTORE,
+                opcode::STOP,
+            ],
+        ),
+        (
+            opcode::MSTORE8,
+            vec![
+                opcode::PUSH1,
+                1,
+                opcode::PUSH2,
+                0x10,
+                0x00,
+                opcode::MSTORE8,
+                opcode::STOP,
+            ],
+        ),
+    ];
+
+    for (target, bytecode) in cases {
+        let component = executed_opcode_component(bytecode, target);
+        assert_eq!(
+            component["model_input"],
+            json!({
+                "kind": "memory_access",
+                "memory_growth_event": 1,
+                "memory_evm_gas_delta": 419,
+                "memory_4k_boundary_event": 1,
+            }),
+            "opcode 0x{target:02x}",
+        );
+    }
+}
+
+#[test]
+fn memory_access_after_prior_expansion_emits_zero_growth_for_that_event() {
+    let component = executed_opcode_component(
+        vec![
+            opcode::PUSH1,
+            1,
+            opcode::PUSH2,
+            0x10,
+            0x00,
+            opcode::MSTORE,
+            opcode::PUSH2,
+            0x10,
+            0x00,
+            opcode::MLOAD,
+            opcode::STOP,
+        ],
+        opcode::MLOAD,
+    );
+
+    assert_eq!(
+        component["model_input"],
+        json!({
+            "kind": "memory_access",
+            "memory_growth_event": 0,
+            "memory_evm_gas_delta": 0,
+            "memory_4k_boundary_event": 0,
+        })
+    );
+}
+
+#[test]
+fn mcopy_captures_copy_words_and_destination_driven_memory_growth() {
+    let component = executed_opcode_component(
+        vec![
+            opcode::PUSH1,
+            33,
+            opcode::PUSH1,
+            0,
+            opcode::PUSH2,
+            0x10,
+            0x00,
+            opcode::MCOPY,
+            opcode::STOP,
+        ],
+        opcode::MCOPY,
+    );
+
+    assert_eq!(
+        component["model_input"],
+        json!({
+            "kind": "memory_copy",
+            "copy_words": 2,
+            "memory_growth_event": 1,
+            "memory_evm_gas_delta": 423,
+            "memory_4k_boundary_event": 1,
+        })
+    );
+}
+
+#[test]
+fn opcode_model_input_schema_rejects_missing_extra_and_wrong_fields() {
+    let valid = json!({
+        "kind": "opcode",
+        "opcode": opcode::ADD,
+        "pricing_basis": "raw_gas_slope",
+        "interpreter_raw_gas": 3,
+        "model_input": {"kind": "static_raw_gas", "raw_gas": 3},
+        "spawned": false,
+        "dispatch_status": "not_applicable",
+    });
+    let roundtrip: OperationComponent =
+        serde_json::from_value(valid.clone()).expect("valid typed opcode component");
+    assert_eq!(serde_json::to_value(roundtrip).unwrap(), valid);
+
+    for (label, malformed) in [
+        (
+            "missing",
+            json!({
+                "kind": "opcode",
+                "opcode": opcode::ADD,
+                "pricing_basis": "raw_gas_slope",
+                "interpreter_raw_gas": 3,
+                "spawned": false,
+                "dispatch_status": "not_applicable",
+            }),
+        ),
+        (
+            "extra",
+            json!({
+                "kind": "opcode",
+                "opcode": opcode::ADD,
+                "pricing_basis": "raw_gas_slope",
+                "interpreter_raw_gas": 3,
+                "model_input": {
+                    "kind": "static_raw_gas",
+                    "raw_gas": 3,
+                    "input_length": 0,
+                },
+                "spawned": false,
+                "dispatch_status": "not_applicable",
+            }),
+        ),
+        (
+            "wrong model",
+            json!({
+                "kind": "opcode",
+                "opcode": opcode::EXP,
+                "pricing_basis": "raw_gas_slope",
+                "interpreter_raw_gas": 60,
+                "model_input": {"kind": "static_raw_gas", "raw_gas": 60},
+                "spawned": false,
+                "dispatch_status": "not_applicable",
+            }),
+        ),
+        (
+            "feature error on static opcode",
+            json!({
+                "kind": "opcode_feature_error",
+                "opcode": opcode::ADD,
+                "interpreter_raw_gas": 3,
+                "error": {
+                    "kind": "stack_underflow",
+                    "feature": "raw_gas",
+                },
+            }),
+        ),
+    ] {
+        assert!(
+            serde_json::from_value::<OperationComponent>(malformed).is_err(),
+            "{label} model input must fail closed",
+        );
+    }
+}
+
+#[test]
+fn confirmed_spawn_substitution_omits_model_input() {
+    let (sink, success) = execute(SpawnFamily::Call.spawned_bytecode(), 500_000);
+    assert!(success);
+    let collector = sink.snapshot();
+    let wrapper = collector
+        .operations()
+        .iter()
+        .find(|operation| {
+            matches!(
+                operation.component,
+                OperationComponent::Opcode {
+                    opcode: opcode::CALL,
+                    spawned: Some(true),
+                    dispatch_status: DispatchStatus::Confirmed,
+                    ..
+                }
+            )
+        })
+        .expect("confirmed CALL wrapper");
+    let serialized = serde_json::to_value(&wrapper.component).unwrap();
+    assert!(serialized.get("model_input").is_none());
+    assert!(serialized.get("interpreter_raw_gas").is_none());
 }

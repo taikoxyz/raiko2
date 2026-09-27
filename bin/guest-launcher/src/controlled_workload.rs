@@ -469,6 +469,13 @@ fn absolute_transaction_operation_units(
                 OperationComponent::Opcode { opcode, .. } => {
                     bail!("transaction opcode 0x{opcode:02x} has no canonical pricing units")
                 }
+                OperationComponent::OpcodeFeatureError {
+                    opcode, ref error, ..
+                } => {
+                    bail!(
+                        "transaction opcode 0x{opcode:02x} is missing typed model input: {error:?}"
+                    )
+                }
                 OperationComponent::Precompile {
                     address,
                     pricing_basis: PricingBasis::RawGasSlope,

@@ -269,11 +269,23 @@ mod tests {
         assert_eq!(pulls.get(), 0);
         tracing.next().expect("first transaction");
         assert_eq!(pulls.get(), 1, "the second input must remain lazy");
-        sink.lock().record_opcode(0x01, 1, 3, false);
+        sink.lock().record_opcode(
+            0x01,
+            1,
+            3,
+            crate::OpcodeModelInput::StaticRawGas { raw_gas: 3 },
+            false,
+        );
 
         tracing.next().expect("second transaction");
         assert_eq!(pulls.get(), 2);
-        sink.lock().record_opcode(0x02, 1, 3, false);
+        sink.lock().record_opcode(
+            0x02,
+            1,
+            3,
+            crate::OpcodeModelInput::StaticRawGas { raw_gas: 3 },
+            false,
+        );
         assert!(tracing.next().is_none());
         drop(tracing);
 

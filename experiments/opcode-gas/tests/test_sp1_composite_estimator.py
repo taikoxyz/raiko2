@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from decimal import Decimal, localcontext
+from types import SimpleNamespace
 from unittest import mock
 
 
@@ -266,6 +267,8 @@ def _sp1_report(trace, gas=160_000_000):
         "mode": "execute",
         "proof_mode": "compressed",
         "sp1_execution_engine": "gas-estimator",
+        "sp1_gas_trace_chunk_threshold": 134_217_728,
+        "sp1_gas_trace_chunk_slots": 2,
         "guest_input_sha256": trace["guest_input_sha256"],
         "guest_input_bincode_length": trace["guest_input_bincode_length"],
         "public_values": trace["public_output"],
@@ -447,6 +450,46 @@ class CompositeEstimatorTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "public output"):
             opcode_gas.estimate_composite_trace(self.estimator, trace)
 
+    def test_trace_header_rejects_contradictory_parity(self):
+        trace = _complete_trace()
+        trace["parity"] = {"passed": True, "mismatch_fields": ["state_root"]}
+
+        with self.assertRaisesRegex(ValueError, "parity"):
+            opcode_gas.estimate_composite_trace(self.estimator, trace)
+
+    def test_spawn_wrapper_variants_require_exact_schema_and_spawn_opcode(self):
+        selected = {
+            "kind": "opcode",
+            "opcode": 0xF1,
+            "spawned": True,
+            "dispatch_status": "selected_not_dispatched",
+        }
+        confirmed = {
+            "kind": "opcode",
+            "opcode": 0xF1,
+            "pricing_basis": "fixed_per_event",
+            "spawned": True,
+            "dispatch_status": "confirmed",
+        }
+        for label, component in (
+            ("selected non-spawn", {**selected, "opcode": 0x01}),
+            ("selected extra field", {**selected, "pricing_basis": None}),
+            ("confirmed non-spawn", {**confirmed, "opcode": 0x01}),
+            ("confirmed extra field", {**confirmed, "unexpected": 1}),
+        ):
+            with self.subTest(label=label):
+                operation = {
+                    "operation_id": 0,
+                    "phase": "transaction",
+                    "tx_index": 2,
+                    "frame_depth": 0,
+                    "component": component,
+                }
+                with self.assertRaisesRegex(ValueError, "spawn wrapper"):
+                    opcode_gas.estimate_composite_trace(
+                        self.estimator, _complete_trace(operation)
+                    )
+
     def test_system_anchor_and_unattempted_work_are_not_double_charged(self):
         system = _opcode(
             0,
@@ -616,6 +659,34 @@ class CompositeEstimatorTests(unittest.TestCase):
         self.assertEqual(report["predicted_prover_gas"], report["modeled_subtotal"])
         self.assertNotIn("ape", report)
 
+    def test_report_join_requires_exact_gas_estimator_chunk_configuration(self):
+        trace = _complete_trace()
+        for field, value in (
+            ("sp1_gas_trace_chunk_threshold", None),
+            ("sp1_gas_trace_chunk_threshold", 1),
+            ("sp1_gas_trace_chunk_slots", None),
+            ("sp1_gas_trace_chunk_slots", 999),
+        ):
+            with self.subTest(field=field, value=value):
+                sp1_report = _sp1_report(trace)
+                if value is None:
+                    sp1_report.pop(field)
+                else:
+                    sp1_report[field] = value
+                report = opcode_gas.estimate_composite_trace(
+                    self.estimator, trace, sp1_report=sp1_report
+                )
+
+                self.assertEqual(report["actual_report_join"], "mismatch")
+                self.assertIn(field, report["actual_report_join_mismatches"])
+                self.assertEqual(
+                    report["validation_status"], "report_join_mismatch"
+                )
+                self.assertNotIn("ape", report)
+                self.assertEqual(
+                    report["predicted_prover_gas"], report["modeled_subtotal"]
+                )
+
     def test_seal_is_create_only_and_verify_rejects_tamper(self):
         with tempfile.TemporaryDirectory() as temporary:
             out_root = pathlib.Path(temporary) / "estimators"
@@ -679,6 +750,117 @@ class CompositeEstimatorTests(unittest.TestCase):
                 )
 
             self.assertEqual(list(out_root.iterdir()), [])
+
+    def test_post_publication_handoff_failure_restores_pointer_and_artifact(self):
+        def publish_then_fail(path, run, *, durable_identity_name):
+            self.assertEqual(durable_identity_name, "estimator.json")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(str(run) + "\n")
+            raise OSError("post-publication directory fsync failed")
+
+        for initial in (None, b"", b"preserve\n"):
+            with self.subTest(initial=initial), tempfile.TemporaryDirectory() as temporary:
+                root = pathlib.Path(temporary)
+                out_root = root / "estimators"
+                pointer = root / "estimator-path"
+                if initial is not None:
+                    pointer.write_bytes(initial)
+                with mock.patch.object(
+                    opcode_gas, "git_head", return_value="f" * 40
+                ), mock.patch.object(
+                    opcode_gas, "git_worktree_status", return_value=""
+                ), mock.patch.object(
+                    opcode_gas, "git_has_local_commit", return_value=True
+                ), mock.patch.object(
+                    opcode_gas,
+                    "write_run_path_file",
+                    side_effect=publish_then_fail,
+                ), self.assertRaisesRegex(OSError, "directory fsync failed"):
+                    opcode_gas.seal_composite_estimator(
+                        augmented_core_path=CORE_SOURCE,
+                        operation_coverage_path=COVERAGE_SOURCE,
+                        higher_layer_package=HIGHER_LAYER_SOURCE,
+                        out_root=out_root,
+                        estimator_path_file=pointer,
+                    )
+
+                self.assertEqual(list(out_root.iterdir()), [])
+                if initial is None:
+                    self.assertFalse(pointer.exists())
+                else:
+                    self.assertEqual(pointer.read_bytes(), initial)
+
+    def test_trace_estimate_output_is_create_only_and_cannot_alias_inputs(self):
+        for case in ("existing", "symlink", "estimator_child", "symlink_parent"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
+                root = pathlib.Path(temporary)
+                estimator_dir = root / "estimator"
+                estimator_dir.mkdir()
+                trace_path = root / "trace.json"
+                trace_bytes = (
+                    json.dumps(_complete_trace(), sort_keys=True) + "\n"
+                ).encode()
+                trace_path.write_bytes(trace_bytes)
+                if case == "existing":
+                    output = root / "estimate.json"
+                    output.write_bytes(b"preserve\n")
+                elif case == "symlink":
+                    output = root / "estimate.json"
+                    output.symlink_to(trace_path)
+                elif case == "estimator_child":
+                    output = estimator_dir / "estimate.json"
+                else:
+                    alias = root / "estimator-alias"
+                    alias.symlink_to(estimator_dir, target_is_directory=True)
+                    output = alias / "estimate.json"
+                args = SimpleNamespace(
+                    estimator=estimator_dir,
+                    trace=trace_path,
+                    sp1_report=None,
+                    out=output,
+                )
+
+                with mock.patch.object(
+                    opcode_gas,
+                    "verify_composite_estimator",
+                    return_value=self.estimator,
+                ), self.assertRaisesRegex(ValueError, "output"):
+                    opcode_gas.cmd_estimate_composite_trace(args)
+
+                self.assertEqual(trace_path.read_bytes(), trace_bytes)
+                if case == "existing":
+                    self.assertEqual(output.read_bytes(), b"preserve\n")
+                elif case == "estimator_child":
+                    self.assertFalse(output.exists())
+
+    def test_trace_estimate_publishes_one_new_canonical_output(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            estimator_dir = root / "estimator"
+            estimator_dir.mkdir()
+            trace_path = root / "trace.json"
+            trace_path.write_text(json.dumps(_complete_trace(), sort_keys=True) + "\n")
+            output = root / "estimate.json"
+            args = SimpleNamespace(
+                estimator=estimator_dir,
+                trace=trace_path,
+                sp1_report=None,
+                out=output,
+            )
+            with mock.patch.object(
+                opcode_gas,
+                "verify_composite_estimator",
+                return_value=self.estimator,
+            ):
+                opcode_gas.cmd_estimate_composite_trace(args)
+                published = output.read_bytes()
+                self.assertEqual(
+                    published,
+                    opcode_gas._canonical_json_file_bytes(json.loads(published)),
+                )
+                with self.assertRaisesRegex(ValueError, "output already exists"):
+                    opcode_gas.cmd_estimate_composite_trace(args)
+                self.assertEqual(output.read_bytes(), published)
 
     def test_cli_exposes_seal_verify_and_trace_estimate_commands(self):
         parser = opcode_gas.build_parser()

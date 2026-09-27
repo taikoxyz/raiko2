@@ -992,7 +992,8 @@ ESTIMATOR_PATH="$(<"$ESTIMATOR_PATH_FILE")"
 `estimate-composite-trace` always emits the modeled subtotal, per-layer contributions, independent
 coverage denominators, and exact gaps. With zero gaps it also emits `predicted_prover_gas`, whether
 or not an SP1 report was supplied. APE and an `evaluated` validation status require an exact report
-join on GuestInput, public output, execution mode, engine, exit status, gas, and primary metric.
+join on GuestInput, public output, execution mode, engine, frozen gas-trace chunk configuration,
+exit status, gas, and primary metric.
 Report-identity mismatches are join diagnostics and do not alter estimator coverage or suppress an
 otherwise complete prediction.
 
@@ -1002,6 +1003,9 @@ EOA transfers without operation traces. System and Anchor operations are block-o
 opcodes or precompiles, confirmed spawn wrappers, missing typed features, partial traces, recovery
 failures, and parity failures remain explicit gaps; the estimator has no fallback multiplier. Omit
 `--sp1-report` for prediction-only use. Both plain JSON and gzip-compressed trace input are accepted.
+When `--out` is supplied, its parent must already be a non-symlink directory and the destination
+must not exist. Output is published atomically and create-only; paths inside the estimator directory
+or its bound source-artifact directories are rejected.
 
 ## Follow-Up TODO
 

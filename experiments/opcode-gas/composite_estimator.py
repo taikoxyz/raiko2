@@ -20,6 +20,8 @@ from hierarchical_model import (
 ESTIMATOR_SCHEMA_VERSION = 1
 ESTIMATOR_PURPOSE = "sp1_composite_block_estimator"
 TRACE_SCHEMA_VERSION = 2
+SP1_GAS_TRACE_CHUNK_THRESHOLD = 134_217_728
+SP1_GAS_TRACE_CHUNK_SLOTS = 2
 ESTIMATOR_FORMULA = (
     "proposal_startup + blocks*block_base + "
     "started_non_anchor_transactions*tx_base + "
@@ -71,6 +73,7 @@ SOURCE_CODE_PATHS = frozenset(
 
 _DECIMAL_CONTEXT = Context(prec=80, rounding=ROUND_HALF_EVEN, traps=[])
 _FIXED_COST_KEYS = frozenset(FIXED_COST_STATUSES)
+_SPAWN_OPCODES = frozenset({0xF0, 0xF1, 0xF2, 0xF4, 0xF5, 0xFA})
 _EXPECTED_ESTIMATOR_FIELDS = frozenset(
     {
         "schema_version",
@@ -701,6 +704,8 @@ def _report_join_mismatches(
         "stage": "proposal",
         "mode": "execute",
         "sp1_execution_engine": "gas-estimator",
+        "sp1_gas_trace_chunk_threshold": SP1_GAS_TRACE_CHUNK_THRESHOLD,
+        "sp1_gas_trace_chunk_slots": SP1_GAS_TRACE_CHUNK_SLOTS,
         "guest_input_sha256": trace.get("guest_input_sha256"),
         "guest_input_bincode_length": trace.get("guest_input_bincode_length"),
         "public_values": trace.get("public_output"),
@@ -773,16 +778,57 @@ def _validate_trace_header(trace: Mapping[str, Any], estimator: Mapping[str, Any
             or not public_output.startswith("0x")
             or not _is_sha256(public_output.removeprefix("0x"))
             or "failure" in trace
+            or parity["passed"] is not True
+            or parity["mismatch_fields"]
         ):
-            raise ValueError("complete proposal trace public output differs")
+            raise ValueError("complete proposal trace public output or parity differs")
     else:
         failure = trace.get("failure")
-        if public_output is not None or not isinstance(failure, Mapping) or set(failure) - {
-            "block_index",
-            "stage",
-            "error",
-        } or not {"stage", "error"}.issubset(failure):
+        if (
+            public_output is not None
+            or parity["passed"] is not False
+            or not isinstance(failure, Mapping)
+            or set(failure) - {"block_index", "stage", "error"}
+            or not {"stage", "error"}.issubset(failure)
+        ):
             raise ValueError("failed proposal trace failure record differs")
+
+
+def _validate_spawn_wrapper_component(component: Mapping[str, Any]) -> bool:
+    """Validate strict Rust wire shapes before any zero-charge ownership exit."""
+    if component.get("kind") != "opcode":
+        return False
+    dispatch = component.get("dispatch_status")
+    if dispatch not in {"confirmed", "selected_not_dispatched"}:
+        return False
+    opcode = component.get("opcode")
+    if (
+        isinstance(opcode, bool)
+        or not isinstance(opcode, int)
+        or opcode not in _SPAWN_OPCODES
+    ):
+        raise ValueError("spawn wrapper opcode differs from the schema")
+    if dispatch == "confirmed":
+        expected_fields = {
+            "kind",
+            "opcode",
+            "pricing_basis",
+            "spawned",
+            "dispatch_status",
+        }
+        if (
+            set(component) != expected_fields
+            or component.get("pricing_basis") != "fixed_per_event"
+            or component.get("spawned") is not True
+        ):
+            raise ValueError("confirmed spawn wrapper fields differ from the schema")
+    else:
+        expected_fields = {"kind", "opcode", "spawned", "dispatch_status"}
+        if set(component) != expected_fields or component.get("spawned") is not True:
+            raise ValueError(
+                "selected-not-dispatched spawn wrapper fields differ from the schema"
+            )
+    return True
 
 
 def estimate_trace(
@@ -1059,14 +1105,8 @@ def _estimate_trace(
 
             component = operation["component"]
             kind = component.get("kind")
-            if kind == "opcode" and component.get("dispatch_status") == "selected_not_dispatched":
-                if (
-                    component.get("spawned") is not True
-                    or component.get("pricing_basis") is not None
-                    or "interpreter_raw_gas" in component
-                    or "model_input" in component
-                ):
-                    raise ValueError("selected-not-dispatched spawn fields differ")
+            is_spawn_wrapper = _validate_spawn_wrapper_component(component)
+            if is_spawn_wrapper and component["dispatch_status"] == "selected_not_dispatched":
                 continue
             total_operation_count += 1
             if kind == "opcode_feature_error":
@@ -1115,15 +1155,8 @@ def _estimate_trace(
             if opcode > 0xFF:
                 raise ValueError("opcode must fit one byte")
             key = f"opcode:0x{opcode:02x}"
-            if component.get("dispatch_status") == "confirmed":
+            if is_spawn_wrapper and component["dispatch_status"] == "confirmed":
                 total_spawn_count += 1
-                if (
-                    component.get("spawned") is not True
-                    or component.get("pricing_basis") != "fixed_per_event"
-                    or "interpreter_raw_gas" in component
-                    or "model_input" in component
-                ):
-                    raise ValueError("confirmed spawn wrapper fields differ")
                 _gap(
                     gaps,
                     reason="confirmed_spawn_wrapper_unmeasured",

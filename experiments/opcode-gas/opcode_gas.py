@@ -23837,6 +23837,73 @@ def build_composite_estimator_artifact(
     return artifact
 
 
+def _snapshot_composite_path_handoff(path: pathlib.Path) -> Mapping[str, Any]:
+    path = pathlib.Path(path)
+    try:
+        mode = path.stat(follow_symlinks=False).st_mode
+    except FileNotFoundError:
+        return {"existed": False}
+    if path.is_symlink() or not stat.S_ISREG(mode):
+        raise ValueError("composite estimator path handoff must be a regular file")
+    return {
+        "existed": True,
+        "contents": _read_regular_file_bytes_once(
+            path, label="composite estimator path handoff"
+        ),
+        "mode": stat.S_IMODE(mode),
+    }
+
+
+def _restore_composite_path_handoff(
+    path: pathlib.Path,
+    snapshot: Mapping[str, Any],
+    *,
+    published_value: bytes,
+) -> None:
+    path = pathlib.Path(path)
+    if snapshot["existed"] is False:
+        if path.is_symlink():
+            raise ValueError("composite estimator path handoff became a symlink")
+        if path.exists():
+            current = _read_regular_file_bytes_once(
+                path, label="composite estimator path handoff rollback"
+            )
+            if current != published_value:
+                raise ValueError(
+                    "composite estimator path handoff changed concurrently"
+                )
+            path.unlink()
+    else:
+        contents = snapshot["contents"]
+        if path.exists() and not path.is_symlink():
+            current = _read_regular_file_bytes_once(
+                path, label="composite estimator path handoff rollback"
+            )
+            if current == contents:
+                return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{path.name}.", suffix=".rollback", dir=path.parent
+        )
+        temporary = pathlib.Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "wb") as output:
+                output.write(contents)
+                output.flush()
+                os.fsync(output.fileno())
+            os.chmod(temporary, snapshot["mode"])
+            os.replace(temporary, path)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
+    if path.parent.exists():
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+
+
 def seal_composite_estimator(
     *,
     augmented_core_path: pathlib.Path,
@@ -23859,6 +23926,8 @@ def seal_composite_estimator(
     lock_descriptor = os.open(out_root, os.O_RDONLY)
     temporary_path = None
     published = False
+    handoff_snapshot = None
+    handoff_attempted = False
     try:
         fcntl.flock(lock_descriptor, fcntl.LOCK_EX)
         if target.exists() or target.is_symlink():
@@ -23874,16 +23943,30 @@ def seal_composite_estimator(
         temporary_path = None
         published = True
         _fsync_directory(out_root)
+        handoff_snapshot = _snapshot_composite_path_handoff(estimator_path_file)
+        handoff_attempted = True
         write_run_path_file(
             pathlib.Path(estimator_path_file),
             target,
             durable_identity_name="estimator.json",
         )
         return target
-    except BaseException:
+    except BaseException as error:
+        rollback_error = None
+        if handoff_attempted:
+            try:
+                _restore_composite_path_handoff(
+                    estimator_path_file,
+                    handoff_snapshot,
+                    published_value=(str(target) + "\n").encode(),
+                )
+            except BaseException as restore_error:
+                rollback_error = restore_error
         if published and target.exists() and target.is_dir() and not target.is_symlink():
             shutil.rmtree(target)
             _fsync_directory(out_root)
+        if rollback_error is not None:
+            raise rollback_error from error
         raise
     finally:
         if temporary_path is not None and temporary_path.exists():
@@ -24123,6 +24206,138 @@ def _read_composite_json(path: pathlib.Path, *, label: str) -> Mapping[str, Any]
     return value
 
 
+def _composite_output_path(
+    path: pathlib.Path,
+    *,
+    estimator_directory: pathlib.Path,
+    estimator: Mapping[str, Any],
+) -> pathlib.Path:
+    """Resolve one new output without allowing symlink or sealed-input overlap."""
+    supplied = pathlib.Path(path)
+    if not supplied.name or ".." in supplied.parts:
+        raise ValueError("composite estimate output path is not canonical")
+    absolute = supplied.absolute()
+    if absolute.exists() or absolute.is_symlink():
+        raise ValueError("composite estimate output already exists")
+    parent = absolute.parent
+    cursor = pathlib.Path(parent.anchor)
+    for part in parent.parts[1:]:
+        cursor /= part
+        try:
+            mode = cursor.stat(follow_symlinks=False).st_mode
+        except OSError as error:
+            raise ValueError("composite estimate output parent is missing") from error
+        if cursor.is_symlink() or not stat.S_ISDIR(mode):
+            raise ValueError(
+                "composite estimate output parent must be a non-symlink directory"
+            )
+    resolved = parent.resolve(strict=True) / absolute.name
+    protected_directories = {
+        pathlib.Path(estimator_directory).resolve(strict=True),
+    }
+    protected_files = set()
+    sources = estimator["source_artifacts"]
+    for name in ("augmented_core", "operation_coverage"):
+        protected_files.add(
+            _resolve_repo_path(
+                sources[name]["path"], field_name=f"composite {name} source"
+            ).resolve(strict=True)
+        )
+    protected_directories.add(
+        _resolve_repo_path(
+            sources["corrected_higher_layer"]["path"],
+            field_name="composite higher-layer source",
+        ).resolve(strict=True)
+    )
+    protected_files.update(
+        _resolve_repo_path(path, field_name="composite source-code input").resolve(
+            strict=True
+        )
+        for path in sources["source_code_sha256s"]
+    )
+    if resolved in protected_files or any(
+        resolved == directory or resolved.is_relative_to(directory)
+        for directory in protected_directories
+    ):
+        raise ValueError("composite estimate output overlaps a sealed input")
+    return resolved
+
+
+def _write_composite_output_create_only(path: pathlib.Path, output: bytes) -> None:
+    parent_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        parent_descriptor = os.open(path.parent, parent_flags)
+    except OSError as error:
+        raise ValueError(
+            "composite estimate output parent must remain a non-symlink directory"
+        ) from error
+    temporary_name = f".{path.name}.{os.urandom(8).hex()}.tmp"
+    temporary_created = False
+    published = False
+    try:
+        descriptor = os.open(
+            temporary_name,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=parent_descriptor,
+        )
+        temporary_created = True
+        with os.fdopen(descriptor, "wb") as output_file:
+            output_file.write(output)
+            output_file.flush()
+            os.fsync(output_file.fileno())
+        try:
+            os.link(
+                temporary_name,
+                path.name,
+                src_dir_fd=parent_descriptor,
+                dst_dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+        except FileExistsError as error:
+            raise ValueError("composite estimate output already exists") from error
+        published = True
+        os.fsync(parent_descriptor)
+    except BaseException:
+        if published:
+            try:
+                temporary_stat = os.stat(
+                    temporary_name,
+                    dir_fd=parent_descriptor,
+                    follow_symlinks=False,
+                )
+                path_stat = os.stat(
+                    path.name,
+                    dir_fd=parent_descriptor,
+                    follow_symlinks=False,
+                )
+            except OSError:
+                pass
+            else:
+                if (temporary_stat.st_dev, temporary_stat.st_ino) == (
+                    path_stat.st_dev,
+                    path_stat.st_ino,
+                ):
+                    os.unlink(path.name, dir_fd=parent_descriptor)
+        raise
+    finally:
+        if temporary_created:
+            try:
+                os.unlink(temporary_name, dir_fd=parent_descriptor)
+            except FileNotFoundError:
+                pass
+        os.close(parent_descriptor)
+
+
 def cmd_estimate_composite_trace(args: argparse.Namespace) -> None:
     estimator = verify_composite_estimator(args.estimator)
     trace = _read_composite_json(args.trace, label="proposal trace")
@@ -24136,7 +24351,12 @@ def cmd_estimate_composite_trace(args: argparse.Namespace) -> None:
     if args.out is None:
         sys.stdout.buffer.write(output)
     else:
-        args.out.write_bytes(output)
+        output_path = _composite_output_path(
+            args.out,
+            estimator_directory=args.estimator,
+            estimator=estimator,
+        )
+        _write_composite_output_create_only(output_path, output)
 
 
 def build_parser() -> argparse.ArgumentParser:

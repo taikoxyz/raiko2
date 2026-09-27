@@ -16,6 +16,7 @@ import shutil
 import statistics
 import stat
 import subprocess
+import sys
 import tarfile
 import tempfile
 import tomllib
@@ -38,6 +39,15 @@ from calibration_model import (
     fit_structured_dynamic_opcode_models,
     reconstruct_lab_multipliers,
     validate_dynamic_holdouts,
+)
+from composite_estimator import (
+    ESTIMATOR_FORMULA as _COMPOSITE_ESTIMATOR_FORMULA,
+    ESTIMATOR_PURPOSE as _COMPOSITE_ESTIMATOR_PURPOSE,
+    ESTIMATOR_SCHEMA_VERSION as _COMPOSITE_ESTIMATOR_SCHEMA_VERSION,
+    TRACE_SCHEMA_VERSION as _COMPOSITE_TRACE_SCHEMA_VERSION,
+    estimate_trace as estimate_composite_trace,
+    load_registry_payload as _composite_registry_from_payload,
+    validate_estimator_artifact as _validate_composite_estimator_artifact,
 )
 from hierarchical_model import (
     ModelKind,
@@ -6005,6 +6015,13 @@ _HIGHER_LAYER_OPERATION_COVERAGE_REF = {
         "35fd25a7878dd407522ab676c8a9965c663c6885e3190df0fd51f6c497b84e77"
     ),
     "file_sha256": "75fec3c4307c59539cc6180e6511dd7fc1111197746c6b0abd9a872902c665a3",
+}
+_COMPOSITE_OPERATION_COVERAGE_REF = {
+    "path": "experiments/opcode-gas/manifests/operation-coverage-v3.json",
+    "artifact_sha256": (
+        "fbe97920148965d065f5d297194b220b70b866f25136cf217e081632d3003520"
+    ),
+    "file_sha256": "be5cd1621be3502a21536ea6925629c0a7ab417a1c3f4301ab5c82f5edf7c256",
 }
 _HIGHER_LAYER_AUGMENTED_CORE_REF = {
     "path": _OPERATION_AUGMENTED_CORE_REF,
@@ -13777,7 +13794,11 @@ def write_run_path_file(
     durable_identity_name: str = "provenance.json",
 ) -> None:
     """Durably publish one machine-readable run path without partial contents."""
-    if durable_identity_name not in {"provenance.json", "identity.json"}:
+    if durable_identity_name not in {
+        "provenance.json",
+        "identity.json",
+        "estimator.json",
+    }:
         raise ValueError("run-path durable identity filename is invalid")
     durable_identity = run / durable_identity_name
     if not durable_identity.is_file():
@@ -23561,6 +23582,355 @@ def build_corrected_higher_layer_projection(
     return artifact
 
 
+_COMPOSITE_SOURCE_PATHS = (
+    "experiments/opcode-gas/opcode_gas.py",
+    "experiments/opcode-gas/composite_estimator.py",
+    "experiments/opcode-gas/hierarchical_model.py",
+    "crates/zkgas-trace/src/inspector.rs",
+    "crates/zkgas-trace/src/transactions.rs",
+    "crates/zkgas-trace/src/reconstruct.rs",
+    "docs/plans/2026-09-26-zkgas-calibration-design.md",
+)
+
+
+def load_composite_registry(
+    augmented_core: Mapping[str, Any], operation_coverage: Mapping[str, Any]
+) -> OpcodeRegistry:
+    """Strictly load the sealed typed registry and its exact coverage classification."""
+    _validate_content_addressed_artifact(
+        augmented_core, label="composite augmented core"
+    )
+    _validate_content_addressed_artifact(
+        operation_coverage, label="composite operation coverage"
+    )
+    rows = operation_coverage.get("execution_coverage")
+    if (
+        operation_coverage.get("schema_version") != 1
+        or operation_coverage.get("purpose") != _OPERATION_COVERAGE_PURPOSE
+        or operation_coverage.get("status") != "ownership_frozen"
+        or not isinstance(rows, list)
+        or len(rows) != 168
+    ):
+        raise ValueError("composite operation coverage schema differs")
+    keys = [row.get("key") for row in rows if isinstance(row, Mapping)]
+    if len(keys) != len(rows) or any(not isinstance(key, str) for key in keys):
+        raise ValueError("composite operation coverage row is invalid")
+    if len(set(keys)) != len(keys):
+        raise ValueError("composite operation coverage contains duplicate keys")
+    opcode_keys = {key for key in keys if key.startswith("opcode:0x")}
+    models, reasons, unsupported = _validate_operation_core_registry(
+        augmented_core, opcode_keys
+    )
+    registry = _composite_registry_from_payload(augmented_core.get("registry"))
+
+    coverage_by_key = {row["key"]: row for row in rows}
+    for key in sorted(opcode_keys):
+        row = coverage_by_key[key]
+        classification = row.get("classification")
+        model_status = row.get("model_status")
+        model = models.get(key)
+        if key in unsupported:
+            if (
+                classification != "explicitly_unsupported"
+                or model_status != "unsupported"
+                or not isinstance(row.get("reason"), Mapping)
+                or row["reason"].get("detail") != reasons[key]
+            ):
+                raise ValueError(f"composite unsupported coverage differs: {key}")
+            continue
+        expected_classification = (
+            "static_raw_gas"
+            if model.get("kind") == ModelKind.STATIC_RAW_GAS.value
+            else "structured_opcode"
+        )
+        reference = row.get("artifact_ref")
+        if (
+            classification != expected_classification
+            or model_status != "measured"
+            or not isinstance(reference, Mapping)
+            or reference.get("artifact_sha256")
+            != augmented_core.get("artifact_sha256")
+            or reference.get("model_id") != key
+            or reference.get("model_kind") != model.get("kind")
+        ):
+            raise ValueError(f"composite measured coverage differs: {key}")
+    for key, row in coverage_by_key.items():
+        if not key.startswith("precompile:0x"):
+            continue
+        if (
+            row.get("classification") != "direct_precompile"
+            or row.get("model_status") != "declared_unmeasured"
+        ):
+            raise ValueError(f"composite precompile coverage differs: {key}")
+    return registry
+
+
+def _composite_repo_relative(path: pathlib.Path, *, label: str) -> tuple[pathlib.Path, str]:
+    supplied = pathlib.Path(path)
+    resolved = supplied.resolve(strict=True)
+    root = REPO_ROOT.resolve(strict=True)
+    try:
+        relative = resolved.relative_to(root).as_posix()
+    except ValueError as error:
+        raise ValueError(f"{label} must be contained in the repository") from error
+    pinned = _operation_pinned_regular_file(relative)
+    if (
+        supplied.is_symlink()
+        or supplied.absolute() != pinned.absolute()
+        or pinned.resolve(strict=True) != resolved
+    ):
+        raise ValueError(f"{label} must be a regular non-symlink file")
+    return pinned, relative
+
+
+@_isolated_decimal_context
+def build_composite_estimator_artifact(
+    *,
+    augmented_core_path: pathlib.Path,
+    operation_coverage_path: pathlib.Path,
+    higher_layer_package: pathlib.Path,
+) -> Mapping[str, Any]:
+    """Build the deterministic coverage-qualified SP1 composite estimator."""
+    assert_generated_paths_only(git_worktree_status())
+    implementation_revision = git_head()
+    if not git_has_local_commit(implementation_revision):
+        raise ValueError("composite implementation revision is not a local commit")
+
+    core_path, core_relative = _composite_repo_relative(
+        augmented_core_path, label="composite augmented core"
+    )
+    coverage_path, coverage_relative = _composite_repo_relative(
+        operation_coverage_path, label="composite operation coverage"
+    )
+    if core_relative != _HIGHER_LAYER_AUGMENTED_CORE_REF["path"]:
+        raise ValueError("composite augmented core path is not canonical")
+    if coverage_relative != _COMPOSITE_OPERATION_COVERAGE_REF["path"]:
+        raise ValueError("composite operation coverage path is not canonical")
+    core = _read_canonical_json_mapping_once(
+        core_path,
+        label="composite augmented core",
+        expected_sha256=_HIGHER_LAYER_AUGMENTED_CORE_REF["file_sha256"],
+    )
+    coverage = _read_canonical_json_mapping_once(
+        coverage_path,
+        label="composite operation coverage",
+        expected_sha256=_COMPOSITE_OPERATION_COVERAGE_REF["file_sha256"],
+    )
+    _require_pinned_operation_artifact(
+        core,
+        expected_sha256=_HIGHER_LAYER_AUGMENTED_CORE_REF["artifact_sha256"],
+        label="composite augmented core",
+    )
+    _require_pinned_operation_artifact(
+        coverage,
+        expected_sha256=_COMPOSITE_OPERATION_COVERAGE_REF["artifact_sha256"],
+        label="composite operation coverage",
+    )
+    load_composite_registry(core, coverage)
+    corrected = build_corrected_higher_layer_projection(higher_layer_package)
+
+    package = pathlib.Path(higher_layer_package).resolve(strict=True)
+    root = REPO_ROOT.resolve(strict=True)
+    try:
+        package_relative = package.relative_to(root).as_posix()
+    except ValueError as error:
+        raise ValueError("composite higher-layer package must be in the repository") from error
+    if package.is_symlink() or not package.is_dir():
+        raise ValueError("composite higher-layer package must be a non-symlink directory")
+
+    source_sha256s = {}
+    for relative in _COMPOSITE_SOURCE_PATHS:
+        source = _operation_pinned_regular_file(relative)
+        source_sha256s[relative] = sha256_bytes(
+            _read_regular_file_bytes_once(source, label=f"composite source {relative}")
+        )
+    reconstruct_source = _read_regular_file_bytes_once(
+        REPO_ROOT / "crates/zkgas-trace/src/reconstruct.rs",
+        label="composite trace schema source",
+    ).decode()
+    if (
+        f"pub const OPERATION_TRACE_SCHEMA_VERSION: u32 = "
+        f"{_COMPOSITE_TRACE_SCHEMA_VERSION};"
+        not in reconstruct_source
+    ):
+        raise ValueError("composite trace schema version differs from source")
+
+    fixed_costs = dict(corrected["fixed_costs"])
+    for key in _HIGHER_LAYER_Q_FORMULA:
+        _canonical_artifact_decimal(
+            fixed_costs.get(key), label=f"composite fixed cost {key}", nonnegative=True
+        )
+    artifact = {
+        "schema_version": _COMPOSITE_ESTIMATOR_SCHEMA_VERSION,
+        "purpose": _COMPOSITE_ESTIMATOR_PURPOSE,
+        "status": "sealed_coverage_qualified_estimator",
+        "review_only": True,
+        "production_write": False,
+        "proposal_validation_opened": False,
+        "implementation_revision": implementation_revision,
+        "version_identity": dict(_HIGHER_LAYER_VERSION_IDENTITY),
+        "formula": _COMPOSITE_ESTIMATOR_FORMULA,
+        "registry_parameter_basis": "production_scaled",
+        "trace_schema": {
+            "schema_version": _COMPOSITE_TRACE_SCHEMA_VERSION,
+            "source_path": "crates/zkgas-trace/src/reconstruct.rs",
+            "source_sha256": source_sha256s[
+                "crates/zkgas-trace/src/reconstruct.rs"
+            ],
+        },
+        "registry": json.loads(json.dumps(core["registry"])),
+        "execution_coverage": json.loads(
+            json.dumps(coverage["execution_coverage"])
+        ),
+        "ownership_policy": {
+            "trace_selectors": json.loads(json.dumps(coverage["trace_selectors"])),
+            "side_effect_ownership": json.loads(
+                json.dumps(coverage["side_effect_ownership"])
+            ),
+            "system_and_anchor_operations": "block_base",
+            "confirmed_spawn_wrapper": "explicit_gap_until_calibrated",
+            "selected_not_dispatched_spawn": "diagnostic_no_charge",
+            "child_execution": "ordinary_execution_coverage_zero_extra_charge",
+        },
+        "fixed_costs": fixed_costs,
+        "fixed_cost_statuses": dict(corrected["fixed_cost_statuses"]),
+        "coarse_state_trie": dict(corrected["coarse_state_trie"]),
+        "coverage_policy": {
+            "complete_prediction_requires_zero_gaps": True,
+            "ape_requires_exact_sp1_report_join": True,
+            "gap_fallback_multiplier": None,
+            "independent_denominators": [
+                "operation_count",
+                "raw_gas",
+                "spawn_wrapper",
+                "precompile",
+                "typed_feature",
+            ],
+        },
+        "source_artifacts": {
+            "augmented_core": {
+                "path": core_relative,
+                "file_sha256": sha256_file(core_path),
+                "artifact_sha256": core["artifact_sha256"],
+            },
+            "operation_coverage": {
+                "path": coverage_relative,
+                "file_sha256": sha256_file(coverage_path),
+                "artifact_sha256": coverage["artifact_sha256"],
+            },
+            "corrected_higher_layer": {
+                "path": package_relative,
+                "derivation_id": _COMPOSITE_HIGHER_LAYER_SOURCE["derivation_id"],
+                "identity_sha256": _COMPOSITE_HIGHER_LAYER_SOURCE[
+                    "identity_sha256"
+                ],
+                "file_sha256s": dict(
+                    _COMPOSITE_HIGHER_LAYER_SOURCE["file_sha256s"]
+                ),
+                "projection_artifact_sha256": corrected["artifact_sha256"],
+            },
+            "source_code_sha256s": dict(sorted(source_sha256s.items())),
+        },
+    }
+    artifact["artifact_sha256"] = sha256_bytes(canonical_json(artifact))
+    _validate_composite_estimator_artifact(artifact)
+    return artifact
+
+
+def seal_composite_estimator(
+    *,
+    augmented_core_path: pathlib.Path,
+    operation_coverage_path: pathlib.Path,
+    higher_layer_package: pathlib.Path,
+    out_root: pathlib.Path,
+    estimator_path_file: pathlib.Path,
+) -> pathlib.Path:
+    """Create one new content-addressed estimator directory without overwriting."""
+    artifact = build_composite_estimator_artifact(
+        augmented_core_path=augmented_core_path,
+        operation_coverage_path=operation_coverage_path,
+        higher_layer_package=higher_layer_package,
+    )
+    out_root = pathlib.Path(out_root)
+    if out_root.exists() and (out_root.is_symlink() or not out_root.is_dir()):
+        raise ValueError("composite estimator root must be a non-symlink directory")
+    out_root.mkdir(parents=True, exist_ok=True)
+    target = out_root / artifact["artifact_sha256"][:24]
+    lock_descriptor = os.open(out_root, os.O_RDONLY)
+    temporary_path = None
+    published = False
+    try:
+        fcntl.flock(lock_descriptor, fcntl.LOCK_EX)
+        if target.exists() or target.is_symlink():
+            raise ValueError(f"composite estimator already exists: {target}")
+        temporary_path = pathlib.Path(
+            tempfile.mkdtemp(prefix=f".{target.name}.", dir=out_root)
+        )
+        _write_derivation_json(temporary_path / "estimator.json", artifact)
+        _fsync_directory(temporary_path)
+        if target.exists() or target.is_symlink():
+            raise ValueError(f"composite estimator already exists: {target}")
+        os.rename(temporary_path, target)
+        temporary_path = None
+        published = True
+        _fsync_directory(out_root)
+        write_run_path_file(
+            pathlib.Path(estimator_path_file),
+            target,
+            durable_identity_name="estimator.json",
+        )
+        return target
+    except BaseException:
+        if published and target.exists() and target.is_dir() and not target.is_symlink():
+            shutil.rmtree(target)
+            _fsync_directory(out_root)
+        raise
+    finally:
+        if temporary_path is not None and temporary_path.exists():
+            shutil.rmtree(temporary_path)
+        os.close(lock_descriptor)
+
+
+def verify_composite_estimator(directory: pathlib.Path) -> Mapping[str, Any]:
+    """Exactly replay a sealed estimator from its bound repository sources."""
+    directory = pathlib.Path(directory)
+    try:
+        mode = directory.stat(follow_symlinks=False).st_mode
+        names = {path.name for path in directory.iterdir()}
+    except OSError as error:
+        raise ValueError("composite estimator directory is missing") from error
+    if directory.is_symlink() or not stat.S_ISDIR(mode) or names != {"estimator.json"}:
+        raise ValueError("composite estimator directory inventory differs")
+    artifact = _read_canonical_json_mapping_once(
+        directory / "estimator.json", label="composite estimator"
+    )
+    _validate_composite_estimator_artifact(artifact)
+    sources = artifact.get("source_artifacts")
+    if not isinstance(sources, Mapping):
+        raise ValueError("composite estimator sources are missing")
+    core = sources.get("augmented_core")
+    coverage = sources.get("operation_coverage")
+    higher = sources.get("corrected_higher_layer")
+    if not all(isinstance(item, Mapping) for item in (core, coverage, higher)):
+        raise ValueError("composite estimator sources differ")
+    rebuilt = build_composite_estimator_artifact(
+        augmented_core_path=_resolve_repo_path(
+            core.get("path"), field_name="composite augmented core"
+        ),
+        operation_coverage_path=_resolve_repo_path(
+            coverage.get("path"), field_name="composite operation coverage"
+        ),
+        higher_layer_package=_resolve_repo_path(
+            higher.get("path"), field_name="composite higher-layer package"
+        ),
+    )
+    if not _exact_json_equal(artifact, rebuilt):
+        raise ValueError("composite estimator differs from exact source replay")
+    if directory.name != artifact["artifact_sha256"][:24]:
+        raise ValueError("composite estimator directory identity differs")
+    return artifact
+
+
 def seal_higher_layer_calibration(
     run: pathlib.Path,
     out_root: pathlib.Path,
@@ -23721,6 +24091,54 @@ def cmd_seal_higher_layer_calibration(args: argparse.Namespace) -> None:
     print(result)
 
 
+def cmd_seal_composite_estimator(args: argparse.Namespace) -> None:
+    sealed = seal_composite_estimator(
+        augmented_core_path=args.augmented_core,
+        operation_coverage_path=args.operation_coverage,
+        higher_layer_package=args.higher_layer,
+        out_root=args.out_root,
+        estimator_path_file=args.estimator_path_file,
+    )
+    print(sealed)
+
+
+def cmd_verify_composite_estimator(args: argparse.Namespace) -> None:
+    artifact = verify_composite_estimator(args.estimator)
+    print(artifact["artifact_sha256"])
+
+
+def _read_composite_json(path: pathlib.Path, *, label: str) -> Mapping[str, Any]:
+    raw = _read_regular_file_bytes_once(pathlib.Path(path), label=label)
+    if pathlib.Path(path).name.endswith(".gz"):
+        try:
+            raw = gzip.decompress(raw)
+        except gzip.BadGzipFile as error:
+            raise ValueError(f"{label} is not valid gzip") from error
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise ValueError(f"{label} is not valid JSON") from error
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{label} must be a JSON object")
+    return value
+
+
+def cmd_estimate_composite_trace(args: argparse.Namespace) -> None:
+    estimator = verify_composite_estimator(args.estimator)
+    trace = _read_composite_json(args.trace, label="proposal trace")
+    sp1_report = (
+        _read_composite_json(args.sp1_report, label="SP1 report")
+        if args.sp1_report is not None
+        else None
+    )
+    report = estimate_composite_trace(estimator, trace, sp1_report=sp1_report)
+    output = _canonical_json_file_bytes(report)
+    if args.out is None:
+        sys.stdout.buffer.write(output)
+    else:
+        args.out.write_bytes(output)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subcommands = parser.add_subparsers(dest="command", required=True)
@@ -23785,6 +24203,42 @@ def build_parser() -> argparse.ArgumentParser:
         "--derivation-path-file", type=pathlib.Path, required=True
     )
     higher_seal.set_defaults(func=cmd_seal_higher_layer_calibration)
+
+    composite_seal = subcommands.add_parser(
+        "seal-composite-estimator",
+        help="create-only seal the coverage-qualified SP1 composite estimator",
+    )
+    composite_seal.add_argument(
+        "--augmented-core", type=pathlib.Path, required=True
+    )
+    composite_seal.add_argument(
+        "--operation-coverage", type=pathlib.Path, required=True
+    )
+    composite_seal.add_argument(
+        "--higher-layer", type=pathlib.Path, required=True
+    )
+    composite_seal.add_argument("--out-root", type=pathlib.Path, required=True)
+    composite_seal.add_argument(
+        "--estimator-path-file", type=pathlib.Path, required=True
+    )
+    composite_seal.set_defaults(func=cmd_seal_composite_estimator)
+
+    composite_verify = subcommands.add_parser(
+        "verify-composite-estimator",
+        help="exactly replay one sealed composite estimator",
+    )
+    composite_verify.add_argument("--estimator", type=pathlib.Path, required=True)
+    composite_verify.set_defaults(func=cmd_verify_composite_estimator)
+
+    composite_estimate = subcommands.add_parser(
+        "estimate-composite-trace",
+        help="estimate one typed proposal trace with optional SP1 report join",
+    )
+    composite_estimate.add_argument("--estimator", type=pathlib.Path, required=True)
+    composite_estimate.add_argument("--trace", type=pathlib.Path, required=True)
+    composite_estimate.add_argument("--sp1-report", type=pathlib.Path)
+    composite_estimate.add_argument("--out", type=pathlib.Path)
+    composite_estimate.set_defaults(func=cmd_estimate_composite_trace)
 
     anchor_generate = subcommands.add_parser(
         "generate-anchor-probe",

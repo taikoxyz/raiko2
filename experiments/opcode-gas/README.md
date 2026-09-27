@@ -957,6 +957,52 @@ directory contains exactly four portable files and can be replayed at the frozen
 without the live run directories. Proposal validation and production promotion remain out of scope
 for this campaign.
 
+## Coverage-Qualified Composite Estimator
+
+Seal the review-only SP1 composite estimator only from a clean committed checkout. The artifact
+binds the exact opcode registry, operation coverage ledger, corrected higher-layer replay, trace
+schema, ownership policy, implementation revision, and source hashes. Sealing is create-only: an
+existing content-addressed directory is never replaced.
+
+The composite estimator uses `operation-coverage-v3.json`, which replays the current schema-v2
+typed trace sources. `operation-coverage-v2.json` remains immutable historical input to the sealed
+higher-layer derivation; do not substitute v3 when replaying that campaign.
+
+```bash
+PYTHON_BIN="${PYTHON_BIN:-python3.11}"
+ESTIMATOR_PATH_FILE="$(mktemp)"
+"$PYTHON_BIN" experiments/opcode-gas/opcode_gas.py \
+  seal-composite-estimator \
+  --augmented-core experiments/opcode-gas/derivations/f945e67bb2c38c9c8ef50530/core-opcode-submodel.json \
+  --operation-coverage experiments/opcode-gas/manifests/operation-coverage-v3.json \
+  --higher-layer experiments/opcode-gas/derivations/3e4de6eecb5e92aa59a6a4b9 \
+  --out-root experiments/opcode-gas/estimators \
+  --estimator-path-file "$ESTIMATOR_PATH_FILE"
+ESTIMATOR_PATH="$(<"$ESTIMATOR_PATH_FILE")"
+"$PYTHON_BIN" experiments/opcode-gas/opcode_gas.py \
+  verify-composite-estimator --estimator "$ESTIMATOR_PATH"
+"$PYTHON_BIN" experiments/opcode-gas/opcode_gas.py \
+  estimate-composite-trace \
+  --estimator "$ESTIMATOR_PATH" \
+  --trace proposal-operation-trace.json.gz \
+  --sp1-report proposal-sp1-report.json \
+  --out proposal-estimate.json
+```
+
+`estimate-composite-trace` always emits the modeled subtotal, per-layer contributions, independent
+coverage denominators, and exact gaps. With zero gaps it also emits `predicted_prover_gas`, whether
+or not an SP1 report was supplied. APE and an `evaluated` validation status require an exact report
+join on GuestInput, public output, execution mode, engine, exit status, gas, and primary metric.
+Report-identity mismatches are join diagnostics and do not alter estimator coverage or suppress an
+otherwise complete prediction.
+
+Proposal startup is charged once, block base once per block, and transaction base once per started
+non-Anchor transaction. The frozen native-transfer approximation applies only to committed native
+EOA transfers without operation traces. System and Anchor operations are block-owned. Unmeasured
+opcodes or precompiles, confirmed spawn wrappers, missing typed features, partial traces, recovery
+failures, and parity failures remain explicit gaps; the estimator has no fallback multiplier. Omit
+`--sp1-report` for prediction-only use. Both plain JSON and gzip-compressed trace input are accepted.
+
 ## Follow-Up TODO
 
 ## Frozen SP1 Calibration Inputs

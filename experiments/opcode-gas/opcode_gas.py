@@ -8996,7 +8996,11 @@ def fixed_startup_residual(panel_repeat_residuals: Iterable[Iterable[Any]]) -> D
 
 
 _HIGHER_LAYER_EXPANSION_REASONS = frozenset(
-    {"checkpoint_generator_bound", "exhausted_sweep"}
+    {
+        "checkpoint_generator_bound",
+        "exhausted_sweep",
+        "native_approximation_requires_bound_128",
+    }
 )
 
 
@@ -9051,6 +9055,199 @@ def _higher_layer_operation_cost(
         ),
         Decimal(0),
     )
+
+
+def _evaluate_native_transfer_approximation(
+    manifest: HigherLayerManifest,
+    rows: Iterable[Mapping[str, Any]],
+    generator_max_count: int,
+) -> dict[str, Any]:
+    case_id = "native_transfer_positive_vs_zero"
+    approximation = manifest.native_transfer_approximation
+    selected = [row for row in rows if row.get("case") == case_id]
+    base = {
+        "case_id": case_id,
+        "overhead_key_id": approximation.overhead_key_id,
+        "materiality_budget": approximation.materiality_budget,
+        "source": dict(approximation.source),
+    }
+    if any(row.get("status") == "rejected" for row in selected):
+        return {**base, "status": "rejected", "reasons": ["generation_failure"]}
+
+    expected_counts = controlled_round_counts(generator_max_count)
+    coefficient = _decimal(
+        approximation.coefficient_prover_gas,
+        label="native transfer approximation coefficient",
+    )
+    materiality_budget = _decimal(
+        approximation.materiality_budget,
+        label="native transfer approximation materiality budget",
+    )
+    count_evidence = []
+    try:
+        expected_inventory = {
+            (lane, count, repeat_index)
+            for lane in ("target", "control")
+            for count in expected_counts
+            for repeat_index in range(3)
+        }
+        actual_inventory = [
+            (row.get("lane"), row.get("target_count"), row.get("repeat_index"))
+            for row in selected
+        ]
+        if (
+            len(actual_inventory) != len(expected_inventory)
+            or set(actual_inventory) != expected_inventory
+        ):
+            raise ValueError("native approximation row inventory differs")
+
+        for row in selected:
+            if (
+                row.get("operation_phase_ownership")
+                != "transaction_non_anchor_only"
+                or row.get("system_operation_ownership") != "block_base"
+                or row.get("anchor_operation_ownership") != "block_base"
+            ):
+                raise ValueError("native approximation operation ownership differs")
+            if row.get("expected_operation_deltas") != {} or row.get(
+                "observed_operation_deltas"
+            ) != {}:
+                raise ValueError("native approximation operation deltas must be empty")
+
+        for count in expected_counts:
+            target_rows = [
+                row
+                for row in selected
+                if row.get("lane") == "target" and row.get("target_count") == count
+            ]
+            control_rows = [
+                row
+                for row in selected
+                if row.get("lane") == "control" and row.get("target_count") == count
+            ]
+            target_values = _higher_layer_repeat_values(
+                target_rows, label=f"{case_id} target {count}"
+            )
+            control_values = _higher_layer_repeat_values(
+                control_rows, label=f"{case_id} control {count}"
+            )
+            if max(target_values) != min(target_values):
+                raise ValueError("native approximation target repeats differ")
+            if max(control_values) != min(control_values):
+                raise ValueError("native approximation control repeats differ")
+            target_prover_gas = target_values[0]
+            control_prover_gas = control_values[0]
+            if target_prover_gas <= 0 or control_prover_gas <= 0:
+                raise ValueError("native approximation proverGas must be positive")
+            for row in target_rows:
+                if row.get("expected_feature_deltas") != {
+                    "native_value_transfer": count,
+                    "tx_base": 0,
+                }:
+                    raise ValueError("native approximation target features differ")
+            for row in control_rows:
+                if row.get("expected_feature_deltas") != {}:
+                    raise ValueError("native approximation control features differ")
+
+            observed_delta = target_prover_gas - control_prover_gas
+            if count == 0:
+                if observed_delta != 0:
+                    raise ValueError("native approximation baseline delta must be zero")
+                continue
+            if observed_delta <= 0:
+                raise ValueError("native approximation delta must be positive")
+            predicted_cost = coefficient * Decimal(count)
+            absolute_error = abs(predicted_cost - observed_delta)
+            materiality = absolute_error / target_prover_gas
+            count_evidence.append(
+                {
+                    "count": count,
+                    "target_prover_gas": _decimal_text(target_prover_gas),
+                    "control_prover_gas": _decimal_text(control_prover_gas),
+                    "observed_native_delta": _decimal_text(observed_delta),
+                    "predicted_native_cost": _decimal_text(predicted_cost),
+                    "absolute_error": _decimal_text(absolute_error),
+                    "materiality": _decimal_text(materiality),
+                }
+            )
+    except (TypeError, ValueError) as error:
+        return {**base, "status": "rejected", "reasons": [str(error)]}
+
+    result = {**base, "count_evidence": count_evidence}
+    if generator_max_count < approximation.required_counts[-1]:
+        return {
+            **result,
+            "status": "pending_required_counts",
+            "reasons": ["native_approximation_requires_bound_128"],
+        }
+    if tuple(point["count"] for point in count_evidence) != approximation.required_counts:
+        return {
+            **result,
+            "status": "rejected",
+            "reasons": ["native approximation required counts differ"],
+        }
+
+    maximum = max(
+        count_evidence,
+        key=lambda point: _decimal(
+            point["materiality"], label="native approximation materiality"
+        ),
+    )
+    result.update(
+        {
+            "maximum_materiality": maximum["materiality"],
+            "maximum_materiality_count": maximum["count"],
+        }
+    )
+    if (
+        _decimal(
+            maximum["materiality"], label="maximum native approximation materiality"
+        )
+        > materiality_budget
+    ):
+        return {
+            **result,
+            "status": "rejected",
+            "reasons": ["native_approximation_materiality"],
+        }
+    return {
+        **result,
+        "status": "declared_approximation",
+        "o_p": _decimal_text(coefficient),
+    }
+
+
+def _higher_layer_nonzero_dependencies(
+    rows: Iterable[Mapping[str, Any]],
+    *,
+    case_ids: Sequence[str],
+    key_id: str,
+    declared_dependencies: Sequence[str],
+) -> tuple:
+    selected = [
+        row
+        for row in rows
+        if row.get("case") in case_ids and row.get("lane") == "target"
+    ]
+    if not selected:
+        raise ValueError("higher-layer dependency panel is empty")
+    expected_keys = {key_id, *declared_dependencies}
+    required = []
+    for row in selected:
+        features = row.get("expected_feature_deltas")
+        if not isinstance(features, Mapping) or set(features) != expected_keys:
+            raise ValueError("higher-layer case feature declaration differs")
+        if any(
+            isinstance(value, bool) or not isinstance(value, int)
+            for value in features.values()
+        ):
+            raise ValueError("higher-layer feature deltas must be integers")
+        if features[key_id] != row.get("target_count"):
+            raise ValueError("higher-layer target feature count differs")
+    for dependency in declared_dependencies:
+        if any(row["expected_feature_deltas"][dependency] != 0 for row in selected):
+            required.append(dependency)
+    return tuple(required)
 
 
 def _higher_layer_calibration_id(value: Any) -> str:
@@ -9297,9 +9494,10 @@ def _higher_layer_sweep_case(
             for target, control in zip(target_values, control_values):
                 residual = target - control - operation_cost
                 for dependency in dependencies:
-                    residual -= Decimal(features.get(dependency, 0)) * accepted_costs[
-                        dependency
-                    ]
+                    if features[dependency] != 0:
+                        residual -= Decimal(features[dependency]) * accepted_costs[
+                            dependency
+                        ]
                 residuals.append(_decimal_text(residual))
             points.append(
                 {
@@ -9437,13 +9635,35 @@ def evaluate_higher_layer_fixed_round(
     def fit_single(
         key_id: str, case_id: str, dependencies: tuple[str, ...]
     ) -> None:
-        missing = [dependency for dependency in dependencies if dependency not in accepted]
-        if missing:
+        result = None
+        missing = []
+        try:
+            required_dependencies = _higher_layer_nonzero_dependencies(
+                row_list,
+                case_ids=(case_id,),
+                key_id=key_id,
+                declared_dependencies=dependencies,
+            )
+        except ValueError as error:
+            roots_by_key[key_id] = [str(error)]
+            result = {
+                "case_id": case_id,
+                "overhead_key_id": key_id,
+                "status": "rejected",
+                "reasons": [str(error)],
+            }
+        else:
+            missing = [
+                dependency
+                for dependency in required_dependencies
+                if dependency not in accepted
+            ]
+        if result is None and missing:
             inherited = list(
                 dict.fromkeys(
                     reason
                     for dependency in missing
-                    for reason in roots_by_key[dependency]
+                    for reason in roots_by_key.get(dependency, [])
                 )
             )
             roots_by_key[key_id] = inherited
@@ -9455,7 +9675,7 @@ def evaluate_higher_layer_fixed_round(
                 "dependency_ids": missing,
                 "root_rejection_reasons": inherited,
             }
-        else:
+        elif result is None:
             result = _higher_layer_sweep_case(
                 case_id=case_id,
                 key_id=key_id,
@@ -9487,11 +9707,24 @@ def evaluate_higher_layer_fixed_round(
                 "root_rejection_reasons": roots_by_key[key_id],
             }
 
-    fit_single(
-        "native_value_transfer",
-        "native_transfer_positive_vs_zero",
-        ("tx_base",),
+    native_result = _evaluate_native_transfer_approximation(
+        manifest, row_list, generator_max_count
     )
+    case_results.append(native_result)
+    overhead_results["native_value_transfer"] = {
+        key: value
+        for key, value in native_result.items()
+        if key not in {"case_id", "overhead_key_id"}
+    }
+    if native_result.get("status") == "declared_approximation":
+        accepted["native_value_transfer"] = _decimal(
+            native_result["o_p"], label="native_value_transfer fixed cost"
+        )
+    else:
+        roots_by_key["native_value_transfer"] = _higher_layer_root_reasons(
+            native_result
+        )
+
     fit_single(
         "block_base",
         "block_base_one_vs_two_minimal_blocks",
@@ -9499,14 +9732,40 @@ def evaluate_higher_layer_fixed_round(
     )
 
     startup_dependencies = ("block_base", "tx_base", "native_value_transfer")
-    missing_startup = [key for key in startup_dependencies if key not in accepted]
     startup_case_ids = manifest.overhead_case_ids[4:]
-    if missing_startup:
+    try:
+        required_startup_dependencies = _higher_layer_nonzero_dependencies(
+            row_list,
+            case_ids=startup_case_ids,
+            key_id="proposal_startup",
+            declared_dependencies=startup_dependencies,
+        )
+    except ValueError as error:
+        roots_by_key["proposal_startup"] = [str(error)]
+        for case_id in startup_case_ids:
+            case_results.append(
+                {
+                    "case_id": case_id,
+                    "overhead_key_id": "proposal_startup",
+                    "status": "rejected",
+                    "reasons": [str(error)],
+                }
+            )
+        missing_startup = []
+    else:
+        missing_startup = [
+            dependency
+            for dependency in required_startup_dependencies
+            if dependency not in accepted
+        ]
+    if "proposal_startup" in roots_by_key:
+        pass
+    elif missing_startup:
         startup_roots = list(
             dict.fromkeys(
                 reason
                 for dependency in missing_startup
-                for reason in roots_by_key[dependency]
+                for reason in roots_by_key.get(dependency, [])
             )
         )
         roots_by_key["proposal_startup"] = startup_roots
@@ -9550,14 +9809,15 @@ def evaluate_higher_layer_fixed_round(
                 )
                 residuals = [
                     _decimal_text(
-                        value
-                        - operation_cost
-                        - sum(
-                            Decimal(features.get(dependency, 0))
-                            * accepted[dependency]
-                            for dependency in startup_dependencies
+                            value
+                            - operation_cost
+                            - sum(
+                                Decimal(features[dependency])
+                                * accepted[dependency]
+                                for dependency in required_startup_dependencies
+                                if features[dependency] != 0
+                            )
                         )
-                    )
                     for value in values
                 ]
                 startup_panels.append(residuals)
@@ -9607,7 +9867,24 @@ def evaluate_higher_layer_fixed_round(
             for reason in roots_by_key.get(key_id, [])
         )
     )
-    complete = set(accepted) == set(manifest.q_formula)
+    fixed_cost_statuses = {
+        key_id: (
+            "declared_approximation"
+            if key_id == "native_value_transfer"
+            else "accepted"
+        )
+        for key_id in manifest.q_formula
+        if key_id in accepted
+    }
+    complete = (
+        set(accepted) == set(manifest.q_formula)
+        and all(
+            fixed_cost_statuses.get(key_id) == "accepted"
+            for key_id in ("proposal_startup", "block_base", "tx_base")
+        )
+        and fixed_cost_statuses.get("native_value_transfer")
+        == "declared_approximation"
+    )
     if complete:
         decision = "accepted"
     elif (
@@ -9619,15 +9896,18 @@ def evaluate_higher_layer_fixed_round(
     else:
         decision = "terminal_failure"
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "generator_max_count": generator_max_count,
-        "status": "accepted" if complete else "rejected",
+        "status": (
+            "accepted_with_declared_approximation" if complete else "rejected"
+        ),
         "decision": decision,
         "fixed_costs": {
             key: _decimal_text(accepted[key])
             for key in manifest.q_formula
             if key in accepted
         },
+        "fixed_cost_statuses": fixed_cost_statuses,
         "root_rejection_reasons": roots,
         "overhead_results": overhead_results,
         "case_results": case_results,

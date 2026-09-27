@@ -455,7 +455,7 @@ class HigherLayerFixedRoundTests(unittest.TestCase):
             "proposal_startup": Decimal("1000"),
             "block_base": Decimal("2000"),
             "tx_base": Decimal("300"),
-            "native_value_transfer": Decimal("40"),
+            "native_value_transfer": Decimal("5017"),
         }
         rows = []
         counts = opcode_gas.controlled_round_counts(bound)
@@ -632,15 +632,24 @@ class HigherLayerFixedRoundTests(unittest.TestCase):
     def test_exactly_recovers_known_costs_and_accepts_round_128(self):
         result = self.evaluate(self.rows(128), 128)
 
-        self.assertEqual(result["status"], "accepted")
+        self.assertEqual(result["status"], "accepted_with_declared_approximation")
         self.assertEqual(result["decision"], "accepted")
+        self.assertEqual(
+            result["fixed_cost_statuses"],
+            {
+                "proposal_startup": "accepted",
+                "block_base": "accepted",
+                "tx_base": "accepted",
+                "native_value_transfer": "declared_approximation",
+            },
+        )
         self.assertEqual(
             result["fixed_costs"],
             {
                 "proposal_startup": "1000",
                 "block_base": "2000",
                 "tx_base": "300",
-                "native_value_transfer": "40",
+                "native_value_transfer": "5017",
             },
         )
         self.assertEqual(result["root_rejection_reasons"], [])
@@ -648,11 +657,230 @@ class HigherLayerFixedRoundTests(unittest.TestCase):
             opcode_gas.canonical_json(result), opcode_gas.canonical_json(result)
         )
 
-    def test_round_8_expands_only_for_exhausted_sweep(self):
+    def test_native_approximation_uses_target_total_materiality_and_all_frozen_counts(self):
+        result = self.evaluate(self.rows(128), 128)
+        evidence = result["overhead_results"]["native_value_transfer"]
+        self.assertEqual(evidence["status"], "declared_approximation")
+        self.assertEqual(evidence["o_p"], "5017")
+        self.assertEqual(evidence["materiality_budget"], "0.002")
+        self.assertEqual(
+            [point["count"] for point in evidence["count_evidence"]],
+            [1, 2, 4, 8, 16, 32, 64, 128],
+        )
+        self.assertTrue(
+            all(
+                point["materiality"] == "0"
+                for point in evidence["count_evidence"]
+            )
+        )
+
+    def test_native_policy_expands_until_all_frozen_counts_exist(self):
+        for bound in (8, 32):
+            result = self.evaluate(self.rows(bound), bound)
+            self.assertEqual(result["decision"], "expand_next_round")
+            self.assertIn(
+                "native_approximation_requires_bound_128",
+                result["root_rejection_reasons"],
+            )
+
+    def test_zero_delta_dependency_does_not_block_block_or_startup(self):
+        rows = self.rows(128)
+        for row in rows:
+            if (
+                row["case"] == "native_transfer_positive_vs_zero"
+                and row["lane"] == "target"
+            ):
+                row["prover_gas"] = str(
+                    Decimal(row["prover_gas"]) - 4977 * row["target_count"]
+                )
+        result = self.evaluate(rows, 128)
+        self.assertEqual(
+            result["overhead_results"]["native_value_transfer"]["status"],
+            "rejected",
+        )
+        self.assertEqual(result["overhead_results"]["block_base"]["status"], "accepted")
+        self.assertEqual(
+            result["overhead_results"]["proposal_startup"]["status"], "accepted"
+        )
+
+    def test_nonzero_dependency_blocks_block_when_native_is_rejected(self):
+        rows = self.rows(128)
+        for row in rows:
+            if (
+                row["case"] == "native_transfer_positive_vs_zero"
+                and row["lane"] == "target"
+            ):
+                row["prover_gas"] = str(
+                    Decimal(row["prover_gas"]) - 4977 * row["target_count"]
+                )
+            if (
+                row["case"] == "block_base_one_vs_two_minimal_blocks"
+                and row["lane"] == "target"
+            ):
+                row["expected_feature_deltas"]["native_value_transfer"] = row[
+                    "target_count"
+                ]
+                self.bind_identity(row)
+
+        result = self.evaluate(rows, 128)
+        native = result["overhead_results"]["native_value_transfer"]
+        block = next(
+            item
+            for item in result["case_results"]
+            if item["case_id"] == "block_base_one_vs_two_minimal_blocks"
+        )
+        self.assertEqual(native["status"], "rejected")
+        self.assertEqual(block["status"], "rejected")
+        self.assertEqual(block["reasons"], ["unmeasured_overhead_dependency"])
+        self.assertEqual(block["dependency_ids"], ["native_value_transfer"])
+
+    def test_native_approximation_rejects_invalid_measurement_evidence(self):
+        def mutate_nonpositive_delta(rows):
+            for row in rows:
+                if (
+                    row["case"] == "native_transfer_positive_vs_zero"
+                    and row["lane"] == "target"
+                    and row["target_count"] == 1
+                ):
+                    row["prover_gas"] = "10000"
+
+        def mutate_target_repeat(rows):
+            row = next(
+                row
+                for row in rows
+                if row["case"] == "native_transfer_positive_vs_zero"
+                and row["lane"] == "target"
+                and row["target_count"] == 1
+                and row["repeat_index"] == 2
+            )
+            row["prover_gas"] = str(Decimal(row["prover_gas"]) + 1)
+
+        def mutate_control_repeat(rows):
+            row = next(
+                row
+                for row in rows
+                if row["case"] == "native_transfer_positive_vs_zero"
+                and row["lane"] == "control"
+                and row["target_count"] == 1
+                and row["repeat_index"] == 2
+            )
+            row["prover_gas"] = "10001"
+
+        def mutate_baseline_delta(rows):
+            for row in rows:
+                if (
+                    row["case"] == "native_transfer_positive_vs_zero"
+                    and row["lane"] == "target"
+                    and row["target_count"] == 0
+                ):
+                    row["prover_gas"] = "10001"
+
+        def mutate_target_total_zero(rows):
+            for row in rows:
+                if (
+                    row["case"] == "native_transfer_positive_vs_zero"
+                    and row["lane"] == "target"
+                    and row["target_count"] == 1
+                ):
+                    row["prover_gas"] = "0"
+
+        def mutate_unexpected_operation(rows):
+            for row in rows:
+                if (
+                    row["case"] == "native_transfer_positive_vs_zero"
+                    and row["lane"] == "target"
+                    and row["target_count"] == 1
+                ):
+                    row["observed_operation_deltas"] = {
+                        "opcode:0x5f": {
+                            "pricing_basis": "raw_gas_slope",
+                            "units": 1,
+                            "event_count": 1,
+                        }
+                    }
+                    self.bind_identity(row)
+
+        mutations = {
+            "nonpositive delta": mutate_nonpositive_delta,
+            "target repeat": mutate_target_repeat,
+            "control repeat": mutate_control_repeat,
+            "baseline delta": mutate_baseline_delta,
+            "target total zero": mutate_target_total_zero,
+            "unexpected native operation deltas": mutate_unexpected_operation,
+        }
+        for label, mutate in mutations.items():
+            rows = self.rows(128)
+            mutate(rows)
+            with self.subTest(label=label):
+                result = self.evaluate(rows, 128)
+                self.assertEqual(
+                    result["overhead_results"]["native_value_transfer"]["status"],
+                    "rejected",
+                )
+
+    def test_native_approximation_rejects_materiality_strictly_above_budget(self):
+        rows = self.rows(128)
+        for row in rows:
+            if (
+                row["case"] == "native_transfer_positive_vs_zero"
+                and row["lane"] == "target"
+                and row["target_count"] == 1
+            ):
+                row["prover_gas"] = "14986"
+
+        result = self.evaluate(rows, 128)
+        evidence = result["overhead_results"]["native_value_transfer"]
+        self.assertEqual(evidence["status"], "rejected")
+        self.assertEqual(evidence["reasons"], ["native_approximation_materiality"])
+        first = evidence["count_evidence"][0]
+        self.assertEqual(first["absolute_error"], "31")
+        self.assertEqual(
+            first["materiality"],
+            "0.0020685973575336981182436941145068730815427732550380354997998131589483517950086748",
+        )
+
+    def test_native_approximation_rejects_missing_count_and_changed_lane_inventory(self):
+        def remove_count(rows):
+            rows[:] = [
+                row
+                for row in rows
+                if not (
+                    row["case"] == "native_transfer_positive_vs_zero"
+                    and row["target_count"] == 128
+                )
+            ]
+
+        def change_lane(rows):
+            row = next(
+                row
+                for row in rows
+                if row["case"] == "native_transfer_positive_vs_zero"
+                and row["lane"] == "target"
+                and row["target_count"] == 128
+                and row["repeat_index"] == 0
+            )
+            row["lane"] = "control"
+            self.bind_identity(row)
+
+        for label, mutate in {
+            "missing count": remove_count,
+            "changed lane": change_lane,
+        }.items():
+            rows = self.rows(128)
+            mutate(rows)
+            with self.subTest(label=label), self.assertRaisesRegex(
+                ValueError, "inventory"
+            ):
+                self.evaluate(rows, 128)
+
+    def test_round_8_expands_for_incomplete_native_approximation(self):
         result = self.evaluate(self.rows(8), 8)
 
         self.assertEqual(result["decision"], "expand_next_round")
-        self.assertEqual(result["root_rejection_reasons"], ["exhausted_sweep"])
+        self.assertEqual(
+            result["root_rejection_reasons"],
+            ["native_approximation_requires_bound_128"],
+        )
         self.assertNotIn("unmeasured_overhead_dependency", result["root_rejection_reasons"])
 
     def test_checkpoint_bound_is_an_expandable_root_reason(self):
@@ -688,8 +916,10 @@ class HigherLayerFixedRoundTests(unittest.TestCase):
         self.assertEqual(result["decision"], "terminal_failure")
         self.assertIn("repeat_noise_p", result["root_rejection_reasons"])
         native = result["overhead_results"]["native_value_transfer"]
-        self.assertEqual(native["status"], "required_case_incomplete")
-        self.assertIn("repeat_noise_p", native["root_rejection_reasons"])
+        self.assertEqual(native["status"], "pending_required_counts")
+        self.assertEqual(
+            native["reasons"], ["native_approximation_requires_bound_128"]
+        )
         self.assertNotIn(
             "unmeasured_overhead_dependency", result["root_rejection_reasons"]
         )

@@ -20,7 +20,7 @@ use reth_revm::{
     db::states::{BundleState, bundle_state::BundleRetention},
 };
 use reth_trie_common::{HashedPostState, KeccakKeyHasher};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use sha2::{Digest, Sha256};
 
 use crate::{
@@ -32,6 +32,19 @@ use crate::{
 };
 
 pub const OPERATION_TRACE_SCHEMA_VERSION: u32 = 2;
+
+fn deserialize_operation_trace_schema_version<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let version = u32::deserialize(deserializer)?;
+    if version != OPERATION_TRACE_SCHEMA_VERSION {
+        return Err(D::Error::custom(format_args!(
+            "unsupported operation trace schema version {version}; expected {OPERATION_TRACE_SCHEMA_VERSION}"
+        )));
+    }
+    Ok(version)
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExecutionParityRecord {
@@ -327,6 +340,7 @@ pub struct ParityStatus {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProposalTrace {
+    #[serde(deserialize_with = "deserialize_operation_trace_schema_version")]
     pub schema_version: u32,
     pub guest_input_sha256: String,
     pub guest_input_bincode_length: usize,
@@ -343,6 +357,7 @@ pub struct ProposalTrace {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProposalTraceSummary {
+    #[serde(deserialize_with = "deserialize_operation_trace_schema_version")]
     pub schema_version: u32,
     pub full_trace_encoding: String,
     pub guest_input_sha256: String,

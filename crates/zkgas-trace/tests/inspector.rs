@@ -839,6 +839,71 @@ fn opcode_model_input_schema_rejects_missing_extra_and_wrong_fields() {
 }
 
 #[test]
+fn exp_model_input_schema_rejects_exponents_larger_than_a_word() {
+    let valid = json!({
+        "kind": "opcode",
+        "opcode": opcode::EXP,
+        "pricing_basis": "raw_gas_slope",
+        "interpreter_raw_gas": 660,
+        "model_input": {"kind": "exp", "exponent_byte_length": 32},
+        "spawned": false,
+        "dispatch_status": "not_applicable",
+    });
+    let roundtrip: OperationComponent =
+        serde_json::from_value(valid.clone()).expect("32-byte exponent");
+    assert_eq!(serde_json::to_value(roundtrip).unwrap(), valid);
+
+    let mut oversized = valid;
+    oversized["model_input"]["exponent_byte_length"] = json!(33);
+    assert!(
+        serde_json::from_value::<OperationComponent>(oversized).is_err(),
+        "EVM exponent must fit in a 32-byte word",
+    );
+}
+
+#[test]
+fn spawn_wrapper_schema_accepts_only_spawn_family_opcodes() {
+    for family in SpawnFamily::ALL {
+        for (pricing_basis, dispatch_status) in [
+            (json!("fixed_per_event"), "confirmed"),
+            (Value::Null, "selected_not_dispatched"),
+        ] {
+            let valid = json!({
+                "kind": "opcode",
+                "opcode": family.opcode(),
+                "pricing_basis": pricing_basis,
+                "spawned": true,
+                "dispatch_status": dispatch_status,
+            });
+            let roundtrip: OperationComponent = serde_json::from_value(valid.clone())
+                .unwrap_or_else(|error| panic!("{} {dispatch_status}: {error}", family.name()));
+            let mut expected = valid;
+            if expected["pricing_basis"].is_null() {
+                expected.as_object_mut().unwrap().remove("pricing_basis");
+            }
+            assert_eq!(serde_json::to_value(roundtrip).unwrap(), expected);
+        }
+    }
+
+    for (pricing_basis, dispatch_status) in [
+        (json!("fixed_per_event"), "confirmed"),
+        (Value::Null, "selected_not_dispatched"),
+    ] {
+        let malformed = json!({
+            "kind": "opcode",
+            "opcode": opcode::ADD,
+            "pricing_basis": pricing_basis,
+            "spawned": true,
+            "dispatch_status": dispatch_status,
+        });
+        assert!(
+            serde_json::from_value::<OperationComponent>(malformed).is_err(),
+            "{dispatch_status} wrapper must reject a non-spawn opcode",
+        );
+    }
+}
+
+#[test]
 fn confirmed_spawn_substitution_omits_model_input() {
     let (sink, success) = execute(SpawnFamily::Call.spawned_bytecode(), 500_000);
     assert!(success);

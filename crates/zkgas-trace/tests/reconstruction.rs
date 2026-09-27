@@ -2,13 +2,68 @@
 
 use alloy_primitives::{B256, U256};
 use raiko2_zkgas_trace::{
-    ProposalTraceStatus, RecoveredTransactionOccurrence, TransactionDisposition,
-    classify_started_occurrences, classify_started_occurrences_with_statuses,
-    is_native_value_transfer, trace_shasta_proposal,
+    ProposalTrace, ProposalTraceStatus, ProposalTraceSummary, RecoveredTransactionOccurrence,
+    TransactionDisposition, classify_started_occurrences,
+    classify_started_occurrences_with_statuses, is_native_value_transfer, trace_shasta_proposal,
 };
+use serde_json::json;
 
 const fn hash(byte: u8) -> B256 {
     B256::with_last_byte(byte)
+}
+
+#[test]
+fn proposal_trace_schema_version_fails_closed_and_current_version_roundtrips() {
+    let valid = json!({
+        "schema_version": 2,
+        "guest_input_sha256": "0x00",
+        "guest_input_bincode_length": 0,
+        "status": "complete",
+        "blocks": [],
+        "partial_blocks": [],
+        "recovery_failures": [],
+        "parity": {"passed": true, "mismatch_fields": []},
+    });
+    let roundtrip: ProposalTrace =
+        serde_json::from_value(valid.clone()).expect("current trace schema");
+    assert_eq!(serde_json::to_value(roundtrip).unwrap(), valid);
+
+    for unsupported in [1, 3] {
+        let mut malformed = valid.clone();
+        malformed["schema_version"] = json!(unsupported);
+        assert!(
+            serde_json::from_value::<ProposalTrace>(malformed).is_err(),
+            "schema version {unsupported} must fail closed",
+        );
+    }
+}
+
+#[test]
+fn proposal_trace_summary_schema_version_fails_closed_and_current_version_roundtrips() {
+    let valid = json!({
+        "schema_version": 2,
+        "full_trace_encoding": "json+gzip",
+        "guest_input_sha256": "0x00",
+        "guest_input_bincode_length": 0,
+        "status": "complete",
+        "parity_passed": true,
+        "block_count": 0,
+        "partial_block_count": 0,
+        "recovery_failure_count": 0,
+        "operation_count": 0,
+    });
+    let roundtrip: ProposalTraceSummary =
+        serde_json::from_value(valid.clone()).expect("current summary schema");
+    assert_eq!(serde_json::to_value(roundtrip).unwrap(), valid);
+
+    for unsupported in [1, 3] {
+        let mut malformed = valid.clone();
+        malformed["schema_version"] = json!(unsupported);
+        assert!(
+            serde_json::from_value::<ProposalTraceSummary>(malformed).is_err(),
+            "summary schema version {unsupported} must fail closed",
+        );
+    }
 }
 
 #[test]

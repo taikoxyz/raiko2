@@ -220,7 +220,8 @@ fn validate_opcode_component(
 ) -> Result<(), &'static str> {
     match dispatch_status {
         DispatchStatus::Confirmed => {
-            if pricing_basis != Some(PricingBasis::FixedPerEvent)
+            if !is_spawn_opcode(opcode)
+                || pricing_basis != Some(PricingBasis::FixedPerEvent)
                 || interpreter_raw_gas.is_some()
                 || model_input.is_some()
                 || spawned != Some(true)
@@ -230,7 +231,8 @@ fn validate_opcode_component(
             return Ok(());
         }
         DispatchStatus::SelectedNotDispatched => {
-            if pricing_basis.is_some()
+            if !is_spawn_opcode(opcode)
+                || pricing_basis.is_some()
                 || interpreter_raw_gas.is_some()
                 || model_input.is_some()
                 || spawned != Some(true)
@@ -248,7 +250,12 @@ fn validate_opcode_component(
     let raw_gas = interpreter_raw_gas.ok_or("executed opcode is missing interpreter raw gas")?;
     let model_input = model_input.ok_or("executed opcode is missing model input")?;
     let model_matches = match opcode {
-        0x0a => matches!(model_input, OpcodeModelInput::Exp { .. }),
+        0x0a => matches!(
+            model_input,
+            OpcodeModelInput::Exp {
+                exponent_byte_length
+            } if *exponent_byte_length <= 32
+        ),
         0x20 => matches!(model_input, OpcodeModelInput::Keccak { .. }),
         0x51..=0x53 => matches!(model_input, OpcodeModelInput::MemoryAccess { .. }),
         0x5e => matches!(model_input, OpcodeModelInput::MemoryCopy { .. }),
@@ -265,6 +272,10 @@ fn validate_opcode_component(
         return Err("opcode model input is incompatible with the opcode");
     }
     Ok(())
+}
+
+const fn is_spawn_opcode(opcode: u8) -> bool {
+    matches!(opcode, 0xf0 | 0xf1 | 0xf2 | 0xf4 | 0xf5 | 0xfa)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

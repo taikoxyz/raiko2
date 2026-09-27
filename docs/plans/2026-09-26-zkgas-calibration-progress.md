@@ -63,8 +63,8 @@ Osaka execution semantics while continuing to bind the actual exported Unzen sch
 | Experiment framework | Core scope complete | Preserve its identity and replay invariants |
 | Opcode core | Complete at partial coverage | Preserve sealed 101-plus-2 augmentation |
 | Remaining operations | Complete at frozen classification | Preserve the sealed coverage and ownership ledgers |
-| State/trie | Closed by fixed-cost gate | Pass a coarse holdout or justify a split model |
-| Transaction | Blocked by terminal controlled fit | Redesign the independent native-transfer experiment |
+| State/trie | Closed pending approximation implementation | Pass a coarse holdout or justify a split model |
+| Transaction | Approximation policy accepted | Implement and validate the frozen native upper bound |
 | Block | Pending | Pass frozen block holdouts without proposal fitting |
 | Proposal | Closed | Seal every lower layer before opening the corpus |
 | Other ZKVM backends | Future | Measure natively or validate an explicit bridge |
@@ -254,13 +254,44 @@ identity with the production backend bytes and passed independent review and beh
 before the canonical run above. No opcode coefficient was refit, no final proposal was opened, and
 no production schedule, runtime configuration, block limit, or Boundless configuration changed.
 
+## Accepted Design: Conservative Native-Transfer Approximation
+
+The terminal campaign remains immutable rejected evidence. It is not relabeled as an accepted
+four-cost artifact. Its diagnosis established that the native EOA transfer path is separate from
+contract/EVM execution, but the current positive-versus-zero matched control also contains different
+signature-recovery work and positive-transfer balance/final-trie work.
+
+The next campaign will use a frozen conservative approximation rather than block higher layers on
+this small mixed signal:
+
+- `native_value_transfer = 5017 proverGas` per committed native EOA transfer;
+- coefficient source: the maximum observed per-transfer delta over counts
+  `1, 2, 4, 8, 16, 32, 64, 128` in run `999b91b91fd693899d09fa53`;
+- status: `declared_approximation`, never an accepted OLS coefficient;
+- materiality gate: maximum
+  `abs(5017 * count - observed_native_delta) / target_total_prover_gas <= 0.002`;
+- observed count-128 materiality from the source evidence:
+  `219576 / 181155333 = 0.0012120868669099573...`;
+- EVM call wrapper, opcode, and precompile work remain separate and are not included in this value.
+
+The new policy preserves all provenance, repeat, execution, positive-signal, and ownership checks.
+It changes only the small native relation's quality gate. Block and startup cases are blocked only
+by dependencies with nonzero deltas, so the native approximation does not prevent those zero-native-
+delta cases from fitting. A new clean campaign identity must validate the already frozen `5017` and
+`0.002`; it may not reselect either value after results are visible.
+
+State holdouts remain closed until the policy is implemented and the three ordinary fixed terms plus
+the native materiality gate pass. Pairwise state predictions cancel the approximation where lane
+native counts are equal. A later holdout failure remains evidence for a predeclared state/transaction
+split; it cannot tune this approximation. Final proposal validation and production changes remain
+closed.
+
 ## Next Gate
 
-Diagnose whether a constant native-transfer model is structurally unsuitable or whether the current
-fixture is confounded. Predeclare the next workload, model, and gates before collecting new evidence;
-failure must remain an allowed conclusion. This campaign may define the question but must not select
-a looser threshold. After the diagnostic experiment is designed, reviewed, and sealed, decide
-whether a new clean higher-layer campaign is justified. State and proposal execution remain closed.
+Implement and independently verify the declared native-transfer approximation, dependency-aware
+fixed-term evaluator, artifact status, replay, and sealing rules. Then execute a new clean
+production-SP1 campaign. Open the six existing state holdouts only if the three ordinary fixed terms
+pass and the frozen native materiality gate passes. Proposal execution remains closed.
 
 ## Next Milestones
 

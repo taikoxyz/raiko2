@@ -149,6 +149,12 @@ not select those features.
 successful, non-create native value transfer with no executable recipient or precompile dispatch
 adds `native_transfer_cost`.
 
+Native transfer and EVM execution are distinct paths. A native transfer is an EOA-to-EOA value
+transfer with no operation trace. A contract call instead enters the CALL/CREATE wrapper and
+opcode/precompile model. Rust's `TxKind::Call(address)` only distinguishes a non-creation
+transaction; it does not by itself mean that the recipient has executable code. The two paths must
+never share one coefficient or use the opcode sum as a substitute for native balance-transfer work.
+
 Opcode work from an attempted transaction remains in the operation sum even if the transaction later
 reverts. State commit work follows the state/trie outcome rather than being folded back into an
 isolated `SSTORE` coefficient.
@@ -284,6 +290,63 @@ Fit and holdout rows must keep ownership unambiguous. If the coarse block holdou
 controlled residual and create a new, predeclared state/trie feature matrix. Never select a feature
 from final proposal residuals.
 
+### Declared Native-Transfer Approximation
+
+The canonical production-guest run `999b91b91fd693899d09fa53` showed that native-transfer cost is
+positive but is not identifiable as a high-precision constant with the current matched control.
+Changing transaction value changes the signed transaction hash and therefore the SP1 signature-
+recovery workload. A successful positive transfer also changes sender and recipient balances and
+the final trie. These effects are real proving work, but their combined residual is immaterial at
+the whole-guest scale and must not block the next calibration layer.
+
+V1 therefore declares a conservative native-transfer approximation:
+
+```text
+native_transfer_cost = 5017 proverGas per committed native EOA transfer
+native_transfer_materiality_budget = 0.002
+```
+
+`5017` is the maximum observed `delta_prover_gas / transfer_count` across the frozen nonzero counts
+`1, 2, 4, 8, 16, 32, 64, 128` in that run. It is an upper-bound approximation, not an accepted OLS
+coefficient. A new campaign validates this already frozen value; it must not select a new maximum or
+refit the value after opening its rows.
+
+For every frozen nonzero native-transfer count `n`, validate:
+
+```text
+native_delta(n) = target_prover_gas(n) - control_prover_gas(n)
+
+native_materiality(n) =
+    abs(5017 * n - native_delta(n)) / target_prover_gas(n)
+
+max(native_materiality(n)) <= 0.002
+```
+
+Identity, exact-repeat, successful-execution, lane, ownership, and positive-signal checks remain
+mandatory. The materiality rule replaces only the requirement that this small mixed signal pass the
+ordinary two-percent relation-residual and checkpoint-relative-error gates. The source campaign's
+largest observed whole-guest materiality is at count 128: `219576 / 181155333`, or approximately
+`0.00121209`, below the frozen `0.002` budget.
+
+Artifacts retain `native_value_transfer` as an independent transaction-layer term and record its
+status as `declared_approximation`. They record `tx_base`, `block_base`, and `proposal_startup` as
+ordinary accepted measurements only when those terms pass their original gates. A dependency blocks
+a case only when that dependency has a nonzero delta in the case equation. Consequently, the native
+approximation does not block block-base or proposal-startup fixtures whose native-transfer delta is
+zero.
+
+The fixed model status is `accepted_with_declared_approximation` only after all three ordinary fixed
+terms pass and the native materiality rule passes. State holdouts may then open. Their pairwise
+predictions cancel the native approximation when the two lanes have equal native-transfer counts;
+signature recovery and trie differences remain visible in the observed higher-layer residual. A
+passing coarse holdout permits continued use of the approximation. A failed holdout motivates a
+new predeclared transaction or state/trie model rather than a result-time change to `5017` or the
+`0.002` budget.
+
+This approximation does not by itself open the final proposal corpus or authorize production-table
+changes. All lower-layer artifacts, holdouts, formulas, coverage statements, and approximation
+evidence must still be sealed first.
+
 ## Candidate And Proposal Validation
 
 Before final validation, seal:
@@ -355,7 +418,8 @@ The experiment is complete only when:
 - all declared side-effect events have exactly one layer owner with no whole-opcode ownership
   shortcut;
 - the state/trie ownership boundary is explicit and its chosen coarse or split model passes holdouts;
-- transaction, block, and proposal fixed costs pass controlled fit and holdout gates;
+- transaction, block, and proposal fixed costs pass controlled fit and holdout gates, except for a
+  separately declared approximation that passes its frozen whole-model materiality budget;
 - the complete candidate and coverage rules are sealed before proposal output is opened;
 - final proposal predictions and coverage are independently reproducible;
 - no production schedule or configuration was changed by the experiment.

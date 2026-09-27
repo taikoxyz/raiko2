@@ -2,8 +2,8 @@
 ARG RUST_VERSION=1.95.0
 
 # Keep in sync with the sp1-zkvm version in guests/sp1/Cargo.lock.
-# For example, sp1-zkvm 6.3.0 in Cargo.lock corresponds to Docker tag v6.3.0 here.
-ARG SP1_DOCKER_TAG=v6.3.0
+# For example, sp1-zkvm 6.8.1 in Cargo.lock corresponds to Docker tag v6.8.1 here.
+ARG SP1_DOCKER_TAG=v6.8.1
 FROM ghcr.io/succinctlabs/sp1:${SP1_DOCKER_TAG}
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -56,8 +56,8 @@ ARG CARGO_PROVE_VERSION
 #
 # Security note: verify the downloaded release artifact checksum to mitigate supply-chain attacks.
 # Keep these checksums in sync with the cargo-prove release assets for the default SP1 docker tag.
-ARG CARGO_PROVE_SHA256_AMD64=9d25d5ab786a508d8f3e216caa2b51ec46127b3b5b57119ec588f8e3d06401a6
-ARG CARGO_PROVE_SHA256_ARM64=5f5b4db7f76ff168c171118dd08c241a7f1bdff28812b2d2b7cd121b0bcbaa49
+ARG CARGO_PROVE_SHA256_AMD64=0c120463d00d2aaebbacdbae4b965ac7b12b88f6ae87411b1e388ff32e6782a7
+ARG CARGO_PROVE_SHA256_ARM64=5d0447fec58698730e09fa029cd83b7a428d7daa7bb2bdf5c98b9c5fb4cb0355
 ARG TARGETARCH
 RUN set -eux; \
     version="${CARGO_PROVE_VERSION:-${SP1_DOCKER_TAG}}"; \

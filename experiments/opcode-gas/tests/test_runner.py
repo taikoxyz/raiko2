@@ -1783,6 +1783,7 @@ class RunnerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = pathlib.Path(tmp)
             out_path = tmp_path / "runs.jsonl"
+            (tmp_path / "guest-input.json").write_text("{}\n")
             with mock.patch.object(opcode_gas.subprocess, "run", fake_run):
                 opcode_gas.run_proposal_guest_input(
                     guest_launcher=pathlib.Path("target/release/guest-launcher"),
@@ -1876,14 +1877,23 @@ class RunnerTests(unittest.TestCase):
                         "label": "prover_gas",
                         "count": 99,
                     },
+                    "sp1_proposal_elf_sha256": opcode_gas.sha256_file(proposal_elf),
+                    "guest_launcher_sha256": opcode_gas.sha256_file(launcher),
                 }))
 
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
+            launcher = root / "guest-launcher"
+            launcher.write_bytes(b"reviewed launcher")
+            proposal_elf = root / "sp1_shasta_proposal.elf"
+            proposal_elf.write_bytes(b"reviewed proposal ELF")
+            (root / "guest-input.json").write_text("{}\n")
             output = root / "runs.jsonl"
-            with mock.patch.object(opcode_gas.subprocess, "run", fake_run):
+            with mock.patch.object(opcode_gas.subprocess, "run", fake_run), mock.patch.object(
+                opcode_gas, "production_sp1_proposal_elf_path", return_value=proposal_elf
+            ):
                 opcode_gas.run_proposal_guest_input(
-                    guest_launcher=pathlib.Path("target/release/guest-launcher"),
+                    guest_launcher=launcher,
                     guest_input=root / "guest-input.json",
                     proof_type="sp1",
                     case_name="proposal-1",
@@ -1917,19 +1927,41 @@ class RunnerTests(unittest.TestCase):
             "exit_code": 0,
             "gas": 99,
             "primary_workload_metric": {"label": "prover_gas", "count": 99},
+            "sp1_proposal_elf_sha256": "cd" * 32,
+            "guest_launcher_sha256": "ef" * 32,
         }
 
-        opcode_gas.validate_sp1_proposal_execution_report(report)
+        opcode_gas.validate_sp1_proposal_execution_report(
+            report,
+            expected_proposal_elf_sha256="cd" * 32,
+            expected_guest_launcher_sha256="ef" * 32,
+        )
         for field, value in (
             ("sp1_execution_engine", "standard"),
             ("sp1_gas_trace_chunk_threshold", 1),
             ("sp1_gas_trace_chunk_slots", 1),
             ("exit_code", 1),
             ("gas", 0),
+            ("sp1_proposal_elf_sha256", "00" * 32),
+            ("guest_launcher_sha256", "11" * 32),
         ):
             with self.subTest(field=field), self.assertRaises(ValueError):
                 opcode_gas.validate_sp1_proposal_execution_report(
-                    {**report, field: value}
+                    {**report, field: value},
+                    expected_proposal_elf_sha256="cd" * 32,
+                    expected_guest_launcher_sha256="ef" * 32,
+                )
+
+    def test_proposal_execution_rejects_launcher_replacement(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            launcher = pathlib.Path(tmp) / "guest-launcher"
+            launcher.write_bytes(b"executing launcher")
+            expected = opcode_gas.sha256_file(launcher)
+            launcher.write_bytes(b"replacement launcher")
+
+            with self.assertRaisesRegex(ValueError, "changed during execution"):
+                opcode_gas.validate_stable_execution_artifact(
+                    launcher, expected, label="guest-launcher"
                 )
 
     def test_parser_accepts_inventory_command(self):

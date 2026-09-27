@@ -19,6 +19,19 @@ production table or configuration.
   `--l1-network ethereum` for `taiko_mainnet`.
 - Documented the post-review sequence for frozen integration-smoke proposals Hoodi `79852` and
   Mainnet `38261`, including the boundary that smoke cannot enter or tune the unopened final corpus.
+- Review hardening now rejects every other smoke identity and every non-SP1 smoke execution, and
+  persists purpose, network, proposal ID, fixture digest, and proposal workload identity in the raw
+  JSONL row.
+- Proposal gas-estimator reports now bind the actual production proposal ELF and running
+  guest-launcher SHA-256 digests. Python independently hashes both supplied files, rejects wrong
+  report hashes, and the launcher rejects `RAIKO2_GUEST_ELF_DIR` for this production-only path.
+  The VK is not consumed by local execute/gas-estimator and therefore is not claimed as execution
+  provenance.
+- GuestInput JSON parsing and fixture hashing use one byte snapshot. Native trace and SP1 execute
+  both consume a read-only staged copy of those verified bytes, so mutation of the original path
+  cannot desynchronize persisted smoke provenance from execution. The launcher hashes the executing
+  inode through `/proc/self/exe` on Linux, while Python binds pre-run hashes and rejects an ELF or
+  launcher path that changes before report acceptance.
 
 ## TDD Evidence
 
@@ -27,10 +40,12 @@ exist (`E0425`). The first focused Python run executed 66 tests and produced the
 failures: the launcher command lacked `--sp1-execution-engine`, the proposal provenance validator
 did not exist, and Hoodi/Mainnet discovery lacked `--l1-network`.
 
-After implementation:
+After implementation and review hardening:
 
-- `cargo test -p guest-launcher proposal_gas_estimator -- --nocapture`: 2 passed, 0 failed.
-- Python 3.11 focused runner/manifest suite: 66 passed, 0 failed.
+- `cargo test -p guest-launcher proposal_gas_estimator -- --nocapture`: 4 passed, 0 failed.
+- `cargo test -p guest-launcher benchmark_report_records_sp1_execution_engine -- --nocapture`:
+  1 passed, 0 failed; standard reports omit the estimator-only digest fields.
+- Python 3.11 focused runner/manifest suite: 71 passed, 0 failed.
 
 ## Verification
 
@@ -45,6 +60,10 @@ After implementation:
   estimator implementation or either expected baseline.
 - `cargo clippy -p guest-launcher -- -D warnings`: passed.
 - Complete Python 3.11 opcode-gas unittest discovery: 506 passed, 1 skipped, 0 failed.
+
+The final focused fix reran formatting, Rust, Python, bytecode compilation, and whitespace checks.
+A redundant post-cleanup clippy rerun was stopped while rebuilding the dependency graph to preserve
+disk; the prior Task 4 clippy pass remains recorded above, but no post-review clippy pass is claimed.
 
 ## Operational Boundary
 

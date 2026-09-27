@@ -4454,13 +4454,61 @@ def run_proposal_guest_input(
     target_count: int,
     out: pathlib.Path,
     risc0_execution_po2: int = 20,
+    proposal_identity: Mapping[str, Any] | None = None,
 ) -> None:
     out.parent.mkdir(parents=True, exist_ok=True)
+    guest_input_bytes = guest_input.read_bytes()
+    if proposal_identity is not None:
+        fixture_sha256 = proposal_identity.get("fixture_sha256")
+        if not _is_sha256(fixture_sha256) or sha256_bytes(
+            guest_input_bytes
+        ) != fixture_sha256:
+            raise ValueError("proposal identity does not match GuestInput snapshot bytes")
+    with tempfile.TemporaryDirectory(prefix=".proposal-input-", dir=out.parent) as tmp:
+        execution_input = pathlib.Path(tmp) / "guest-input.json"
+        execution_input.write_bytes(guest_input_bytes)
+        execution_input.chmod(stat.S_IRUSR)
+        _run_proposal_guest_input_snapshot(
+            guest_launcher=guest_launcher,
+            execution_input=execution_input,
+            recorded_guest_input=guest_input,
+            proof_type=proof_type,
+            case_name=case_name,
+            target_raw_gas=target_raw_gas,
+            target_count=target_count,
+            out=out,
+            risc0_execution_po2=risc0_execution_po2,
+            proposal_identity=proposal_identity,
+        )
+
+
+def _run_proposal_guest_input_snapshot(
+    *,
+    guest_launcher: pathlib.Path,
+    execution_input: pathlib.Path,
+    recorded_guest_input: pathlib.Path,
+    proof_type: str,
+    case_name: str,
+    target_raw_gas: int,
+    target_count: int,
+    out: pathlib.Path,
+    risc0_execution_po2: int,
+    proposal_identity: Mapping[str, Any] | None,
+) -> None:
     report_path = out.with_name(f"{out.stem}.guest-launcher.json")
     trace_path = out.with_name(f"{out.stem}.proposal-trace.json.gz")
     trace_summary_path = out.with_name(f"{out.stem}.proposal-trace.summary.json")
     trace = None
+    expected_proposal_elf_sha256 = None
+    expected_guest_launcher_sha256 = None
     if proof_type == "sp1":
+        proposal_elf = production_sp1_proposal_elf_path()
+        if not proposal_elf.is_file():
+            raise ValueError("production SP1 proposal ELF does not exist")
+        if not guest_launcher.is_file():
+            raise ValueError("guest-launcher does not exist")
+        expected_proposal_elf_sha256 = sha256_file(proposal_elf)
+        expected_guest_launcher_sha256 = sha256_file(guest_launcher)
         subprocess.run(
             [
                 str(guest_launcher),
@@ -4471,7 +4519,7 @@ def run_proposal_guest_input(
                 "--mode",
                 "execute",
                 "--input",
-                str(guest_input),
+                str(execution_input),
                 "--json-out",
                 str(trace_path),
             ],
@@ -4487,7 +4535,7 @@ def run_proposal_guest_input(
         "--mode",
         "execute",
         "--input",
-        str(guest_input),
+        str(execution_input),
         "--json-out",
         str(report_path),
     ]
@@ -4508,20 +4556,52 @@ def run_proposal_guest_input(
 
     report = json.loads(report_path.read_text())
     if proof_type == "sp1":
-        validate_sp1_proposal_execution_report(report)
+        proposal_elf = production_sp1_proposal_elf_path()
+        validate_stable_execution_artifact(
+            proposal_elf,
+            expected_proposal_elf_sha256,
+            label="production SP1 proposal ELF",
+        )
+        validate_stable_execution_artifact(
+            guest_launcher,
+            expected_guest_launcher_sha256,
+            label="guest-launcher",
+        )
+        validate_sp1_proposal_execution_report(
+            report,
+            expected_proposal_elf_sha256=expected_proposal_elf_sha256,
+            expected_guest_launcher_sha256=expected_guest_launcher_sha256,
+        )
     case = {
         "case": case_name,
         "kind": "proposal",
         "proof_type": proof_type,
-        "guest_input": str(guest_input),
+        "guest_input": str(recorded_guest_input),
         "target_count": target_count,
         "target_raw_gas": target_raw_gas,
     }
+    if proposal_identity is not None:
+        case.update(
+            {
+                field: proposal_identity[field]
+                for field in (
+                    "purpose",
+                    "network",
+                    "proposal_id",
+                    "fixture_sha256",
+                    "workload_id",
+                )
+            }
+        )
     if trace is not None:
         case.update(join_proposal_trace_and_sp1(trace, report))
         case["proposal_trace"] = str(trace_path)
         case["proposal_trace_summary"] = str(trace_summary_path)
-    out.write_text(json.dumps(raw_run_from_report(case, report), sort_keys=True) + "\n")
+    normalized_report = dict(report)
+    normalized_report["input"] = str(recorded_guest_input)
+    out.write_text(
+        json.dumps(raw_run_from_report(case, normalized_report), sort_keys=True) + "\n"
+    )
 
 
 def _normalized_hex(value: Any, *, field_name: str) -> str:
@@ -4537,7 +4617,23 @@ def _normalized_hex(value: Any, *, field_name: str) -> str:
     return normalized
 
 
-def validate_sp1_proposal_execution_report(report: Mapping[str, Any]) -> None:
+def production_sp1_proposal_elf_path() -> pathlib.Path:
+    return REPO_ROOT / "crates/guests/elf/sp1_shasta_proposal.elf"
+
+
+def validate_stable_execution_artifact(
+    path: pathlib.Path, expected_sha256: str, *, label: str
+) -> None:
+    if not path.is_file() or sha256_file(path) != expected_sha256:
+        raise ValueError(f"{label} changed during execution")
+
+
+def validate_sp1_proposal_execution_report(
+    report: Mapping[str, Any],
+    *,
+    expected_proposal_elf_sha256: str,
+    expected_guest_launcher_sha256: str,
+) -> None:
     """Fail closed unless a proposal report has canonical local estimator provenance."""
     validate_sp1_execution_provenance(
         report, workload_kind="proposal", expected_engine="gas-estimator"
@@ -4569,6 +4665,16 @@ def validate_sp1_proposal_execution_report(report: Mapping[str, Any]) -> None:
         "count": gas,
     }:
         raise ValueError("SP1 proposal report has invalid primary workload metric")
+    if (
+        not _is_sha256(expected_proposal_elf_sha256)
+        or report.get("sp1_proposal_elf_sha256") != expected_proposal_elf_sha256
+    ):
+        raise ValueError("SP1 proposal report has the wrong production proposal ELF hash")
+    if (
+        not _is_sha256(expected_guest_launcher_sha256)
+        or report.get("guest_launcher_sha256") != expected_guest_launcher_sha256
+    ):
+        raise ValueError("SP1 proposal report has the wrong guest-launcher hash")
 
 
 def join_proposal_trace_and_sp1(
@@ -11911,6 +12017,21 @@ def assert_integration_smoke_is_disjoint(final_rows: Iterable[Mapping[str, Any]]
         raise ValueError("integration_smoke proposal is in the final_validation corpus")
 
 
+FROZEN_INTEGRATION_SMOKE_PROPOSALS = frozenset(
+    {
+        ("taiko_hoodi", 79852),
+        ("taiko_mainnet", 38261),
+    }
+)
+
+
+def assert_frozen_integration_smoke_identity(network: str, proposal_id: int) -> None:
+    if (network, proposal_id) not in FROZEN_INTEGRATION_SMOKE_PROPOSALS:
+        raise ValueError(
+            "integration_smoke identity is not one of the two frozen integration_smoke proposals"
+        )
+
+
 def freeze_smoke_row(row: Mapping[str, Any], *, purpose: str) -> dict[str, Any]:
     if row.get("purpose") != "integration_smoke" or purpose != "integration_smoke":
         raise ValueError("integration_smoke rows cannot be relabeled after execution")
@@ -11921,7 +12042,8 @@ def _proposal_guest_input_identity(guest_input: pathlib.Path) -> tuple[str, int,
     if not guest_input.is_file():
         raise ValueError(f"GuestInput does not exist: {guest_input}")
     try:
-        raw = json.loads(guest_input.read_text())
+        guest_input_bytes = guest_input.read_bytes()
+        raw = json.loads(guest_input_bytes)
         taiko = raw["taiko"]
         network = taiko["chain_spec"]["name"]
         proposal_id = taiko["proposal_id"]
@@ -11931,7 +12053,7 @@ def _proposal_guest_input_identity(guest_input: pathlib.Path) -> tuple[str, int,
         raise ValueError("GuestInput has an invalid Taiko network")
     if not isinstance(proposal_id, int) or isinstance(proposal_id, bool):
         raise ValueError("GuestInput has an invalid Taiko proposal ID")
-    return network, proposal_id, sha256_file(guest_input)
+    return network, proposal_id, sha256_bytes(guest_input_bytes)
 
 
 def prepare_integration_smoke(
@@ -11946,6 +12068,7 @@ def prepare_integration_smoke(
     assert_integration_smoke_is_disjoint(final_rows, network, proposal_id)
     if purpose != "integration_smoke":
         raise ValueError("integration_smoke rows cannot be relabeled after execution")
+    assert_frozen_integration_smoke_identity(network, proposal_id)
     if guest_input is None:
         raise ValueError("integration_smoke requires a GuestInput")
     input_network, input_proposal_id, fixture_sha256 = _proposal_guest_input_identity(
@@ -11959,6 +12082,7 @@ def prepare_integration_smoke(
             "proposal_id": proposal_id,
             "purpose": "integration_smoke",
             "fixture_sha256": fixture_sha256,
+            "workload_id": proposal_workload_id(fixture_sha256),
         },
         purpose=purpose,
     )
@@ -11978,6 +12102,7 @@ def verify_prepared_integration_smoke(
         raise ValueError("integration_smoke rows cannot be relabeled after execution")
     if record.get("network") != network or record.get("proposal_id") != proposal_id:
         raise ValueError("prepared integration_smoke record does not match run-proposal identity")
+    assert_frozen_integration_smoke_identity(network, proposal_id)
     input_network, input_proposal_id, fixture_sha256 = _proposal_guest_input_identity(
         guest_input
     )
@@ -11985,6 +12110,8 @@ def verify_prepared_integration_smoke(
         raise ValueError("GuestInput does not match run-proposal identity")
     if record.get("fixture_sha256") != fixture_sha256:
         raise ValueError("prepared integration_smoke record does not match GuestInput bytes")
+    if record.get("workload_id") != proposal_workload_id(fixture_sha256):
+        raise ValueError("prepared integration_smoke record has an invalid workload identity")
     assert_integration_smoke_is_disjoint(
         select_final_validation_corpus(), network, proposal_id
     )
@@ -25133,17 +25260,31 @@ def cmd_run(args: argparse.Namespace) -> None:
 
 
 def cmd_run_proposal(args: argparse.Namespace) -> None:
+    proposal_identity = None
     if args.purpose == "integration_smoke":
+        if args.proof_type != "sp1":
+            raise ValueError("run-proposal integration_smoke requires --proof-type sp1")
         if args.smoke_record is None or args.network is None or args.proposal_id is None:
             raise ValueError(
                 "run-proposal integration_smoke requires --smoke-record --network --proposal-id"
             )
-        verify_prepared_integration_smoke(
+        proposal_identity = verify_prepared_integration_smoke(
             _resolve_repo_path(args.smoke_record, field_name="smoke_record"),
             network=args.network,
             proposal_id=args.proposal_id,
             guest_input=args.guest_input,
         )
+    else:
+        network, proposal_id, fixture_sha256 = _proposal_guest_input_identity(
+            args.guest_input
+        )
+        proposal_identity = {
+            "purpose": "ad_hoc",
+            "network": network,
+            "proposal_id": proposal_id,
+            "fixture_sha256": fixture_sha256,
+            "workload_id": proposal_workload_id(fixture_sha256),
+        }
     run_proposal_guest_input(
         guest_launcher=args.guest_launcher,
         guest_input=args.guest_input,
@@ -25153,6 +25294,7 @@ def cmd_run_proposal(args: argparse.Namespace) -> None:
         target_count=args.target_count,
         out=args.out,
         risc0_execution_po2=args.risc0_execution_po2,
+        proposal_identity=proposal_identity,
     )
     print(f"wrote proposal raw run to {args.out}")
 

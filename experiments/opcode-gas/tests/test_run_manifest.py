@@ -368,6 +368,48 @@ class RunManifestTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "cannot be relabeled"):
             opcode_gas.prepare_integration_smoke("taiko_hoodi", 1, purpose="final_validation")
 
+    def test_integration_smoke_identity_is_exactly_the_frozen_two_proposals(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            opcode_gas, "select_final_validation_corpus", return_value=[]
+        ):
+            root = pathlib.Path(tmp)
+            guest_input = root / "guest-input.json"
+            for network, proposal_id in (
+                ("taiko_hoodi", 79852),
+                ("taiko_mainnet", 38261),
+            ):
+                with self.subTest(network=network):
+                    guest_input.write_text(json.dumps({
+                        "taiko": {
+                            "proposal_id": proposal_id,
+                            "chain_spec": {"name": network},
+                        }
+                    }) + "\n")
+                    record = opcode_gas.prepare_integration_smoke(
+                        network, proposal_id, guest_input=guest_input
+                    )
+                    fixture_sha256 = opcode_gas.sha256_file(guest_input)
+                    self.assertEqual(record, {
+                        "network": network,
+                        "proposal_id": proposal_id,
+                        "purpose": "integration_smoke",
+                        "fixture_sha256": fixture_sha256,
+                        "workload_id": opcode_gas.proposal_workload_id(
+                            fixture_sha256
+                        ),
+                    })
+
+            guest_input.write_text(json.dumps({
+                "taiko": {
+                    "proposal_id": 79853,
+                    "chain_spec": {"name": "taiko_hoodi"},
+                }
+            }) + "\n")
+            with self.assertRaisesRegex(ValueError, "frozen integration_smoke"):
+                opcode_gas.prepare_integration_smoke(
+                    "taiko_hoodi", 79853, guest_input=guest_input
+                )
+
     def test_calibration_records_exact_formula_checkpoint_versions_and_artifacts(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
@@ -646,13 +688,13 @@ class RunManifestTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "readback SHA256 mismatch"):
                     opcode_gas.publish_corpus(archive, f"gs://bucket/{digest}.tar")
 
-    def test_run_proposal_smoke_requires_a_matching_prepared_record_before_execution(self):
+    def test_run_proposal_smoke_rejects_missing_or_relabelled_prepared_record(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
             args = proposal_args(root, purpose="integration_smoke", smoke_record=root / "smoke.json")
             args.guest_input.write_text(json.dumps({
                 "taiko": {
-                    "proposal_id": 1,
+                    "proposal_id": 79852,
                     "chain_spec": {"name": "taiko_hoodi"},
                 }
             }) + "\n")
@@ -670,13 +712,107 @@ class RunManifestTests(unittest.TestCase):
                     opcode_gas.cmd_run_proposal(args)
                 execute.assert_not_called()
 
-                args.smoke_record.write_text(json.dumps({
-                    "network": "taiko_hoodi", "proposal_id": 1,
-                    "purpose": "integration_smoke",
-                    "fixture_sha256": opcode_gas.sha256_file(args.guest_input),
-                }))
+    def test_run_proposal_smoke_rejects_non_sp1_backend(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            args = proposal_args(
+                root, purpose="integration_smoke", smoke_record=root / "smoke.json"
+            )
+            args.proof_type = "risc0"
+            with mock.patch.object(opcode_gas, "run_proposal_guest_input") as execute:
+                with self.assertRaisesRegex(ValueError, "requires --proof-type sp1"):
+                    opcode_gas.cmd_run_proposal(args)
+            execute.assert_not_called()
+
+    def test_run_proposal_smoke_persists_verified_identity_in_output(self):
+        guest_hash = "0x" + "ab" * 32
+        public_output = "0x" + "12" * 32
+        executed_guest_inputs = []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            args = proposal_args(
+                root, purpose="integration_smoke", smoke_record=root / "smoke.json"
+            )
+            args.guest_launcher.write_bytes(b"reviewed launcher")
+            proposal_elf = root / "sp1_shasta_proposal.elf"
+            proposal_elf.write_bytes(b"reviewed proposal ELF")
+            args.guest_input.write_text(json.dumps({
+                "taiko": {
+                    "proposal_id": 79852,
+                    "chain_spec": {"name": "taiko_hoodi"},
+                }
+            }) + "\n")
+            fixture_sha256 = opcode_gas.sha256_file(args.guest_input)
+            workload_id = opcode_gas.proposal_workload_id(fixture_sha256)
+            args.smoke_record.write_text(json.dumps({
+                "network": "taiko_hoodi",
+                "proposal_id": 79852,
+                "purpose": "integration_smoke",
+                "fixture_sha256": fixture_sha256,
+                "workload_id": workload_id,
+            }))
+
+            def fake_run(command, check):
+                execution_input = pathlib.Path(command[command.index("--input") + 1])
+                executed_guest_inputs.append(execution_input.read_bytes())
+                json_out = pathlib.Path(command[command.index("--json-out") + 1])
+                if command[command.index("--stage") + 1] == "proposal-trace":
+                    args.guest_input.write_text(json.dumps({
+                        "taiko": {
+                            "proposal_id": 99999,
+                            "chain_spec": {"name": "taiko_hoodi"},
+                        }
+                    }) + "\n")
+                    json_out.write_bytes(b"\x1f\x8btrace")
+                    json_out.with_name(
+                        json_out.name.removesuffix(".json.gz") + ".summary.json"
+                    ).write_text(json.dumps({
+                        "status": "complete",
+                        "guest_input_sha256": guest_hash,
+                        "public_output": public_output,
+                        "parity_passed": True,
+                        "block_count": 1,
+                        "partial_block_count": 0,
+                    }))
+                else:
+                    json_out.write_text(json.dumps({
+                        "input": str(execution_input),
+                        "stage": "proposal",
+                        "mode": "execute",
+                        "sp1_execution_engine": "gas-estimator",
+                        "sp1_gas_trace_chunk_threshold": 134_217_728,
+                        "sp1_gas_trace_chunk_slots": 2,
+                        "guest_input_sha256": guest_hash,
+                        "guest_input_bincode_length": 1234,
+                        "public_values": public_output,
+                        "exit_code": 0,
+                        "gas": 99,
+                        "primary_workload_metric": {
+                            "label": "prover_gas", "count": 99,
+                        },
+                        "sp1_proposal_elf_sha256": opcode_gas.sha256_file(proposal_elf),
+                        "guest_launcher_sha256": opcode_gas.sha256_file(args.guest_launcher),
+                    }))
+
+            with mock.patch.object(opcode_gas, "REPO_ROOT", root), mock.patch.object(
+                opcode_gas, "select_final_validation_corpus", return_value=[]
+            ), mock.patch.object(
+                opcode_gas, "production_sp1_proposal_elf_path", return_value=proposal_elf
+            ), mock.patch.object(opcode_gas.subprocess, "run", fake_run):
                 opcode_gas.cmd_run_proposal(args)
-                execute.assert_called_once()
+
+            row = json.loads(args.out.read_text())
+            self.assertEqual(row["purpose"], "integration_smoke")
+            self.assertEqual(row["network"], "taiko_hoodi")
+            self.assertEqual(row["proposal_id"], 79852)
+            self.assertEqual(row["input"], str(args.guest_input))
+            self.assertEqual(row["fixture_sha256"], fixture_sha256)
+            self.assertEqual(row["workload_id"], workload_id)
+            self.assertEqual(len(set(executed_guest_inputs)), 1)
+            self.assertEqual(
+                opcode_gas.sha256_bytes(executed_guest_inputs[0]), fixture_sha256
+            )
 
     def test_run_proposal_smoke_record_must_bind_the_executed_guest_input_bytes(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -685,7 +821,7 @@ class RunManifestTests(unittest.TestCase):
             executed_input = root / "executed.json"
             prepared_input.write_text(json.dumps({
                 "taiko": {
-                    "proposal_id": 1,
+                    "proposal_id": 79852,
                     "chain_spec": {"name": "taiko_hoodi"},
                 }
             }) + "\n")
@@ -698,7 +834,7 @@ class RunManifestTests(unittest.TestCase):
             smoke_record = root / "smoke.json"
             smoke_record.write_text(json.dumps({
                 "network": "taiko_hoodi",
-                "proposal_id": 1,
+                "proposal_id": 79852,
                 "purpose": "integration_smoke",
                 "fixture_sha256": opcode_gas.sha256_file(prepared_input),
             }))
@@ -710,6 +846,32 @@ class RunManifestTests(unittest.TestCase):
                 opcode_gas, "select_final_validation_corpus", return_value=[]
             ), mock.patch.object(opcode_gas, "run_proposal_guest_input") as execute:
                 with self.assertRaisesRegex(ValueError, "GuestInput"):
+                    opcode_gas.cmd_run_proposal(args)
+            execute.assert_not_called()
+
+    def test_run_proposal_smoke_record_rejects_wrong_workload_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            args = proposal_args(
+                root, purpose="integration_smoke", smoke_record=root / "smoke.json"
+            )
+            args.guest_input.write_text(json.dumps({
+                "taiko": {
+                    "proposal_id": 79852,
+                    "chain_spec": {"name": "taiko_hoodi"},
+                }
+            }) + "\n")
+            args.smoke_record.write_text(json.dumps({
+                "network": "taiko_hoodi",
+                "proposal_id": 79852,
+                "purpose": "integration_smoke",
+                "fixture_sha256": opcode_gas.sha256_file(args.guest_input),
+                "workload_id": "00" * 32,
+            }))
+            with mock.patch.object(opcode_gas, "REPO_ROOT", root), mock.patch.object(
+                opcode_gas, "select_final_validation_corpus", return_value=[]
+            ), mock.patch.object(opcode_gas, "run_proposal_guest_input") as execute:
+                with self.assertRaisesRegex(ValueError, "workload identity"):
                     opcode_gas.cmd_run_proposal(args)
             execute.assert_not_called()
 
@@ -1052,7 +1214,7 @@ def proposal_args(root, *, purpose, smoke_record):
         purpose=purpose,
         smoke_record=smoke_record,
         network="taiko_hoodi",
-        proposal_id=1,
+        proposal_id=79852,
     )
 
 

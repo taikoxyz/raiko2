@@ -385,6 +385,14 @@ evidence:
   status, positive gas, and primary metric are valid;
 - `prepare-corpus` discovery now passes L1 network `hoodi` for `taiko_hoodi` and `ethereum` for
   `taiko_mainnet` rather than relying on the discovery script's default.
+- Smoke preparation accepts only Hoodi `79852` and Mainnet `38261`; normalized output keeps purpose,
+  network, proposal ID, fixture digest, and workload identity, and non-SP1 smoke labels fail closed.
+- Proposal reports bind the exact production proposal ELF and executing launcher digests. The
+  launcher rejects `RAIKO2_GUEST_ELF_DIR`, hashes `/proc/self/exe` on Linux, and Python rejects wrong
+  or mid-run-changing artifact hashes.
+- GuestInput identity parsing and hashing use one byte read. Native trace and SP1 execute then consume
+  the same read-only staged snapshot, so original-path mutation cannot change the executed workload
+  after smoke verification.
 
 No proposal execution, RPC acquisition, coefficient tuning, production schedule/config change, or
 corpus publication occurred in this implementation checkpoint. Hoodi proposal `79852` and Mainnet

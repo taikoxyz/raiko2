@@ -202,6 +202,10 @@ struct BenchReport {
     input: String,
     guest_input_sha256: Option<String>,
     guest_input_bincode_length: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sp1_proposal_elf_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    guest_launcher_sha256: Option<String>,
     public_values: String,
     wall_time_ms: u64,
     primary_workload_metric: Option<BenchCountEntry>,
@@ -296,6 +300,8 @@ impl BenchReport {
             input,
             guest_input_sha256: None,
             guest_input_bincode_length: None,
+            sp1_proposal_elf_sha256: None,
+            guest_launcher_sha256: None,
             public_values: String::new(),
             wall_time_ms: 0,
             primary_workload_metric: None,
@@ -1860,7 +1866,7 @@ async fn execute_sp1_guest_gas_estimator_blocking(
         execute_sp1_gas_estimator(program, stdin)
     })
     .await
-    .context("join SP1 gas-estimator proposal-guest task")?
+    .context("join SP1 guest gas-estimator task")?
 }
 
 fn canonical_sp1_core_opts() -> SP1CoreOpts {
@@ -1917,12 +1923,12 @@ fn execute_sp1_gas_estimator_with_opts(
     let mut report = ExecutionReport::default();
     while let Some(chunk) = runner
         .try_execute_chunk()
-        .map_err(|err| anyhow::anyhow!("execute minimal SP1 opcode-lab chunk: {err:?}"))?
+        .map_err(|err| anyhow::anyhow!("execute minimal SP1 guest chunk: {err:?}"))?
     {
         let mut vm = GasEstimatingVMEnum::new(&chunk, program.clone(), [0u32; 4], opts.clone());
         report += vm
             .execute()
-            .map_err(|err| anyhow::anyhow!("estimate SP1 opcode-lab gas: {err:?}"))?;
+            .map_err(|err| anyhow::anyhow!("estimate SP1 guest gas: {err:?}"))?;
     }
     let public_values = sp1_sdk::SP1PublicValues::from(runner.public_values_stream());
     Ok((public_values, report))
@@ -2054,6 +2060,11 @@ async fn run_sp1_proposal(
     input: GuestInput,
     mut report: BenchReport,
 ) -> Result<()> {
+    if args.sp1_execution_engine == Sp1ExecutionEngine::GasEstimator {
+        validate_proposal_gas_estimator_guest_elf_override(
+            std::env::var_os("RAIKO2_GUEST_ELF_DIR").as_deref(),
+        )?;
+    }
     let backend = load_sp1_shasta_backend()
         .map_err(anyhow::Error::msg)
         .context("load SP1 Shasta guest ELFs")?;
@@ -2093,12 +2104,16 @@ async fn run_sp1_proposal(
                 .map_err(anyhow::Error::msg)
                 .context("load production SP1 proposal ELF")?
                 .to_vec();
+            let proposal_elf_sha256 = hex::encode(Sha256::digest(&elf));
+            let guest_launcher_sha256 = current_guest_launcher_sha256()?;
             let (public_values, execution_report) =
                 execute_sp1_guest_gas_estimator_blocking(elf, input).await?;
             finalize_sp1_proposal_gas_estimator_report(
                 &mut report,
                 public_values.raw(),
                 &execution_report,
+                proposal_elf_sha256,
+                guest_launcher_sha256,
             )?;
         }
     }
@@ -2125,13 +2140,47 @@ async fn run_sp1_proposal(
     Ok(())
 }
 
+fn validate_proposal_gas_estimator_guest_elf_override(
+    guest_elf_dir: Option<&std::ffi::OsStr>,
+) -> Result<()> {
+    if guest_elf_dir.is_some() {
+        bail!(
+            "proposal gas-estimator requires the production SP1 proposal ELF and rejects \
+             RAIKO2_GUEST_ELF_DIR"
+        );
+    }
+    Ok(())
+}
+
+fn current_guest_launcher_sha256() -> Result<String> {
+    let path = guest_launcher_executable_path()?;
+    let bytes = fs::read(&path)
+        .with_context(|| format!("read current guest-launcher executable {}", path.display()))?;
+    Ok(hex::encode(Sha256::digest(bytes)))
+}
+
+fn guest_launcher_executable_path() -> Result<PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        Ok(PathBuf::from("/proc/self/exe"))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        std::env::current_exe().context("resolve current guest-launcher executable")
+    }
+}
+
 fn finalize_sp1_proposal_gas_estimator_report(
     report: &mut BenchReport,
     public_values: String,
     execution_report: &ExecutionReport,
+    proposal_elf_sha256: String,
+    guest_launcher_sha256: String,
 ) -> Result<()> {
     apply_sp1_execution_engine_metadata(report, Sp1ExecutionEngine::GasEstimator);
     report.public_values = public_values;
+    report.sp1_proposal_elf_sha256 = Some(proposal_elf_sha256);
+    report.guest_launcher_sha256 = Some(guest_launcher_sha256);
     apply_execution_metadata(report, execution_report);
     match report.exit_code {
         Some(0) => Ok(()),
@@ -2257,9 +2306,10 @@ mod tests {
         apply_risc0_execution_metadata, apply_sp1_metadata, canonical_sp1_core_opts,
         canonicalize_sp1_core_opts, execute_opcode_lab_gas_estimator_with_opts,
         finalize_opcode_lab_execution_report, finalize_sp1_proposal_gas_estimator_report,
-        install_opcode_lab_input_identity, new_controlled_overhead_report, parse_sp1_program,
-        read_input, read_opcode_lab_input, read_opcode_lab_input_list, risc0_padded_cycles,
-        run_controlled_state_holdout_trace,
+        guest_launcher_executable_path, install_opcode_lab_input_identity,
+        new_controlled_overhead_report, parse_sp1_program, read_input, read_opcode_lab_input,
+        read_opcode_lab_input_list, risc0_padded_cycles, run_controlled_state_holdout_trace,
+        validate_proposal_gas_estimator_guest_elf_override,
     };
     use alloy_primitives::{Address, B256, hex};
     use clap::Parser as _;
@@ -2270,7 +2320,7 @@ mod tests {
     use raiko2_primitives_shasta::{GuestInput, build_proof_carry_data_from_witness_spec};
     use raiko2_prover::sp1::Sp1ExecutionMetadata;
     use sp1_sdk::ExecutionReport;
-    use std::fs;
+    use std::{ffi::OsStr, fs};
 
     #[test]
     fn parses_controlled_overhead_production_proposal_stage() {
@@ -2752,12 +2802,35 @@ mod tests {
     }
 
     #[test]
+    fn proposal_gas_estimator_rejects_guest_elf_directory_override() {
+        let error = validate_proposal_gas_estimator_guest_elf_override(Some(OsStr::new(
+            "/tmp/stale-guest-artifacts",
+        )))
+        .expect_err("proposal gas estimation must reject an environment override");
+
+        assert!(error.to_string().contains("RAIKO2_GUEST_ELF_DIR"));
+        validate_proposal_gas_estimator_guest_elf_override(None)
+            .expect("the production guest directory is accepted");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn proposal_gas_estimator_hashes_the_executing_launcher_inode() {
+        assert_eq!(
+            guest_launcher_executable_path().expect("resolve executing launcher inode"),
+            std::path::PathBuf::from("/proc/self/exe")
+        );
+    }
+
+    #[test]
     fn benchmark_report_records_sp1_execution_engine() {
         let mut report = BenchReport::new("opcode-lab", "execute", "core", "input.json".into());
         let standard = serde_json::to_value(&report).expect("serialize standard report");
         assert_eq!(standard["sp1_execution_engine"], "standard");
         assert!(standard["sp1_gas_trace_chunk_threshold"].is_null());
         assert!(standard["sp1_gas_trace_chunk_slots"].is_null());
+        assert!(standard.get("sp1_proposal_elf_sha256").is_none());
+        assert!(standard.get("guest_launcher_sha256").is_none());
 
         report.sp1_execution_engine = Sp1ExecutionEngine::GasEstimator.as_str();
         report.sp1_gas_trace_chunk_threshold = Some(134_217_728);
@@ -3115,8 +3188,14 @@ mod tests {
         report.guest_input_sha256 = Some(format!("0x{}", "11".repeat(32)));
         report.guest_input_bincode_length = Some(1234);
 
-        finalize_sp1_proposal_gas_estimator_report(&mut report, "0x1234".into(), &execution)
-            .expect("finalize proposal estimator report");
+        finalize_sp1_proposal_gas_estimator_report(
+            &mut report,
+            "0x1234".into(),
+            &execution,
+            "22".repeat(32),
+            "33".repeat(32),
+        )
+        .expect("finalize proposal estimator report");
 
         let serialized = serde_json::to_value(report).expect("serialize proposal report");
         assert_eq!(serialized["stage"], "proposal");
@@ -3131,6 +3210,8 @@ mod tests {
         assert_eq!(serialized["guest_input_bincode_length"], 1234);
         assert_eq!(serialized["public_values"], "0x1234");
         assert_eq!(serialized["exit_code"], 0);
+        assert_eq!(serialized["sp1_proposal_elf_sha256"], "22".repeat(32));
+        assert_eq!(serialized["guest_launcher_sha256"], "33".repeat(32));
     }
 
     #[test]

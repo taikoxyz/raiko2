@@ -658,7 +658,9 @@ or cadence.
 
 The fast engine is restricted to local SP1 execute-mode opcode labs and production proposal-guest
 validation. Proposal gas estimation always loads the production proposal ELF and rejects proof,
-network-prover, aggregation, and single-ELF override modes. Precompile, aggregation, and
+network-prover, aggregation, single-ELF override modes, and `RAIKO2_GUEST_ELF_DIR`. Its report
+records the exact proposal ELF and guest-launcher SHA-256 digests; `run-proposal` independently
+hashes both files and rejects a mismatched report. Precompile, aggregation, and
 proof-generation paths continue to use their normal engines. Use direct
 `guest-launcher --sp1-execution-engine standard` runs only for focused parity checks; do not mix
 standard and gas-estimator rows in one fit. The estimator is an offline calibration and validation
@@ -1016,6 +1018,11 @@ the final 40-Hoodi/20-Mainnet corpus. Do not substitute another proposal, add ei
 final corpus, or tune a coefficient from its result. The final corpus remains unopened until this
 plumbing change has independent review and the two smoke joins complete.
 
+`prepare-integration-smoke` rejects every other network/proposal pair. Its record and the resulting
+`run.jsonl` bind `purpose`, `network`, `proposal_id`, the exact GuestInput fixture digest, and the
+derived proposal workload identity. An integration smoke accepts only `--proof-type sp1`; a RISC0
+execute run cannot be labelled as this checkpoint.
+
 Run the following only from the reviewed clean revision. The two input files are preflight-produced
 `GuestInput` files stored under the ignored smoke directory; acquiring them from RPC is a separate
 read-only operation. The `--target-raw-gas 1` arguments are legacy raw-run metadata and do not enter
@@ -1192,8 +1199,10 @@ then supply the same `--network`, `--proposal-id`, and
 `--smoke-record <record.json>` to
 `run-proposal --purpose integration_smoke`. The command validates that the
 record is still purpose-labelled `integration_smoke`, is disjoint from the
-frozen final 60 rows, and binds the exact GuestInput bytes and embedded
-network/proposal identity before invoking guest-launcher.
+frozen final 60 rows, is one of Hoodi `79852` or Mainnet `38261`, and binds the exact GuestInput
+bytes, derived workload identity, and embedded network/proposal identity before invoking
+guest-launcher. The normalized JSONL row preserves all five fields so later review can audit that
+the row never entered final validation.
 
 - Add a Taiko/reth-context revm lab that keeps the `revm-opcode-lab` execution path but uses Taiko
   fork config, block env, and realistic tx env instead of fixed Osaka/mainnet benchmark defaults.

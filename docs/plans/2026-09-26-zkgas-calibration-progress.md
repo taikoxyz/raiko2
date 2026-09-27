@@ -4,7 +4,7 @@
 
 In progress.
 
-Last updated: 2026-09-27.
+Last updated: 2026-09-28.
 
 This document is the execution-status ledger for the ZKGas calibration work. It records what is
 currently proved, what is actively being changed, and which gate opens the next layer. It does not
@@ -66,7 +66,7 @@ Osaka execution semantics while continuing to bind the actual exported Unzen sch
 | State/trie | Coarse model accepted | Preserve the sealed holdout evidence; split only after a new predeclared experiment |
 | Transaction | Declared approximation accepted and sealed | Preserve `5017` and its `0.002` materiality budget |
 | Block | Fixed base accepted and sealed | Preserve the selected round-128 fixed-cost artifact |
-| Proposal | Closed | Seal every lower layer before opening the corpus |
+| Proposal | Integration-smoke plumbing implemented; no result opened | Review, then run the two disjoint smoke rows before opening the corpus |
 | Other ZKVM backends | Future | Measure natively or validate an explicit bridge |
 
 ## Sealed Baseline
@@ -369,11 +369,35 @@ opcode-gas Python suite with one existing opt-in skip, and all 27 controlled-wor
 The controller's independent post-commit replay and adversarial review remain the next gate before
 this evidence is used to open any proposal input.
 
+## Implementation Checkpoint: Proposal Integration-Smoke Plumbing
+
+The Task 4 implementation adds the missing local proposal-validation path without opening proposal
+evidence:
+
+- `guest-launcher --stage proposal --proof-type sp1 --mode execute --sp1-prover local
+  --sp1-execution-engine gas-estimator` loads the production proposal ELF, applies the frozen SP1
+  gas-estimator chunk threshold `134217728` and slot count `2`, and emits GuestInput identity,
+  public output, exit status, `proverGas`, primary metric, and execution diagnostics in one report;
+- proposal gas estimation still rejects proof mode, a network prover, aggregation, and an alternate
+  single ELF;
+- `run-proposal --proof-type sp1` explicitly selects this engine and rejects a report unless its
+  proposal/execute identity, canonical chunk parameters, GuestInput/public-output join fields, exit
+  status, positive gas, and primary metric are valid;
+- `prepare-corpus` discovery now passes L1 network `hoodi` for `taiko_hoodi` and `ethereum` for
+  `taiko_mainnet` rather than relying on the discovery script's default.
+
+No proposal execution, RPC acquisition, coefficient tuning, production schedule/config change, or
+corpus publication occurred in this implementation checkpoint. Hoodi proposal `79852` and Mainnet
+proposal `38261` are frozen only as the later integration-smoke pair and are disjoint from the still
+unopened final corpus. The exact post-review smoke sequence is documented in the experiment README.
+
 ## Next Gate
 
-Independently replay and adversarially review derivation `3e4de6eecb5e92aa59a6a4b9`. After that
-review closes, consolidate the complete lower-layer estimator and its coverage statement before
-authorizing the fixed proposal-validation corpus. Proposal execution remains closed.
+Independently review the Task 4 proposal plumbing. Then build the reviewed `preflight` and
+`guest-launcher`, seal and replay the composite estimator at that clean revision, and run Hoodi
+proposal `79852` plus Mainnet proposal `38261` as purpose-labelled `integration_smoke` rows. Record
+their exact trace/report joins, predictions, actual `proverGas`, APE, per-layer contributions,
+coverage, and gaps without changing a coefficient. The final 60-row corpus remains unopened.
 
 ## Next Milestones
 

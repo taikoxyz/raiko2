@@ -747,10 +747,74 @@ class RunManifestTests(unittest.TestCase):
                 opcode_gas, "select_final_validation_corpus", return_value=rows
             ), mock.patch.object(opcode_gas.subprocess, "run", fake_run):
                 opcode_gas.cmd_prepare_corpus(args)
+                discovery = next(
+                    command
+                    for command in calls
+                    if any("stress_shasta_proposal.py" in part for part in command)
+                )
+                self.assertEqual(
+                    discovery[discovery.index("--l1-network") + 1], "hoodi"
+                )
                 preflight = next(command for command in calls if command[0] == "target/release/preflight")
                 self.assertEqual(preflight[preflight.index("--chain-spec-file") + 1], str(spec))
                 self.assertTrue((root / "corpus" / "taiko_hoodi" / "proposal_7.json").exists())
                 self.assertTrue((root / "manifest.json").exists())
+
+    def test_prepare_corpus_maps_taiko_mainnet_discovery_to_ethereum_l1(self):
+        rows = [{
+            "network": "taiko_mainnet",
+            "proposal_id": 9,
+            "block_count": 1,
+            "total_zkgas": 1,
+            "purpose": "final_validation",
+        }]
+        calls = []
+
+        def fake_run(command, **kwargs):
+            calls.append(command)
+            if any("stress_shasta_proposal.py" in part for part in command):
+                pathlib.Path(command[command.index("--proposal-out") + 1]).write_text(
+                    json.dumps([{
+                        "proposal_id": 9,
+                        "l1_inclusion_block_number": 10,
+                        "last_anchor_block_number": 9,
+                        "l2_start": 1,
+                        "l2_end": 1,
+                    }])
+                )
+            else:
+                pathlib.Path(command[command.index("--output") + 1]).write_text(
+                    '{"blocks":[{"block_difficulty":1,"timestamp":1}]}\n'
+                )
+            return subprocess_completed(command)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            spec = root / "chain-spec.json"
+            spec.write_text(json.dumps(actual_chain_spec_list("taiko_mainnet", 1)))
+            args = opcode_gas.build_parser().parse_args([
+                "prepare-corpus", "--corpus-root", "corpus",
+                "--l1-rpc", "taiko_mainnet=https://l1.invalid",
+                "--l2-rpc", "taiko_mainnet=https://l2.invalid",
+                "--chain-spec-hash",
+                f"taiko_mainnet={hashlib.sha256(spec.read_bytes()).hexdigest()}",
+                "--chain-spec-file", "taiko_mainnet=chain-spec.json",
+            ])
+            with mock.patch.object(opcode_gas, "REPO_ROOT", root), mock.patch.object(
+                opcode_gas, "git_head", return_value="a" * 40
+            ), mock.patch.object(
+                opcode_gas, "git_worktree_status", return_value=""
+            ), mock.patch.object(
+                opcode_gas, "select_final_validation_corpus", return_value=rows
+            ), mock.patch.object(opcode_gas.subprocess, "run", fake_run):
+                opcode_gas.cmd_prepare_corpus(args)
+
+        discovery = next(
+            command
+            for command in calls
+            if any("stress_shasta_proposal.py" in part for part in command)
+        )
+        self.assertEqual(discovery[discovery.index("--l1-network") + 1], "ethereum")
 
     def test_controlled_manifest_is_materialized_and_swap_is_rejected_before_generation(self):
         with tempfile.TemporaryDirectory() as tmp:

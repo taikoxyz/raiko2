@@ -543,14 +543,15 @@ impl Args {
         }
         if !matches!(
             self.stage,
-            Stage::OpcodeLab
+            Stage::Proposal
+                | Stage::OpcodeLab
                 | Stage::RevmOpcodeLab
                 | Stage::ControlledOverhead
                 | Stage::ControlledBlock
                 | Stage::ControlledStateHoldout
         ) {
             bail!(
-                "--sp1-execution-engine gas-estimator is restricted to opcode labs, controlled overhead, controlled blocks, and controlled state holdouts"
+                "--sp1-execution-engine gas-estimator is restricted to proposals, opcode labs, controlled overhead, controlled blocks, and controlled state holdouts"
             );
         }
         if self.proof_type != ProofType::Sp1 {
@@ -1838,7 +1839,7 @@ async fn execute_opcode_lab_gas_estimator_blocking(
 fn parse_sp1_program(elf: &[u8]) -> Result<Arc<Program>> {
     Program::from(elf)
         .map(Arc::new)
-        .map_err(|err| anyhow::anyhow!("parse SP1 opcode-lab ELF: {err:?}"))
+        .map_err(|err| anyhow::anyhow!("parse SP1 guest ELF: {err:?}"))
 }
 
 fn execute_opcode_lab_gas_estimator(
@@ -1859,7 +1860,7 @@ async fn execute_sp1_guest_gas_estimator_blocking(
         execute_sp1_gas_estimator(program, stdin)
     })
     .await
-    .context("join SP1 gas-estimator controlled-block task")?
+    .context("join SP1 gas-estimator proposal-guest task")?
 }
 
 fn canonical_sp1_core_opts() -> SP1CoreOpts {
@@ -2053,45 +2054,64 @@ async fn run_sp1_proposal(
     input: GuestInput,
     mut report: BenchReport,
 ) -> Result<()> {
-    let sp1_config = args.sp1_config()?;
     let backend = load_sp1_shasta_backend()
         .map_err(anyhow::Error::msg)
         .context("load SP1 Shasta guest ELFs")?;
-    let prover = Sp1Prover::new(sp1_config);
     report.input = input_path.display().to_string();
     record_memory_snapshot(&mut report, "proposal:before_sp1_prover");
     let start = Instant::now();
-    let proof = prover
-        .prove(input, &serde_json::Value::Null, &backend)
-        .await
-        .context("SP1 proposal failed")?;
+    match args.sp1_execution_engine {
+        Sp1ExecutionEngine::Standard => {
+            let prover = Sp1Prover::new(args.sp1_config()?);
+            let proof = prover
+                .prove(input, &serde_json::Value::Null, &backend)
+                .await
+                .context("SP1 proposal failed")?;
+            if args.mode == Mode::Execute {
+                let metadata_value = proof
+                    .extra_data
+                    .as_ref()
+                    .and_then(|extra_data| extra_data.get("sp1"))
+                    .cloned()
+                    .context("SP1 execute proof is missing production metadata")?;
+                let metadata: Sp1ExecutionMetadata = serde_json::from_value(metadata_value)
+                    .context("parse production SP1 execution metadata")?;
+                apply_sp1_metadata(&mut report, &metadata);
+            } else {
+                report.public_values = proof
+                    .input
+                    .map(|input| format!("{input:#x}"))
+                    .unwrap_or_default();
+                if let Some(path) = &args.output {
+                    write_proof_json(path, &proof)?;
+                }
+            }
+        }
+        Sp1ExecutionEngine::GasEstimator => {
+            let elf = backend
+                .elf(ProofStage::Proposal)
+                .map_err(anyhow::Error::msg)
+                .context("load production SP1 proposal ELF")?
+                .to_vec();
+            let (public_values, execution_report) =
+                execute_sp1_guest_gas_estimator_blocking(elf, input).await?;
+            finalize_sp1_proposal_gas_estimator_report(
+                &mut report,
+                public_values.raw(),
+                &execution_report,
+            )?;
+        }
+    }
     report.wall_time_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
     record_memory_snapshot(&mut report, "proposal:after_sp1_prover");
 
     if args.mode == Mode::Execute {
-        let metadata_value = proof
-            .extra_data
-            .as_ref()
-            .and_then(|extra_data| extra_data.get("sp1"))
-            .cloned()
-            .context("SP1 execute proof is missing production metadata")?;
-        let metadata: Sp1ExecutionMetadata = serde_json::from_value(metadata_value)
-            .context("parse production SP1 execution metadata")?;
-        apply_sp1_metadata(&mut report, &metadata);
         record_memory_snapshot(&mut report, "proposal:after_apply_execution_metadata");
         if !report.cycle_tracker.is_empty() {
             println!("cycle_tracker:");
             for entry in &report.cycle_tracker {
                 println!("  {}: {}", entry.label, entry.cycles);
             }
-        }
-    } else {
-        report.public_values = proof
-            .input
-            .map(|input| format!("{input:#x}"))
-            .unwrap_or_default();
-        if let Some(path) = &args.output {
-            write_proof_json(path, &proof)?;
         }
     }
 
@@ -2103,6 +2123,21 @@ async fn run_sp1_proposal(
     }
 
     Ok(())
+}
+
+fn finalize_sp1_proposal_gas_estimator_report(
+    report: &mut BenchReport,
+    public_values: String,
+    execution_report: &ExecutionReport,
+) -> Result<()> {
+    apply_sp1_execution_engine_metadata(report, Sp1ExecutionEngine::GasEstimator);
+    report.public_values = public_values;
+    apply_execution_metadata(report, execution_report);
+    match report.exit_code {
+        Some(0) => Ok(()),
+        Some(code) => bail!("SP1 proposal gas-estimator guest exited with code {code}"),
+        None => bail!("SP1 proposal gas-estimator guest exit code is missing"),
+    }
 }
 
 async fn run_risc0_proposal(
@@ -2221,9 +2256,10 @@ mod tests {
         apply_controlled_opcode_trace, apply_controlled_precompile_trace,
         apply_risc0_execution_metadata, apply_sp1_metadata, canonical_sp1_core_opts,
         canonicalize_sp1_core_opts, execute_opcode_lab_gas_estimator_with_opts,
-        finalize_opcode_lab_execution_report, install_opcode_lab_input_identity,
-        new_controlled_overhead_report, parse_sp1_program, read_input, read_opcode_lab_input,
-        read_opcode_lab_input_list, risc0_padded_cycles, run_controlled_state_holdout_trace,
+        finalize_opcode_lab_execution_report, finalize_sp1_proposal_gas_estimator_report,
+        install_opcode_lab_input_identity, new_controlled_overhead_report, parse_sp1_program,
+        read_input, read_opcode_lab_input, read_opcode_lab_input_list, risc0_padded_cycles,
+        run_controlled_state_holdout_trace,
     };
     use alloy_primitives::{Address, B256, hex};
     use clap::Parser as _;
@@ -2616,6 +2652,7 @@ mod tests {
     #[test]
     fn gas_estimator_accepts_local_sp1_execute_for_every_supported_stage() {
         for stage in [
+            "proposal",
             "opcode-lab",
             "revm-opcode-lab",
             "controlled-overhead",
@@ -2648,7 +2685,10 @@ mod tests {
     fn gas_estimator_rejects_non_lab_prove_non_local_and_aggregate_usage() {
         let invalid = [
             ("precompile-lab", "sp1", "execute", "local", false),
-            ("proposal", "sp1", "execute", "local", false),
+            ("proposal", "sp1", "prove", "local", false),
+            ("proposal", "sp1", "execute", "network", false),
+            ("proposal", "native", "execute", "local", false),
+            ("proposal", "sp1", "execute", "local", true),
             ("opcode-lab", "sp1", "prove", "local", false),
             ("opcode-lab", "sp1", "execute", "network", false),
             ("opcode-lab", "native", "execute", "local", false),
@@ -2682,6 +2722,33 @@ mod tests {
                 args.proof_type,
             );
         }
+    }
+
+    #[test]
+    fn proposal_gas_estimator_rejects_alternate_elf() {
+        let args = Args::try_parse_from([
+            "guest-launcher",
+            "--stage",
+            "proposal",
+            "--proof-type",
+            "sp1",
+            "--mode",
+            "execute",
+            "--sp1-prover",
+            "local",
+            "--sp1-execution-engine",
+            "gas-estimator",
+            "--elf",
+            "/tmp/proposal.elf",
+            "--input",
+            "/tmp/input.json",
+        ])
+        .expect("parse proposal gas-estimator args");
+
+        let error = args
+            .validate_standard_guest_artifacts()
+            .expect_err("proposal gas estimation must use the production ELF");
+        assert!(error.to_string().contains("production guest pair"));
     }
 
     #[test]
@@ -3033,6 +3100,37 @@ mod tests {
         assert_eq!(report.public_values, "0x12");
         assert_eq!(report.gas, Some(7));
         assert_eq!(report.total_instruction_count, Some(11));
+    }
+
+    #[test]
+    fn proposal_gas_estimator_report_preserves_provenance_and_join_fields() {
+        let mut execution = ExecutionReport::default();
+        execution.exit_code = 0;
+        let mut report = BenchReport::new(
+            "proposal",
+            "execute",
+            "compressed",
+            "input.json".to_string(),
+        );
+        report.guest_input_sha256 = Some(format!("0x{}", "11".repeat(32)));
+        report.guest_input_bincode_length = Some(1234);
+
+        finalize_sp1_proposal_gas_estimator_report(&mut report, "0x1234".into(), &execution)
+            .expect("finalize proposal estimator report");
+
+        let serialized = serde_json::to_value(report).expect("serialize proposal report");
+        assert_eq!(serialized["stage"], "proposal");
+        assert_eq!(serialized["mode"], "execute");
+        assert_eq!(serialized["sp1_execution_engine"], "gas-estimator");
+        assert_eq!(serialized["sp1_gas_trace_chunk_threshold"], 134_217_728);
+        assert_eq!(serialized["sp1_gas_trace_chunk_slots"], 2);
+        assert_eq!(
+            serialized["guest_input_sha256"],
+            format!("0x{}", "11".repeat(32))
+        );
+        assert_eq!(serialized["guest_input_bincode_length"], 1234);
+        assert_eq!(serialized["public_values"], "0x1234");
+        assert_eq!(serialized["exit_code"], 0);
     }
 
     #[test]

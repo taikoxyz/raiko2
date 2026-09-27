@@ -4492,7 +4492,14 @@ def run_proposal_guest_input(
         str(report_path),
     ]
     if proof_type == "sp1":
-        cmd.extend(["--sp1-prover", "local"])
+        cmd.extend(
+            [
+                "--sp1-prover",
+                "local",
+                "--sp1-execution-engine",
+                "gas-estimator",
+            ]
+        )
     elif proof_type == "risc0":
         cmd.extend(["--risc0-execution-po2", str(risc0_execution_po2)])
     else:
@@ -4500,6 +4507,8 @@ def run_proposal_guest_input(
     subprocess.run(cmd, check=True)
 
     report = json.loads(report_path.read_text())
+    if proof_type == "sp1":
+        validate_sp1_proposal_execution_report(report)
     case = {
         "case": case_name,
         "kind": "proposal",
@@ -4526,6 +4535,40 @@ def _normalized_hex(value: Any, *, field_name: str) -> str:
     except ValueError as exc:
         raise ValueError(f"{field_name} must be a hex string") from exc
     return normalized
+
+
+def validate_sp1_proposal_execution_report(report: Mapping[str, Any]) -> None:
+    """Fail closed unless a proposal report has canonical local estimator provenance."""
+    validate_sp1_execution_provenance(
+        report, workload_kind="proposal", expected_engine="gas-estimator"
+    )
+    guest_input_sha256 = report.get("guest_input_sha256")
+    guest_input_bincode_length = report.get("guest_input_bincode_length")
+    public_values = _normalized_hex(
+        report.get("public_values"), field_name="SP1 public output"
+    )
+    gas = report.get("gas")
+    if report.get("stage") != "proposal" or report.get("mode") != "execute":
+        raise ValueError("SP1 proposal report has the wrong stage or mode")
+    if (
+        not isinstance(guest_input_sha256, str)
+        or not guest_input_sha256.startswith("0x")
+        or not _is_sha256(guest_input_sha256[2:])
+        or isinstance(guest_input_bincode_length, bool)
+        or not isinstance(guest_input_bincode_length, int)
+        or guest_input_bincode_length <= 0
+        or len(public_values) != 66
+    ):
+        raise ValueError("SP1 proposal report has invalid join identity fields")
+    if report.get("exit_code") != 0:
+        raise ValueError("SP1 proposal gas-estimator guest did not exit successfully")
+    if isinstance(gas, bool) or not isinstance(gas, int) or gas <= 0:
+        raise ValueError("SP1 proposal report has invalid proverGas")
+    if report.get("primary_workload_metric") != {
+        "label": "prover_gas",
+        "count": gas,
+    }:
+        raise ValueError("SP1 proposal report has invalid primary workload metric")
 
 
 def join_proposal_trace_and_sp1(
@@ -12040,6 +12083,16 @@ def _guest_input_block_summary(path: pathlib.Path) -> tuple[int, int]:
     return len(values), sum(values)
 
 
+def proposal_discovery_l1_network(network: str) -> str:
+    try:
+        return {
+            "taiko_hoodi": "hoodi",
+            "taiko_mainnet": "ethereum",
+        }[network]
+    except KeyError as error:
+        raise ValueError(f"unsupported proposal-discovery network: {network}") from error
+
+
 def _assert_guest_input_post_unzen(path: pathlib.Path, activation: tuple[str, int]) -> None:
     guest_input = json.loads(path.read_text())
     blocks = guest_input.get("blocks")
@@ -12095,7 +12148,29 @@ def prepare_corpus(*, corpus_root: pathlib.Path, l1_rpc_by_network: Mapping[str,
         unzen_activation = _unzen_activation_from_chain_spec(chain_spec_path, network)
         with tempfile.TemporaryDirectory(prefix="opcode-gas-discovery-") as tmp:
             discovery = pathlib.Path(tmp) / f"{network}.json"
-            subprocess.run([os.environ.get("PYTHON_BIN", str(pathlib.Path.home() / ".venv/bin/python")), "scripts/regression/stress_shasta_proposal.py", "--network", network, "--l1-rpc", l1_rpc_by_network[network], "--l2-rpc", l2_rpc_by_network[network], "--proposal-ids", ",".join(str(row["proposal_id"]) for row in selected), "--discover-only", "--proposal-out", str(discovery)], cwd=REPO_ROOT, check=True)
+            subprocess.run(
+                [
+                    os.environ.get(
+                        "PYTHON_BIN", str(pathlib.Path.home() / ".venv/bin/python")
+                    ),
+                    "scripts/regression/stress_shasta_proposal.py",
+                    "--network",
+                    network,
+                    "--l1-network",
+                    proposal_discovery_l1_network(network),
+                    "--l1-rpc",
+                    l1_rpc_by_network[network],
+                    "--l2-rpc",
+                    l2_rpc_by_network[network],
+                    "--proposal-ids",
+                    ",".join(str(row["proposal_id"]) for row in selected),
+                    "--discover-only",
+                    "--proposal-out",
+                    str(discovery),
+                ],
+                cwd=REPO_ROOT,
+                check=True,
+            )
             discovered = _discovery_rows(discovery)
             for row in selected:
                 proposal_id = int(row["proposal_id"])

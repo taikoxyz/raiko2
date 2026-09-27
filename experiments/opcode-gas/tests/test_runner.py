@@ -1841,6 +1841,7 @@ class RunnerTests(unittest.TestCase):
     def test_run_sp1_proposal_executes_trace_first_and_joins_exact_identities(self):
         calls = []
         guest_hash = "0x" + "ab" * 32
+        public_output = "0x" + "12" * 32
 
         def fake_run(cmd, check):
             calls.append(cmd)
@@ -1854,16 +1855,27 @@ class RunnerTests(unittest.TestCase):
                 summary_out.write_text(opcode_gas.json.dumps({
                     "status": "complete",
                     "guest_input_sha256": guest_hash,
-                    "public_output": "0x1234",
+                    "public_output": public_output,
                     "parity_passed": True,
                     "block_count": 1,
                     "partial_block_count": 0,
                 }))
             else:
                 json_out.write_text(opcode_gas.json.dumps({
+                    "stage": "proposal",
+                    "mode": "execute",
+                    "sp1_execution_engine": "gas-estimator",
+                    "sp1_gas_trace_chunk_threshold": 134_217_728,
+                    "sp1_gas_trace_chunk_slots": 2,
                     "guest_input_sha256": guest_hash,
-                    "public_values": "1234",
+                    "guest_input_bincode_length": 1234,
+                    "public_values": public_output,
+                    "exit_code": 0,
                     "gas": 99,
+                    "primary_workload_metric": {
+                        "label": "prover_gas",
+                        "count": 99,
+                    },
                 }))
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -1883,10 +1895,42 @@ class RunnerTests(unittest.TestCase):
 
         self.assertEqual(calls[0][calls[0].index("--stage") + 1], "proposal-trace")
         self.assertEqual(calls[1][calls[1].index("--stage") + 1], "proposal")
+        self.assertEqual(
+            calls[1][calls[1].index("--sp1-execution-engine") + 1],
+            "gas-estimator",
+        )
         self.assertEqual(row["guest_input_sha256"], guest_hash)
-        self.assertEqual(row["public_output"], "0x1234")
+        self.assertEqual(row["public_output"], public_output)
         self.assertTrue(row["trace_ab_passed"])
         self.assertTrue(row["proposal_trace"].endswith(".json.gz"))
+
+    def test_sp1_proposal_report_requires_canonical_gas_estimator_provenance(self):
+        report = {
+            "stage": "proposal",
+            "mode": "execute",
+            "sp1_execution_engine": "gas-estimator",
+            "sp1_gas_trace_chunk_threshold": 134_217_728,
+            "sp1_gas_trace_chunk_slots": 2,
+            "guest_input_sha256": "0x" + "ab" * 32,
+            "guest_input_bincode_length": 1234,
+            "public_values": "0x" + "12" * 32,
+            "exit_code": 0,
+            "gas": 99,
+            "primary_workload_metric": {"label": "prover_gas", "count": 99},
+        }
+
+        opcode_gas.validate_sp1_proposal_execution_report(report)
+        for field, value in (
+            ("sp1_execution_engine", "standard"),
+            ("sp1_gas_trace_chunk_threshold", 1),
+            ("sp1_gas_trace_chunk_slots", 1),
+            ("exit_code", 1),
+            ("gas", 0),
+        ):
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                opcode_gas.validate_sp1_proposal_execution_report(
+                    {**report, field: value}
+                )
 
     def test_parser_accepts_inventory_command(self):
         args = opcode_gas.build_parser().parse_args(

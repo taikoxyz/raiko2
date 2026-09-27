@@ -656,8 +656,10 @@ canonical gas-estimation cadence (`gas_trace_chunk_threshold = 134217728`,
 `gas_trace_chunk_slots = 2`) in calibration provenance and rejects rows produced by another engine
 or cadence.
 
-The fast engine is restricted to local SP1 execute-mode opcode labs. Proposal, precompile, overhead,
-aggregation, and proof-generation paths continue to use their normal engines. Use direct
+The fast engine is restricted to local SP1 execute-mode opcode labs and production proposal-guest
+validation. Proposal gas estimation always loads the production proposal ELF and rejects proof,
+network-prover, aggregation, and single-ELF override modes. Precompile, aggregation, and
+proof-generation paths continue to use their normal engines. Use direct
 `guest-launcher --sp1-execution-engine standard` runs only for focused parity checks; do not mix
 standard and gas-estimator rows in one fit. The estimator is an offline calibration and validation
 oracle, not a production online quote or admission path. Production online behavior continues to
@@ -1006,6 +1008,77 @@ failures, and parity failures remain explicit gaps; the estimator has no fallbac
 When `--out` is supplied, its parent must already be a non-symlink directory and the destination
 must not exist. Output is published atomically and create-only; paths inside the estimator directory
 or its bound source-artifact directories are rejected.
+
+### Task 4 Integration Smoke Checkpoint
+
+The two frozen integration-smoke proposals are Hoodi `79852` and Mainnet `38261`. They are outside
+the final 40-Hoodi/20-Mainnet corpus. Do not substitute another proposal, add either smoke row to the
+final corpus, or tune a coefficient from its result. The final corpus remains unopened until this
+plumbing change has independent review and the two smoke joins complete.
+
+Run the following only from the reviewed clean revision. The two input files are preflight-produced
+`GuestInput` files stored under the ignored smoke directory; acquiring them from RPC is a separate
+read-only operation. The `--target-raw-gas 1` arguments are legacy raw-run metadata and do not enter
+the composite estimate.
+
+```bash
+PYTHON_BIN="${PYTHON_BIN:-python3.11}"
+SMOKE_ROOT=experiments/opcode-gas/runs/task-4-integration-smoke
+HOODI_INPUT="$SMOKE_ROOT/inputs/taiko_hoodi-proposal-79852.json"
+MAINNET_INPUT="$SMOKE_ROOT/inputs/taiko_mainnet-proposal-38261.json"
+mkdir -p "$SMOKE_ROOT/inputs" "$SMOKE_ROOT/hoodi" "$SMOKE_ROOT/mainnet"
+
+cargo build --release -p preflight -p guest-launcher --features sp1-sdk/profiling
+
+ESTIMATOR_PATH_FILE="$(mktemp)"
+"$PYTHON_BIN" experiments/opcode-gas/opcode_gas.py \
+  seal-composite-estimator \
+  --augmented-core experiments/opcode-gas/derivations/f945e67bb2c38c9c8ef50530/core-opcode-submodel.json \
+  --operation-coverage experiments/opcode-gas/manifests/operation-coverage-v3.json \
+  --higher-layer experiments/opcode-gas/derivations/3e4de6eecb5e92aa59a6a4b9 \
+  --out-root experiments/opcode-gas/estimators \
+  --estimator-path-file "$ESTIMATOR_PATH_FILE"
+ESTIMATOR_PATH="$(<"$ESTIMATOR_PATH_FILE")"
+"$PYTHON_BIN" experiments/opcode-gas/opcode_gas.py \
+  verify-composite-estimator --estimator "$ESTIMATOR_PATH"
+
+"$PYTHON_BIN" experiments/opcode-gas/opcode_gas.py prepare-integration-smoke \
+  --network taiko_hoodi --proposal-id 79852 --guest-input "$HOODI_INPUT" \
+  --out "$SMOKE_ROOT/hoodi/record.json"
+"$PYTHON_BIN" experiments/opcode-gas/opcode_gas.py run-proposal \
+  --guest-launcher target/release/guest-launcher --guest-input "$HOODI_INPUT" \
+  --proof-type sp1 --case integration-smoke-hoodi-79852 \
+  --target-raw-gas 1 --purpose integration_smoke \
+  --network taiko_hoodi --proposal-id 79852 \
+  --smoke-record "$SMOKE_ROOT/hoodi/record.json" \
+  --out "$SMOKE_ROOT/hoodi/run.jsonl"
+"$PYTHON_BIN" experiments/opcode-gas/opcode_gas.py estimate-composite-trace \
+  --estimator "$ESTIMATOR_PATH" \
+  --trace "$SMOKE_ROOT/hoodi/run.proposal-trace.json.gz" \
+  --sp1-report "$SMOKE_ROOT/hoodi/run.guest-launcher.json" \
+  --out "$SMOKE_ROOT/hoodi/estimate.json"
+
+"$PYTHON_BIN" experiments/opcode-gas/opcode_gas.py prepare-integration-smoke \
+  --network taiko_mainnet --proposal-id 38261 --guest-input "$MAINNET_INPUT" \
+  --out "$SMOKE_ROOT/mainnet/record.json"
+"$PYTHON_BIN" experiments/opcode-gas/opcode_gas.py run-proposal \
+  --guest-launcher target/release/guest-launcher --guest-input "$MAINNET_INPUT" \
+  --proof-type sp1 --case integration-smoke-mainnet-38261 \
+  --target-raw-gas 1 --purpose integration_smoke \
+  --network taiko_mainnet --proposal-id 38261 \
+  --smoke-record "$SMOKE_ROOT/mainnet/record.json" \
+  --out "$SMOKE_ROOT/mainnet/run.jsonl"
+"$PYTHON_BIN" experiments/opcode-gas/opcode_gas.py estimate-composite-trace \
+  --estimator "$ESTIMATOR_PATH" \
+  --trace "$SMOKE_ROOT/mainnet/run.proposal-trace.json.gz" \
+  --sp1-report "$SMOKE_ROOT/mainnet/run.guest-launcher.json" \
+  --out "$SMOKE_ROOT/mainnet/estimate.json"
+```
+
+For each `estimate.json`, record `predicted_prover_gas`, actual `proverGas`, APE, every layer
+contribution, all coverage denominators, and every gap. A smoke result validates only the trace,
+identity join, feature extraction, and estimator execution. It cannot modify the sealed estimator,
+and it does not authorize acquisition or publication of the final corpus.
 
 ## Follow-Up TODO
 

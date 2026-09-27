@@ -29,6 +29,13 @@ V1_MANIFEST_PATH = (
     / "sp1-higher-layer-v1.json"
 )
 CALIBRATION_ID = "1" * 24
+OPERATION_COVERAGE_V2_REF = {
+    "path": "experiments/opcode-gas/manifests/operation-coverage-v2.json",
+    "artifact_sha256": (
+        "35fd25a7878dd407522ab676c8a9965c663c6885e3190df0fd51f6c497b84e77"
+    ),
+    "file_sha256": "75fec3c4307c59539cc6180e6511dd7fc1111197746c6b0abd9a872902c665a3",
+}
 
 
 def reseal(manifest):
@@ -127,6 +134,13 @@ class HigherLayerManifestTests(unittest.TestCase):
         self.assertEqual(
             json.loads(V1_MANIFEST_PATH.read_text())["artifact_sha256"],
             "f531201bd93f98ba20e51474ae4d64ae1f444bdaad027ea88362a47fb45e9809",
+        )
+        self.assertEqual(
+            dict(manifest.operation_coverage_ref), OPERATION_COVERAGE_V2_REF
+        )
+        self.assertEqual(
+            opcode_gas._HIGHER_LAYER_COVERAGE_PATH,
+            pathlib.Path(OPERATION_COVERAGE_V2_REF["path"]),
         )
 
     def test_committed_manifest_is_canonical_and_content_addressed(self):
@@ -1062,7 +1076,7 @@ class HigherLayerCampaignInterfaceTests(unittest.TestCase):
                 "--manifest",
                 str(MANIFEST_PATH.relative_to(ROOT)),
                 "--operation-coverage",
-                "experiments/opcode-gas/manifests/operation-coverage-v1.json",
+                "experiments/opcode-gas/manifests/operation-coverage-v2.json",
                 "--augmented-core",
                 "experiments/opcode-gas/derivations/f945e67bb2c38c9c8ef50530/core-opcode-submodel.json",
                 "--guest-launcher",
@@ -1080,6 +1094,10 @@ class HigherLayerCampaignInterfaceTests(unittest.TestCase):
         )
 
         self.assertIs(prepared.func, opcode_gas.cmd_prepare_higher_layer_calibration)
+        self.assertEqual(
+            prepared.operation_coverage,
+            pathlib.Path(OPERATION_COVERAGE_V2_REF["path"]),
+        )
         self.assertIs(running.func, opcode_gas.cmd_run_higher_layer_calibration)
 
     def test_create_only_artifact_accepts_same_bytes_and_rejects_conflict(self):

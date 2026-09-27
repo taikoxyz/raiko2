@@ -906,16 +906,24 @@ with larger variants or a cleaner template before treating the slope as a candid
 
 The higher-layer campaign binds the clean implementation revision, exact manifest, operation
 coverage, Osaka core, launcher, and production SP1 proposal ELF/VK. It evaluates round 8 first and
-opens rounds 32 and 128 only after a persisted expandable decision. This command stops after the
-overhead decision ledger; it cannot execute state holdouts, which remain gated on the later sealed
+opens rounds 32 and 128 only after a persisted expandable decision. Bounds 8 and 32 remain
+expansion rounds because neither contains the complete native-transfer count set
+`1, 2, 4, 8, 16, 32, 64, 128`; only a complete set at bound 128 can reach the fixed-cost gate.
+The native-transfer coefficient `5017` and materiality budget `0.002` are frozen campaign inputs,
+not outputs selected or fitted by this campaign. A passing fixed round reports status
+`accepted_with_declared_approximation` with decision `accepted`.
+
+The historical v1 campaign is terminal rejected evidence and must never be resumed. Always prepare
+a new identity from the v2 manifests shown below. The overhead runner stops after the decision
+ledger; it cannot execute state holdouts, which remain gated on successful creation of the sealed
 fixed-cost artifact.
 
 ```bash
 RUN_PATH_FILE="$(mktemp)"
 ~/.venv/bin/python experiments/opcode-gas/opcode_gas.py \
   prepare-higher-layer-calibration \
-  --manifest experiments/opcode-gas/manifests/sp1-higher-layer-v1.json \
-  --operation-coverage experiments/opcode-gas/manifests/operation-coverage-v1.json \
+  --manifest experiments/opcode-gas/manifests/sp1-higher-layer-v2.json \
+  --operation-coverage experiments/opcode-gas/manifests/operation-coverage-v2.json \
   --augmented-core experiments/opcode-gas/derivations/f945e67bb2c38c9c8ef50530/core-opcode-submodel.json \
   --guest-launcher target/release/guest-launcher \
   --elf crates/guests/elf/sp1_shasta_proposal.elf \
@@ -941,11 +949,13 @@ DERIVATION_PATH_FILE="$(mktemp)"
 DERIVATION_PATH="$(<"$DERIVATION_PATH_FILE")"
 ```
 
-The gated order is mandatory: fit the accepted overhead result, run all state holdouts, finalize,
-verify, and only then seal. A missing or conflicting predecessor is rejected. State holdouts are
-validation-only and never modify the fixed-cost artifact, its selected round, or its digest. The
-sealed content-addressed directory contains exactly four portable files and can be replayed at the
-frozen source revision without the live run directories.
+The gated order is mandatory: fit the accepted overhead result and successfully create its fixed-cost
+artifact before any state command is allowed; then run all state holdouts, finalize, verify, and only
+then seal. A missing or conflicting predecessor is rejected. State holdouts are validation-only and
+never modify the fixed-cost artifact, its selected round, or its digest. The sealed content-addressed
+directory contains exactly four portable files and can be replayed at the frozen source revision
+without the live run directories. Proposal validation and production promotion remain out of scope
+for this campaign.
 
 ## Follow-Up TODO
 

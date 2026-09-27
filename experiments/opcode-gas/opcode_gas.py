@@ -6000,11 +6000,11 @@ _HIGHER_LAYER_VERSION_IDENTITY = {
     "primary_metric": "proverGas",
 }
 _HIGHER_LAYER_OPERATION_COVERAGE_REF = {
-    "path": "experiments/opcode-gas/manifests/operation-coverage-v1.json",
+    "path": "experiments/opcode-gas/manifests/operation-coverage-v2.json",
     "artifact_sha256": (
-        "fbb4817d50b04147d0d9c86a25c82324d5e36ce9d6acbf49c51dd165cf1905a3"
+        "35fd25a7878dd407522ab676c8a9965c663c6885e3190df0fd51f6c497b84e77"
     ),
-    "file_sha256": "c5e5a7c28bb2640249f70df2298f6e8a4ee5d46b3bfe2d204c4cb6a86bf1d9be",
+    "file_sha256": "75fec3c4307c59539cc6180e6511dd7fc1111197746c6b0abd9a872902c665a3",
 }
 _HIGHER_LAYER_AUGMENTED_CORE_REF = {
     "path": _OPERATION_AUGMENTED_CORE_REF,

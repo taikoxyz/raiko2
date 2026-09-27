@@ -381,6 +381,50 @@ class StaticOperationDeltaTests(unittest.TestCase):
             negative_expected,
         )
 
+    def test_static_delta_matches_typed_registry_prediction(self):
+        registry_data = self.core["registry"]
+        registry = opcode_gas.OpcodeRegistry(
+            common_dispatch=Decimal(registry_data["common_dispatch"]),
+            models={
+                model_id: opcode_gas.ModelSpec(
+                    opcode_gas.ModelKind(model["kind"]),
+                    {
+                        name: Decimal(value)
+                        for name, value in model["parameters"].items()
+                    },
+                )
+                for model_id, model in registry_data["models"].items()
+            },
+            opcode_model_ids=tuple(registry_data["opcode_model_ids"]),
+            named_opcodes=frozenset(
+                int(key.removeprefix("opcode:0x"), 16)
+                for key in registry_data["named_opcode_keys"]
+            ),
+            invalid_model_id=registry_data["invalid_model_id"],
+            shared_memory_parameters={
+                name: Decimal(value)
+                for name, value in registry_data["shared_memory_parameters"].items()
+            },
+        )
+        raw_gas = 3
+
+        expected = opcode_gas.predict_opcode_event(
+            registry,
+            opcode_gas.OpcodeEvent(opcode=0x01, raw_gas=raw_gas),
+        )
+        actual = opcode_gas.resolve_canonical_static_operation_delta(
+            self.core,
+            self.coverage,
+            "opcode:0x01",
+            {
+                "pricing_basis": "raw_gas_slope",
+                "units": raw_gas,
+                "event_count": 1,
+            },
+        )
+
+        self.assertEqual(actual, expected)
+
     def test_rejects_missing_event_count_wrong_basis_and_impossible_signs(self):
         valid = {
             "pricing_basis": "raw_gas_slope",

@@ -97,15 +97,25 @@ The operation layer owns EVM interpreter execution, direct precompile bodies, an
 CALL/CREATE wrapper events. It does not own final state-trie commit, transaction-envelope work,
 Anchor/system execution, or proposal startup.
 
-The registry supports two opcode model shapes:
+The fit keeps lab-body parameters and a cross-environment `body_scale` separate. Promotion applies
+that scale exactly once and stores production-scaled parameters in the typed registry. Runtime and
+higher-layer estimators consume those stored parameters directly; they do not apply `body_scale`
+again. The registry therefore supports these two executable model shapes:
 
 ```text
 static_opcode_cost(e) = common_dispatch
-                      + body_scale * body_per_raw_gas[k] * raw_evm_gas(e)
+                      + stored_body_per_raw_gas[k] * raw_evm_gas(e)
 
 structured_opcode_cost(e) = common_dispatch
-                          + body_scale * f_k(context(e))
+                          + stored_f_k(context(e))
+
+stored_body_per_raw_gas[k] = body_scale * fitted_lab_body_per_raw_gas[k]
+stored_f_k                  = body_scale * fitted_lab_f_k
 ```
+
+The historical higher-layer derivation preserves its original extra-scale residualization only for
+byte-exact replay. Any new composite estimator must reproject its sealed raw rows through the typed,
+production-scaled registry semantics above.
 
 Use the static shape when one per-key body coefficient passes controlled relations and holdouts. Use
 a typed `f_k` only when measured evidence rejects the static shape. The current structured families

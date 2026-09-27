@@ -45,6 +45,7 @@ Every plan should include a `## Status` section near the top with one of these v
 | `2026-09-26-zkgas-calibration-design.md` | Accepted | Authoritative architecture, ownership boundaries, units, and experiment invariants. |
 | `2026-09-26-zkgas-calibration-execution-plan.md` | In progress | Current Osaka operation-supplement tasks and gates. |
 | `2026-09-26-zkgas-calibration-progress.md` | In progress | Verified evidence, active milestone, next gate, and explicit non-goals. |
+| `2026-09-27-zkgas-composite-block-estimator-implementation-plan.md` | In progress | Composite estimator, typed traces, sealing, and real block validation. |
 
 The earlier `2026-09-06-zkgas-multiplier-recalibration-experiment-design.md` and
 `2026-06-08-sp1-opcode-prover-gas-experiment-implementation-plan.md` are superseded historical

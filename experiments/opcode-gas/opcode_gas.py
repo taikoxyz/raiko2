@@ -23,7 +23,7 @@ from dataclasses import asdict, dataclass, field, replace
 from decimal import Context, Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
 from fractions import Fraction
 from types import MappingProxyType
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from calibration_model import (
     AffineOpcodeModel,
@@ -6313,22 +6313,9 @@ def validate_higher_layer_manifest(artifact: Mapping[str, Any]) -> None:
         raise ValueError("native transfer approximation differs")
 
 
-def load_higher_layer_manifest(path: pathlib.Path) -> HigherLayerManifest:
-    """Load and validate the canonical higher-layer campaign manifest."""
-    if path.is_symlink():
-        raise ValueError("higher-layer manifest must be a regular non-symlink file")
-    try:
-        mode = path.stat(follow_symlinks=False).st_mode
-        raw_bytes = path.read_bytes()
-        artifact = json.loads(raw_bytes)
-    except (FileNotFoundError, OSError, json.JSONDecodeError) as error:
-        raise ValueError("higher-layer manifest is not valid JSON") from error
-    if not stat.S_ISREG(mode) or not isinstance(artifact, Mapping):
-        raise ValueError(
-            "higher-layer manifest must be a JSON object in a regular file"
-        )
-    if raw_bytes != _canonical_json_file_bytes(artifact):
-        raise ValueError("higher-layer manifest is not canonical JSON")
+def _higher_layer_manifest_from_artifact(
+    artifact: Mapping[str, Any],
+) -> HigherLayerManifest:
     validate_higher_layer_manifest(artifact)
     state_holdouts = tuple(
         StateHoldoutSpec(
@@ -6367,6 +6354,25 @@ def load_higher_layer_manifest(path: pathlib.Path) -> HigherLayerManifest:
     )
 
 
+def load_higher_layer_manifest(path: pathlib.Path) -> HigherLayerManifest:
+    """Load and validate the canonical higher-layer campaign manifest."""
+    if path.is_symlink():
+        raise ValueError("higher-layer manifest must be a regular non-symlink file")
+    try:
+        mode = path.stat(follow_symlinks=False).st_mode
+        raw_bytes = path.read_bytes()
+        artifact = json.loads(raw_bytes)
+    except (FileNotFoundError, OSError, json.JSONDecodeError) as error:
+        raise ValueError("higher-layer manifest is not valid JSON") from error
+    if not stat.S_ISREG(mode) or not isinstance(artifact, Mapping):
+        raise ValueError(
+            "higher-layer manifest must be a JSON object in a regular file"
+        )
+    if raw_bytes != _canonical_json_file_bytes(artifact):
+        raise ValueError("higher-layer manifest is not canonical JSON")
+    return _higher_layer_manifest_from_artifact(artifact)
+
+
 def _require_pinned_operation_artifact(
     artifact: Mapping[str, Any], *, expected_sha256: str, label: str
 ) -> None:
@@ -6381,14 +6387,12 @@ def _require_pinned_operation_artifact(
         raise ValueError(f"{label} is not the exact pinned artifact") from error
 
 
-@_isolated_decimal_context
-def resolve_static_operation_delta(
+def _validated_static_operation_delta_terms(
     core: Mapping[str, Any],
     coverage: Mapping[str, Any],
     key: str,
     delta: Mapping[str, Any],
-) -> Decimal:
-    """Resolve one measured static operation delta against the frozen Osaka core."""
+) -> tuple[int, int, Decimal, Decimal]:
     _require_pinned_operation_artifact(
         coverage,
         expected_sha256=_HIGHER_LAYER_OPERATION_COVERAGE_REF["artifact_sha256"],
@@ -6454,18 +6458,51 @@ def resolve_static_operation_delta(
         label="pinned common dispatch",
         positive=True,
     )
-    body_scale = _canonical_artifact_decimal(
-        core.get("body_scale"), label="pinned body scale", positive=True
-    )
     body_per_raw_gas = _canonical_artifact_decimal(
         parameters.get("body_per_raw_gas"),
         label=f"pinned static body {key}",
         nonnegative=True,
     )
+    return event_count, units, common_dispatch, body_per_raw_gas
+
+
+@_isolated_decimal_context
+def resolve_static_operation_delta(
+    core: Mapping[str, Any],
+    coverage: Mapping[str, Any],
+    key: str,
+    delta: Mapping[str, Any],
+) -> Decimal:
+    """Replay the legacy higher-layer residualization contract.
+
+    The frozen higher-layer package was fitted with an extra body-scale
+    application. New estimators must use
+    ``resolve_canonical_static_operation_delta`` instead.
+    """
+    event_count, units, common_dispatch, body_per_raw_gas = (
+        _validated_static_operation_delta_terms(core, coverage, key, delta)
+    )
+    body_scale = _canonical_artifact_decimal(
+        core.get("body_scale"), label="pinned body scale", positive=True
+    )
     return (
         Decimal(event_count) * common_dispatch
         + Decimal(units) * body_scale * body_per_raw_gas
     )
+
+
+@_isolated_decimal_context
+def resolve_canonical_static_operation_delta(
+    core: Mapping[str, Any],
+    coverage: Mapping[str, Any],
+    key: str,
+    delta: Mapping[str, Any],
+) -> Decimal:
+    """Resolve one static delta in the production-scaled registry unit."""
+    event_count, units, common_dispatch, body_per_raw_gas = (
+        _validated_static_operation_delta_terms(core, coverage, key, delta)
+    )
+    return Decimal(event_count) * common_dispatch + Decimal(units) * body_per_raw_gas
 
 
 def damage_report(
@@ -9046,11 +9083,15 @@ def _higher_layer_operation_cost(
     core: Mapping[str, Any],
     coverage: Mapping[str, Any],
     rows: Iterable[Mapping[str, Any]],
+    *,
+    operation_resolver: Callable[
+        [Mapping[str, Any], Mapping[str, Any], str, Mapping[str, Any]], Decimal
+    ] = resolve_static_operation_delta,
 ) -> Decimal:
     deltas = _stable_operation_deltas(rows, "observed_operation_deltas")
     return sum(
         (
-            resolve_static_operation_delta(core, coverage, key, delta)
+            operation_resolver(core, coverage, key, delta)
             for key, delta in sorted(deltas.items())
         ),
         Decimal(0),
@@ -9434,6 +9475,9 @@ def _higher_layer_sweep_case(
     accepted_costs: Mapping[str, Decimal],
     dependencies: tuple[str, ...],
     generator_max_count: int,
+    operation_resolver: Callable[
+        [Mapping[str, Any], Mapping[str, Any], str, Mapping[str, Any]], Decimal
+    ] = resolve_static_operation_delta,
 ) -> dict[str, Any]:
     if any(
         row.get("case") == case_id and row.get("status") == "rejected"
@@ -9488,7 +9532,10 @@ def _higher_layer_sweep_case(
             if set(features) != {key_id, *dependencies}:
                 raise ValueError("higher-layer case feature declaration differs")
             operation_cost = _higher_layer_operation_cost(
-                core, coverage, target_rows
+                core,
+                coverage,
+                target_rows,
+                operation_resolver=operation_resolver,
             )
             residuals = []
             for target, control in zip(target_values, control_values):
@@ -9544,6 +9591,9 @@ def evaluate_higher_layer_fixed_round(
     generator_max_count: int,
     *,
     calibration_id: str,
+    operation_resolver: Callable[
+        [Mapping[str, Any], Mapping[str, Any], str, Mapping[str, Any]], Decimal
+    ] = resolve_static_operation_delta,
 ) -> Mapping[str, Any]:
     """Fit one bounded higher-layer round without executing or writing files."""
     if not isinstance(manifest, HigherLayerManifest):
@@ -9591,6 +9641,7 @@ def evaluate_higher_layer_fixed_round(
             accepted_costs=accepted,
             dependencies=(),
             generator_max_count=generator_max_count,
+            operation_resolver=operation_resolver,
         )
         for case_id in manifest.overhead_case_ids[:2]
     ]
@@ -9685,6 +9736,7 @@ def evaluate_higher_layer_fixed_round(
                 accepted_costs=accepted,
                 dependencies=dependencies,
                 generator_max_count=generator_max_count,
+                operation_resolver=operation_resolver,
             )
             if result.get("status") == "accepted":
                 accepted[key_id] = _decimal(
@@ -9805,7 +9857,10 @@ def evaluate_higher_layer_fixed_round(
                 ):
                     raise ValueError("higher-layer startup feature identity differs")
                 operation_cost = _higher_layer_operation_cost(
-                    augmented_core, operation_coverage, case_rows
+                    augmented_core,
+                    operation_coverage,
+                    case_rows,
+                    operation_resolver=operation_resolver,
                 )
                 residuals = [
                     _decimal_text(
@@ -21422,6 +21477,26 @@ _HIGHER_LAYER_SEALED_FILES = (
     "state-holdout-evidence.json",
     "higher-layer-calibration.json",
 )
+_COMPOSITE_HIGHER_LAYER_SOURCE = {
+    "derivation_id": "3e4de6eecb5e92aa59a6a4b9",
+    "identity_sha256": (
+        "3e4de6eecb5e92aa59a6a4b9d380765b94ddf9b1b8198479659393a878694f24"
+    ),
+    "file_sha256s": {
+        "identity.json": (
+            "b68c892a25cec824cc5805b9f20baee163287caa91b0d146261e4497b042391e"
+        ),
+        "higher-layer-calibration.json": (
+            "e06e90546f48b59f52670ceb320c63a5da64e910c7154efc95bafc4fa5579a54"
+        ),
+        "overhead-evidence.json": (
+            "e990deed7cf0e04153e716165e67ec1028c5c3479e8e99cda0d8f9872c826979"
+        ),
+        "state-holdout-evidence.json": (
+            "1004cb82af8a67fe9a3794044bc8b88f62a08fc095d528454940745c83690ec6"
+        ),
+    },
+}
 _HIGHER_LAYER_STATE_REJECTION_REASONS = frozenset(
     {"state_holdout_subprocess_failure", "state_holdout_io_failure"}
 )
@@ -21445,6 +21520,41 @@ def _higher_layer_regular_file(path: pathlib.Path, *, label: str) -> pathlib.Pat
     if path.is_symlink() or not stat.S_ISREG(mode):
         raise ValueError(f"{label} must be a regular non-symlink file")
     return path
+
+
+def _read_regular_file_bytes_once(path: pathlib.Path, *, label: str) -> bytes:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise ValueError(f"{label} is missing or not a regular file") from error
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise ValueError(f"{label} must be a regular non-symlink file")
+        with os.fdopen(descriptor, "rb", closefd=False) as source:
+            return source.read()
+    finally:
+        os.close(descriptor)
+
+
+def _read_canonical_json_mapping_once(
+    path: pathlib.Path,
+    *,
+    label: str,
+    expected_sha256: str | None = None,
+) -> Mapping[str, Any]:
+    raw = _read_regular_file_bytes_once(path, label=label)
+    if expected_sha256 is not None and sha256_bytes(raw) != expected_sha256:
+        raise ValueError(f"{label} source file hash differs")
+    try:
+        artifact = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise ValueError(f"{label} is not valid JSON") from error
+    if not isinstance(artifact, Mapping):
+        raise ValueError(f"{label} must be a JSON object")
+    if raw != _canonical_json_file_bytes(artifact):
+        raise ValueError(f"{label} is not canonical JSON")
+    return artifact
 
 
 def _higher_layer_json_artifact(path: pathlib.Path, *, label: str) -> Mapping[str, Any]:
@@ -22324,10 +22434,14 @@ def _higher_layer_state_operation_cost(
     core: Mapping[str, Any],
     coverage: Mapping[str, Any],
     ledger: Mapping[str, Any],
+    *,
+    operation_resolver: Callable[
+        [Mapping[str, Any], Mapping[str, Any], str, Mapping[str, Any]], Decimal
+    ] = resolve_static_operation_delta,
 ) -> Decimal:
     return sum(
         (
-            resolve_static_operation_delta(core, coverage, key, delta)
+            operation_resolver(core, coverage, key, delta)
             for key, delta in sorted(ledger.items())
         ),
         Decimal(0),
@@ -22341,6 +22455,10 @@ def evaluate_higher_layer_state_holdouts(
     augmented_core: Mapping[str, Any],
     fixed: Mapping[str, Any],
     rows: Iterable[Mapping[str, Any]],
+    *,
+    operation_resolver: Callable[
+        [Mapping[str, Any], Mapping[str, Any], str, Mapping[str, Any]], Decimal
+    ] = resolve_static_operation_delta,
 ) -> Mapping[str, Any]:
     """Evaluate the frozen state pairs without modifying the accepted fixed costs."""
     if not isinstance(manifest, HigherLayerManifest):
@@ -22446,7 +22564,10 @@ def evaluate_higher_layer_state_holdouts(
         try:
             lane_costs = {
                 lane: _higher_layer_state_operation_cost(
-                    augmented_core, operation_coverage, lane_ledgers[lane]
+                    augmented_core,
+                    operation_coverage,
+                    lane_ledgers[lane],
+                    operation_resolver=operation_resolver,
                 )
                 for lane in ("control", "target")
             }
@@ -23225,6 +23346,219 @@ def verify_sealed_higher_layer_calibration(
         "fixed": expected_fixed,
         "final": replay,
     }
+
+
+def _load_composite_higher_layer_source(
+    package: pathlib.Path,
+) -> tuple[
+    Mapping[str, Any],
+    Mapping[str, Any],
+    HigherLayerManifest,
+    Mapping[str, Any],
+    Mapping[str, Any],
+]:
+    package = pathlib.Path(package)
+    try:
+        mode = package.stat(follow_symlinks=False).st_mode
+        names = {entry.name for entry in package.iterdir()}
+    except OSError as error:
+        raise ValueError("composite higher-layer source is missing") from error
+    if package.is_symlink() or not stat.S_ISDIR(mode) or names != set(
+        _HIGHER_LAYER_SEALED_FILES
+    ):
+        raise ValueError("composite higher-layer source file inventory differs")
+    expected_hashes = _COMPOSITE_HIGHER_LAYER_SOURCE["file_sha256s"]
+    documents = {}
+    for name, expected in expected_hashes.items():
+        path = _higher_layer_contained_regular_file(
+            package,
+            pathlib.Path(name),
+            label=f"composite higher-layer source {name}",
+        )
+        documents[name] = _read_canonical_json_mapping_once(
+            path,
+            label=f"composite higher-layer source {name}",
+            expected_sha256=expected,
+        )
+    sealed_identity = documents["identity.json"]
+    if (
+        sealed_identity.get("derivation_id")
+        != _COMPOSITE_HIGHER_LAYER_SOURCE["derivation_id"]
+        or sealed_identity.get("identity_sha256")
+        != _COMPOSITE_HIGHER_LAYER_SOURCE["identity_sha256"]
+    ):
+        raise ValueError("composite higher-layer source identity differs")
+    identity_payload = sealed_identity.get("identity")
+    if (
+        not isinstance(identity_payload, Mapping)
+        or sha256_bytes(canonical_json(identity_payload))
+        != sealed_identity["identity_sha256"]
+    ):
+        raise ValueError("composite higher-layer source identity is invalid")
+    source_identity = identity_payload.get("source_identity")
+    if not isinstance(source_identity, Mapping):
+        raise ValueError("composite higher-layer source calibration identity is missing")
+    source_payload = source_identity.get("identity")
+    if (
+        not isinstance(source_payload, Mapping)
+        or sha256_bytes(canonical_json(source_payload))
+        != source_identity.get("identity_sha256")
+        or source_identity.get("calibration_id")
+        != str(source_identity.get("identity_sha256"))[:24]
+    ):
+        raise ValueError("composite higher-layer source calibration identity differs")
+
+    source_artifacts = {}
+    for field, label in (
+        ("higher_layer_manifest", "higher-layer manifest"),
+        ("operation_coverage", "operation coverage"),
+        ("augmented_core", "augmented core"),
+    ):
+        reference = source_payload.get(field)
+        if not isinstance(reference, Mapping):
+            raise ValueError(f"composite {label} reference is missing")
+        path = _resolve_repo_path(reference.get("path"), field_name=label)
+        artifact = _read_canonical_json_mapping_once(
+            path,
+            label=f"composite {label}",
+            expected_sha256=reference.get("file_sha256"),
+        )
+        _validate_content_addressed_artifact(artifact, label=label)
+        if artifact.get("artifact_sha256") != reference.get("artifact_sha256"):
+            raise ValueError(f"composite {label} artifact differs")
+        source_artifacts[field] = artifact
+
+    guest = source_payload.get("sp1_proposal_guest")
+    if not isinstance(guest, Mapping):
+        raise ValueError("composite SP1 proposal guest identity is missing")
+    for path_field, hash_field in (
+        ("elf_path", "elf_sha256"),
+        ("vk_path", "vk_sha256"),
+    ):
+        path = _resolve_repo_path(guest.get(path_field), field_name=path_field)
+        raw = _read_regular_file_bytes_once(path, label=path_field)
+        if sha256_bytes(raw) != guest.get(hash_field):
+            raise ValueError("composite SP1 proposal guest artifact differs")
+
+    manifest = _higher_layer_manifest_from_artifact(
+        source_artifacts["higher_layer_manifest"]
+    )
+    coverage = source_artifacts["operation_coverage"]
+    core = source_artifacts["augmented_core"]
+    return documents, source_identity, manifest, coverage, core
+
+
+@_isolated_decimal_context
+def build_corrected_higher_layer_projection(
+    package: pathlib.Path,
+) -> Mapping[str, Any]:
+    """Reproject sealed raw rows using production-scaled registry parameters."""
+    assert_generated_paths_only(git_worktree_status())
+    implementation_revision = git_head()
+    if not git_has_local_commit(implementation_revision):
+        raise ValueError("composite implementation revision is not a local commit")
+    documents, source_identity, manifest, coverage, core = (
+        _load_composite_higher_layer_source(package)
+    )
+    overhead = documents["overhead-evidence.json"]
+    state = documents["state-holdout-evidence.json"]
+    if (
+        not isinstance(overhead.get("rounds"), list)
+        or not isinstance(overhead.get("decision_ledger"), Mapping)
+        or not isinstance(state.get("rows"), list)
+    ):
+        raise ValueError("composite higher-layer source evidence differs")
+
+    corrected_rounds = []
+    corrected_fits = []
+    for packaged in overhead["rounds"]:
+        if (
+            not isinstance(packaged, Mapping)
+            or set(packaged) != {"record", "rows", "fit"}
+            or not isinstance(packaged.get("record"), Mapping)
+            or not isinstance(packaged.get("rows"), list)
+        ):
+            raise ValueError("composite higher-layer source round differs")
+        record = packaged["record"]
+        raw_bytes = b"".join(canonical_json(row) + b"\n" for row in packaged["rows"])
+        if sha256_bytes(raw_bytes) != record.get("raw_rows_sha256"):
+            raise ValueError("composite higher-layer source raw rows differ")
+        fit = evaluate_higher_layer_fixed_round(
+            manifest,
+            coverage,
+            core,
+            packaged["rows"],
+            record.get("generator_max_count"),
+            calibration_id=source_identity["calibration_id"],
+            operation_resolver=resolve_canonical_static_operation_delta,
+        )
+        corrected_fits.append(fit)
+        corrected_rounds.append(
+            {
+                "generator_max_count": record["generator_max_count"],
+                "raw_rows_sha256": record["raw_rows_sha256"],
+                "corrected_fit_sha256": sha256_bytes(
+                    _canonical_json_file_bytes(fit)
+                ),
+                "decision": fit["decision"],
+            }
+        )
+    terminal = [fit for fit in corrected_fits if fit.get("decision") != "expand_next_round"]
+    if (
+        len(terminal) != 1
+        or terminal[0].get("decision") != "accepted"
+        or terminal[0].get("status") != "accepted_with_declared_approximation"
+    ):
+        raise ValueError("corrected higher-layer replay is not accepted")
+    selected = terminal[0]
+    fixed_costs = {
+        key: str(selected["fixed_costs"][key]) for key in manifest.q_formula
+    }
+    fixed_statuses = {
+        key: str(selected["fixed_cost_statuses"][key]) for key in manifest.q_formula
+    }
+    fixed = {
+        "schema_version": _HIGHER_LAYER_FIXED_COST_SCHEMA_VERSION,
+        "status": "accepted_with_declared_approximation",
+        "identity_sha256": source_identity["identity_sha256"],
+        "calibration_id": source_identity["calibration_id"],
+        "selected_round": selected["generator_max_count"],
+        "fixed_cost_rank": len(fixed_costs),
+        "fixed_costs": fixed_costs,
+        "fixed_cost_statuses": fixed_statuses,
+        "fixed_costs_sha256": sha256_bytes(canonical_json(fixed_costs)),
+    }
+    state_verdict = evaluate_higher_layer_state_holdouts(
+        manifest,
+        coverage,
+        core,
+        fixed,
+        state["rows"],
+        operation_resolver=resolve_canonical_static_operation_delta,
+    )
+    artifact = {
+        "schema_version": 1,
+        "purpose": "sp1_corrected_higher_layer_projection",
+        "status": state_verdict["coarse_state_trie"]["status"],
+        "implementation_revision": implementation_revision,
+        "source": {
+            "derivation_id": _COMPOSITE_HIGHER_LAYER_SOURCE["derivation_id"],
+            "identity_sha256": _COMPOSITE_HIGHER_LAYER_SOURCE["identity_sha256"],
+            "file_sha256s": dict(_COMPOSITE_HIGHER_LAYER_SOURCE["file_sha256s"]),
+            "source_identity_sha256": source_identity["identity_sha256"],
+        },
+        "registry_parameter_basis": "production_scaled",
+        "resolver_semantics": "typed_registry_v1",
+        "selected_round": fixed["selected_round"],
+        "corrected_rounds": corrected_rounds,
+        "fixed_costs": fixed_costs,
+        "fixed_cost_statuses": fixed_statuses,
+        "fixed_costs_sha256": fixed["fixed_costs_sha256"],
+        "coarse_state_trie": dict(state_verdict["coarse_state_trie"]),
+        "state_holdouts": list(state_verdict["state_holdouts"]),
+    }
+    artifact["artifact_sha256"] = sha256_bytes(canonical_json(artifact))
+    return artifact
 
 
 def seal_higher_layer_calibration(

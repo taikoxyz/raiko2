@@ -11,7 +11,9 @@ changing the production ZKGas schedule.
 ## Status
 
 In progress. The opcode registry, operation-coverage ledger, and controlled higher-layer evidence
-are sealed. Proposal validation has not opened.
+are sealed. Two existing-fixture proposal runs have been opened only as `ad_hoc` diagnostics; both
+stopped at `insufficient_coverage`. The frozen integration smokes and final proposal validation have
+not opened.
 
 ## Global Constraints
 

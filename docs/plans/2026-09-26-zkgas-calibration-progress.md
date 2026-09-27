@@ -66,7 +66,7 @@ Osaka execution semantics while continuing to bind the actual exported Unzen sch
 | State/trie | Coarse model accepted | Preserve the sealed holdout evidence; split only after a new predeclared experiment |
 | Transaction | Declared approximation accepted and sealed | Preserve `5017` and its `0.002` materiality budget |
 | Block | Fixed base accepted and sealed | Preserve the selected round-128 fixed-cost artifact |
-| Proposal | Integration-smoke plumbing implemented; no result opened | Review, then run the two disjoint smoke rows before opening the corpus |
+| Proposal | Plumbing reviewed; two existing-fixture ad-hoc diagnostics opened | Close the exposed operation gaps, then run the two frozen smoke rows before opening the corpus |
 | Other ZKVM backends | Future | Measure natively or validate an explicit bridge |
 
 ## Sealed Baseline
@@ -399,13 +399,61 @@ corpus publication occurred in this implementation checkpoint. Hoodi proposal `7
 proposal `38261` are frozen only as the later integration-smoke pair and are disjoint from the still
 unopened final corpus. The exact post-review smoke sequence is documented in the experiment README.
 
+## Diagnostic Milestone: First Composite Proposal Replays
+
+Task 4 passed independent review at implementation revision
+`c93aac09b9a280b75110e0a4bc0bf975855da836`. The final reviewer reported no unresolved findings
+after the frozen-smoke identity, exact ELF/launcher provenance, GuestInput and executable TOCTOU,
+and normalized-input compatibility fixes. The reviewed release launcher SHA256 is
+`f77bfed34a085961332dee6741397c2c3477831dae4735624193433ada3c32cc`; the production SP1 proposal
+ELF remained
+`e32daf0bf9e981162c95c95e4004996a9be153357c503dd6373d647559b41bf1`.
+
+Composite estimator artifact
+`6431ef06ace0ae748551b6d42312690b692322e1f28276460c71b79ddb7515f7` sealed and replayed exactly
+at that revision. Two existing repository fixtures were then executed as `purpose=ad_hoc`
+diagnostics. They are not substitutes for the frozen Hoodi `79852` and Mainnet `38261` integration
+smokes, are not final-validation rows, and did not tune any coefficient:
+
+| Network / proposal | Blocks | Actual proverGas | Modeled subtotal | Modeled / actual | Operation-count coverage | Raw-gas coverage | Result |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| Mainnet `23077` | 192 | `2047710602` | `651114652.98548710145385022502878729059677218985258403756560922755473186873126614` | `31.7972%` | `97.5691%` | `20.3116%` | `insufficient_coverage` |
+| Mainnet `7857` | 192 | `1492313639` | `646682264.08691615025121578174724959606716717129236473771197697086806683189302328` | `43.3369%` | `96.3574%` | `11.1801%` | `insufficient_coverage` |
+
+Both exact SP1 report joins passed. The estimator correctly withheld `predicted_prover_gas` and
+APE because coverage was incomplete. The shared fixed contribution was approximately `637.7M`
+proverGas: one proposal startup plus 192 block bases. Non-Anchor transaction base and modeled
+operation work contributed only the remaining small subtotal. The 192 Anchor transactions produced
+`2353267` block-owned operation rows in each fixture and were excluded from operation charging, so
+the result did not double-count Anchor execution.
+
+The gap shape was consistent across both workloads. SLOAD (`0x54`) and SSTORE (`0x55`) dominated
+uncovered raw EVM gas: respectively `393000` and `355500` in proposal `23077`, and `455900` and
+`280000` in proposal `7857`. The remaining material gaps were LOG variants, EXTCODE/account access,
+CALL-family wrapper rows, and direct precompiles. This means high operation-count coverage is not a
+sufficient completion signal. It does not yet prove that the roughly `1.40B` / `0.85B` difference
+is operation cost: state/witness/trie and other higher-layer work remain possible residual owners.
+
+Frozen smoke acquisition remains operationally blocked in this checkout. Public Taiko RPCs support
+proposal discovery but returned JSON-RPC `-32601` for `debug_executionWitnessForTxList`; the
+deployment's dedicated witness RPC is not reachable from this machine. The existing Hoodi fixture
+for proposal `17462` was also rejected rather than reused: it records
+`last_anchor_block_number=0`, while the current guest derives `2668320`. Its native trace was marked
+failed and no estimator result was produced.
+
 ## Next Gate
 
-Independently review the Task 4 proposal plumbing. Then build the reviewed `preflight` and
-`guest-launcher`, seal and replay the composite estimator at that clean revision, and run Hoodi
-proposal `79852` plus Mainnet proposal `38261` as purpose-labelled `integration_smoke` rows. Record
-their exact trace/report joins, predictions, actual `proverGas`, APE, per-layer contributions,
-coverage, and gaps without changing a coefficient. The final 60-row corpus remains unopened.
+Close the high-impact operation gaps before claiming proposal accuracy. Start with SLOAD and SSTORE
+operation bodies while keeping account/storage access, dirty-state updates, witness validation, and
+final-trie updates in the state/trie ownership domain. Then cover LOG/EXTCODE, CALL-family wrappers,
+and direct precompiles in descending observed impact. Re-seal a new estimator and replay the two
+ad-hoc proposal fixtures after each independently reviewed family milestone; never tune from those
+proposal results.
+
+The frozen Hoodi `79852` and Mainnet `38261` integration smokes remain required once a
+witness-capable RPC or immutable GuestInputs are available. Record their exact trace/report joins,
+predictions, actual `proverGas`, APE, per-layer contributions, coverage, and gaps without changing a
+coefficient. The final 60-row corpus remains unopened.
 
 ## Next Milestones
 

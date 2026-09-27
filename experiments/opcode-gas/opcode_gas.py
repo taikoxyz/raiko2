@@ -6716,7 +6716,7 @@ FINAL_CORPUS_FIXTURE_DIR = REPO_ROOT / "tests/fixtures/risc0-zkgas/2026-09-02-m2
 GENERATED_EXPERIMENT_PREFIXES = (
     "experiments/opcode-gas/corpora/", "experiments/opcode-gas/manifests/proposals/",
     "experiments/opcode-gas/runs/", "experiments/opcode-gas/derivations/",
-    "experiments/opcode-gas/validations/",
+    "experiments/opcode-gas/estimators/", "experiments/opcode-gas/validations/",
 )
 Q_FORMULA = ["proposal_startup", "block_base", "tx_base", "native_value_transfer"]
 BLOCK_CALIBRATION_TRANSFER_PARAMETERS = [

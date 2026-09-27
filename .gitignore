@@ -23,6 +23,7 @@ docker/var/
 # small provenance records; acquired GuestInputs and archives are never staged
 # until final verification explicitly promotes the evidence.
 /experiments/opcode-gas/corpora/
+/experiments/opcode-gas/estimators/
 /experiments/opcode-gas/runs/
 /experiments/opcode-gas/validations/
 /experiments/opcode-gas/manifests/proposals/

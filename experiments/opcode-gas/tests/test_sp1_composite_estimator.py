@@ -687,6 +687,19 @@ class CompositeEstimatorTests(unittest.TestCase):
                     report["predicted_prover_gas"], report["modeled_subtotal"]
                 )
 
+    def test_generated_estimator_status_is_allowed_without_allowing_dirty_sources(self):
+        estimator_status = (
+            "?? experiments/opcode-gas/estimators/"
+            "a59ffea7eb9d8d50ea4563dd/estimator.json\n"
+        )
+
+        opcode_gas.assert_generated_paths_only(estimator_status)
+
+        with self.assertRaisesRegex(ValueError, "dirty implementation path"):
+            opcode_gas.assert_generated_paths_only(
+                estimator_status + " M experiments/opcode-gas/opcode_gas.py\n"
+            )
+
     def test_seal_is_create_only_and_verify_rejects_tamper(self):
         with tempfile.TemporaryDirectory() as temporary:
             out_root = pathlib.Path(temporary) / "estimators"

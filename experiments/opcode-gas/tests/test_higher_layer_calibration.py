@@ -1405,6 +1405,13 @@ class HigherLayerCampaignInterfaceTests(unittest.TestCase):
 
 
 class HigherLayerTask5FixedCostTests(unittest.TestCase):
+    fixed_cost_statuses = {
+        "proposal_startup": "accepted",
+        "block_base": "accepted",
+        "tx_base": "accepted",
+        "native_value_transfer": "declared_approximation",
+    }
+
     @classmethod
     def setUpClass(cls):
         cls.manifest = opcode_gas.load_higher_layer_manifest(MANIFEST_PATH)
@@ -1472,7 +1479,9 @@ class HigherLayerTask5FixedCostTests(unittest.TestCase):
             run = pathlib.Path(temporary)
             result = self.fit(run)
 
-            self.assertEqual(result["status"], "accepted")
+            self.assertEqual(
+                result["status"], "accepted_with_declared_approximation"
+            )
             self.assertEqual(result["selected_round"], 128)
             self.assertEqual(result["fixed_cost_rank"], 4)
             self.assertEqual(
@@ -1481,15 +1490,24 @@ class HigherLayerTask5FixedCostTests(unittest.TestCase):
                     "proposal_startup": "1000",
                     "block_base": "2000",
                     "tx_base": "300",
-                    "native_value_transfer": "40",
+                    "native_value_transfer": "5017",
                 },
+            )
+            self.assertEqual(
+                result["fixed_cost_statuses"], self.fixed_cost_statuses
             )
             fixed_path = run / "fixed-costs.json"
             self.assertEqual(
                 fixed_path.read_bytes(), opcode_gas._canonical_json_file_bytes(result)
             )
 
-    def test_fit_rejects_nonaccepted_terminal_or_conflicting_existing_artifact(self):
+    def test_fit_rejects_ordinary_accepted_or_nonaccepted_terminal_and_conflict(self):
+        def ordinary_accepted(validated):
+            validated[-1]["fit_payload"] = {
+                **validated[-1]["fit_payload"],
+                "status": "accepted",
+            }
+
         def terminal_failure(validated):
             validated[-1]["decision"] = "terminal_failure"
             validated[-1]["fit_payload"] = {
@@ -1500,6 +1518,7 @@ class HigherLayerTask5FixedCostTests(unittest.TestCase):
             }
 
         for setup, expected in (
+            (ordinary_accepted, "accepted fixed costs"),
             (terminal_failure, "terminal accepted"),
             (None, "different bytes"),
         ):
@@ -1510,8 +1529,43 @@ class HigherLayerTask5FixedCostTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, expected):
                     self.fit(run, validated_mutator=setup)
 
+    def test_fixed_cost_values_rejects_inexact_status_provenance(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            fixed = self.fit(pathlib.Path(temporary))
+
+        mutations = {
+            "missing": lambda statuses: (
+                statuses.pop("native_value_transfer"),
+                None,
+            )[1],
+            "changed": lambda statuses: statuses.update(
+                {"unexpected": "declared_approximation"}
+            ),
+            "reordered": lambda statuses: list(reversed(statuses.items())),
+            "relabeled": lambda statuses: statuses.__setitem__(
+                "native_value_transfer", "accepted"
+            ),
+        }
+        for label, mutate in mutations.items():
+            artifact = copy.deepcopy(fixed)
+            statuses = artifact["fixed_cost_statuses"]
+            replacement = mutate(statuses)
+            if replacement is not None:
+                artifact["fixed_cost_statuses"] = dict(replacement)
+            with self.subTest(label=label), self.assertRaisesRegex(
+                ValueError, "fixed-cost artifact"
+            ):
+                opcode_gas._higher_layer_fixed_cost_values(self.manifest, artifact)
+
 
 class HigherLayerTask5StateVerdictTests(unittest.TestCase):
+    fixed_cost_statuses = {
+        "proposal_startup": "accepted",
+        "block_base": "accepted",
+        "tx_base": "accepted",
+        "native_value_transfer": "declared_approximation",
+    }
+
     @classmethod
     def setUpClass(cls):
         cls.manifest = opcode_gas.load_higher_layer_manifest(MANIFEST_PATH)
@@ -1525,16 +1579,17 @@ class HigherLayerTask5StateVerdictTests(unittest.TestCase):
             "proposal_startup": "1000",
             "block_base": "2000",
             "tx_base": "300",
-            "native_value_transfer": "40",
+            "native_value_transfer": "5017",
         }
         cls.fixed = {
-            "schema_version": 1,
-            "status": "accepted",
+            "schema_version": 2,
+            "status": "accepted_with_declared_approximation",
             "identity_sha256": "1" * 64,
             "calibration_id": CALIBRATION_ID,
             "selected_round": 128,
             "fixed_cost_rank": 4,
             "fixed_costs": cls.fixed_costs,
+            "fixed_cost_statuses": cls.fixed_cost_statuses,
             "fixed_costs_sha256": opcode_gas.sha256_bytes(
                 opcode_gas.canonical_json(cls.fixed_costs)
             ),
@@ -1562,7 +1617,7 @@ class HigherLayerTask5StateVerdictTests(unittest.TestCase):
                 "tx_base": tx_count,
                 "native_value_transfer": tx_count,
             }
-            observed_gas = 3000 + 340 * tx_count
+            observed_gas = 3000 + 5317 * tx_count
             spec = self.pair_spec(pair)
             for lane_index, lane in enumerate(("control", "target")):
                 backend_input_sha256 = f"{pair_index * 2 + lane_index:064x}"
@@ -1733,6 +1788,137 @@ class HigherLayerTask5StateVerdictTests(unittest.TestCase):
 
         return execute
 
+    def write_live_run(self, root):
+        verified = self.verified_bundle()
+        run = root / "run"
+        (run / "raw").mkdir(parents=True)
+        (run / "fit").mkdir()
+        for packaged in verified["round_evidence"]:
+            record = packaged["record"]
+            (run / record["raw_rows"]).write_bytes(
+                b"".join(
+                    opcode_gas.canonical_json(row) + b"\n"
+                    for row in packaged["rows"]
+                )
+            )
+            (run / record["fit"]).write_bytes(
+                opcode_gas._canonical_json_file_bytes(packaged["fit"])
+            )
+        opcode_gas._write_higher_layer_decisions(run, verified["decisions"])
+        (run / "fixed-costs.json").write_bytes(
+            opcode_gas._canonical_json_file_bytes(verified["fixed"])
+        )
+        (run / "raw" / "state-holdouts.jsonl").write_bytes(
+            b"".join(
+                opcode_gas.canonical_json(row) + b"\n"
+                for row in verified["state_rows"]
+            )
+        )
+        (run / "higher-layer-calibration.json").write_bytes(
+            opcode_gas._canonical_json_file_bytes(verified["final"])
+        )
+        run_path = root / "run-path"
+        run_path.write_text(str(run) + "\n")
+        return run, run_path, verified
+
+    @staticmethod
+    def reseal_live_terminal_fit(run, mutate):
+        decisions = json.loads((run / "overhead-decisions.json").read_text())
+        record = decisions["rounds"][-1]
+        fit_path = run / record["fit"]
+        fit = json.loads(fit_path.read_text())
+        mutate(fit)
+        fit_path.write_bytes(opcode_gas._canonical_json_file_bytes(fit))
+        record["fit_sha256"] = opcode_gas.sha256_file(fit_path)
+        opcode_gas._write_higher_layer_decisions(run, decisions)
+
+        fixed_path = run / "fixed-costs.json"
+        fixed = json.loads(fixed_path.read_text())
+        fixed["status"] = fit["status"]
+        fixed["fixed_costs"] = copy.deepcopy(fit["fixed_costs"])
+        fixed["fixed_cost_statuses"] = copy.deepcopy(fit["fixed_cost_statuses"])
+        fixed["fixed_costs_sha256"] = opcode_gas.sha256_bytes(
+            opcode_gas.canonical_json(fixed["fixed_costs"])
+        )
+        fixed["source"]["selected_fit_sha256"] = record["fit_sha256"]
+        fixed["source"]["decision_ledger_sha256"] = opcode_gas.sha256_bytes(
+            opcode_gas._higher_layer_decisions_bytes(decisions)
+        )
+        fixed["fit"] = fit
+        fixed_path.write_bytes(opcode_gas._canonical_json_file_bytes(fixed))
+
+    def test_live_replay_rejects_resealed_approximation_evidence_tamper(self):
+        native = lambda fit: fit["overhead_results"]["native_value_transfer"]
+        tamper_cases = {
+            "policy status": lambda fit: native(fit).__setitem__(
+                "status", "accepted"
+            ),
+            "per-count materiality": lambda fit: native(fit)["count_evidence"][
+                0
+            ].__setitem__("materiality", "0.001"),
+            "coefficient": lambda fit: native(fit).__setitem__("o_p", "5018"),
+            "budget": lambda fit: native(fit).__setitem__(
+                "materiality_budget", "0.003"
+            ),
+            "fixed statuses": lambda fit: fit["fixed_cost_statuses"].__setitem__(
+                "native_value_transfer", "accepted"
+            ),
+            "source identity": lambda fit: native(fit)["source"].__setitem__(
+                "identity_sha256", "0" * 64
+            ),
+            "source raw": lambda fit: native(fit)["source"].__setitem__(
+                "raw_rows_sha256", "0" * 64
+            ),
+            "source fit": lambda fit: native(fit)["source"].__setitem__(
+                "fit_sha256", "0" * 64
+            ),
+            "target total": lambda fit: native(fit)["count_evidence"][0].__setitem__(
+                "target_prover_gas", "15018"
+            ),
+            "observed delta": lambda fit: native(fit)["count_evidence"][0].__setitem__(
+                "observed_native_delta", "5018"
+            ),
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            _run, run_path, verified = self.write_live_run(root)
+            with mock.patch.object(
+                opcode_gas,
+                "_validate_current_higher_layer_identity",
+                return_value=(
+                    verified["identity"],
+                    self.manifest,
+                    self.coverage,
+                    self.core,
+                ),
+            ):
+                replay = opcode_gas.verify_higher_layer_calibration(
+                    run_path,
+                    trace_executor=self.trace_executor(verified["state_rows"]),
+                )
+            self.assertEqual(replay["fixed"], verified["fixed"])
+            self.assertEqual(replay["final"], verified["final"])
+
+        for label, mutate in tamper_cases.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as temporary:
+                root = pathlib.Path(temporary)
+                run, run_path, verified = self.write_live_run(root)
+                self.reseal_live_terminal_fit(run, mutate)
+                with mock.patch.object(
+                    opcode_gas,
+                    "_validate_current_higher_layer_identity",
+                    return_value=(
+                        verified["identity"],
+                        self.manifest,
+                        self.coverage,
+                        self.core,
+                    ),
+                ), self.assertRaisesRegex(ValueError, "replay|accepted fixed costs"):
+                    opcode_gas.verify_higher_layer_calibration(
+                        run_path,
+                        trace_executor=self.trace_executor(verified["state_rows"]),
+                    )
+
     def test_all_state_statuses_use_decimal_metrics_and_preserve_fixed_digest(self):
         accepted = self.evaluate(self.rows())
         failed_rows = self.rows()
@@ -1767,6 +1953,14 @@ class HigherLayerTask5StateVerdictTests(unittest.TestCase):
         self.assertEqual(
             accepted["coarse_state_trie"]["status"], "coarse_model_accepted"
         )
+        self.assertEqual(accepted["schema_version"], 2)
+        self.assertEqual(
+            accepted["fixed_model_status"],
+            "accepted_with_declared_approximation",
+        )
+        self.assertEqual(
+            accepted["fixed_cost_statuses"], self.fixed_cost_statuses
+        )
         self.assertEqual(failed["coarse_state_trie"]["status"], "needs_state_split")
         self.assertEqual(inconclusive["coarse_state_trie"]["status"], "inconclusive")
         self.assertEqual(
@@ -1782,6 +1976,15 @@ class HigherLayerTask5StateVerdictTests(unittest.TestCase):
             expected_target_ape = Decimal(1) / Decimal(6)
         self.assertEqual(Decimal(failed_pair["target_ape"]), expected_target_ape)
         self.assertEqual(Decimal(failed_pair["effect_ratio"]), Decimal("0.2"))
+
+        for pair in accepted["state_holdouts"]:
+            if pair["kind"] != "dirty_accounts":
+                continue
+            expected_total = 3000 + 5317 * pair["scale"]
+            self.assertEqual(pair["control_prediction"], str(expected_total))
+            self.assertEqual(pair["target_prediction"], str(expected_total))
+            self.assertEqual(pair["predicted_delta"], "0")
+            self.assertEqual(pair["observed_delta"], "0")
 
     def test_missing_inventory_rejects_but_complete_invalid_evidence_is_inconclusive(self):
         missing = self.rows()
@@ -2652,6 +2855,39 @@ class HigherLayerTask5StateVerdictTests(unittest.TestCase):
                 }
             )
             rejected_final = self.evaluate(rejected_rows)
+
+            def mutate_terminal_fit(overhead, mutate):
+                packaged = overhead["rounds"][-1]
+                fit = packaged["fit"]
+                mutate(fit)
+                fit_sha256 = opcode_gas.sha256_bytes(
+                    opcode_gas._canonical_json_file_bytes(fit)
+                )
+                packaged["record"]["fit_sha256"] = fit_sha256
+                ledger_record = overhead["decision_ledger"]["rounds"][-1]
+                ledger_record["fit_sha256"] = fit_sha256
+                fixed = overhead["fixed_costs"]
+                fixed["status"] = fit["status"]
+                fixed["fixed_costs"] = copy.deepcopy(fit["fixed_costs"])
+                fixed["fixed_cost_statuses"] = copy.deepcopy(
+                    fit["fixed_cost_statuses"]
+                )
+                fixed["fixed_costs_sha256"] = opcode_gas.sha256_bytes(
+                    opcode_gas.canonical_json(fixed["fixed_costs"])
+                )
+                fixed["source"]["selected_fit_sha256"] = fit_sha256
+                fixed["source"]["decision_ledger_sha256"] = (
+                    opcode_gas.sha256_bytes(
+                        opcode_gas._higher_layer_decisions_bytes(
+                            overhead["decision_ledger"]
+                        )
+                    )
+                )
+                fixed["fit"] = copy.deepcopy(fit)
+
+            def native_result(fit):
+                return fit["overhead_results"]["native_value_transfer"]
+
             tamper_cases = {
                 "source": lambda overhead, state, final: overhead["fixed_costs"][
                     "source"
@@ -2694,6 +2930,70 @@ class HigherLayerTask5StateVerdictTests(unittest.TestCase):
                 "verdict": lambda overhead, state, final: final[
                     "coarse_state_trie"
                 ].__setitem__("status", "needs_state_split"),
+                "policy status": lambda overhead, state, final: mutate_terminal_fit(
+                    overhead,
+                    lambda fit: native_result(fit).__setitem__(
+                        "status", "accepted"
+                    ),
+                ),
+                "per-count materiality": lambda overhead, state, final: mutate_terminal_fit(
+                    overhead,
+                    lambda fit: native_result(fit)["count_evidence"][0].__setitem__(
+                        "materiality", "0.001"
+                    ),
+                ),
+                "coefficient": lambda overhead, state, final: mutate_terminal_fit(
+                    overhead,
+                    lambda fit: native_result(fit).__setitem__("o_p", "5018"),
+                ),
+                "budget": lambda overhead, state, final: mutate_terminal_fit(
+                    overhead,
+                    lambda fit: native_result(fit).__setitem__(
+                        "materiality_budget", "0.003"
+                    ),
+                ),
+                "fixed statuses": lambda overhead, state, final: mutate_terminal_fit(
+                    overhead,
+                    lambda fit: fit["fixed_cost_statuses"].__setitem__(
+                        "native_value_transfer", "accepted"
+                    ),
+                ),
+                "source identity": lambda overhead, state, final: mutate_terminal_fit(
+                    overhead,
+                    lambda fit: native_result(fit)["source"].__setitem__(
+                        "identity_sha256", "0" * 64
+                    ),
+                ),
+                "source raw": lambda overhead, state, final: mutate_terminal_fit(
+                    overhead,
+                    lambda fit: native_result(fit)["source"].__setitem__(
+                        "raw_rows_sha256", "0" * 64
+                    ),
+                ),
+                "source fit": lambda overhead, state, final: mutate_terminal_fit(
+                    overhead,
+                    lambda fit: native_result(fit)["source"].__setitem__(
+                        "fit_sha256", "0" * 64
+                    ),
+                ),
+                "target total": lambda overhead, state, final: mutate_terminal_fit(
+                    overhead,
+                    lambda fit: native_result(fit)["count_evidence"][0].__setitem__(
+                        "target_prover_gas", "15018"
+                    ),
+                ),
+                "observed delta": lambda overhead, state, final: mutate_terminal_fit(
+                    overhead,
+                    lambda fit: native_result(fit)["count_evidence"][0].__setitem__(
+                        "observed_native_delta", "5018"
+                    ),
+                ),
+                "drop approximation status": lambda overhead, state, final: final.pop(
+                    "fixed_model_status"
+                ),
+                "relabel approximation status": lambda overhead, state, final: final[
+                    "fixed_cost_statuses"
+                ].__setitem__("native_value_transfer", "accepted"),
             }
             for label, mutate in tamper_cases.items():
                 with self.subTest(label=label):
@@ -2743,7 +3043,7 @@ class HigherLayerTask5StateVerdictTests(unittest.TestCase):
                             source_validator=validate_source,
                         )
 
-            changed_source = root / "tampered-source-identity"
+            changed_source = root / "tampered-sealed-source-identity"
             changed_source.mkdir()
             for source in destination.iterdir():
                 (changed_source / source.name).write_bytes(source.read_bytes())

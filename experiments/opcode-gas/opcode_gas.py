@@ -21412,8 +21412,9 @@ _HIGHER_LAYER_VK_PATH = pathlib.Path("crates/guests/elf/sp1_shasta_proposal.vk.b
 _HIGHER_LAYER_RUN_ROOT = pathlib.Path("experiments/opcode-gas/runs")
 _HIGHER_LAYER_IDENTITY_SCHEMA_VERSION = 1
 _HIGHER_LAYER_DECISIONS_SCHEMA_VERSION = 1
-_HIGHER_LAYER_FIXED_COST_SCHEMA_VERSION = 1
-_HIGHER_LAYER_SEALED_SCHEMA_VERSION = 1
+_HIGHER_LAYER_FIXED_COST_SCHEMA_VERSION = 2
+_HIGHER_LAYER_STATE_VERDICT_SCHEMA_VERSION = 2
+_HIGHER_LAYER_SEALED_SCHEMA_VERSION = 2
 _HIGHER_LAYER_SEALED_PURPOSE = "sp1_higher_layer_fixed_cost_derivation"
 _HIGHER_LAYER_SEALED_FILES = (
     "identity.json",
@@ -21904,12 +21905,26 @@ def _higher_layer_fixed_cost_artifact(
     selected = terminal[0][1]
     fit = selected.get("fit_payload")
     fixed_costs = fit.get("fixed_costs") if isinstance(fit, Mapping) else None
+    fixed_cost_statuses = (
+        fit.get("fixed_cost_statuses") if isinstance(fit, Mapping) else None
+    )
+    expected_statuses = {
+        key: (
+            "declared_approximation"
+            if key == "native_value_transfer"
+            else "accepted"
+        )
+        for key in manifest.q_formula
+    }
     if (
         not isinstance(fit, Mapping)
-        or fit.get("status") != "accepted"
+        or fit.get("status") != "accepted_with_declared_approximation"
         or fit.get("decision") != "accepted"
         or not isinstance(fixed_costs, Mapping)
         or tuple(fixed_costs) != manifest.q_formula
+        or not isinstance(fixed_cost_statuses, Mapping)
+        or tuple(fixed_cost_statuses) != manifest.q_formula
+        or not _exact_json_equal(fixed_cost_statuses, expected_statuses)
     ):
         raise ValueError("higher-layer terminal round does not contain accepted fixed costs")
     parsed = {
@@ -21921,15 +21936,19 @@ def _higher_layer_fixed_cost_artifact(
     canonical_costs = {
         key: _decimal_text(parsed[key]) for key in manifest.q_formula
     }
+    canonical_statuses = {
+        key: str(fixed_cost_statuses[key]) for key in manifest.q_formula
+    }
     fixed_costs_sha256 = sha256_bytes(canonical_json(canonical_costs))
     artifact = {
         "schema_version": _HIGHER_LAYER_FIXED_COST_SCHEMA_VERSION,
-        "status": "accepted",
+        "status": "accepted_with_declared_approximation",
         "identity_sha256": identity["identity_sha256"],
         "calibration_id": identity["calibration_id"],
         "selected_round": selected["generator_max_count"],
         "fixed_cost_rank": len(canonical_costs),
         "fixed_costs": canonical_costs,
+        "fixed_cost_statuses": canonical_statuses,
         "fixed_costs_sha256": fixed_costs_sha256,
         "source": {
             "decision_ledger_sha256": sha256_bytes(
@@ -21983,12 +22002,26 @@ def _higher_layer_fixed_cost_values(
     manifest: HigherLayerManifest, fixed: Mapping[str, Any]
 ) -> dict[str, Decimal]:
     costs = fixed.get("fixed_costs") if isinstance(fixed, Mapping) else None
+    statuses = (
+        fixed.get("fixed_cost_statuses") if isinstance(fixed, Mapping) else None
+    )
+    expected_statuses = {
+        key: (
+            "declared_approximation"
+            if key == "native_value_transfer"
+            else "accepted"
+        )
+        for key in manifest.q_formula
+    }
     if (
         fixed.get("schema_version") != _HIGHER_LAYER_FIXED_COST_SCHEMA_VERSION
-        or fixed.get("status") != "accepted"
+        or fixed.get("status") != "accepted_with_declared_approximation"
         or fixed.get("fixed_cost_rank") != len(manifest.q_formula)
         or not isinstance(costs, Mapping)
         or set(costs) != set(manifest.q_formula)
+        or not isinstance(statuses, Mapping)
+        or tuple(statuses) != tuple(costs)
+        or not _exact_json_equal(statuses, expected_statuses)
         or fixed.get("fixed_costs_sha256") != sha256_bytes(canonical_json(costs))
     ):
         raise ValueError("higher-layer fixed-cost artifact is invalid")
@@ -22478,10 +22511,12 @@ def evaluate_higher_layer_state_holdouts(
         else "coarse_model_accepted"
     )
     return {
-        "schema_version": 1,
+        "schema_version": _HIGHER_LAYER_STATE_VERDICT_SCHEMA_VERSION,
         "identity_sha256": fixed["identity_sha256"],
         "calibration_id": calibration_id,
+        "fixed_model_status": fixed["status"],
         "fixed_costs": dict(fixed["fixed_costs"]),
+        "fixed_cost_statuses": dict(fixed["fixed_cost_statuses"]),
         "fixed_costs_sha256": fixed["fixed_costs_sha256"],
         "selected_round": fixed["selected_round"],
         "state_holdouts": results,

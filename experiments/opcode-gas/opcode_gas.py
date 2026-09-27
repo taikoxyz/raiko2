@@ -5989,7 +5989,7 @@ def validate_operation_coverage_manifest(
         raise ValueError("execution coverage differs from exact source replay")
 
 
-_HIGHER_LAYER_SCHEMA_VERSION = 1
+_HIGHER_LAYER_SCHEMA_VERSION = 2
 _HIGHER_LAYER_PURPOSE = "sp1_higher_layer_fixed_cost_calibration"
 _HIGHER_LAYER_VERSION_IDENTITY = {
     "taiko_fork": "Unzen",
@@ -6037,6 +6037,28 @@ _HIGHER_LAYER_GATES = {
     "maximum_state_effect_ratio": "0.10",
     "maximum_state_total_ape": "0.10",
 }
+_HIGHER_LAYER_NATIVE_TRANSFER_APPROXIMATION = {
+    "overhead_key_id": "native_value_transfer",
+    "method": "frozen_max_observed_per_transfer",
+    "coefficient_prover_gas": "5017",
+    "materiality_budget": "0.002",
+    "required_counts": [1, 2, 4, 8, 16, 32, 64, 128],
+    "source": {
+        "calibration_id": "999b91b91fd693899d09fa53",
+        "identity_sha256": (
+            "999b91b91fd693899d09fa53c0502c19"
+            "e6c43d6f9a0ddcf4c38bd15ef9c0fccd"
+        ),
+        "raw_rows_sha256": (
+            "297d88799b069765481f9793645da504"
+            "c507b14193677109cf760803d491140e"
+        ),
+        "fit_sha256": (
+            "fc92696741c1b74503b4863f156936a6"
+            "b3ad00164222058d8db26f14f637b3e5"
+        ),
+    },
+}
 
 
 @dataclass(frozen=True)
@@ -6046,6 +6068,16 @@ class StateHoldoutSpec:
     scale: int
     control: Mapping[str, Any]
     target: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class NativeTransferApproximationSpec:
+    overhead_key_id: str
+    method: str
+    coefficient_prover_gas: str
+    materiality_budget: str
+    required_counts: tuple[int, ...]
+    source: Mapping[str, str]
 
 
 @dataclass(frozen=True)
@@ -6062,6 +6094,7 @@ class HigherLayerManifest:
     overhead_case_ids: tuple[str, ...]
     state_holdouts: tuple[StateHoldoutSpec, ...]
     gates: Mapping[str, str | int]
+    native_transfer_approximation: NativeTransferApproximationSpec
 
 
 def _higher_layer_expected_state_holdouts() -> tuple[dict[str, Any], ...]:
@@ -6144,6 +6177,7 @@ def validate_higher_layer_manifest(artifact: Mapping[str, Any]) -> None:
         "overhead_case_ids",
         "state_holdouts",
         "gates",
+        "native_transfer_approximation",
     }
     _reject_unknown_fields(artifact, fields, label="higher-layer manifest")
     _validate_content_addressed_artifact(artifact, label="higher-layer manifest")
@@ -6225,6 +6259,59 @@ def validate_higher_layer_manifest(artifact: Mapping[str, Any]) -> None:
     if not _exact_json_equal(gates, _HIGHER_LAYER_GATES):
         raise ValueError("higher-layer gates differ")
 
+    approximation = artifact["native_transfer_approximation"]
+    approximation_fields = {
+        "overhead_key_id",
+        "method",
+        "coefficient_prover_gas",
+        "materiality_budget",
+        "required_counts",
+        "source",
+    }
+    _reject_unknown_fields(
+        approximation,
+        approximation_fields,
+        label="native transfer approximation",
+    )
+    source = approximation["source"]
+    _reject_unknown_fields(
+        source,
+        set(_HIGHER_LAYER_NATIVE_TRANSFER_APPROXIMATION["source"]),
+        label="native transfer approximation source",
+    )
+    coefficient = _decimal(
+        approximation["coefficient_prover_gas"],
+        label="native transfer approximation coefficient",
+    )
+    materiality_budget = _decimal(
+        approximation["materiality_budget"],
+        label="native transfer approximation materiality budget",
+    )
+    if coefficient <= 0:
+        raise ValueError("native transfer approximation coefficient must be positive")
+    if not 0 < materiality_budget < 1:
+        raise ValueError(
+            "native transfer approximation materiality budget must be between zero and one"
+        )
+    required_counts = approximation["required_counts"]
+    if (
+        not isinstance(required_counts, list)
+        or not all(type(count) is int and count > 0 for count in required_counts)
+        or required_counts != sorted(set(required_counts))
+    ):
+        raise ValueError(
+            "native transfer approximation required counts must be positive, unique, and increasing"
+        )
+    for source_key in ("identity_sha256", "raw_rows_sha256", "fit_sha256"):
+        if not _is_sha256(source[source_key]):
+            raise ValueError(
+                f"native transfer approximation source {source_key} must be a SHA256 digest"
+            )
+    if not _exact_json_equal(
+        approximation, _HIGHER_LAYER_NATIVE_TRANSFER_APPROXIMATION
+    ):
+        raise ValueError("native transfer approximation differs")
+
 
 def load_higher_layer_manifest(path: pathlib.Path) -> HigherLayerManifest:
     """Load and validate the canonical higher-layer campaign manifest."""
@@ -6253,6 +6340,7 @@ def load_higher_layer_manifest(path: pathlib.Path) -> HigherLayerManifest:
         )
         for holdout in artifact["state_holdouts"]
     )
+    approximation = artifact["native_transfer_approximation"]
     return HigherLayerManifest(
         schema_version=artifact["schema_version"],
         purpose=artifact["purpose"],
@@ -6268,6 +6356,14 @@ def load_higher_layer_manifest(path: pathlib.Path) -> HigherLayerManifest:
         overhead_case_ids=tuple(artifact["overhead_case_ids"]),
         state_holdouts=state_holdouts,
         gates=MappingProxyType(dict(artifact["gates"])),
+        native_transfer_approximation=NativeTransferApproximationSpec(
+            overhead_key_id=approximation["overhead_key_id"],
+            method=approximation["method"],
+            coefficient_prover_gas=approximation["coefficient_prover_gas"],
+            materiality_budget=approximation["materiality_budget"],
+            required_counts=tuple(approximation["required_counts"]),
+            source=MappingProxyType(dict(approximation["source"])),
+        ),
     )
 
 
@@ -21026,7 +21122,7 @@ def cmd_verify_osaka_opcode_augmentation(args: argparse.Namespace) -> None:
 
 
 _HIGHER_LAYER_MANIFEST_PATH = pathlib.Path(
-    "experiments/opcode-gas/manifests/sp1-higher-layer-v1.json"
+    "experiments/opcode-gas/manifests/sp1-higher-layer-v2.json"
 )
 _HIGHER_LAYER_COVERAGE_PATH = pathlib.Path(_HIGHER_LAYER_OPERATION_COVERAGE_REF["path"])
 _HIGHER_LAYER_CORE_PATH = pathlib.Path(_HIGHER_LAYER_AUGMENTED_CORE_REF["path"])

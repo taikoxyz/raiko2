@@ -1,0 +1,156 @@
+{
+  "artifact_sha256": "5e5f10ccd9e4a121984be154d94961dec73a7844c9fe5577dfd5f60ec62c88b0",
+  "augmented_core_ref": {
+    "artifact_sha256": "b66d7951bfa416810f93319f99c30ce91969026ee9fa3a402a74cbc2214f7e8b",
+    "file_sha256": "8bfcef84bf5b42a643bd98bcb7dd9a7a8122e0ce1f8a2a4ed6f18b082f16693e",
+    "path": "experiments/opcode-gas/derivations/f945e67bb2c38c9c8ef50530/core-opcode-submodel.json"
+  },
+  "gates": {
+    "maximum_checkpoint_ape": "0.10",
+    "maximum_relative_slope_standard_error": "0.05",
+    "maximum_residual_signal_ratio": "0.02",
+    "maximum_state_effect_ratio": "0.10",
+    "maximum_state_total_ape": "0.10",
+    "maximum_tx_base_disagreement": "0.05",
+    "minimum_r2": "0.995",
+    "minimum_signal_absolute": 1000,
+    "minimum_signal_baseline_ratio": "0.01"
+  },
+  "generator_rounds": [
+    8,
+    32,
+    128
+  ],
+  "native_transfer_approximation": {
+    "coefficient_prover_gas": "5017",
+    "materiality_budget": "0.002",
+    "method": "frozen_max_observed_per_transfer",
+    "overhead_key_id": "native_value_transfer",
+    "required_counts": [
+      1,
+      2,
+      4,
+      8,
+      16,
+      32,
+      64,
+      128
+    ],
+    "source": {
+      "calibration_id": "999b91b91fd693899d09fa53",
+      "fit_sha256": "fc92696741c1b74503b4863f156936a6b3ad00164222058d8db26f14f637b3e5",
+      "identity_sha256": "999b91b91fd693899d09fa53c0502c19e6c43d6f9a0ddcf4c38bd15ef9c0fccd",
+      "raw_rows_sha256": "297d88799b069765481f9793645da504c507b14193677109cf760803d491140e"
+    }
+  },
+  "operation_coverage_ref": {
+    "artifact_sha256": "fbb4817d50b04147d0d9c86a25c82324d5e36ce9d6acbf49c51dd165cf1905a3",
+    "file_sha256": "c5e5a7c28bb2640249f70df2298f6e8a4ee5d46b3bfe2d204c4cb6a86bf1d9be",
+    "path": "experiments/opcode-gas/manifests/operation-coverage-v1.json"
+  },
+  "overhead_case_ids": [
+    "tx_base_no_code_no_value",
+    "tx_base_minimal_contract_call",
+    "native_transfer_positive_vs_zero",
+    "block_base_one_vs_two_minimal_blocks",
+    "startup_minimal_no_candidate_tx",
+    "startup_minimal_one_no_code_tx"
+  ],
+  "purpose": "sp1_higher_layer_fixed_cost_calibration",
+  "q_formula": [
+    "proposal_startup",
+    "block_base",
+    "tx_base",
+    "native_value_transfer"
+  ],
+  "repeats": 3,
+  "schema_version": 2,
+  "state_holdouts": [
+    {
+      "control": {
+        "extra_account_count": 0
+      },
+      "kind": "witness_topology",
+      "pair_id": "witness_topology_1",
+      "scale": 1,
+      "target": {
+        "extra_account_count": 1
+      }
+    },
+    {
+      "control": {
+        "extra_account_count": 0
+      },
+      "kind": "witness_topology",
+      "pair_id": "witness_topology_8",
+      "scale": 8,
+      "target": {
+        "extra_account_count": 8
+      }
+    },
+    {
+      "control": {
+        "extra_account_count": 0
+      },
+      "kind": "witness_topology",
+      "pair_id": "witness_topology_32",
+      "scale": 32,
+      "target": {
+        "extra_account_count": 32
+      }
+    },
+    {
+      "control": {
+        "recipient_mode": "single",
+        "transaction_count": 2,
+        "value": 1
+      },
+      "kind": "dirty_accounts",
+      "pair_id": "dirty_accounts_2",
+      "scale": 2,
+      "target": {
+        "recipient_mode": "distinct",
+        "transaction_count": 2,
+        "value": 1
+      }
+    },
+    {
+      "control": {
+        "recipient_mode": "single",
+        "transaction_count": 8,
+        "value": 1
+      },
+      "kind": "dirty_accounts",
+      "pair_id": "dirty_accounts_8",
+      "scale": 8,
+      "target": {
+        "recipient_mode": "distinct",
+        "transaction_count": 8,
+        "value": 1
+      }
+    },
+    {
+      "control": {
+        "recipient_mode": "single",
+        "transaction_count": 32,
+        "value": 1
+      },
+      "kind": "dirty_accounts",
+      "pair_id": "dirty_accounts_32",
+      "scale": 32,
+      "target": {
+        "recipient_mode": "distinct",
+        "transaction_count": 32,
+        "value": 1
+      }
+    }
+  ],
+  "version_identity": {
+    "ethereum_upgrade": "Fusaka",
+    "primary_metric": "proverGas",
+    "production_schedule": "UNZEN_ZK_GAS_SCHEDULE",
+    "proving_backend": "sp1",
+    "revm_spec_id": "OSAKA",
+    "taiko_fork": "Unzen"
+  }
+}

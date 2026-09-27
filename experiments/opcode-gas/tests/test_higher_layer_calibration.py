@@ -19,6 +19,13 @@ MANIFEST_PATH = (
     / "experiments"
     / "opcode-gas"
     / "manifests"
+    / "sp1-higher-layer-v2.json"
+)
+V1_MANIFEST_PATH = (
+    ROOT
+    / "experiments"
+    / "opcode-gas"
+    / "manifests"
     / "sp1-higher-layer-v1.json"
 )
 CALIBRATION_ID = "1" * 24
@@ -92,6 +99,34 @@ class HigherLayerManifestTests(unittest.TestCase):
                 ("dirty_accounts", 8),
                 ("dirty_accounts", 32),
             ),
+        )
+        approximation = manifest.native_transfer_approximation
+        self.assertEqual(approximation.overhead_key_id, "native_value_transfer")
+        self.assertEqual(approximation.method, "frozen_max_observed_per_transfer")
+        self.assertEqual(approximation.coefficient_prover_gas, "5017")
+        self.assertEqual(approximation.materiality_budget, "0.002")
+        self.assertEqual(approximation.required_counts, (1, 2, 4, 8, 16, 32, 64, 128))
+        self.assertEqual(
+            approximation.source,
+            {
+                "calibration_id": "999b91b91fd693899d09fa53",
+                "identity_sha256": (
+                    "999b91b91fd693899d09fa53c0502c19"
+                    "e6c43d6f9a0ddcf4c38bd15ef9c0fccd"
+                ),
+                "raw_rows_sha256": (
+                    "297d88799b069765481f9793645da504"
+                    "c507b14193677109cf760803d491140e"
+                ),
+                "fit_sha256": (
+                    "fc92696741c1b74503b4863f156936a6"
+                    "b3ad00164222058d8db26f14f637b3e5"
+                ),
+            },
+        )
+        self.assertEqual(
+            json.loads(V1_MANIFEST_PATH.read_text())["artifact_sha256"],
+            "f531201bd93f98ba20e51474ae4d64ae1f444bdaad027ea88362a47fb45e9809",
         )
 
     def test_committed_manifest_is_canonical_and_content_addressed(self):
@@ -215,6 +250,77 @@ class HigherLayerManifestTests(unittest.TestCase):
         for mutate in mutations:
             with self.subTest(mutate=mutate):
                 self.assert_rejected(mutate, "unknown fields|differs")
+
+    def test_rejects_resealed_native_transfer_approximation_drift(self):
+        mutations = (
+            (
+                lambda artifact: artifact["native_transfer_approximation"].__setitem__(
+                    "coefficient_prover_gas", "5018"
+                ),
+                "native transfer approximation differs",
+            ),
+            (
+                lambda artifact: artifact["native_transfer_approximation"].__setitem__(
+                    "materiality_budget", "0.003"
+                ),
+                "native transfer approximation differs",
+            ),
+            (
+                lambda artifact: artifact["native_transfer_approximation"].__setitem__(
+                    "method", "mean_observed_per_transfer"
+                ),
+                "native transfer approximation differs",
+            ),
+            (
+                lambda artifact: artifact["native_transfer_approximation"][
+                    "required_counts"
+                ].append(256),
+                "native transfer approximation differs",
+            ),
+            (
+                lambda artifact: artifact["native_transfer_approximation"]["source"].__setitem__(
+                    "calibration_id", "0" * 24
+                ),
+                "native transfer approximation differs",
+            ),
+            (
+                lambda artifact: artifact["native_transfer_approximation"]["source"].__setitem__(
+                    "identity_sha256", "0" * 64
+                ),
+                "native transfer approximation differs",
+            ),
+            (
+                lambda artifact: artifact["native_transfer_approximation"]["source"].__setitem__(
+                    "raw_rows_sha256", "0" * 64
+                ),
+                "native transfer approximation differs",
+            ),
+            (
+                lambda artifact: artifact["native_transfer_approximation"]["source"].__setitem__(
+                    "fit_sha256", "0" * 64
+                ),
+                "native transfer approximation differs",
+            ),
+            (
+                lambda artifact: artifact["native_transfer_approximation"].__setitem__(
+                    "unexpected", True
+                ),
+                "unknown fields",
+            ),
+            (
+                lambda artifact: artifact["native_transfer_approximation"].__setitem__(
+                    "materiality_budget", "0.0020"
+                ),
+                "native transfer approximation differs",
+            ),
+            (
+                lambda artifact: artifact.__setitem__("schema_version", 1),
+                "higher-layer manifest header differs",
+            ),
+        )
+        for mutate, expected in mutations:
+            with self.subTest(mutate=mutate):
+                self.assert_rejected(mutate, expected)
 
 
 class StaticOperationDeltaTests(unittest.TestCase):

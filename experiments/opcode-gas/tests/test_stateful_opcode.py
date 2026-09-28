@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from dataclasses import replace
+from fractions import Fraction
 from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
@@ -62,6 +63,7 @@ EXPECTED_SCENARIOS = (
 STATEFUL_MANIFEST = (
     ROOT / "experiments" / "opcode-gas" / "manifests" / "sp1-stateful-opcode-v1.json"
 )
+STATEFUL_REFERENCE_REGISTRY = ROOT / stateful.REFERENCE_REGISTRY["path"]
 
 
 class StatefulOpcodeManifestTests(unittest.TestCase):
@@ -976,6 +978,700 @@ class StatefulCampaignRowIdentityTests(unittest.TestCase):
                     batch_executor=lambda **_kwargs: None,
                     identity_replayer=lambda *_args: {},
                 )
+
+
+class StatefulExactReferenceTests(unittest.TestCase):
+    def setUp(self):
+        self.registry_artifact = json.loads(STATEFUL_REFERENCE_REGISTRY.read_text())
+        self.registry = stateful.load_stateful_reference_registry(
+            self.registry_artifact,
+            expected_artifact_sha256=stateful.REFERENCE_REGISTRY["artifact_sha256"],
+        )
+
+    def test_fraction_payload_is_exact_and_replays_80_digit_projection(self):
+        payload = stateful.exact_fraction_payload(Fraction(1, 3))
+
+        self.assertEqual(payload["numerator"], "1")
+        self.assertEqual(payload["denominator"], "3")
+        self.assertEqual(
+            payload["decimal"],
+            "0.33333333333333333333333333333333333333333333333333333333333333333333333333333333",
+        )
+        self.assertEqual(stateful.replay_exact_fraction(payload), Fraction(1, 3))
+
+        rounded = dict(payload)
+        rounded["decimal"] = "0.333333"
+        with self.assertRaisesRegex(ValueError, "replay residual"):
+            stateful.replay_exact_fraction(rounded)
+
+        noncanonical = dict(payload)
+        noncanonical["decimal"] = payload["decimal"][:-1] + "34"
+        with self.assertRaisesRegex(ValueError, "80-digit projection"):
+            stateful.replay_exact_fraction(noncanonical)
+
+    def test_typed_reference_lookup_reconstructs_signed_cost_and_absolute_slope(self):
+        common = Fraction(self.registry_artifact["registry"]["common_dispatch"])
+        pop_body = Fraction(
+            self.registry_artifact["registry"]["models"]["opcode:0x50"]
+            ["parameters"]["body_per_raw_gas"]
+        )
+        ledger = {"opcode:0x50": -2, "opcode:0x55": 1, "opcode:0x5b": 1}
+        typed_inputs = {
+            "opcode:0x50": {
+                "artifact_sha256": stateful.REFERENCE_REGISTRY["artifact_sha256"],
+                "model_id": "opcode:0x50",
+                "model_kind": "static_raw_gas",
+                "input": {"raw_gas": 2},
+            },
+            "opcode:0x5b": {
+                "artifact_sha256": stateful.REFERENCE_REGISTRY["artifact_sha256"],
+                "model_id": "opcode:0x5b",
+                "model_kind": "static_raw_gas",
+                "input": {"raw_gas": 1},
+            },
+        }
+
+        resolved = stateful.resolve_signed_reference_cost(
+            self.registry,
+            ledger,
+            state_opcode_key="opcode:0x55",
+            typed_inputs=typed_inputs,
+        )
+
+        expected = -2 * (common + 2 * pop_body) + common
+        self.assertEqual(
+            resolved["signed_reference_cost_exact"],
+            stateful.exact_fraction_payload(expected),
+        )
+        self.assertEqual(
+            [entry["opcode_key"] for entry in resolved["entries"]],
+            ["opcode:0x50", "opcode:0x5b"],
+        )
+        self.assertEqual(
+            resolved["entries"][0]["model_parameters_exact"],
+            {"body_per_raw_gas": stateful.exact_fraction_payload(pop_body)},
+        )
+        self.assertEqual(
+            resolved["entries"][0]["common_dispatch_exact"],
+            stateful.exact_fraction_payload(common),
+        )
+        self.assertIn("predictor_decimal", resolved["entries"][0])
+        self.assertLessEqual(
+            stateful.replay_exact_fraction(
+                resolved["entries"][0]["predictor_residual_exact"]
+            ),
+            stateful.STATEFUL_REPLAY_RESIDUAL_MAX,
+        )
+        self.assertEqual(sum(ledger.values()), 0, "common dispatch must cancel")
+
+        fit = stateful.fit_stateful_scenario(
+            scenario="synthetic_store",
+            fit_deltas={
+                count: [str(7 + count * 17)] * 3
+                for count in stateful.FIT_COUNTS
+            },
+            reference_cost=Fraction(-3),
+        )
+        self.assertEqual(
+            fit["relative_slope_exact"],
+            stateful.exact_fraction_payload(Fraction(17)),
+        )
+        self.assertEqual(
+            fit["nuisance_intercept_exact"],
+            stateful.exact_fraction_payload(Fraction(7)),
+        )
+        self.assertEqual(
+            fit["absolute_stateful_cost_exact"],
+            stateful.exact_fraction_payload(Fraction(20)),
+        )
+
+    def test_reference_lookup_rejects_missing_unsupported_and_non_exact_inputs(self):
+        valid = {
+            "artifact_sha256": stateful.REFERENCE_REGISTRY["artifact_sha256"],
+            "model_id": "opcode:0x19",
+            "model_kind": "static_raw_gas",
+            "input": {"raw_gas": 3},
+        }
+        for label, opcode_key, typed, message in (
+            ("missing", "opcode:0x0c", valid, "missing"),
+            ("unsupported", "opcode:0x00", valid, "unsupported"),
+            (
+                "wrong model",
+                "opcode:0x19",
+                {**valid, "model_id": "opcode:0x50"},
+                "model",
+            ),
+            (
+                "non-exact input",
+                "opcode:0x19",
+                {**valid, "input": {"raw_gas": "3"}},
+                "typed input",
+            ),
+            (
+                "structured without trace features",
+                "opcode:0x0a",
+                {
+                    **valid,
+                    "model_id": "opcode:0x0a",
+                    "model_kind": "exp",
+                    "input": {"exponent_byte_length": 1},
+                },
+                "structured",
+            ),
+        ):
+            with self.subTest(label=label), self.assertRaisesRegex(
+                ValueError, message
+            ):
+                stateful.evaluate_typed_reference(self.registry, opcode_key, typed)
+
+        with self.assertRaisesRegex(ValueError, "zero sum"):
+            stateful.resolve_signed_reference_cost(
+                self.registry,
+                {"opcode:0x19": -1, "opcode:0x54": 1, "opcode:0x5b": 1},
+                state_opcode_key="opcode:0x54",
+                typed_inputs={"opcode:0x19": valid, "opcode:0x5b": valid},
+            )
+
+    def test_loaded_registry_is_immutable_after_caller_artifact_mutation(self):
+        typed = {
+            "artifact_sha256": stateful.REFERENCE_REGISTRY["artifact_sha256"],
+            "model_id": "opcode:0x50",
+            "model_kind": "static_raw_gas",
+            "input": {"raw_gas": 2},
+        }
+        before = stateful.evaluate_typed_reference(
+            self.registry, "opcode:0x50", typed
+        )
+
+        self.registry_artifact["registry"]["common_dispatch"] = "999999"
+        self.registry_artifact["registry"]["models"]["opcode:0x50"]["parameters"][
+            "body_per_raw_gas"
+        ] = "999999"
+
+        self.assertEqual(
+            stateful.evaluate_typed_reference(
+                self.registry, "opcode:0x50", typed
+            ),
+            before,
+        )
+
+
+class StatefulScenarioGateTests(unittest.TestCase):
+    @staticmethod
+    def deltas(*, slope=20, intercept=10):
+        return {
+            count: [str(intercept + count * slope)] * stateful.REPEATS
+            for count in stateful.PRIMARY_COUNTS
+        }
+
+    def gate(self, deltas=None, *, reference_cost=Fraction(-2)):
+        return stateful.fit_and_gate_stateful_scenario(
+            scenario="synthetic",
+            deltas=self.deltas() if deltas is None else deltas,
+            reference_cost=reference_cost,
+            noise_floor=Fraction(143),
+        )
+
+    def test_exact_linear_scenario_passes_every_predeclared_gate(self):
+        report = self.gate()
+
+        self.assertTrue(report["passed"])
+        self.assertEqual(report["failures"], [])
+        self.assertEqual(
+            report["fit"]["r2_exact"],
+            stateful.exact_fraction_payload(Fraction(1)),
+        )
+        self.assertEqual(
+            report["fit"]["absolute_stateful_cost_exact"],
+            stateful.exact_fraction_payload(Fraction(22)),
+        )
+        for gate in (
+            "positive_signal",
+            "r2",
+            "relative_slope_standard_error",
+            "residual_signal",
+            "count_zero_intercept",
+            "repeat_spread",
+            "holdout_ape",
+            "checkpoint_ape",
+        ):
+            self.assertTrue(report["gates"][gate]["passed"], gate)
+        self.assertEqual(
+            report["gates"]["positive_signal"]["threshold_exact"],
+            stateful.exact_fraction_payload(Fraction(143)),
+        )
+        self.assertEqual(
+            report["gates"]["r2"]["threshold_exact"],
+            stateful.exact_fraction_payload(Fraction(995, 1000)),
+        )
+
+    def test_each_scenario_quality_gate_rejects_its_synthetic_failure(self):
+        cases = []
+
+        low_signal = self.deltas(slope=5)
+        cases.append(("positive_signal", low_signal, Fraction(-2)))
+
+        noisy_fit = self.deltas()
+        noisy_fit[8] = ["270", "170", "170"]
+        cases.extend(
+            (gate, noisy_fit, Fraction(-2))
+            for gate in (
+                "r2",
+                "relative_slope_standard_error",
+                "residual_signal",
+            )
+        )
+
+        bad_zero = self.deltas()
+        bad_zero[0] = ["100", "100", "100"]
+        cases.append(("count_zero_intercept", bad_zero, Fraction(-2)))
+
+        one_bad_zero_repeat = self.deltas()
+        one_bad_zero_repeat[0] = ["10", "10", "100"]
+        cases.append(
+            ("count_zero_intercept", one_bad_zero_repeat, Fraction(-2))
+        )
+
+        spread = self.deltas()
+        spread[32] = ["650", "700", "750"]
+        cases.append(("repeat_spread", spread, Fraction(-2)))
+
+        holdout = self.deltas()
+        holdout[32] = ["810", "810", "810"]
+        cases.append(("holdout_ape", holdout, Fraction(-2)))
+
+        checkpoint = self.deltas()
+        checkpoint[64] = ["1610", "1610", "1610"]
+        cases.append(("checkpoint_ape", checkpoint, Fraction(-2)))
+
+        for gate, deltas, reference_cost in cases:
+            with self.subTest(gate=gate):
+                report = self.gate(deltas, reference_cost=reference_cost)
+                self.assertFalse(report["gates"][gate]["passed"])
+                self.assertIn(gate, report["failures"])
+
+    def test_zero_denominators_fail_closed_without_division_errors(self):
+        zero_signal = self.deltas(slope=0)
+        report = self.gate(zero_signal, reference_cost=Fraction(0))
+        self.assertIn("zero_signal", report["failures"])
+        self.assertFalse(report["gates"]["residual_signal"]["passed"])
+        self.assertFalse(report["gates"]["count_zero_intercept"]["passed"])
+
+        zero_absolute = self.gate(reference_cost=Fraction(20))
+        self.assertIn("zero_absolute_stateful_cost", zero_absolute["failures"])
+        self.assertFalse(zero_absolute["gates"]["repeat_spread"]["passed"])
+
+        zero_holdout = self.deltas()
+        zero_holdout[32] = ["10", "10", "10"]
+        report = self.gate(zero_holdout)
+        self.assertIn("zero_holdout_marginal", report["failures"])
+        self.assertFalse(report["gates"]["holdout_ape"]["passed"])
+
+        zero_checkpoint = self.deltas()
+        zero_checkpoint[64] = ["10", "10", "10"]
+        report = self.gate(zero_checkpoint)
+        self.assertIn("zero_checkpoint_marginal", report["failures"])
+        self.assertFalse(report["gates"]["checkpoint_ape"]["passed"])
+
+
+class StatefulModelComparisonTests(unittest.TestCase):
+    def setUp(self):
+        self.manifest = stateful.StatefulCampaignManifest.from_mapping(
+            stateful.canonical_stateful_manifest_payload()
+        )
+
+    @staticmethod
+    def branch(scenario):
+        if scenario.operation_kind == "load":
+            return "load"
+        if scenario.current_value != scenario.original_value:
+            return (
+                "restore_original"
+                if scenario.new_value == scenario.original_value
+                else "dirty_rewrite"
+            )
+        if scenario.new_value == scenario.current_value:
+            return "noop"
+        if scenario.current_value == 0:
+            return "set"
+        if scenario.new_value == 0:
+            return "clear"
+        return "reset"
+
+    def scenario_data(self, family):
+        branch_costs = {
+            "noop": 200,
+            "set": 300,
+            "clear": 400,
+            "reset": 500,
+            "dirty_rewrite": 600,
+            "restore_original": 700,
+        }
+        data = {}
+        for index, scenario in enumerate(self.manifest.scenarios):
+            if family == "fixed":
+                absolute = 100 if scenario.operation_kind == "load" else 200
+            elif family == "access":
+                absolute = (
+                    100 + (30 if scenario.access == "cold" else 0)
+                    if scenario.operation_kind == "load"
+                    else 200 + (40 if scenario.access == "cold" else 0)
+                )
+            else:
+                absolute = (
+                    100 + (30 if scenario.access == "cold" else 0)
+                    if scenario.operation_kind == "load"
+                    else branch_costs[self.branch(scenario)]
+                    + (40 if scenario.access == "cold" else 0)
+                )
+            intercept = 10 + index
+            data[scenario.name] = {
+                "deltas": {
+                    count: [str(intercept + absolute * count)] * stateful.REPEATS
+                    for count in scenario.counts
+                },
+                "signed_execution_ledger": stateful._reference_ledger(scenario),
+                "signed_reference_cost_exact": stateful.exact_fraction_payload(
+                    Fraction(0)
+                ),
+            }
+        return data
+
+    def fit(self, family):
+        return stateful.fit_stateful_model_report(
+            self.manifest,
+            self.scenario_data(family),
+            noise_floor=Fraction(143),
+        )
+
+    def test_joint_models_share_parameters_and_use_fixed_selection_order(self):
+        fixed = self.fit("fixed")
+        access = self.fit("access")
+        typed = self.fit("typed")
+
+        self.assertEqual(fixed["selection"]["selected_model"], "M_fixed")
+        self.assertEqual(access["selection"]["selected_model"], "M_access")
+        self.assertEqual(typed["selection"]["selected_model"], "M_typed")
+        self.assertEqual(
+            typed["selection"]["order"], ["M_fixed", "M_access", "M_typed"]
+        )
+        self.assertFalse(typed["candidate_eligible"])
+
+        typed_parameters = typed["model_reports"]["M_typed"]["parameters_exact"]
+        self.assertEqual(
+            typed_parameters["sload_warm_body"],
+            stateful.exact_fraction_payload(Fraction(100)),
+        )
+        self.assertEqual(
+            typed_parameters["sstore_cold_extra"],
+            stateful.exact_fraction_payload(Fraction(40)),
+        )
+        self.assertEqual(
+            typed_parameters["sstore_branch:set"],
+            stateful.exact_fraction_payload(Fraction(300)),
+        )
+        self.assertEqual(
+            typed["model_reports"]["M_typed"]["cold_increment_diagnostic"]
+            ["difference_exact"],
+            stateful.exact_fraction_payload(Fraction(-10)),
+        )
+        self.assertEqual(
+            typed["model_reports"]["M_typed"]["maximum_ape_threshold_exact"],
+            stateful.exact_fraction_payload(Fraction(1, 10)),
+        )
+        nuisance = typed["model_reports"]["M_typed"]["nuisance_intercepts_exact"]
+        self.assertEqual(
+            nuisance["sload_cold_zero"],
+            stateful.exact_fraction_payload(Fraction(10)),
+        )
+        self.assertEqual(
+            nuisance["sstore_restore_nonzero"],
+            stateful.exact_fraction_payload(Fraction(27)),
+        )
+
+        raw = typed["model_reports"]["M_raw_gas_diagnostic"]
+        self.assertTrue(raw["diagnostic_only"])
+        self.assertFalse(raw["eligible"])
+        self.assertEqual(set(raw["parameters_exact"]), {"alpha", "beta"})
+
+    def test_all_families_are_frozen_before_holdout_and_never_refit(self):
+        data = self.scenario_data("typed")
+        original = stateful.fit_stateful_model_report(
+            self.manifest, data, noise_floor=Fraction(143)
+        )
+        changed = copy.deepcopy(data)
+        changed["sstore_set_warm"]["deltas"][stateful.HOLDOUT_COUNT] = [
+            "999999",
+            "999999",
+            "999999",
+        ]
+        rejected = stateful.fit_stateful_model_report(
+            self.manifest, changed, noise_floor=Fraction(143)
+        )
+
+        self.assertEqual(original["frozen_fit_sha256"], rejected["frozen_fit_sha256"])
+        self.assertEqual(
+            original["frozen_fit_models"], rejected["frozen_fit_models"]
+        )
+        self.assertTrue(original["model_reports"]["M_typed"]["eligible"])
+        self.assertFalse(rejected["model_reports"]["M_typed"]["eligible"])
+        self.assertIn(
+            "holdout_ape",
+            rejected["model_reports"]["M_typed"]["rejection_reasons"],
+        )
+
+    def test_high_limb_required_scenarios_and_no_eligible_model_fail_closed(self):
+        data = self.scenario_data("typed")
+        high = copy.deepcopy(data)
+        high["sstore_set_high_value_warm"]["deltas"][
+            stateful.CHECKPOINT_COUNT
+        ] = ["999999", "999999", "999999"]
+        report = stateful.fit_stateful_model_report(
+            self.manifest, high, noise_floor=Fraction(143)
+        )
+        self.assertFalse(report["model_reports"]["M_typed"]["eligible"])
+        self.assertIn(
+            "high_limb_ape",
+            report["model_reports"]["M_typed"]["rejection_reasons"],
+        )
+
+        none = copy.deepcopy(data)
+        for scenario in self.manifest.scenarios:
+            if scenario.diagnostic:
+                continue
+            none[scenario.name]["deltas"][stateful.HOLDOUT_COUNT] = [
+                "999999",
+                "999999",
+                "999999",
+            ]
+        report = stateful.fit_stateful_model_report(
+            self.manifest, none, noise_floor=Fraction(143)
+        )
+        self.assertEqual(report["selection"]["status"], "no_eligible_model")
+        self.assertIsNone(report["selection"]["selected_model"])
+
+        incomplete = self.scenario_data("fixed")
+        incomplete.pop("sload_warm_zero")
+        with self.assertRaisesRegex(ValueError, "required scenario"):
+            stateful.fit_stateful_model_report(
+                self.manifest, incomplete, noise_floor=Fraction(143)
+            )
+
+    def test_low_high_consistency_is_separate_from_marginal_signal_ape(self):
+        data = self.scenario_data("typed")
+        high_name = "sstore_set_high_value_warm"
+        zero = Fraction(data[high_name]["deltas"][0][0])
+        observed_absolute = Fraction(663, 2)  # 10.5% above the typed set cost.
+        data[high_name]["deltas"][stateful.CHECKPOINT_COUNT] = [
+            str(zero + stateful.CHECKPOINT_COUNT * observed_absolute)
+        ] * stateful.REPEATS
+
+        report = stateful.fit_stateful_model_report(
+            self.manifest, data, noise_floor=Fraction(143)
+        )
+        typed = report["model_reports"]["M_typed"]
+
+        self.assertLessEqual(
+            stateful.replay_exact_fraction(typed["maximum_high_limb_ape_exact"]),
+            Fraction(1, 10),
+        )
+        self.assertGreater(
+            stateful.replay_exact_fraction(
+                typed["maximum_high_limb_consistency_error_exact"]
+            ),
+            Fraction(1, 10),
+        )
+        self.assertIn("high_limb_consistency", typed["rejection_reasons"])
+        row = next(
+            item
+            for item in typed["high_limb_comparisons"]
+            if item["scenario"] == high_name
+        )
+        self.assertEqual(
+            stateful.replay_exact_fraction(row["observed_absolute_cost_exact"]),
+            observed_absolute,
+        )
+
+    def test_high_limb_zero_model_cost_denominator_fails_closed(self):
+        scenario = self.manifest.scenario("sload_warm_high_value")
+        comparison = stateful._high_limb_model_comparison(
+            scenario=scenario,
+            count=stateful.CHECKPOINT_COUNT,
+            zero_deltas=(Fraction(7), Fraction(7), Fraction(7)),
+            checkpoint_deltas=(Fraction(71), Fraction(71), Fraction(71)),
+            predicted_absolute=Fraction(0),
+            reference_cost=Fraction(1),
+        )
+
+        self.assertIsNone(comparison["consistency_error_exact"])
+        self.assertTrue(comparison["zero_model_cost_denominator"])
+
+
+class StatefulPairLedgerExtractionTests(unittest.TestCase):
+    def setUp(self):
+        self.manifest = stateful.StatefulCampaignManifest.from_mapping(
+            stateful.canonical_stateful_manifest_payload()
+        )
+        artifact = json.loads(STATEFUL_REFERENCE_REGISTRY.read_text())
+        self.registry = stateful.load_stateful_reference_registry(
+            artifact,
+            expected_artifact_sha256=stateful.REFERENCE_REGISTRY["artifact_sha256"],
+        )
+
+    @staticmethod
+    def raw_gas_for(scenario, opcode_key):
+        opcode = int(opcode_key.removeprefix("opcode:0x"), 16)
+        if opcode == scenario.measurement_opcode:
+            return scenario.target_raw_gas
+        return {
+            stateful.NOT: 3,
+            stateful.POP: 2,
+            stateful.JUMPDEST: 1,
+            stateful.PUSH32: 3,
+            stateful.STOP: 0,
+        }[opcode]
+
+    def rows(self, scenario_name):
+        scenario = self.manifest.scenario(scenario_name)
+        rows = []
+        for count in scenario.counts:
+            fixtures = {
+                lane: stateful.generate_stateful_fixture(
+                    self.manifest, scenario_name, lane=lane, count=count
+                )
+                for lane in ("target", "control")
+            }
+            for repeat_index in range(self.manifest.repeats):
+                for lane in ("target", "control"):
+                    fixture = fixtures[lane]
+                    counts = stateful._expected_executed_opcode_counts(
+                        fixture["case_record"]
+                    )
+                    raw = {
+                        key: value * self.raw_gas_for(scenario, key)
+                        for key, value in counts.items()
+                    }
+                    base = 10_000 + repeat_index
+                    delta = 10 + 200 * count
+                    rows.append(
+                        {
+                            "scenario": scenario_name,
+                            "lane": lane,
+                            "relation_count": count,
+                            "repeat_index": repeat_index,
+                            "ordered_pair_identity": hashlib.sha256(
+                                f"{scenario_name}:{count}:{repeat_index}".encode()
+                            ).hexdigest(),
+                            "normalized_report": {
+                                "prover_gas": base + (delta if lane == "target" else 0)
+                            },
+                            "formal_report": {
+                                "controlled_trace": {
+                                    "executed_opcode_counts": counts,
+                                    "executed_opcode_raw_gas": raw,
+                                }
+                            },
+                        }
+                    )
+        return rows
+
+    def test_task4_rows_reconstruct_every_pair_ledger_and_exact_typed_reference(self):
+        rows = [
+            *self.rows("sload_warm_zero"),
+            *self.rows("sstore_set_warm"),
+        ]
+
+        extracted = stateful.extract_stateful_pair_observations(
+            self.manifest, rows, self.registry
+        )
+
+        self.assertEqual(len(extracted["pair_ledgers"]), 2 * 8 * 3)
+        self.assertEqual(
+            extracted["scenario_data"]["sload_warm_zero"][
+                "signed_execution_ledger"
+            ],
+            {"opcode:0x19": -1, "opcode:0x54": 1},
+        )
+        self.assertEqual(
+            extracted["scenario_data"]["sstore_set_warm"][
+                "signed_execution_ledger"
+            ],
+            {"opcode:0x50": -2, "opcode:0x55": 1, "opcode:0x5b": 1},
+        )
+        typed = extracted["typed_references"]["sstore_set_warm"]
+        self.assertEqual(typed["opcode:0x50"]["input"], {"raw_gas": 2})
+        self.assertEqual(typed["opcode:0x5b"]["input"], {"raw_gas": 1})
+        zero_pairs = [
+            row
+            for row in extracted["pair_ledgers"]
+            if row["relation_count"] == 0
+        ]
+        self.assertTrue(zero_pairs)
+        self.assertTrue(
+            all(row["signed_execution_total"] == {} for row in zero_pairs)
+        )
+
+    def test_raw_gas_quotients_require_positive_counts_integrality_and_consistency(self):
+        rows = self.rows("sload_warm_zero")
+        changed = copy.deepcopy(rows)
+        target = next(
+            row
+            for row in changed
+            if row["lane"] == "target"
+            and row["relation_count"] == 2
+            and row["repeat_index"] == 1
+        )
+        target["formal_report"]["controlled_trace"]["executed_opcode_raw_gas"][
+            "opcode:0x19"
+        ] += 1
+        with self.assertRaisesRegex(ValueError, "raw-gas quotient"):
+            stateful.extract_stateful_pair_observations(
+                self.manifest, changed, self.registry
+            )
+
+        zero_only = [row for row in rows if row["relation_count"] == 0]
+        with self.assertRaisesRegex(ValueError, "positive-count"):
+            stateful.extract_stateful_pair_observations(
+                self.manifest, zero_only, self.registry
+            )
+
+        inconsistent = copy.deepcopy(rows)
+        target = next(
+            row
+            for row in inconsistent
+            if row["lane"] == "target"
+            and row["relation_count"] == 2
+            and row["repeat_index"] == 1
+        )
+        target["formal_report"]["controlled_trace"]["executed_opcode_raw_gas"][
+            "opcode:0x19"
+        ] += 2
+        with self.assertRaisesRegex(ValueError, "differs across"):
+            stateful.extract_stateful_pair_observations(
+                self.manifest, inconsistent, self.registry
+            )
+
+    def test_full_task4_rows_bind_reference_evidence_into_derived_report(self):
+        rows = [
+            row
+            for scenario in self.manifest.scenarios
+            for row in self.rows(scenario.name)
+        ]
+        artifact = json.loads(STATEFUL_REFERENCE_REGISTRY.read_text())
+
+        report = stateful.fit_stateful_task4_rows(
+            self.manifest,
+            rows,
+            artifact,
+            noise_floor=Fraction(143),
+        )
+
+        self.assertEqual(report["reference_registry"], stateful.REFERENCE_REGISTRY)
+        self.assertEqual(len(report["pair_ledgers"]), 564)
+        self.assertEqual(set(report["reference_evidence"]), set(EXPECTED_SCENARIOS))
+        self.assertEqual(report["selection"]["selected_model"], "M_fixed")
+        self.assertFalse(report["candidate_eligible"])
+        self.assertNotIn("raw_rows", report)
 
 
 class StatefulOpcodeGeneratorTests(unittest.TestCase):

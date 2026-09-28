@@ -8,10 +8,14 @@ import pathlib
 import re
 import tempfile
 from dataclasses import dataclass
+from decimal import Context, Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
+from fractions import Fraction
 from types import MappingProxyType
 from typing import Any, Mapping, Sequence
 
 import opcode_gas
+from composite_estimator import load_registry_payload
+from hierarchical_model import ModelKind, OpcodeEvent, OpcodeRegistry, predict_opcode_event
 
 from opcode_gas import (
     canonical_json,
@@ -31,6 +35,8 @@ REPEATS = 3
 PRIMARY_COUNTS = (0, *FIT_COUNTS, HOLDOUT_COUNT, CHECKPOINT_COUNT)
 DIAGNOSTIC_COUNTS = (0, CHECKPOINT_COUNT)
 GENERATOR_MAX_COUNT = CHECKPOINT_COUNT
+STATEFUL_DECIMAL_CONTEXT = Context(prec=80, rounding=ROUND_HALF_EVEN, traps=[])
+STATEFUL_REPLAY_RESIDUAL_MAX = Fraction(1, 10**75)
 REFERENCE_REGISTRY = {
     "path": "experiments/opcode-gas/derivations/f945e67bb2c38c9c8ef50530/core-opcode-submodel.json",
     "artifact_sha256": "b66d7951bfa416810f93319f99c30ce91969026ee9fa3a402a74cbc2214f7e8b",
@@ -1914,22 +1920,11 @@ def _stateful_campaign_identity(
         or registry_raw != opcode_gas._canonical_json_file_bytes(registry)
     ):
         raise ValueError("stateful source registry is not canonical JSON")
-    registry_artifact_sha256 = opcode_gas._validate_content_addressed_artifact(
-        registry, label="stateful source registry"
+    reference_registry = load_stateful_reference_registry(
+        registry,
+        expected_artifact_sha256=manifest.reference_registry["artifact_sha256"],
     )
-    registry_payload = registry.get("registry")
-    named_keys = (
-        registry_payload.get("named_opcode_keys")
-        if isinstance(registry_payload, Mapping)
-        else None
-    )
-    if not isinstance(named_keys, list) or any(
-        not isinstance(key, str) for key in named_keys
-    ):
-        raise ValueError("stateful source registry has invalid opcode inventory")
-    opcode_gas._validate_operation_core_registry(registry, set(named_keys))
-    if registry_artifact_sha256 != manifest.reference_registry["artifact_sha256"]:
-        raise ValueError("stateful source registry artifact hash differs")
+    registry_artifact_sha256 = reference_registry.artifact_sha256
 
     fixture_rows = []
     seen = set()
@@ -2174,6 +2169,1229 @@ def verify_stateful_opcode_campaign(
         "pair_count": decisions["pair_count"],
         "campaign_identity_sha256": decisions["campaign_identity_sha256"],
         "row_ledger_sha256": decisions["row_ledger_sha256"],
+    }
+
+
+@dataclass(frozen=True)
+class StatefulReferenceRegistry:
+    artifact_sha256: str
+    typed_registry: OpcodeRegistry
+    common_dispatch_exact: Fraction
+    static_body_per_raw_gas: Mapping[str, Fraction]
+    named_opcode_keys: frozenset[str]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "static_body_per_raw_gas",
+            MappingProxyType(dict(self.static_body_per_raw_gas)),
+        )
+        object.__setattr__(self, "named_opcode_keys", frozenset(self.named_opcode_keys))
+
+
+def _canonical_decimal_fraction(value: Any, *, label: str) -> Fraction:
+    if not isinstance(value, str):
+        raise ValueError(f"{label} must be a canonical Decimal string")
+    try:
+        decimal = Decimal(value)
+    except InvalidOperation as error:
+        raise ValueError(f"{label} must be a canonical Decimal string") from error
+    if not decimal.is_finite() or opcode_gas._decimal_text(decimal) != value:
+        raise ValueError(f"{label} must be a canonical Decimal string")
+    return Fraction(decimal)
+
+
+def _fraction_decimal_text(value: Fraction) -> str:
+    with localcontext(STATEFUL_DECIMAL_CONTEXT):
+        projected = Decimal(value.numerator) / Decimal(value.denominator)
+    return opcode_gas._decimal_text(projected)
+
+
+def exact_fraction_payload(value: Fraction) -> dict[str, str]:
+    if not isinstance(value, Fraction):
+        raise TypeError("exact value must be a Fraction")
+    payload = {
+        "numerator": str(value.numerator),
+        "denominator": str(value.denominator),
+        "decimal": _fraction_decimal_text(value),
+    }
+    replay_exact_fraction(payload)
+    return payload
+
+
+def replay_exact_fraction(value: Mapping[str, Any]) -> Fraction:
+    if not isinstance(value, Mapping) or set(value) != {
+        "numerator",
+        "denominator",
+        "decimal",
+    }:
+        raise ValueError("exact Fraction payload has an invalid shape")
+    numerator_raw = value["numerator"]
+    denominator_raw = value["denominator"]
+    if not isinstance(numerator_raw, str) or not isinstance(denominator_raw, str):
+        raise ValueError("exact Fraction numerator/denominator must be strings")
+    try:
+        numerator = int(numerator_raw)
+        denominator = int(denominator_raw)
+    except ValueError as error:
+        raise ValueError("exact Fraction numerator/denominator are invalid") from error
+    if (
+        str(numerator) != numerator_raw
+        or str(denominator) != denominator_raw
+        or denominator <= 0
+    ):
+        raise ValueError("exact Fraction numerator/denominator are noncanonical")
+    exact = Fraction(numerator, denominator)
+    if exact.numerator != numerator or exact.denominator != denominator:
+        raise ValueError("exact Fraction numerator/denominator are not reduced")
+    projected = _canonical_decimal_fraction(value["decimal"], label="Fraction projection")
+    if abs(projected - exact) > STATEFUL_REPLAY_RESIDUAL_MAX:
+        raise ValueError("exact Fraction decimal replay residual exceeds 1e-75")
+    if value["decimal"] != _fraction_decimal_text(exact):
+        raise ValueError("exact Fraction decimal is not its 80-digit projection")
+    return exact
+
+
+def load_stateful_reference_registry(
+    artifact: Mapping[str, Any], *, expected_artifact_sha256: str
+) -> StatefulReferenceRegistry:
+    if not isinstance(artifact, Mapping):
+        raise ValueError("stateful reference registry must be an object")
+    actual_sha256 = opcode_gas._validate_content_addressed_artifact(
+        artifact, label="stateful reference registry"
+    )
+    if actual_sha256 != expected_artifact_sha256:
+        raise ValueError("stateful reference registry differs from the sealed artifact")
+    registry = artifact.get("registry")
+    named = registry.get("named_opcode_keys") if isinstance(registry, Mapping) else None
+    if not isinstance(named, list) or any(not isinstance(key, str) for key in named):
+        raise ValueError("stateful reference registry has invalid named opcode keys")
+    opcode_gas._validate_operation_core_registry(
+        artifact, set(named)
+    )
+    if not isinstance(registry, Mapping):
+        raise ValueError("stateful reference registry payload is missing")
+    registry_snapshot = json.loads(canonical_json(registry))
+    typed_registry = load_registry_payload(registry_snapshot)
+    return StatefulReferenceRegistry(
+        artifact_sha256=actual_sha256,
+        typed_registry=typed_registry,
+        common_dispatch_exact=_canonical_decimal_fraction(
+            registry_snapshot["common_dispatch"],
+            label="stateful reference common dispatch",
+        ),
+        static_body_per_raw_gas={
+            model_id: _canonical_decimal_fraction(
+                registry_snapshot["models"][model_id]["parameters"][
+                    "body_per_raw_gas"
+                ],
+                label=f"stateful reference {model_id} body_per_raw_gas",
+            )
+            for model_id, model in typed_registry.models.items()
+            if model.kind is ModelKind.STATIC_RAW_GAS
+        },
+        named_opcode_keys=frozenset(named),
+    )
+
+
+def _typed_reference_input(kind: str, value: Any) -> dict[str, int]:
+    if not isinstance(value, Mapping):
+        raise ValueError("stateful reference typed input must be an object")
+    if kind != ModelKind.STATIC_RAW_GAS.value:
+        raise ValueError(
+            "structured stateful reference lacks exact Task 4 typed input"
+        )
+    if set(value) != {"raw_gas"} or any(
+        type(item) is not int or item < 0 for item in value.values()
+    ):
+        raise ValueError("stateful reference typed input differs from its exact model")
+    return dict(value)
+
+
+def evaluate_typed_reference(
+    registry: StatefulReferenceRegistry,
+    opcode_key: str,
+    typed_reference: Mapping[str, Any],
+) -> dict[str, Any]:
+    match = re.fullmatch(r"opcode:0x([0-9a-f]{2})", opcode_key)
+    if match is None:
+        raise ValueError("stateful reference opcode key is invalid")
+    opcode = int(match.group(1), 16)
+    if opcode_key not in registry.named_opcode_keys:
+        raise ValueError("stateful reference opcode is missing from the sealed registry")
+    model_id = registry.typed_registry.opcode_model_ids[opcode]
+    if model_id is None:
+        raise ValueError("stateful reference opcode is unsupported by the sealed registry")
+    if not isinstance(typed_reference, Mapping) or set(typed_reference) != {
+        "artifact_sha256",
+        "model_id",
+        "model_kind",
+        "input",
+    }:
+        raise ValueError("stateful reference typed input has an invalid shape")
+    model = registry.typed_registry.models.get(model_id)
+    if model is None:
+        raise ValueError("stateful reference model is missing")
+    if (
+        typed_reference["artifact_sha256"] != registry.artifact_sha256
+        or typed_reference["model_id"] != model_id
+        or typed_reference["model_kind"] != model.kind.value
+    ):
+        raise ValueError("stateful reference model identity differs")
+    typed_input = _typed_reference_input(model.kind.value, typed_reference["input"])
+    predicted = predict_opcode_event(
+        registry.typed_registry,
+        OpcodeEvent(opcode=opcode, raw_gas=typed_input["raw_gas"]),
+    )
+    exact = (
+        registry.common_dispatch_exact
+        + registry.static_body_per_raw_gas[model_id] * typed_input["raw_gas"]
+    )
+    predictor_residual = abs(Fraction(predicted) - exact)
+    if predictor_residual > STATEFUL_REPLAY_RESIDUAL_MAX:
+        raise ValueError("stateful reference typed predictor differs from exact static cost")
+    return {
+        "opcode_key": opcode_key,
+        "artifact_sha256": registry.artifact_sha256,
+        "model_id": model_id,
+        "model_kind": model.kind.value,
+        "input": typed_input,
+        "common_dispatch_exact": exact_fraction_payload(
+            registry.common_dispatch_exact
+        ),
+        "model_parameters_exact": {
+            "body_per_raw_gas": exact_fraction_payload(
+                registry.static_body_per_raw_gas[model_id]
+            )
+        },
+        "predictor_decimal": opcode_gas._decimal_text(predicted),
+        "predictor_residual_exact": exact_fraction_payload(predictor_residual),
+        "predictor_residual_tolerance_exact": exact_fraction_payload(
+            STATEFUL_REPLAY_RESIDUAL_MAX
+        ),
+        "predicted_cost_exact": exact_fraction_payload(exact),
+    }
+
+
+def resolve_signed_reference_cost(
+    registry: StatefulReferenceRegistry,
+    signed_execution_ledger: Mapping[str, Any],
+    *,
+    state_opcode_key: str,
+    typed_inputs: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any]:
+    if not isinstance(signed_execution_ledger, Mapping) or any(
+        not isinstance(key, str) or type(value) is not int or value == 0
+        for key, value in signed_execution_ledger.items()
+    ):
+        raise ValueError("stateful signed execution ledger is invalid")
+    if signed_execution_ledger.get(state_opcode_key) != 1:
+        raise ValueError("stateful signed execution ledger must contain one state opcode")
+    if sum(signed_execution_ledger.values()) != 0:
+        raise ValueError("stateful signed execution ledger is not zero sum")
+    reference_keys = set(signed_execution_ledger) - {state_opcode_key}
+    if set(typed_inputs) != reference_keys:
+        raise ValueError("stateful signed execution ledger typed references differ")
+    entries = []
+    signed_cost = Fraction()
+    for opcode_key in sorted(reference_keys):
+        evidence = evaluate_typed_reference(
+            registry, opcode_key, typed_inputs[opcode_key]
+        )
+        coefficient = signed_execution_ledger[opcode_key]
+        predicted = replay_exact_fraction(evidence["predicted_cost_exact"])
+        signed_cost += coefficient * predicted
+        entries.append({**evidence, "signed_count": coefficient})
+    return {
+        "signed_execution_ledger": dict(sorted(signed_execution_ledger.items())),
+        "entries": entries,
+        "signed_reference_cost_exact": exact_fraction_payload(signed_cost),
+    }
+
+
+def _task4_row_trace_ledgers(
+    row: Mapping[str, Any], *, label: str
+) -> tuple[dict[str, int], dict[str, int]]:
+    formal = row.get("formal_report")
+    trace = formal.get("controlled_trace") if isinstance(formal, Mapping) else None
+    counts = trace.get("executed_opcode_counts") if isinstance(trace, Mapping) else None
+    raw_gas = (
+        trace.get("executed_opcode_raw_gas") if isinstance(trace, Mapping) else None
+    )
+    if (
+        not isinstance(counts, Mapping)
+        or not isinstance(raw_gas, Mapping)
+        or set(counts) != set(raw_gas)
+        or any(
+            not isinstance(key, str)
+            or type(value) is not int
+            or value < 0
+            for ledger in (counts, raw_gas)
+            for key, value in ledger.items()
+        )
+    ):
+        raise ValueError(f"{label} Task 4 trace ledgers are invalid")
+    return dict(counts), dict(raw_gas)
+
+
+def extract_stateful_pair_observations(
+    manifest: StatefulCampaignManifest,
+    rows: Sequence[Mapping[str, Any]],
+    registry: StatefulReferenceRegistry,
+) -> dict[str, Any]:
+    if not rows:
+        raise ValueError("stateful Task 4 rows are empty")
+    grouped: dict[tuple[str, int, int], dict[str, Mapping[str, Any]]] = {}
+    for row in rows:
+        if not isinstance(row, Mapping):
+            raise ValueError("stateful Task 4 row is not an object")
+        scenario_name = row.get("scenario")
+        lane = row.get("lane")
+        count = row.get("relation_count")
+        repeat_index = row.get("repeat_index")
+        scenario = manifest.scenario(scenario_name)
+        if (
+            lane not in {"target", "control"}
+            or type(count) is not int
+            or count not in scenario.counts
+            or type(repeat_index) is not int
+            or repeat_index not in range(manifest.repeats)
+        ):
+            raise ValueError("stateful Task 4 row identity differs from the manifest")
+        key = scenario_name, count, repeat_index
+        lanes = grouped.setdefault(key, {})
+        if lane in lanes:
+            raise ValueError("stateful Task 4 pair lane is duplicated")
+        lanes[lane] = row
+
+    pair_ledgers = []
+    deltas: dict[str, dict[int, list[str | None]]] = {}
+    raw_inputs: dict[str, dict[str, set[int]]] = {}
+    present_scenarios = set()
+    for (scenario_name, count, repeat_index), lanes in sorted(grouped.items()):
+        if set(lanes) != {"target", "control"}:
+            raise ValueError("stateful Task 4 target/control pair is incomplete")
+        target = lanes["target"]
+        control = lanes["control"]
+        if target.get("ordered_pair_identity") != control.get("ordered_pair_identity"):
+            raise ValueError("stateful Task 4 ordered pair identity differs")
+        scenario = manifest.scenario(scenario_name)
+        expected_per_unit = _reference_ledger(scenario)
+        target_counts, target_raw = _task4_row_trace_ledgers(
+            target, label="target"
+        )
+        control_counts, control_raw = _task4_row_trace_ledgers(
+            control, label="control"
+        )
+        all_keys = set(target_counts) | set(control_counts)
+        signed_total = {
+            key: target_counts.get(key, 0) - control_counts.get(key, 0)
+            for key in sorted(all_keys)
+        }
+        signed_total = {key: value for key, value in signed_total.items() if value}
+        if count == 0:
+            if signed_total:
+                raise ValueError("stateful count-zero signed execution ledger is not empty")
+        else:
+            if any(value % count for value in signed_total.values()):
+                raise ValueError("stateful signed execution ledger is not integral per slot")
+            per_unit = {
+                key: value // count for key, value in signed_total.items()
+            }
+            if per_unit != expected_per_unit:
+                raise ValueError("stateful signed execution ledger differs from canonical pair")
+            reference_keys = set(expected_per_unit) - {
+                f"opcode:0x{scenario.measurement_opcode:02x}"
+            }
+            for opcode_key in reference_keys:
+                coefficient = expected_per_unit[opcode_key]
+                raw_delta = target_raw.get(opcode_key, 0) - control_raw.get(
+                    opcode_key, 0
+                )
+                quotient = Fraction(raw_delta, coefficient * count)
+                if quotient.denominator != 1 or quotient < 0:
+                    raise ValueError(
+                        "stateful reference raw-gas quotient is not an exact nonnegative integer"
+                    )
+                raw_inputs.setdefault(scenario_name, {}).setdefault(
+                    opcode_key, set()
+                ).add(quotient.numerator)
+        target_normalized = target.get("normalized_report")
+        control_normalized = control.get("normalized_report")
+        target_gas = (
+            target_normalized.get("prover_gas")
+            if isinstance(target_normalized, Mapping)
+            else None
+        )
+        control_gas = (
+            control_normalized.get("prover_gas")
+            if isinstance(control_normalized, Mapping)
+            else None
+        )
+        if type(target_gas) is not int or type(control_gas) is not int:
+            raise ValueError("stateful Task 4 proverGas observations must be exact integers")
+        scenario_deltas = deltas.setdefault(
+            scenario_name,
+            {
+                scenario_count: [None] * manifest.repeats
+                for scenario_count in scenario.counts
+            },
+        )
+        if scenario_deltas[count][repeat_index] is not None:
+            raise ValueError("stateful Task 4 pair repeat is duplicated")
+        scenario_deltas[count][repeat_index] = str(target_gas - control_gas)
+        present_scenarios.add(scenario_name)
+        pair_ledgers.append(
+            {
+                "scenario": scenario_name,
+                "relation_count": count,
+                "repeat_index": repeat_index,
+                "ordered_pair_identity": target["ordered_pair_identity"],
+                "signed_execution_ledger": expected_per_unit,
+                "signed_execution_total": signed_total,
+            }
+        )
+
+    scenario_data = {}
+    typed_references = {}
+    reference_evidence = {}
+    for scenario_name in sorted(present_scenarios):
+        scenario = manifest.scenario(scenario_name)
+        ledger = _reference_ledger(scenario)
+        reference_keys = set(ledger) - {
+            f"opcode:0x{scenario.measurement_opcode:02x}"
+        }
+        scenario_raw = raw_inputs.get(scenario_name, {})
+        if set(scenario_raw) != reference_keys:
+            raise ValueError(
+                "stateful reference typed input requires positive-count pair evidence"
+            )
+        typed = {}
+        for opcode_key in sorted(reference_keys):
+            candidates = scenario_raw[opcode_key]
+            if len(candidates) != 1:
+                raise ValueError(
+                    "stateful reference raw-gas quotient differs across positive-count pairs"
+                )
+            opcode = int(opcode_key.removeprefix("opcode:0x"), 16)
+            model_id = registry.typed_registry.opcode_model_ids[opcode]
+            model = (
+                registry.typed_registry.models.get(model_id)
+                if model_id is not None
+                else None
+            )
+            if model is None:
+                raise ValueError("stateful reference opcode is unsupported")
+            if model.kind is not ModelKind.STATIC_RAW_GAS:
+                raise ValueError(
+                    "structured stateful reference lacks exact Task 4 typed input"
+                )
+            typed[opcode_key] = {
+                "artifact_sha256": registry.artifact_sha256,
+                "model_id": model_id,
+                "model_kind": model.kind.value,
+                "input": {"raw_gas": next(iter(candidates))},
+            }
+        resolved = resolve_signed_reference_cost(
+            registry,
+            ledger,
+            state_opcode_key=f"opcode:0x{scenario.measurement_opcode:02x}",
+            typed_inputs=typed,
+        )
+        scenario_deltas = deltas[scenario_name]
+        if any(
+            any(value is None for value in scenario_deltas[count])
+            for count in scenario.counts
+        ):
+            raise ValueError("stateful Task 4 required scenario count/repeat is missing")
+        scenario_data[scenario_name] = {
+            "deltas": {
+                count: list(scenario_deltas[count]) for count in scenario.counts
+            },
+            "signed_execution_ledger": ledger,
+            "signed_reference_cost_exact": resolved[
+                "signed_reference_cost_exact"
+            ],
+        }
+        typed_references[scenario_name] = typed
+        reference_evidence[scenario_name] = resolved
+    return {
+        "scenario_data": scenario_data,
+        "pair_ledgers": pair_ledgers,
+        "typed_references": typed_references,
+        "reference_evidence": reference_evidence,
+    }
+
+
+def fit_stateful_scenario(
+    *,
+    scenario: str,
+    fit_deltas: Mapping[int, Sequence[str]],
+    reference_cost: Fraction,
+) -> dict[str, Any]:
+    if not isinstance(scenario, str) or not scenario:
+        raise ValueError("stateful scenario fit name is invalid")
+    if set(fit_deltas) != set(FIT_COUNTS) or any(
+        len(fit_deltas[count]) != REPEATS for count in FIT_COUNTS
+    ):
+        raise ValueError("stateful scenario fit rows differ from the frozen counts/repeats")
+    if not isinstance(reference_cost, Fraction):
+        raise TypeError("stateful scenario reference cost must be a Fraction")
+    points = [
+        (
+            Fraction(count),
+            _canonical_decimal_fraction(
+                delta, label=f"stateful scenario {scenario} delta"
+            ),
+        )
+        for count in FIT_COUNTS
+        for delta in fit_deltas[count]
+    ]
+    point_count = Fraction(len(points))
+    mean_x = sum((x for x, _ in points), Fraction()) / point_count
+    mean_y = sum((y for _, y in points), Fraction()) / point_count
+    denominator = sum(((x - mean_x) ** 2 for x, _ in points), Fraction())
+    if denominator == 0:
+        raise ValueError("stateful scenario fit count denominator is zero")
+    slope = sum(
+        ((x - mean_x) * (y - mean_y) for x, y in points), Fraction()
+    ) / denominator
+    intercept = mean_y - slope * mean_x
+    absolute = slope - reference_cost
+    residuals = [y - (intercept + slope * x) for x, y in points]
+    ss_residual = sum((residual * residual for residual in residuals), Fraction())
+    ss_total = sum(((y - mean_y) ** 2 for _, y in points), Fraction())
+    r2 = Fraction(1) if ss_total == 0 else Fraction(1) - ss_residual / ss_total
+    stderr_squared = ss_residual / Fraction(len(points) - 2) / denominator
+    relative_stderr_squared = (
+        None if slope == 0 else stderr_squared / (slope * slope)
+    )
+    max_residual = max(abs(residual) for residual in residuals)
+    return {
+        "scenario": scenario,
+        "fit_counts": list(FIT_COUNTS),
+        "fit_observation_count": len(points),
+        "relative_slope_exact": exact_fraction_payload(slope),
+        "nuisance_intercept_exact": exact_fraction_payload(intercept),
+        "signed_reference_cost_exact": exact_fraction_payload(reference_cost),
+        "absolute_stateful_cost_exact": exact_fraction_payload(absolute),
+        "r2_exact": exact_fraction_payload(r2),
+        "slope_standard_error_squared_exact": exact_fraction_payload(stderr_squared),
+        "relative_slope_standard_error_squared_exact": (
+            None
+            if relative_stderr_squared is None
+            else exact_fraction_payload(relative_stderr_squared)
+        ),
+        "max_fit_residual_exact": exact_fraction_payload(max_residual),
+    }
+
+
+def _median_fraction(values: Sequence[Fraction]) -> Fraction:
+    if not values or len(values) % 2 == 0:
+        raise ValueError("stateful median requires a nonempty odd sample count")
+    return sorted(values)[len(values) // 2]
+
+
+def _parse_stateful_delta_table(
+    scenario: str, deltas: Mapping[int, Sequence[str]]
+) -> dict[int, tuple[Fraction, ...]]:
+    if set(deltas) != set(PRIMARY_COUNTS):
+        raise ValueError("stateful scenario rows differ from the frozen count inventory")
+    parsed = {}
+    for count in PRIMARY_COUNTS:
+        values = deltas[count]
+        if not isinstance(values, Sequence) or isinstance(values, (str, bytes)):
+            raise ValueError("stateful scenario repeat rows are invalid")
+        if len(values) != REPEATS:
+            raise ValueError("stateful scenario requires exactly three repeats")
+        parsed[count] = tuple(
+            _canonical_decimal_fraction(
+                value, label=f"stateful scenario {scenario} count {count} delta"
+            )
+            for value in values
+        )
+    return parsed
+
+
+def _sqrt_fraction_text(value: Fraction) -> str:
+    if value < 0:
+        raise ValueError("stateful square root input is negative")
+    with localcontext(STATEFUL_DECIMAL_CONTEXT):
+        projected = (
+            Decimal(value.numerator) / Decimal(value.denominator)
+        ).sqrt()
+    return opcode_gas._decimal_text(projected)
+
+
+def fit_and_gate_stateful_scenario(
+    *,
+    scenario: str,
+    deltas: Mapping[int, Sequence[str]],
+    reference_cost: Fraction,
+    noise_floor: Fraction,
+) -> dict[str, Any]:
+    if not isinstance(noise_floor, Fraction) or noise_floor < 0:
+        raise ValueError("stateful controlled-run noise floor is invalid")
+    parsed = _parse_stateful_delta_table(scenario, deltas)
+    fit = fit_stateful_scenario(
+        scenario=scenario,
+        fit_deltas={count: deltas[count] for count in FIT_COUNTS},
+        reference_cost=reference_cost,
+    )
+    slope = replay_exact_fraction(fit["relative_slope_exact"])
+    intercept = replay_exact_fraction(fit["nuisance_intercept_exact"])
+    absolute = replay_exact_fraction(fit["absolute_stateful_cost_exact"])
+    r2 = replay_exact_fraction(fit["r2_exact"])
+    relative_stderr_squared_payload = fit[
+        "relative_slope_standard_error_squared_exact"
+    ]
+    relative_stderr_squared = (
+        None
+        if relative_stderr_squared_payload is None
+        else replay_exact_fraction(relative_stderr_squared_payload)
+    )
+    max_fit_residual = replay_exact_fraction(fit["max_fit_residual_exact"])
+    signal = abs(slope) * (max(FIT_COUNTS) - min(FIT_COUNTS))
+    residual_signal_ratio = (
+        None if signal == 0 else max_fit_residual / signal
+    )
+    zero_values = parsed[STRUCTURAL_ZERO_COUNT]
+    zero_baseline = _median_fraction(zero_values)
+    count_zero_ratio = (
+        None
+        if signal == 0
+        else max(abs(value - intercept) for value in zero_values) / signal
+    )
+
+    spread_numerators = []
+    for count in (*FIT_COUNTS, HOLDOUT_COUNT, CHECKPOINT_COUNT):
+        per_event = tuple(
+            (delta - zero_baseline) / count for delta in parsed[count]
+        )
+        spread_numerators.append(max(per_event) - min(per_event))
+    repeat_spread = (
+        None if absolute == 0 else max(spread_numerators) / abs(absolute)
+    )
+
+    def marginal_ape(count: int) -> tuple[Fraction | None, bool]:
+        predicted = Fraction(count) * slope
+        apes = []
+        for delta in parsed[count]:
+            observed = delta - intercept
+            if observed == 0:
+                return None, True
+            apes.append(abs(predicted - observed) / abs(observed))
+        return max(apes), False
+
+    holdout_ape, zero_holdout = marginal_ape(HOLDOUT_COUNT)
+    checkpoint_ape, zero_checkpoint = marginal_ape(CHECKPOINT_COUNT)
+    positive_signal = slope > 0 and absolute > 0 and signal > noise_floor
+    gate_values: dict[str, tuple[bool, Fraction | None]] = {
+        "positive_signal": (positive_signal, signal),
+        "r2": (r2 >= Fraction(995, 1000), r2),
+        "relative_slope_standard_error": (
+            relative_stderr_squared is not None
+            and relative_stderr_squared <= Fraction(1, 400),
+            relative_stderr_squared,
+        ),
+        "residual_signal": (
+            residual_signal_ratio is not None
+            and residual_signal_ratio <= Fraction(1, 50),
+            residual_signal_ratio,
+        ),
+        "count_zero_intercept": (
+            count_zero_ratio is not None and count_zero_ratio <= Fraction(1, 50),
+            count_zero_ratio,
+        ),
+        "repeat_spread": (
+            repeat_spread is not None and repeat_spread <= Fraction(1, 20),
+            repeat_spread,
+        ),
+        "holdout_ape": (
+            holdout_ape is not None and holdout_ape <= Fraction(1, 10),
+            holdout_ape,
+        ),
+        "checkpoint_ape": (
+            checkpoint_ape is not None and checkpoint_ape <= Fraction(1, 10),
+            checkpoint_ape,
+        ),
+    }
+    gate_thresholds = {
+        "positive_signal": noise_floor,
+        "r2": Fraction(995, 1000),
+        "relative_slope_standard_error": Fraction(1, 400),
+        "residual_signal": Fraction(1, 50),
+        "count_zero_intercept": Fraction(1, 50),
+        "repeat_spread": Fraction(1, 20),
+        "holdout_ape": Fraction(1, 10),
+        "checkpoint_ape": Fraction(1, 10),
+    }
+    failures = [name for name, (passed, _value) in gate_values.items() if not passed]
+    if signal == 0:
+        failures.append("zero_signal")
+    if absolute == 0:
+        failures.append("zero_absolute_stateful_cost")
+    if zero_holdout:
+        failures.append("zero_holdout_marginal")
+    if zero_checkpoint:
+        failures.append("zero_checkpoint_marginal")
+    gates = {
+        name: {
+            "passed": passed,
+            "value_exact": None if value is None else exact_fraction_payload(value),
+            "threshold_exact": exact_fraction_payload(gate_thresholds[name]),
+        }
+        for name, (passed, value) in gate_values.items()
+    }
+    gates["relative_slope_standard_error"]["value_decimal"] = (
+        None
+        if relative_stderr_squared is None
+        else _sqrt_fraction_text(relative_stderr_squared)
+    )
+    return {
+        "scenario": scenario,
+        "fit": fit,
+        "noise_floor_exact": exact_fraction_payload(noise_floor),
+        "gates": gates,
+        "failures": failures,
+        "passed": not failures,
+    }
+
+
+STATEFUL_MODEL_FAMILY_ORDER = (
+    "M_fixed",
+    "M_access",
+    "M_typed",
+    "M_raw_gas_diagnostic",
+)
+STATEFUL_PRODUCTION_MODEL_ORDER = STATEFUL_MODEL_FAMILY_ORDER[:3]
+_SSTORE_BRANCHES = (
+    "noop",
+    "set",
+    "clear",
+    "reset",
+    "dirty_rewrite",
+    "restore_original",
+)
+
+
+def _stateful_store_branch(scenario: StatefulScenario) -> str:
+    if scenario.operation_kind != "store":
+        raise ValueError("stateful SSTORE branch requested for a load")
+    if scenario.current_value != scenario.original_value:
+        return (
+            "restore_original"
+            if scenario.new_value == scenario.original_value
+            else "dirty_rewrite"
+        )
+    if scenario.new_value == scenario.current_value:
+        return "noop"
+    if scenario.current_value == 0:
+        return "set"
+    if scenario.new_value == 0:
+        return "clear"
+    return "reset"
+
+
+def _stateful_model_parameter_order(family: str) -> tuple[str, ...]:
+    if family == "M_fixed":
+        return ("sload", "sstore")
+    if family == "M_access":
+        return (
+            "sload_warm_body",
+            "sload_cold_extra",
+            "sstore_warm_body",
+            "sstore_cold_extra",
+        )
+    if family == "M_typed":
+        return (
+            "sload_warm_body",
+            "sload_cold_extra",
+            *(f"sstore_branch:{branch}" for branch in _SSTORE_BRANCHES),
+            "sstore_cold_extra",
+        )
+    if family == "M_raw_gas_diagnostic":
+        return ("alpha", "beta")
+    raise ValueError(f"unknown stateful model family: {family}")
+
+
+def _stateful_model_features(
+    family: str, scenario: StatefulScenario
+) -> dict[str, Fraction]:
+    if family == "M_fixed":
+        return {
+            "sload" if scenario.operation_kind == "load" else "sstore": Fraction(1)
+        }
+    if family in {"M_access", "M_typed"}:
+        if scenario.operation_kind == "load":
+            features = {"sload_warm_body": Fraction(1)}
+            if scenario.access == "cold":
+                features["sload_cold_extra"] = Fraction(1)
+            return features
+        if family == "M_access":
+            features = {"sstore_warm_body": Fraction(1)}
+        else:
+            features = {
+                f"sstore_branch:{_stateful_store_branch(scenario)}": Fraction(1)
+            }
+        if scenario.access == "cold":
+            features["sstore_cold_extra"] = Fraction(1)
+        return features
+    if family == "M_raw_gas_diagnostic":
+        return {
+            "alpha": Fraction(1),
+            "beta": Fraction(scenario.target_raw_gas),
+        }
+    raise ValueError(f"unknown stateful model family: {family}")
+
+
+def _solve_fraction_linear_system(
+    matrix: Sequence[Sequence[Fraction]], values: Sequence[Fraction]
+) -> tuple[Fraction, ...]:
+    size = len(values)
+    if len(matrix) != size or any(len(row) != size for row in matrix):
+        raise ValueError("stateful exact solver matrix is not square")
+    augmented = [list(row) + [value] for row, value in zip(matrix, values)]
+    for column in range(size):
+        pivot = next(
+            (row for row in range(column, size) if augmented[row][column] != 0),
+            None,
+        )
+        if pivot is None:
+            raise ValueError("stateful model fit is rank deficient")
+        augmented[column], augmented[pivot] = augmented[pivot], augmented[column]
+        divisor = augmented[column][column]
+        augmented[column] = [value / divisor for value in augmented[column]]
+        for row in range(size):
+            if row == column:
+                continue
+            factor = augmented[row][column]
+            if factor:
+                augmented[row] = [
+                    actual - factor * source
+                    for actual, source in zip(augmented[row], augmented[column])
+                ]
+    return tuple(augmented[index][-1] for index in range(size))
+
+
+def _solve_fraction_least_squares(
+    matrix: Sequence[Sequence[Fraction]], values: Sequence[Fraction]
+) -> tuple[Fraction, ...]:
+    if not matrix or len(matrix) != len(values):
+        raise ValueError("stateful exact least-squares input is empty or mismatched")
+    width = len(matrix[0])
+    if width == 0 or any(len(row) != width for row in matrix):
+        raise ValueError("stateful exact least-squares rows differ")
+    normal = [
+        [
+            sum((row[left] * row[right] for row in matrix), Fraction())
+            for right in range(width)
+        ]
+        for left in range(width)
+    ]
+    projection = [
+        sum((row[column] * value for row, value in zip(matrix, values)), Fraction())
+        for column in range(width)
+    ]
+    return _solve_fraction_linear_system(normal, projection)
+
+
+def _validate_stateful_scenario_data(
+    manifest: StatefulCampaignManifest,
+    scenario_data: Mapping[str, Mapping[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    expected = {scenario.name for scenario in manifest.scenarios}
+    if not isinstance(scenario_data, Mapping) or set(scenario_data) != expected:
+        raise ValueError("stateful model required scenario inventory is incomplete")
+    validated = {}
+    for scenario in manifest.scenarios:
+        row = scenario_data[scenario.name]
+        if not isinstance(row, Mapping) or set(row) != {
+            "deltas",
+            "signed_execution_ledger",
+            "signed_reference_cost_exact",
+        }:
+            raise ValueError("stateful model scenario data schema differs")
+        ledger = row["signed_execution_ledger"]
+        if ledger != _reference_ledger(scenario):
+            raise ValueError("stateful model signed execution ledger differs")
+        deltas = row["deltas"]
+        if not isinstance(deltas, Mapping) or set(deltas) != set(scenario.counts):
+            raise ValueError("stateful model scenario count inventory differs")
+        parsed = {}
+        for count in scenario.counts:
+            repeats = deltas[count]
+            if (
+                not isinstance(repeats, Sequence)
+                or isinstance(repeats, (str, bytes))
+                or len(repeats) != manifest.repeats
+            ):
+                raise ValueError("stateful model scenario repeats differ")
+            parsed[count] = tuple(
+                _canonical_decimal_fraction(
+                    value,
+                    label=f"stateful model {scenario.name} count {count} delta",
+                )
+                for value in repeats
+            )
+        validated[scenario.name] = {
+            "deltas": parsed,
+            "reference_cost": replay_exact_fraction(
+                row["signed_reference_cost_exact"]
+            ),
+            "signed_execution_ledger": dict(sorted(ledger.items())),
+        }
+    return validated
+
+
+def _fit_stateful_model_family(
+    manifest: StatefulCampaignManifest,
+    data: Mapping[str, Mapping[str, Any]],
+    family: str,
+) -> dict[str, Any]:
+    primary = tuple(scenario for scenario in manifest.scenarios if not scenario.diagnostic)
+    parameter_order = _stateful_model_parameter_order(family)
+    intercept_order = tuple(scenario.name for scenario in primary)
+    columns = (*intercept_order, *parameter_order)
+    matrix = []
+    values = []
+    fit_projection = []
+    for scenario in primary:
+        reference_cost = data[scenario.name]["reference_cost"]
+        features = _stateful_model_features(family, scenario)
+        for count in manifest.fit_counts:
+            for repeat_index, delta in enumerate(data[scenario.name]["deltas"][count]):
+                row = [Fraction(int(name == scenario.name)) for name in intercept_order]
+                row.extend(
+                    Fraction(count) * features.get(name, Fraction())
+                    for name in parameter_order
+                )
+                matrix.append(row)
+                values.append(delta - Fraction(count) * reference_cost)
+                fit_projection.append(
+                    {
+                        "scenario": scenario.name,
+                        "count": count,
+                        "repeat_index": repeat_index,
+                        "delta": exact_fraction_payload(delta),
+                        "signed_reference_cost": exact_fraction_payload(reference_cost),
+                    }
+                )
+    solution = _solve_fraction_least_squares(matrix, values)
+    solved = dict(zip(columns, solution))
+    residuals = [
+        value - sum((coefficient * solved[name] for name, coefficient in zip(columns, row)), Fraction())
+        for row, value in zip(matrix, values)
+    ]
+    return {
+        "family": family,
+        "parameter_order": list(parameter_order),
+        "parameters_exact": {
+            name: exact_fraction_payload(solved[name]) for name in parameter_order
+        },
+        "nuisance_intercepts_exact": {
+            name: exact_fraction_payload(solved[name]) for name in intercept_order
+        },
+        "fit_observation_count": len(matrix),
+        "fit_input_sha256": sha256_bytes(canonical_json(fit_projection)),
+        "max_fit_residual_exact": exact_fraction_payload(
+            max((abs(value) for value in residuals), default=Fraction())
+        ),
+    }
+
+
+def _model_cost_from_frozen_fit(
+    model: Mapping[str, Any], scenario: StatefulScenario
+) -> Fraction:
+    features = _stateful_model_features(model["family"], scenario)
+    parameters = {
+        name: replay_exact_fraction(value)
+        for name, value in model["parameters_exact"].items()
+    }
+    return sum(
+        (coefficient * parameters[name] for name, coefficient in features.items()),
+        Fraction(),
+    )
+
+
+def _max_model_ape(
+    *,
+    scenario: StatefulScenario,
+    count: int,
+    deltas: Sequence[Fraction],
+    intercept: Fraction,
+    predicted_absolute: Fraction,
+    reference_cost: Fraction,
+) -> Fraction | None:
+    predicted = Fraction(count) * (predicted_absolute + reference_cost)
+    apes = []
+    for delta in deltas:
+        observed = delta - intercept
+        if observed == 0:
+            return None
+        apes.append(abs(predicted - observed) / abs(observed))
+    return max(apes)
+
+
+def _high_limb_model_comparison(
+    *,
+    scenario: StatefulScenario,
+    count: int,
+    zero_deltas: Sequence[Fraction],
+    checkpoint_deltas: Sequence[Fraction],
+    predicted_absolute: Fraction,
+    reference_cost: Fraction,
+) -> dict[str, Any]:
+    if not scenario.diagnostic or scenario.low_variant is None:
+        raise ValueError("stateful high-limb comparison requires a diagnostic scenario")
+    if count <= 0 or not zero_deltas or not checkpoint_deltas:
+        raise ValueError("stateful high-limb comparison inputs are invalid")
+    zero_intercept = _median_fraction(zero_deltas)
+    observed_relative = (
+        _median_fraction(checkpoint_deltas) - zero_intercept
+    ) / count
+    observed_absolute = observed_relative - reference_cost
+    consistency = (
+        None
+        if predicted_absolute == 0
+        else abs(observed_absolute - predicted_absolute) / abs(predicted_absolute)
+    )
+    ape = _max_model_ape(
+        scenario=scenario,
+        count=count,
+        deltas=checkpoint_deltas,
+        intercept=zero_intercept,
+        predicted_absolute=predicted_absolute,
+        reference_cost=reference_cost,
+    )
+    return {
+        "scenario": scenario.name,
+        "low_variant": scenario.low_variant,
+        "structural_zero_median_exact": exact_fraction_payload(zero_intercept),
+        "observed_relative_cost_exact": exact_fraction_payload(observed_relative),
+        "signed_reference_cost_exact": exact_fraction_payload(reference_cost),
+        "observed_absolute_cost_exact": exact_fraction_payload(observed_absolute),
+        "model_absolute_cost_exact": exact_fraction_payload(predicted_absolute),
+        "ape_exact": None if ape is None else exact_fraction_payload(ape),
+        "consistency_error_exact": (
+            None if consistency is None else exact_fraction_payload(consistency)
+        ),
+        "zero_marginal_denominator": ape is None,
+        "zero_model_cost_denominator": consistency is None,
+    }
+
+
+def fit_stateful_model_report(
+    manifest: StatefulCampaignManifest,
+    scenario_data: Mapping[str, Mapping[str, Any]],
+    *,
+    noise_floor: Fraction,
+) -> dict[str, Any]:
+    data = _validate_stateful_scenario_data(manifest, scenario_data)
+    primary = tuple(scenario for scenario in manifest.scenarios if not scenario.diagnostic)
+    diagnostics = tuple(scenario for scenario in manifest.scenarios if scenario.diagnostic)
+
+    # Freeze every declared family from fit rows before reading any decision split.
+    frozen_models = {
+        family: _fit_stateful_model_family(manifest, data, family)
+        for family in STATEFUL_MODEL_FAMILY_ORDER
+    }
+    frozen_fit_sha256 = sha256_bytes(canonical_json(frozen_models))
+
+    scenario_reports = {
+        scenario.name: fit_and_gate_stateful_scenario(
+            scenario=scenario.name,
+            deltas={
+                count: [
+                    _fraction_decimal_text(value)
+                    for value in data[scenario.name]["deltas"][count]
+                ]
+                for count in manifest.primary_counts
+            },
+            reference_cost=data[scenario.name]["reference_cost"],
+            noise_floor=noise_floor,
+        )
+        for scenario in primary
+    }
+    measurement_gates_pass = all(
+        report["passed"] for report in scenario_reports.values()
+    )
+
+    model_reports = {}
+    for family in STATEFUL_MODEL_FAMILY_ORDER:
+        frozen = frozen_models[family]
+        holdout_apes = []
+        checkpoint_apes = []
+        high_limb_rows = []
+        zero_denominator = False
+        zero_high_model_denominator = False
+        for scenario in primary:
+            intercept = replay_exact_fraction(
+                frozen["nuisance_intercepts_exact"][scenario.name]
+            )
+            predicted_absolute = _model_cost_from_frozen_fit(frozen, scenario)
+            reference_cost = data[scenario.name]["reference_cost"]
+            holdout = _max_model_ape(
+                scenario=scenario,
+                count=manifest.holdout_count,
+                deltas=data[scenario.name]["deltas"][manifest.holdout_count],
+                intercept=intercept,
+                predicted_absolute=predicted_absolute,
+                reference_cost=reference_cost,
+            )
+            checkpoint = _max_model_ape(
+                scenario=scenario,
+                count=manifest.checkpoint_count,
+                deltas=data[scenario.name]["deltas"][manifest.checkpoint_count],
+                intercept=intercept,
+                predicted_absolute=predicted_absolute,
+                reference_cost=reference_cost,
+            )
+            if holdout is None or checkpoint is None:
+                zero_denominator = True
+            else:
+                holdout_apes.append(holdout)
+                checkpoint_apes.append(checkpoint)
+        for scenario in diagnostics:
+            low_scenario = manifest.scenario(scenario.low_variant)
+            if _stateful_model_features(
+                family, scenario
+            ) != _stateful_model_features(family, low_scenario):
+                raise ValueError(
+                    "stateful high-limb scenario differs from its low model features"
+                )
+            predicted_absolute = _model_cost_from_frozen_fit(
+                frozen, low_scenario
+            )
+            comparison = _high_limb_model_comparison(
+                scenario=scenario,
+                count=manifest.checkpoint_count,
+                zero_deltas=data[scenario.name]["deltas"][
+                    manifest.structural_zero_count
+                ],
+                checkpoint_deltas=data[scenario.name]["deltas"][
+                    manifest.checkpoint_count
+                ],
+                predicted_absolute=predicted_absolute,
+                reference_cost=data[scenario.name]["reference_cost"],
+            )
+            if comparison["zero_marginal_denominator"]:
+                zero_denominator = True
+            if comparison["zero_model_cost_denominator"]:
+                zero_high_model_denominator = True
+            high_limb_rows.append(comparison)
+        max_holdout = max(holdout_apes, default=Fraction())
+        max_checkpoint = max(checkpoint_apes, default=Fraction())
+        high_values = [
+            replay_exact_fraction(row["ape_exact"])
+            for row in high_limb_rows
+            if row["ape_exact"] is not None
+        ]
+        max_high = max(high_values, default=Fraction())
+        consistency_values = [
+            replay_exact_fraction(row["consistency_error_exact"])
+            for row in high_limb_rows
+            if row["consistency_error_exact"] is not None
+        ]
+        max_consistency = max(consistency_values, default=Fraction())
+        reasons = []
+        if not measurement_gates_pass:
+            reasons.append("scenario_measurement_gates")
+        if zero_denominator:
+            reasons.append("zero_model_ape_denominator")
+        if zero_high_model_denominator:
+            reasons.append("zero_high_limb_model_denominator")
+        if max_holdout > Fraction(1, 10):
+            reasons.append("holdout_ape")
+        if max_checkpoint > Fraction(1, 10):
+            reasons.append("checkpoint_ape")
+        if max_high > Fraction(1, 10):
+            reasons.append("high_limb_ape")
+        if max_consistency > Fraction(1, 10):
+            reasons.append("high_limb_consistency")
+        diagnostic_only = family == "M_raw_gas_diagnostic"
+        if diagnostic_only:
+            reasons.append("diagnostic_only")
+        cold_increment_diagnostic = None
+        if family in {"M_access", "M_typed"}:
+            parameters = {
+                name: replay_exact_fraction(value)
+                for name, value in frozen["parameters_exact"].items()
+            }
+            load_cold = parameters["sload_cold_extra"]
+            store_cold = parameters["sstore_cold_extra"]
+            cold_increment_diagnostic = {
+                "sload_cold_extra_exact": exact_fraction_payload(load_cold),
+                "sstore_cold_extra_exact": exact_fraction_payload(store_cold),
+                "difference_exact": exact_fraction_payload(load_cold - store_cold),
+                "equal": load_cold == store_cold,
+            }
+        model_reports[family] = {
+            **frozen,
+            "diagnostic_only": diagnostic_only,
+            "eligible": not reasons,
+            "rejection_reasons": reasons,
+            "maximum_ape_threshold_exact": exact_fraction_payload(Fraction(1, 10)),
+            "maximum_holdout_ape_exact": exact_fraction_payload(max_holdout),
+            "maximum_checkpoint_ape_exact": exact_fraction_payload(max_checkpoint),
+            "maximum_high_limb_ape_exact": exact_fraction_payload(max_high),
+            "maximum_high_limb_consistency_error_exact": exact_fraction_payload(
+                max_consistency
+            ),
+            "cold_increment_diagnostic": cold_increment_diagnostic,
+            "high_limb_comparisons": high_limb_rows,
+        }
+
+    selected = next(
+        (
+            family
+            for family in STATEFUL_PRODUCTION_MODEL_ORDER
+            if model_reports[family]["eligible"]
+        ),
+        None,
+    )
+    return {
+        "schema_version": 1,
+        "purpose": "stateful_opcode_model_comparison",
+        "candidate_eligible": False,
+        "frozen_fit_family_order": list(STATEFUL_MODEL_FAMILY_ORDER),
+        "frozen_fit_sha256": frozen_fit_sha256,
+        "frozen_fit_models": frozen_models,
+        "scenario_reports": scenario_reports,
+        "model_reports": model_reports,
+        "selection": {
+            "order": list(STATEFUL_PRODUCTION_MODEL_ORDER),
+            "selected_model": selected,
+            "status": "selected" if selected is not None else "no_eligible_model",
+        },
+    }
+
+
+def fit_stateful_task4_rows(
+    manifest: StatefulCampaignManifest,
+    rows: Sequence[Mapping[str, Any]],
+    registry_artifact: Mapping[str, Any],
+    *,
+    noise_floor: Fraction,
+) -> dict[str, Any]:
+    registry = load_stateful_reference_registry(
+        registry_artifact,
+        expected_artifact_sha256=manifest.reference_registry["artifact_sha256"],
+    )
+    extracted = extract_stateful_pair_observations(manifest, rows, registry)
+    report = fit_stateful_model_report(
+        manifest,
+        extracted["scenario_data"],
+        noise_floor=noise_floor,
+    )
+    pair_ledgers = extracted["pair_ledgers"]
+    return {
+        **report,
+        "reference_registry": dict(manifest.reference_registry),
+        "pair_ledgers": pair_ledgers,
+        "pair_ledger_sha256": sha256_bytes(canonical_json(pair_ledgers)),
+        "typed_references": extracted["typed_references"],
+        "reference_evidence": extracted["reference_evidence"],
     }
 
 

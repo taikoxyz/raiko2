@@ -84,6 +84,18 @@ class StatefulOpcodeManifestTests(unittest.TestCase):
         self.assertEqual(
             dict(manifest.reference_registry), stateful.REFERENCE_REGISTRY
         )
+        self.assertEqual(
+            dict(manifest.controlled_run_noise_floor),
+            {
+                "prover_gas": 143,
+                "provenance_contract_id": (
+                    "sp1-controlled-block-fixed-envelope-cross-input-v1"
+                ),
+                "scope": "signal_gate_only",
+            },
+        )
+        with self.assertRaises(TypeError):
+            stateful.CONTROLLED_RUN_NOISE_FLOOR["prover_gas"] = 0
         rows = stateful.stateful_campaign_row_specs(manifest)
         self.assertEqual(len(rows), 1_128)
         self.assertEqual(len({row.logical_identity for row in rows}), len(rows))
@@ -156,6 +168,18 @@ class StatefulOpcodeManifestTests(unittest.TestCase):
         payload["reference_registry"]["artifact_sha256"] = "0" * 64
         with self.assertRaisesRegex(ValueError, "frozen contract"):
             stateful.StatefulCampaignManifest.from_mapping(payload)
+
+        for field, value in (
+            ("prover_gas", 0),
+            ("provenance_contract_id", "caller-selected"),
+            ("scope", "model_fit"),
+        ):
+            payload = stateful.canonical_stateful_manifest_payload()
+            payload["controlled_run_noise_floor"][field] = value
+            with self.subTest(field=field), self.assertRaisesRegex(
+                ValueError, "frozen contract"
+            ):
+                stateful.StatefulCampaignManifest.from_mapping(payload)
 
 
 class StatefulCampaignRowIdentityTests(unittest.TestCase):
@@ -867,6 +891,77 @@ class StatefulCampaignRowIdentityTests(unittest.TestCase):
             self.assertTrue((run / "decisions.json").is_file())
             self.assertTrue((run / "decisions.sha256").is_file())
 
+            fit_kwargs = {
+                "manifest_path": STATEFUL_MANIFEST,
+                "calibration_run": root / "calibration",
+                "fixtures_root": root / "fixtures",
+                "guest_launcher": launcher,
+                "elf": elf,
+                "run": run,
+                "identity_replayer": replay,
+                "execution_identity_loader": lambda _run: execution_identity,
+                "launcher_validator": lambda _identity, _launcher: execution_identity[
+                    "guest_launcher_sha256"
+                ],
+            }
+            with mock.patch.object(
+                stateful, "stateful_campaign_row_specs", return_value=specs
+            ), mock.patch.object(
+                stateful,
+                "_fit_stateful_task4_rows",
+                return_value={"candidate_eligible": False},
+            ):
+                fitted = stateful.fit_stateful_task4_run(**fit_kwargs)
+            provenance = fitted["task4_provenance"]
+            self.assertEqual(
+                provenance["campaign_identity_sha256"],
+                result["campaign_identity_sha256"],
+            )
+            self.assertEqual(
+                provenance["row_ledger_sha256"], result["row_ledger_sha256"]
+            )
+            self.assertEqual(
+                provenance["terminal_artifact_file_sha256"]["rows.jsonl"],
+                result["row_ledger_sha256"],
+            )
+            self.assertEqual(
+                set(provenance["terminal_artifact_file_sha256"]),
+                {"rows.jsonl", "decisions.json", "decisions.sha256"},
+            )
+
+            terminal_rows_path = run / "rows.jsonl"
+            terminal_rows_bytes = terminal_rows_path.read_bytes()
+            for coherent in (False, True):
+                terminal_rows = list(opcode_gas.iter_jsonl(terminal_rows_path))
+                changed = next(row for row in terminal_rows if row["lane"] == "target")
+                changed["normalized_report"]["prover_gas"] += 100
+                if coherent:
+                    changed["formal_report"]["gas"] += 100
+                    changed["formal_report"]["primary_workload_metric"]["count"] += 100
+                    changed["normalized_report"]["gas"] += 100
+                    changed["normalized_report"]["primary_workload_metric"][
+                        "count"
+                    ] += 100
+                    changed["normalized_report"]["workload_value"] += 100
+                    changed["formal_report_sha256"] = opcode_gas.sha256_bytes(
+                        opcode_gas.canonical_json(changed["formal_report"])
+                    )
+                terminal_rows_path.write_bytes(
+                    b"".join(
+                        opcode_gas.canonical_json(row) + b"\n"
+                        for row in terminal_rows
+                    )
+                )
+                with self.subTest(coherent=coherent), mock.patch.object(
+                    stateful, "stateful_campaign_row_specs", return_value=specs
+                ), mock.patch.object(
+                    stateful,
+                    "_fit_stateful_task4_rows",
+                    side_effect=AssertionError("unverified rows reached fitting"),
+                ), self.assertRaisesRegex(ValueError, "terminal stateful row ledger"):
+                    stateful.fit_stateful_task4_run(**fit_kwargs)
+                terminal_rows_path.write_bytes(terminal_rows_bytes)
+
             with mock.patch.object(
                 stateful, "stateful_campaign_row_specs", return_value=specs
             ):
@@ -1008,6 +1103,18 @@ class StatefulExactReferenceTests(unittest.TestCase):
         noncanonical["decimal"] = payload["decimal"][:-1] + "34"
         with self.assertRaisesRegex(ValueError, "80-digit projection"):
             stateful.replay_exact_fraction(noncanonical)
+
+    def test_fraction_payload_projects_high_magnitude_recurring_values(self):
+        for value in (Fraction(1_528_426, 7), Fraction(-1_528_426, 7)):
+            with self.subTest(value=value):
+                payload = stateful.exact_fraction_payload(value)
+                fractional = payload["decimal"].lstrip("-").split(".", 1)[1]
+                self.assertEqual(len(fractional), 80)
+                self.assertEqual(stateful.replay_exact_fraction(payload), value)
+                self.assertLessEqual(
+                    abs(Fraction(payload["decimal"]) - value),
+                    stateful.STATEFUL_REPLAY_RESIDUAL_MAX,
+                )
 
     def test_typed_reference_lookup_reconstructs_signed_cost_and_absolute_slope(self):
         common = Fraction(self.registry_artifact["registry"]["common_dispatch"])
@@ -1169,7 +1276,6 @@ class StatefulScenarioGateTests(unittest.TestCase):
             scenario="synthetic",
             deltas=self.deltas() if deltas is None else deltas,
             reference_cost=reference_cost,
-            noise_floor=Fraction(143),
         )
 
     def test_exact_linear_scenario_passes_every_predeclared_gate(self):
@@ -1203,6 +1309,10 @@ class StatefulScenarioGateTests(unittest.TestCase):
         self.assertEqual(
             report["gates"]["r2"]["threshold_exact"],
             stateful.exact_fraction_payload(Fraction(995, 1000)),
+        )
+        self.assertEqual(
+            report["controlled_run_noise_floor"],
+            stateful.CONTROLLED_RUN_NOISE_FLOOR,
         )
 
     def test_each_scenario_quality_gate_rejects_its_synthetic_failure(self):
@@ -1341,7 +1451,6 @@ class StatefulModelComparisonTests(unittest.TestCase):
         return stateful.fit_stateful_model_report(
             self.manifest,
             self.scenario_data(family),
-            noise_floor=Fraction(143),
         )
 
     def test_joint_models_share_parameters_and_use_fixed_selection_order(self):
@@ -1356,6 +1465,10 @@ class StatefulModelComparisonTests(unittest.TestCase):
             typed["selection"]["order"], ["M_fixed", "M_access", "M_typed"]
         )
         self.assertFalse(typed["candidate_eligible"])
+        self.assertEqual(
+            typed["controlled_run_noise_floor"],
+            stateful.CONTROLLED_RUN_NOISE_FLOOR,
+        )
 
         typed_parameters = typed["model_reports"]["M_typed"]["parameters_exact"]
         self.assertEqual(
@@ -1397,7 +1510,7 @@ class StatefulModelComparisonTests(unittest.TestCase):
     def test_all_families_are_frozen_before_holdout_and_never_refit(self):
         data = self.scenario_data("typed")
         original = stateful.fit_stateful_model_report(
-            self.manifest, data, noise_floor=Fraction(143)
+            self.manifest, data
         )
         changed = copy.deepcopy(data)
         changed["sstore_set_warm"]["deltas"][stateful.HOLDOUT_COUNT] = [
@@ -1406,7 +1519,7 @@ class StatefulModelComparisonTests(unittest.TestCase):
             "999999",
         ]
         rejected = stateful.fit_stateful_model_report(
-            self.manifest, changed, noise_floor=Fraction(143)
+            self.manifest, changed
         )
 
         self.assertEqual(original["frozen_fit_sha256"], rejected["frozen_fit_sha256"])
@@ -1420,6 +1533,20 @@ class StatefulModelComparisonTests(unittest.TestCase):
             rejected["model_reports"]["M_typed"]["rejection_reasons"],
         )
 
+    def test_model_report_rejects_direct_manifest_noise_floor_forgery(self):
+        forged = replace(
+            self.manifest,
+            controlled_run_noise_floor={
+                **stateful.CONTROLLED_RUN_NOISE_FLOOR,
+                "prover_gas": 0,
+            },
+        )
+        with self.assertRaisesRegex(ValueError, "noise floor contract"):
+            stateful.fit_stateful_model_report(
+                forged,
+                self.scenario_data("fixed"),
+            )
+
     def test_high_limb_required_scenarios_and_no_eligible_model_fail_closed(self):
         data = self.scenario_data("typed")
         high = copy.deepcopy(data)
@@ -1427,7 +1554,7 @@ class StatefulModelComparisonTests(unittest.TestCase):
             stateful.CHECKPOINT_COUNT
         ] = ["999999", "999999", "999999"]
         report = stateful.fit_stateful_model_report(
-            self.manifest, high, noise_floor=Fraction(143)
+            self.manifest, high
         )
         self.assertFalse(report["model_reports"]["M_typed"]["eligible"])
         self.assertIn(
@@ -1445,7 +1572,7 @@ class StatefulModelComparisonTests(unittest.TestCase):
                 "999999",
             ]
         report = stateful.fit_stateful_model_report(
-            self.manifest, none, noise_floor=Fraction(143)
+            self.manifest, none
         )
         self.assertEqual(report["selection"]["status"], "no_eligible_model")
         self.assertIsNone(report["selection"]["selected_model"])
@@ -1454,7 +1581,7 @@ class StatefulModelComparisonTests(unittest.TestCase):
         incomplete.pop("sload_warm_zero")
         with self.assertRaisesRegex(ValueError, "required scenario"):
             stateful.fit_stateful_model_report(
-                self.manifest, incomplete, noise_floor=Fraction(143)
+                self.manifest, incomplete
             )
 
     def test_low_high_consistency_is_separate_from_marginal_signal_ape(self):
@@ -1467,7 +1594,7 @@ class StatefulModelComparisonTests(unittest.TestCase):
         ] * stateful.REPEATS
 
         report = stateful.fit_stateful_model_report(
-            self.manifest, data, noise_floor=Fraction(143)
+            self.manifest, data
         )
         typed = report["model_reports"]["M_typed"]
 
@@ -1659,11 +1786,10 @@ class StatefulPairLedgerExtractionTests(unittest.TestCase):
         ]
         artifact = json.loads(STATEFUL_REFERENCE_REGISTRY.read_text())
 
-        report = stateful.fit_stateful_task4_rows(
+        report = stateful._fit_stateful_task4_rows(
             self.manifest,
             rows,
             artifact,
-            noise_floor=Fraction(143),
         )
 
         self.assertEqual(report["reference_registry"], stateful.REFERENCE_REGISTRY)

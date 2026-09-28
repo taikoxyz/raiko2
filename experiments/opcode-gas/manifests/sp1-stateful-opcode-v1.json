@@ -1,5 +1,10 @@
 {
   "checkpoint_count": 64,
+  "controlled_run_noise_floor": {
+    "provenance_contract_id": "sp1-controlled-block-fixed-envelope-cross-input-v1",
+    "prover_gas": 143,
+    "scope": "signal_gate_only"
+  },
   "execution": {
     "elf_path": "crates/guests/elf/sp1_revm_opcode_lab.elf",
     "evm_spec": "osaka",

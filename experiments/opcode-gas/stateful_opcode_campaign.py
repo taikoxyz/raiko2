@@ -37,6 +37,11 @@ DIAGNOSTIC_COUNTS = (0, CHECKPOINT_COUNT)
 GENERATOR_MAX_COUNT = CHECKPOINT_COUNT
 STATEFUL_DECIMAL_CONTEXT = Context(prec=80, rounding=ROUND_HALF_EVEN, traps=[])
 STATEFUL_REPLAY_RESIDUAL_MAX = Fraction(1, 10**75)
+CONTROLLED_RUN_NOISE_FLOOR = MappingProxyType({
+    "prover_gas": 143,
+    "provenance_contract_id": "sp1-controlled-block-fixed-envelope-cross-input-v1",
+    "scope": "signal_gate_only",
+})
 REFERENCE_REGISTRY = {
     "path": "experiments/opcode-gas/derivations/f945e67bb2c38c9c8ef50530/core-opcode-submodel.json",
     "artifact_sha256": "b66d7951bfa416810f93319f99c30ce91969026ee9fa3a402a74cbc2214f7e8b",
@@ -285,6 +290,7 @@ def canonical_stateful_manifest_payload() -> dict[str, Any]:
         "fit_counts": list(FIT_COUNTS),
         "holdout_count": HOLDOUT_COUNT,
         "checkpoint_count": CHECKPOINT_COUNT,
+        "controlled_run_noise_floor": dict(CONTROLLED_RUN_NOISE_FLOOR),
         "structural_zero_count": STRUCTURAL_ZERO_COUNT,
         "repeats": REPEATS,
         "execution": dict(EXECUTION_CONTRACT),
@@ -349,6 +355,7 @@ class StatefulCampaignManifest:
     checkpoint_count: int
     structural_zero_count: int
     repeats: int
+    controlled_run_noise_floor: Mapping[str, Any]
     execution: Mapping[str, str]
     reference_registry: Mapping[str, str]
     scenarios: tuple[StatefulScenario, ...]
@@ -428,6 +435,9 @@ class StatefulCampaignManifest:
             checkpoint_count=CHECKPOINT_COUNT,
             structural_zero_count=STRUCTURAL_ZERO_COUNT,
             repeats=REPEATS,
+            controlled_run_noise_floor=MappingProxyType(
+                dict(CONTROLLED_RUN_NOISE_FLOOR)
+            ),
             execution=MappingProxyType(dict(EXECUTION_CONTRACT)),
             reference_registry=MappingProxyType(dict(REFERENCE_REGISTRY)),
             scenarios=tuple(scenarios),
@@ -2202,8 +2212,23 @@ def _canonical_decimal_fraction(value: Any, *, label: str) -> Fraction:
 
 
 def _fraction_decimal_text(value: Fraction) -> str:
-    with localcontext(STATEFUL_DECIMAL_CONTEXT):
-        projected = Decimal(value.numerator) / Decimal(value.denominator)
+    integer_digits = max(1, len(str(abs(value.numerator) // value.denominator)))
+    context = Context(
+        prec=integer_digits + 90,
+        rounding=ROUND_HALF_EVEN,
+        traps=[],
+    )
+    with localcontext(context):
+        projected = (Decimal(value.numerator) / Decimal(value.denominator)).quantize(
+            Decimal(1).scaleb(-80),
+            rounding=ROUND_HALF_EVEN,
+        )
+    denominator = value.denominator
+    for factor in (2, 5):
+        while denominator % factor == 0:
+            denominator //= factor
+    if denominator != 1:
+        return format(projected, "f")
     return opcode_gas._decimal_text(projected)
 
 
@@ -2244,7 +2269,16 @@ def replay_exact_fraction(value: Mapping[str, Any]) -> Fraction:
     exact = Fraction(numerator, denominator)
     if exact.numerator != numerator or exact.denominator != denominator:
         raise ValueError("exact Fraction numerator/denominator are not reduced")
-    projected = _canonical_decimal_fraction(value["decimal"], label="Fraction projection")
+    decimal_raw = value["decimal"]
+    if not isinstance(decimal_raw, str):
+        raise ValueError("Fraction projection must be a canonical Decimal string")
+    try:
+        decimal = Decimal(decimal_raw)
+    except InvalidOperation as error:
+        raise ValueError("Fraction projection must be a canonical Decimal string") from error
+    if not decimal.is_finite():
+        raise ValueError("Fraction projection must be a canonical Decimal string")
+    projected = Fraction(decimal)
     if abs(projected - exact) > STATEFUL_REPLAY_RESIDUAL_MAX:
         raise ValueError("exact Fraction decimal replay residual exceeds 1e-75")
     if value["decimal"] != _fraction_decimal_text(exact):
@@ -2728,10 +2762,8 @@ def fit_and_gate_stateful_scenario(
     scenario: str,
     deltas: Mapping[int, Sequence[str]],
     reference_cost: Fraction,
-    noise_floor: Fraction,
 ) -> dict[str, Any]:
-    if not isinstance(noise_floor, Fraction) or noise_floor < 0:
-        raise ValueError("stateful controlled-run noise floor is invalid")
+    noise_floor = Fraction(CONTROLLED_RUN_NOISE_FLOOR["prover_gas"])
     parsed = _parse_stateful_delta_table(scenario, deltas)
     fit = fit_stateful_scenario(
         scenario=scenario,
@@ -2851,6 +2883,7 @@ def fit_and_gate_stateful_scenario(
     return {
         "scenario": scenario,
         "fit": fit,
+        "controlled_run_noise_floor": dict(CONTROLLED_RUN_NOISE_FLOOR),
         "noise_floor_exact": exact_fraction_payload(noise_floor),
         "gates": gates,
         "failures": failures,
@@ -3184,9 +3217,11 @@ def _high_limb_model_comparison(
 def fit_stateful_model_report(
     manifest: StatefulCampaignManifest,
     scenario_data: Mapping[str, Mapping[str, Any]],
-    *,
-    noise_floor: Fraction,
 ) -> dict[str, Any]:
+    if dict(manifest.controlled_run_noise_floor) != dict(
+        CONTROLLED_RUN_NOISE_FLOOR
+    ):
+        raise ValueError("stateful controlled-run noise floor contract differs")
     data = _validate_stateful_scenario_data(manifest, scenario_data)
     primary = tuple(scenario for scenario in manifest.scenarios if not scenario.diagnostic)
     diagnostics = tuple(scenario for scenario in manifest.scenarios if scenario.diagnostic)
@@ -3209,7 +3244,6 @@ def fit_stateful_model_report(
                 for count in manifest.primary_counts
             },
             reference_cost=data[scenario.name]["reference_cost"],
-            noise_floor=noise_floor,
         )
         for scenario in primary
     }
@@ -3354,6 +3388,7 @@ def fit_stateful_model_report(
         "schema_version": 1,
         "purpose": "stateful_opcode_model_comparison",
         "candidate_eligible": False,
+        "controlled_run_noise_floor": dict(CONTROLLED_RUN_NOISE_FLOOR),
         "frozen_fit_family_order": list(STATEFUL_MODEL_FAMILY_ORDER),
         "frozen_fit_sha256": frozen_fit_sha256,
         "frozen_fit_models": frozen_models,
@@ -3367,12 +3402,10 @@ def fit_stateful_model_report(
     }
 
 
-def fit_stateful_task4_rows(
+def _fit_stateful_task4_rows(
     manifest: StatefulCampaignManifest,
     rows: Sequence[Mapping[str, Any]],
     registry_artifact: Mapping[str, Any],
-    *,
-    noise_floor: Fraction,
 ) -> dict[str, Any]:
     registry = load_stateful_reference_registry(
         registry_artifact,
@@ -3382,7 +3415,6 @@ def fit_stateful_task4_rows(
     report = fit_stateful_model_report(
         manifest,
         extracted["scenario_data"],
-        noise_floor=noise_floor,
     )
     pair_ledgers = extracted["pair_ledgers"]
     return {
@@ -3392,6 +3424,178 @@ def fit_stateful_task4_rows(
         "pair_ledger_sha256": sha256_bytes(canonical_json(pair_ledgers)),
         "typed_references": extracted["typed_references"],
         "reference_evidence": extracted["reference_evidence"],
+    }
+
+
+def _validate_verified_task4_row_identities(
+    manifest: StatefulCampaignManifest,
+    rows: Sequence[Mapping[str, Any]],
+) -> None:
+    specs = stateful_campaign_row_specs(manifest)
+    if len(rows) != len(specs):
+        raise ValueError("verified stateful Task 4 row inventory differs")
+    grouped: dict[tuple[str, int, int], dict[str, Mapping[str, Any]]] = {}
+    for spec, row in zip(specs, rows):
+        if not isinstance(row, Mapping):
+            raise ValueError("verified stateful Task 4 row is not an object")
+        if (
+            row.get("scenario") != spec.scenario
+            or row.get("lane") != spec.lane
+            or row.get("relation_count") != spec.relation_count
+            or row.get("repeat_index") != spec.repeat_index
+            or row.get("logical_identity") != spec.logical_identity
+        ):
+            raise ValueError("verified stateful Task 4 logical identity differs")
+        expected_row_identity = stateful_execution_row_identity(
+            scenario=spec.scenario,
+            lane=spec.lane,
+            relation_count=spec.relation_count,
+            repeat_index=spec.repeat_index,
+            backend_input_sha256=row.get("backend_input_sha256"),
+            elf_sha256=row.get("elf_sha256"),
+            launcher_sha256=row.get("launcher_sha256"),
+            trace_sha256=row.get("trace_sha256"),
+        )
+        if row.get("row_identity") != expected_row_identity:
+            raise ValueError("verified stateful Task 4 execution identity differs")
+        formal = row.get("formal_report")
+        if (
+            not isinstance(formal, Mapping)
+            or row.get("formal_report_sha256")
+            != sha256_bytes(canonical_json(formal))
+        ):
+            raise ValueError("verified stateful Task 4 formal report hash differs")
+        normalized = row.get("normalized_report")
+        formal_gas = formal.get("prover_gas", formal.get("gas"))
+        normalized_gas = (
+            normalized.get("prover_gas")
+            if isinstance(normalized, Mapping)
+            else None
+        )
+        if (
+            type(formal_gas) is not int
+            or formal_gas <= 0
+            or normalized_gas != formal_gas
+        ):
+            raise ValueError("verified stateful Task 4 proverGas binding differs")
+        grouped.setdefault(
+            (spec.scenario, spec.relation_count, spec.repeat_index), {}
+        )[spec.lane] = row
+
+    for (scenario_name, count, repeat_index), lanes in grouped.items():
+        if set(lanes) != {"target", "control"}:
+            raise ValueError("verified stateful Task 4 ordered pair is incomplete")
+        scenario = manifest.scenario(scenario_name)
+        expected_pair = stateful_ordered_pair_identity(
+            scenario=scenario_name,
+            measurement_opcode=scenario.measurement_opcode,
+            relation_count=count,
+            repeat_index=repeat_index,
+            target_hash=lanes["target"]["backend_input_sha256"],
+            control_hash=lanes["control"]["backend_input_sha256"],
+        )
+        if any(
+            row.get("ordered_pair_identity") != expected_pair
+            for row in lanes.values()
+        ):
+            raise ValueError("verified stateful Task 4 ordered pair identity differs")
+
+
+def fit_stateful_task4_run(
+    *,
+    manifest_path: pathlib.Path,
+    calibration_run: pathlib.Path,
+    fixtures_root: pathlib.Path,
+    guest_launcher: pathlib.Path,
+    elf: pathlib.Path,
+    run: pathlib.Path,
+    identity_replayer=None,
+    execution_identity_loader=opcode_gas.validate_calibration_execution_identity,
+    launcher_validator=opcode_gas.validate_calibration_guest_launcher,
+) -> dict[str, Any]:
+    verification = verify_stateful_opcode_campaign(
+        manifest_path=manifest_path,
+        calibration_run=calibration_run,
+        fixtures_root=fixtures_root,
+        guest_launcher=guest_launcher,
+        elf=elf,
+        run=run,
+        identity_replayer=identity_replayer,
+        execution_identity_loader=execution_identity_loader,
+        launcher_validator=launcher_validator,
+    )
+    rows_path = _regular_file(run / "rows.jsonl", label="terminal row ledger")
+    rows_bytes = rows_path.read_bytes()
+    if sha256_bytes(rows_bytes) != verification["row_ledger_sha256"]:
+        raise ValueError("verified stateful Task 4 row ledger hash differs")
+    rows = list(opcode_gas.iter_jsonl(rows_path))
+    if rows_bytes != b"".join(canonical_json(row) + b"\n" for row in rows):
+        raise ValueError("verified stateful Task 4 row ledger is not canonical JSONL")
+
+    decisions_path = _regular_file(
+        run / "decisions.json", label="terminal decision ledger"
+    )
+    seal_path = _regular_file(
+        run / "decisions.sha256", label="terminal decision seal"
+    )
+    decisions_bytes = decisions_path.read_bytes()
+    try:
+        decisions = json.loads(decisions_bytes)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("verified stateful Task 4 decisions are invalid JSON") from error
+    if (
+        not isinstance(decisions, Mapping)
+        or set(decisions)
+        != {
+            "schema_version",
+            "purpose",
+            "status",
+            "campaign_identity_sha256",
+            "row_count",
+            "pair_count",
+            "repeats",
+            "row_ledger_sha256",
+        }
+        or decisions_bytes != canonical_json(decisions) + b"\n"
+        or decisions.get("schema_version") != 1
+        or decisions.get("purpose") != PURPOSE
+        or decisions.get("status") != "complete"
+        or decisions.get("campaign_identity_sha256")
+        != verification["campaign_identity_sha256"]
+        or decisions.get("row_ledger_sha256") != verification["row_ledger_sha256"]
+        or decisions.get("row_count") != verification["row_count"]
+        or decisions.get("pair_count") != verification["pair_count"]
+        or decisions.get("repeats") != REPEATS
+    ):
+        raise ValueError("verified stateful Task 4 decisions differ")
+    seal_bytes = seal_path.read_bytes()
+    if seal_bytes != (sha256_bytes(decisions_bytes) + "\n").encode():
+        raise ValueError("verified stateful Task 4 decision seal differs")
+
+    manifest = load_stateful_campaign_manifest(manifest_path)
+    _validate_verified_task4_row_identities(manifest, rows)
+    registry_path = _regular_file(
+        opcode_gas.REPO_ROOT / manifest.reference_registry["path"],
+        label="stateful source registry",
+    )
+    try:
+        registry_artifact = json.loads(registry_path.read_bytes())
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("stateful source registry is invalid JSON") from error
+    report = _fit_stateful_task4_rows(manifest, rows, registry_artifact)
+    return {
+        **report,
+        "task4_provenance": {
+            "campaign_identity_sha256": verification[
+                "campaign_identity_sha256"
+            ],
+            "row_ledger_sha256": verification["row_ledger_sha256"],
+            "terminal_artifact_file_sha256": {
+                "rows.jsonl": sha256_bytes(rows_bytes),
+                "decisions.json": sha256_bytes(decisions_bytes),
+                "decisions.sha256": sha256_bytes(seal_bytes),
+            },
+        },
     }
 
 

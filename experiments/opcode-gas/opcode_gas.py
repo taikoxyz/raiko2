@@ -14106,6 +14106,19 @@ def cmd_generate(args: argparse.Namespace) -> None:
     print(f"wrote {len(written)} case metadata files")
 
 
+def cmd_generate_stateful(args: argparse.Namespace) -> None:
+    from stateful_opcode_campaign import cmd_generate as generate_stateful
+
+    generate_stateful(
+        argparse.Namespace(
+            manifest=_resolve_repo_path(
+                args.manifest, field_name="stateful_campaign_manifest"
+            ),
+            out=_resolve_repo_path(args.out, field_name="stateful_generated_fixtures"),
+        )
+    )
+
+
 def cmd_generate_relations(args: argparse.Namespace) -> None:
     calibration_run = _resolve_repo_path(args.calibration_run, field_name="calibration_run")
     validate_calibration_execution_identity(calibration_run)
@@ -24704,6 +24717,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="frozen controlled sweep checkpoint bound",
     )
     generate.set_defaults(func=cmd_generate, matched_control_diagnostic=False)
+
+    stateful_generate = subcommands.add_parser(
+        "generate-stateful",
+        help="generate the frozen stateful SLOAD/SSTORE fixture matrix",
+    )
+    stateful_generate.add_argument("--manifest", type=pathlib.Path, required=True)
+    stateful_generate.add_argument("--out", type=pathlib.Path, required=True)
+    stateful_generate.set_defaults(func=cmd_generate_stateful)
 
     matched_generate = subcommands.add_parser(
         "generate-matched-control",

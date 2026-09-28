@@ -1,5 +1,147 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpcodeLabStorageLane {
+    Target,
+    Control,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpcodeLabStorageAccess {
+    Cold,
+    Warm,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OpcodeLabStorageOperation {
+    Load {
+        expected_value: [u8; 32],
+    },
+    Store {
+        current_value: [u8; 32],
+        new_value: [u8; 32],
+    },
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum ReadableStorageOperationRef<'a> {
+    Load {
+        #[serde(with = "hex_word")]
+        expected_value: &'a [u8; 32],
+    },
+    Store {
+        #[serde(with = "hex_word")]
+        current_value: &'a [u8; 32],
+        #[serde(with = "hex_word")]
+        new_value: &'a [u8; 32],
+    },
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum ReadableStorageOperation {
+    Load {
+        #[serde(with = "hex_word")]
+        expected_value: [u8; 32],
+    },
+    Store {
+        #[serde(with = "hex_word")]
+        current_value: [u8; 32],
+        #[serde(with = "hex_word")]
+        new_value: [u8; 32],
+    },
+}
+
+#[derive(Serialize)]
+enum BinaryStorageOperationRef<'a> {
+    Load(&'a [u8; 32]),
+    Store(&'a [u8; 32], &'a [u8; 32]),
+}
+
+#[derive(Deserialize)]
+enum BinaryStorageOperation {
+    Load([u8; 32]),
+    Store([u8; 32], [u8; 32]),
+}
+
+impl Serialize for OpcodeLabStorageOperation {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        if serializer.is_human_readable() {
+            match self {
+                Self::Load { expected_value } => {
+                    ReadableStorageOperationRef::Load { expected_value }.serialize(serializer)
+                }
+                Self::Store {
+                    current_value,
+                    new_value,
+                } => ReadableStorageOperationRef::Store {
+                    current_value,
+                    new_value,
+                }
+                .serialize(serializer),
+            }
+        } else {
+            match self {
+                Self::Load { expected_value } => {
+                    BinaryStorageOperationRef::Load(expected_value).serialize(serializer)
+                }
+                Self::Store {
+                    current_value,
+                    new_value,
+                } => {
+                    BinaryStorageOperationRef::Store(current_value, new_value).serialize(serializer)
+                }
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for OpcodeLabStorageOperation {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        if deserializer.is_human_readable() {
+            Ok(match ReadableStorageOperation::deserialize(deserializer)? {
+                ReadableStorageOperation::Load { expected_value } => Self::Load { expected_value },
+                ReadableStorageOperation::Store {
+                    current_value,
+                    new_value,
+                } => Self::Store {
+                    current_value,
+                    new_value,
+                },
+            })
+        } else {
+            Ok(match BinaryStorageOperation::deserialize(deserializer)? {
+                BinaryStorageOperation::Load(expected_value) => Self::Load { expected_value },
+                BinaryStorageOperation::Store(current_value, new_value) => Self::Store {
+                    current_value,
+                    new_value,
+                },
+            })
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct OpcodeLabStorageInput {
+    pub measurement_opcode: u8,
+    pub lane: OpcodeLabStorageLane,
+    #[serde(with = "hex_word")]
+    pub slot: [u8; 32],
+    #[serde(with = "hex_word")]
+    pub original_value: [u8; 32],
+    pub access: OpcodeLabStorageAccess,
+    pub operation: OpcodeLabStorageOperation,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub struct OpcodeLabInput {
     pub case: String,
@@ -15,6 +157,8 @@ pub struct OpcodeLabInput {
     pub generator_max_count: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fixed_bytecode_len: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage: Option<OpcodeLabStorageInput>,
 }
 
 impl OpcodeLabInput {
@@ -59,8 +203,140 @@ impl OpcodeLabInput {
         {
             return Err("bytecode length differs from fixed_bytecode_len");
         }
+        self.validate_storage_contract()?;
         self.execution_programs()?;
         Ok(())
+    }
+
+    /// Validates the typed storage scenario against the concrete lane and bytecode.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the storage operation, lane opcode, canonical operands, access class,
+    /// or dirty prefix differs from the declared contract.
+    pub fn validate_storage_contract(&self) -> Result<(), &'static str> {
+        let Some(storage) = &self.storage else {
+            return Ok(());
+        };
+        match storage.measurement_opcode {
+            0x54 | 0x55 => {}
+            _ => return Err("storage measurement_opcode must be SLOAD or SSTORE"),
+        }
+        match storage.lane {
+            OpcodeLabStorageLane::Target if self.opcode != storage.measurement_opcode => {
+                return Err("target opcode differs from storage measurement_opcode");
+            }
+            OpcodeLabStorageLane::Control if matches!(self.opcode, 0x54 | 0x55) => {
+                return Err("control opcode must name a non-storage reference opcode");
+            }
+            _ => {}
+        }
+
+        let programs = self.execution_programs()?;
+        match &storage.operation {
+            OpcodeLabStorageOperation::Load { expected_value } => {
+                if storage.measurement_opcode != 0x54 {
+                    return Err("load operation requires SLOAD measurement_opcode");
+                }
+                if expected_value != &storage.original_value {
+                    return Err("SLOAD expected_value differs from original_value");
+                }
+                self.validate_load_programs(storage, &programs)
+            }
+            OpcodeLabStorageOperation::Store {
+                current_value,
+                new_value,
+            } => {
+                if storage.measurement_opcode != 0x55 {
+                    return Err("store operation requires SSTORE measurement_opcode");
+                }
+                let dirty = current_value != &storage.original_value;
+                if dirty && storage.access != OpcodeLabStorageAccess::Warm {
+                    return Err("dirty SSTORE measured operation must be warm");
+                }
+                self.validate_store_programs(storage, &programs, current_value, new_value, dirty)
+            }
+        }
+    }
+
+    fn validate_load_programs(
+        &self,
+        storage: &OpcodeLabStorageInput,
+        programs: &[&[u8]],
+    ) -> Result<(), &'static str> {
+        let mut measured_count = 0u64;
+        for program in programs {
+            let sites = storage_sites(program)?;
+            if sites.len() > 1 {
+                return Err("microprogram contains multiple measured storage opcodes");
+            }
+            for site in sites {
+                if site.opcode != 0x54 || site.slot != storage.slot {
+                    return Err("storage bytecode differs from declared SLOAD operation");
+                }
+                measured_count = measured_count
+                    .checked_add(1)
+                    .ok_or("storage opcode count overflow")?;
+            }
+        }
+        match storage.lane {
+            OpcodeLabStorageLane::Target if measured_count != self.target_count => {
+                Err("target SLOAD count differs from target_count")
+            }
+            OpcodeLabStorageLane::Control if measured_count != 0 => {
+                Err("control lane contains an undeclared storage opcode")
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn validate_store_programs(
+        &self,
+        storage: &OpcodeLabStorageInput,
+        programs: &[&[u8]],
+        current_value: &[u8; 32],
+        new_value: &[u8; 32],
+        dirty: bool,
+    ) -> Result<(), &'static str> {
+        let mut measured_count = 0u64;
+        for program in programs {
+            let sites = storage_sites(program)?;
+            let measured_start = usize::from(dirty);
+            if sites.len().saturating_sub(measured_start) > 1 {
+                return Err("microprogram contains multiple measured storage opcodes");
+            }
+            if dirty {
+                let prefix = sites
+                    .first()
+                    .ok_or("dirty SSTORE bytecode is missing its declared prefix")?;
+                if prefix.opcode != 0x55 || prefix.value.as_ref() != Some(current_value) {
+                    return Err("SSTORE dirty prefix differs from declared current value");
+                }
+                if prefix.slot != storage.slot {
+                    return Err("SSTORE dirty prefix differs from declared slot");
+                }
+            }
+            for site in &sites[measured_start..] {
+                if site.opcode != 0x55
+                    || site.slot != storage.slot
+                    || site.value.as_ref() != Some(new_value)
+                {
+                    return Err("storage bytecode differs from declared SSTORE operation");
+                }
+                measured_count = measured_count
+                    .checked_add(1)
+                    .ok_or("storage opcode count overflow")?;
+            }
+        }
+        match storage.lane {
+            OpcodeLabStorageLane::Target if measured_count != self.target_count => {
+                Err("target SSTORE count differs from target_count")
+            }
+            OpcodeLabStorageLane::Control if measured_count != 0 => {
+                Err("control lane contains an undeclared storage opcode")
+            }
+            _ => Ok(()),
+        }
     }
 
     /// Returns the one legacy program or every framed fixed-footprint microprogram.
@@ -120,6 +396,78 @@ impl OpcodeLabInput {
     }
 }
 
+#[derive(Clone, Copy)]
+struct StorageSite {
+    opcode: u8,
+    value: Option<[u8; 32]>,
+    slot: [u8; 32],
+}
+
+fn storage_sites(program: &[u8]) -> Result<Vec<StorageSite>, &'static str> {
+    let mut instructions: Vec<(u8, Option<[u8; 32]>)> = Vec::new();
+    let mut cursor = 0usize;
+    while cursor < program.len() {
+        let opcode = program[cursor];
+        cursor += 1;
+        if (0x60..=0x7f).contains(&opcode) {
+            let immediate_len = usize::from(opcode - 0x5f);
+            let end = cursor
+                .checked_add(immediate_len)
+                .ok_or("PUSH immediate length overflow")?;
+            if end > program.len() {
+                return Err("truncated PUSH immediate in storage bytecode");
+            }
+            let immediate = if opcode == 0x7f {
+                Some(
+                    program[cursor..end]
+                        .try_into()
+                        .map_err(|_| "invalid PUSH32 immediate")?,
+                )
+            } else {
+                None
+            };
+            instructions.push((opcode, immediate));
+            cursor = end;
+        } else {
+            instructions.push((opcode, None));
+        }
+    }
+
+    let mut sites = Vec::new();
+    for (index, (opcode, _)) in instructions.iter().enumerate() {
+        match *opcode {
+            0x54 => {
+                let slot = instructions
+                    .get(index.wrapping_sub(1))
+                    .and_then(|(_, immediate)| *immediate)
+                    .ok_or("storage opcode is missing canonical PUSH32 operands")?;
+                sites.push(StorageSite {
+                    opcode: *opcode,
+                    value: None,
+                    slot,
+                });
+            }
+            0x55 => {
+                let value = instructions
+                    .get(index.wrapping_sub(2))
+                    .and_then(|(_, immediate)| *immediate)
+                    .ok_or("storage opcode is missing canonical PUSH32 operands")?;
+                let slot = instructions
+                    .get(index.wrapping_sub(1))
+                    .and_then(|(_, immediate)| *immediate)
+                    .ok_or("storage opcode is missing canonical PUSH32 operands")?;
+                sites.push(StorageSite {
+                    opcode: *opcode,
+                    value: Some(value),
+                    slot,
+                });
+            }
+            _ => {}
+        }
+    }
+    Ok(sites)
+}
+
 mod hex_bytes {
     use serde::{Deserialize, Deserializer, Serializer, de::Error as _};
 
@@ -137,6 +485,38 @@ mod hex_bytes {
         let value = String::deserialize(deserializer)?;
         let value = value.strip_prefix("0x").unwrap_or(&value);
         alloy_primitives::hex::decode(value).map_err(D::Error::custom)
+    }
+}
+
+mod hex_word {
+    use serde::{Deserialize, Deserializer, Serializer, de::Error as _};
+
+    pub fn serialize<S>(word: &[u8; 32], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&format!("0x{}", alloy_primitives::hex::encode(word)))
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<[u8; 32], D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        if value.len() != 66
+            || !value.starts_with("0x")
+            || !value[2..]
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(D::Error::custom(
+                "expected canonical 0x-prefixed 32-byte lowercase hex value",
+            ));
+        }
+        let decoded = alloy_primitives::hex::decode(&value[2..]).map_err(D::Error::custom)?;
+        decoded
+            .try_into()
+            .map_err(|_| D::Error::custom("expected exactly 32 bytes"))
     }
 }
 

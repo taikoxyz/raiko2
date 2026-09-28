@@ -1,0 +1,41 @@
+{
+  "artifact_sha256": "185dedb58925304433a0e591016d049abf2bf23aa6807e2165a49e5880ceb953",
+  "candidate_eligible": false,
+  "output_hashes": {
+    "model_report_file_sha256": "124676b34172bd5715b73107eecc4174c9fb99310298143fe58ce420afeabf89",
+    "ownership_sha256": "305fc798e30750df9d30534060b2905d5bd41a67238ecd28b38978b59a7bb710"
+  },
+  "ownership": {
+    "excluded": [
+      "witness materialization",
+      "persistent dirty-state commit",
+      "trie hashing",
+      "final state root"
+    ],
+    "measured": "stateful REVM execution cost including storage execution, journal updates, and result-state construction"
+  },
+  "production_registry_modified": false,
+  "proposal_validated": false,
+  "purpose": "stateful_opcode_calibration_result",
+  "result_id": "64065fa462311bdc1848e9d0",
+  "result_identity": {
+    "analysis_implementation_revision": "6e188fe00d15815190535cb1bb739198ecbe2fed",
+    "analysis_schema_version": 1,
+    "input_hashes": {
+      "calibration_identity_file_sha256": "33cdc777c7fe5348bd87f3a3e2f8c5d2a9cbbe3827963e9bf7ea578f437101ac",
+      "campaign_decisions_file_sha256": "498b201c5d420b40fd9f2b51a7f5e54887d7f40286d7531ff5a33ad2f02b65d8",
+      "campaign_decisions_seal_file_sha256": "e18aafbb6ad83f9c397f1caa14ddc3a146fad401a96bf0bfc612267f08801369",
+      "campaign_identity_file_sha256": "bcdea847cfdec257f92fec76cd0be327a8e49275e794ff8c4f50864b50b3118a",
+      "campaign_manifest_file_sha256": "dffd6fed4de3b45968e74000e3005c6840b1cca5e7a8bb1b1440325a20842422",
+      "source_registry_artifact_sha256": "b66d7951bfa416810f93319f99c30ce91969026ee9fa3a402a74cbc2214f7e8b",
+      "source_registry_file_sha256": "8bfcef84bf5b42a643bd98bcb7dd9a7a8122e0ce1f8a2a4ed6f18b082f16693e"
+    },
+    "task4": {
+      "campaign_identity_sha256": "eb04b0504ff28d0d8479694070d0ddfcf817d2c442e7c5b8ae088e30d6d7292d",
+      "row_ledger_sha256": "f8a3977df12e461426dc48daeaa974d830e3e86e1ed9404e54a7d41856e9bd34"
+    }
+  },
+  "result_identity_sha256": "64065fa462311bdc1848e9d0071930dacb4f3aa78d52d9e1fe7e5bb4e9ef4a90",
+  "schema_version": 1,
+  "status": "sealed"
+}

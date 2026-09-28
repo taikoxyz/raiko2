@@ -4,7 +4,7 @@
 
 In progress.
 
-Last updated: 2026-09-28.
+Last updated: 2026-09-29.
 
 This document is the execution-status ledger for the ZKGas calibration work. It records what is
 currently proved, what is actively being changed, and which gate opens the next layer. It does not
@@ -63,10 +63,11 @@ Osaka execution semantics while continuing to bind the actual exported Unzen sch
 | Experiment framework | Core scope complete | Preserve its identity and replay invariants |
 | Opcode core | Complete at partial coverage | Preserve sealed 101-plus-2 augmentation |
 | Remaining operations | Complete at frozen classification | Preserve the sealed coverage and ownership ledgers |
+| Stateful storage execution | Controlled model selected | Add typed trace fields before estimator promotion |
 | State/trie | Coarse model accepted | Preserve the sealed holdout evidence; split only after a new predeclared experiment |
 | Transaction | Declared approximation accepted and sealed | Preserve `5017` and its `0.002` materiality budget |
 | Block | Fixed base accepted and sealed | Preserve the selected round-128 fixed-cost artifact |
-| Proposal | Plumbing reviewed; two existing-fixture ad-hoc diagnostics opened | Close the exposed operation gaps, then run the two frozen smoke rows before opening the corpus |
+| Proposal | Plumbing reviewed; two existing-fixture ad-hoc diagnostics opened | Promote reviewed operation families, then rerun the two diagnostics before opening frozen smoke rows |
 | Other ZKVM backends | Future | Measure natively or validate an explicit bridge |
 
 ## Sealed Baseline
@@ -441,14 +442,86 @@ for proposal `17462` was also rejected rather than reused: it records
 `last_anchor_block_number=0`, while the current guest derives `2668320`. Its native trace was marked
 failed and no estimator result was produced.
 
+## Completed Milestone: Stateful SLOAD/SSTORE Execution
+
+Formal SP1 sampling selected the predeclared typed storage model. The sealed artifact is derivation
+`64065fa462311bdc1848e9d0`, produced from calibration run `e96fa5d0372dbb29cc9f606a` at
+implementation revision `6e188fe00d15815190535cb1bb739198ecbe2fed`.
+
+- production-path guest launcher SHA256:
+  `f7e40fa7b820516418eb4bd80afd24b3a53705171dbbd9ffa3d1b44bd105351a`;
+- SP1 REVM opcode-lab ELF SHA256:
+  `ca7fd7f79189a382bbdd50d5a565b27e8ea382fe5382bb43bd43d994d8bed259`;
+- SP1 REVM opcode-lab VK SHA256:
+  `8d28d6949bab2e52b1711d015311df3e0a90dafd55fc6fa4b1be10052db42a50`;
+- campaign: 40 frozen scenarios, 564 target/control pairs, 1,128 rows, three repeats, and 376
+  distinct canonical guest inputs;
+- terminal row-ledger SHA256:
+  `f8a3977df12e461426dc48daeaa974d830e3e86e1ed9404e54a7d41856e9bd34`;
+- all 18 primary low-value/low-slot scenarios passed their predeclared fit, noise, repeat,
+  holdout, and checkpoint gates;
+- all 22 high-limb value/slot diagnostics remained below the predeclared 10% model and
+  low/high-consistency limits.
+
+`M_fixed` and `M_access` were rejected. Their maximum holdout APE was respectively about 50.97%
+and 46.12%; access class alone cannot represent SSTORE execution. `M_typed` was the first eligible
+model in the frozen selection order:
+
+| Typed parameter | SP1 proverGas per event |
+| --- | ---: |
+| SLOAD warm body | `3957.51520727213202200418390456906258` |
+| SLOAD cold modifier | `-621.19690860215053763440860215053763` |
+| SSTORE no-op branch | `4474.71437431588060011417067340115379` |
+| SSTORE set branch | `4658.38204904706339581309540458394949` |
+| SSTORE clear branch | `4642.02653829437522377008465189577744` |
+| SSTORE reset branch | `4669.13204904706339581309540458394949` |
+| SSTORE dirty-rewrite branch | `2145.59428022985909473782658737964841` |
+| SSTORE restore-original branch | `2147.89468345566554635072981318610002` |
+| SSTORE cold modifier | `-625.49489247311827956989247311827957` |
+
+The negative cold modifiers are measured model terms, not a claim about protocol gas or total state
+cost. They were independently present for SLOAD and SSTORE and differed by only about `4.298`
+proverGas. They may reflect the exact REVM/SP1 warm-path implementation under the frozen
+target/control envelope. Promotion must preserve the measured typed formula and must not replace it
+with an unsigned generic “cold surcharge.”
+
+`M_typed` reached maximum marginal-signal APE of about `0.2714%` on the untouched count-32
+holdouts, `0.2068%` on the count-64 extrapolation checkpoints, and `4.0451%` across high-value and
+high-slot diagnostics. The worst high-limb case was cold high-value SSTORE clear. No result-driven
+count expansion or coefficient tuning occurred.
+
+This artifact measures stateful REVM execution, including storage execution, journal updates, and
+result-state construction. It deliberately excludes witness materialization, persistent dirty-state
+commit, trie hashing, and final-state-root construction. The artifact remains
+`candidate_eligible=false`, `proposal_validated=false`, and
+`production_registry_modified=false`: the selected model cannot be promoted through the current
+proposal trace because that trace does not expose reliable access warmth and original/current/new
+storage relationships.
+
+The formal run, verification-only campaign replay, sealing, and directory-only sealed-result replay
+all completed successfully. Sealed replay regenerated all 376 fixtures and host-native semantic
+identities while executing the SP1 guest zero times. No proposal was opened and no production
+schedule, table, runtime configuration, block limit, or Boundless configuration changed.
+
+Fresh root verification passed the complete opcode-gas suite (`576` tests with one opt-in skip),
+Python byte-compilation, SP1 artifact provenance, and staged-diff checks. Independent adversarial
+review reproduced the negative cold contrasts and exact model/gate decisions with no material
+finding. Independent behavioral verification recomputed all nine typed parameters and 18 nuisance
+intercepts using exact rational arithmetic, checked all 564 pair joins, observed 376 host-native
+identity replays and zero SP1 executions, and confirmed that sealed-file hashes did not change.
+
 ## Next Gate
 
-Close the high-impact operation gaps before claiming proposal accuracy. Start with SLOAD and SSTORE
-operation bodies while keeping account/storage access, dirty-state updates, witness validation, and
-final-trie updates in the state/trie ownership domain. Then cover LOG/EXTCODE, CALL-family wrappers,
-and direct precompiles in descending observed impact. Re-seal a new estimator and replay the two
-ad-hoc proposal fixtures after each independently reviewed family milestone; never tune from those
-proposal results.
+Write and independently review the separate typed-storage promotion design. It must add execution-time
+trace fields for SLOAD warmth and the SSTORE semantic branch without inferring them from final raw
+gas, and it must keep persistent dirty-state/trie events in their existing higher-layer ownership
+domain. Then build a new non-production composite estimator from derivation
+`64065fa462311bdc1848e9d0` and replay the two existing ad-hoc proposal fixtures exactly once without
+tuning from their results.
+
+After that storage checkpoint, close LOG/EXTCODE, CALL-family wrappers, and direct precompiles in
+descending observed impact. Re-seal and replay the same diagnostics after each independently reviewed
+family milestone; do not use those proposal results to repair a coefficient.
 
 The frozen Hoodi `79852` and Mainnet `38261` integration smokes remain required once a
 witness-capable RPC or immutable GuestInputs are available. Record their exact trace/report joins,

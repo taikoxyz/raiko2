@@ -352,6 +352,20 @@ hashing, and final-root construction. The sealed result always remains
 `production_registry_modified=false`. Do not run proposal replay, edit the production registry or
 multiplier table, change runtime configuration, or promote the result under this workflow.
 
+The formal 2026-09-29 campaign is sealed as
+`experiments/opcode-gas/derivations/64065fa462311bdc1848e9d0`. It contains 1,128 rows from 564
+target/control pairs and selects `M_typed`; `M_fixed` and `M_access` are rejected. All 18 primary
+scenarios pass, and the selected model's maximum holdout, checkpoint, and high-limb APE are about
+`0.2714%`, `0.2068%`, and `4.0451%`, respectively. See the calibration progress ledger for the
+exact model parameters and identities.
+
+The selected typed model is evidence, not a directly usable proposal estimator. The current
+proposal trace cannot distinguish access warmth and SSTORE original/current/new relationships
+reliably. A separate reviewed promotion change must emit those execution-time fields and retain
+persistent dirty-state/trie work as a higher-layer cost. In particular, do not reinterpret the
+measured negative cold modifiers as a generic unsigned cold surcharge and do not infer the typed
+branch from final raw gas.
+
 ### Bounded Osaka supplement
 
 Run these commands from the repository root. First verify the exact tracked historical-schema

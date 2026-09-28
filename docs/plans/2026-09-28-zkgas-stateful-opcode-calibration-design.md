@@ -113,9 +113,11 @@ continues to name the opcode whose count/raw gas the concrete lane declares: it 
 `measurement_opcode` in the target lane and the matched reference opcode in the control lane. The
 structured `operation` describes the target semantic scenario in both lanes so the pair carries
 identical prestate and access-list state. Validation is lane-aware: the target must execute the
-declared state operation, while the control must execute no `SLOAD`/`SSTORE` and must match the
-sealed reference ledger. This avoids pretending that the control bytecode itself performs the
-state transition.
+declared state operation at the measured site, while the control substitutes the sealed reference
+there. A dirty/restore control still executes the identical declared prefix `SSTORE` at the same
+position as the target; it may not execute any other state opcode. Clean controls execute no state
+opcode. This avoids pretending that the control's measured site performs the state transition
+while preserving the prefix work that must cancel in a dirty relation.
 
 The primary matrix uses values `0`, `1`, and `2` because the required semantic classes depend on
 zero and equality relationships. The wire contract nevertheless carries complete 256-bit values,

@@ -111,10 +111,13 @@ the fixed selection order is `M_fixed`, `M_access`, `M_typed`. The raw-gas relat
 - [ ] **Step 1: Write failing Rust contract tests**
 
   Cover stateless JSON compatibility, full-width JSON/bincode round trips, invalid lane,
-  target measurement-opcode mismatch, control lane containing a storage opcode, missing SSTORE
-  current/new values, SLOAD with store values, expected-load mismatch, noncanonical widths, and
-  dirty-prefix relationships. The lane-aware validator must permit a control top-level reference
-  opcode while still binding the pair to one measurement opcode and semantic scenario.
+  target measurement-opcode mismatch, a control measured site containing a storage opcode,
+  missing SSTORE current/new values, SLOAD with store values, expected-load mismatch, noncanonical
+  widths, and dirty-prefix relationships. The lane-aware validator must permit a control top-level
+  reference opcode while still binding the pair to one measurement opcode and semantic scenario.
+  Dirty/restore target and control programs execute one identical declared prefix SSTORE at the
+  same position; reject a prefix mismatch or any undeclared control-lane storage opcode. Clean
+  SLOAD/SSTORE controls execute no storage opcode.
 
 - [ ] **Step 2: Run the Rust tests and observe the intended failure**
 
@@ -279,9 +282,11 @@ the fixed selection order is `M_fixed`, `M_access`, `M_typed`. The raw-gas relat
   Reject differing transaction envelope, gas limit, bytecode length, access list, prestate,
   dirty-prefix program, inactive-slot layout, reference ledger, or REVM identity.
   Permit only the declared active target/control opcode substitution. Validate the structured
-  measurement opcode/lane against the concrete lane opcode and prove the control trace executes no
-  `SLOAD` or `SSTORE`. Each lane's trace/report backend-input hash must equal that lane's own
-  canonical guest-input hash. The pair/workload identity binds the ordered
+  measurement opcode/lane against the concrete lane opcode. Prove a clean control executes no
+  `SLOAD` or `SSTORE`; a dirty/restore control may execute only the exact declared prefix at the
+  same position as target and never a state opcode at the measured site. Each lane's trace/report
+  backend-input hash must equal that lane's own canonical guest-input hash. The pair/workload
+  identity binds the ordered
   `(target_hash, control_hash)` plus scenario, measurement opcode, count, and repeat; tests reject
   target/control swaps, cross-pair joins, and a report attached to the other lane.
 

@@ -14291,7 +14291,12 @@ def cmd_verify_stateful_opcode_result(args: argparse.Namespace) -> None:
     result_path = _resolve_repo_path_without_symlinks(
         args.result, field_name="stateful result"
     )
-    result = verify_stateful_opcode_result(result_path)
+    result = verify_stateful_opcode_result(
+        result_path,
+        guest_launcher=_resolve_repo_path_without_symlinks(
+            args.guest_launcher, field_name="guest launcher"
+        ),
+    )
     print(f"verified stateful opcode result {result['result_id']}")
 
 
@@ -24994,6 +24999,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     stateful_verify_result.add_argument(
         "--result", type=pathlib.Path, required=True
+    )
+    stateful_verify_result.add_argument(
+        "--guest-launcher", type=pathlib.Path, required=True
     )
     stateful_verify_result.set_defaults(func=cmd_verify_stateful_opcode_result)
 

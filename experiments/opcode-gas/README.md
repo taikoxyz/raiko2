@@ -327,14 +327,17 @@ model-report option:
 
 RESULT_DIR=experiments/opcode-gas/derivations/<result-id-printed-by-seal>
 ~/.venv/bin/python experiments/opcode-gas/opcode_gas.py verify-stateful-opcode-result \
-  --result "$RESULT_DIR"
+  --result "$RESULT_DIR" \
+  --guest-launcher target/release/guest-launcher
 ```
 
 The calibration directory, fixtures, and campaign run are generated/ignored evidence. The stateful
 manifest, sealed 103-opcode source registry, and this operator documentation are tracked inputs.
 After successful replay, the one flat content-addressed result directory under
 `experiments/opcode-gas/derivations/` is the only generated result intended to become tracked. Its
-verifier reads that directory, checks an exact nine-file inventory, and performs no guest execution.
+verifier reads that directory, checks an exact nine-file inventory, regenerates every canonical
+fixture, and uses the hash-bound reviewed launcher only for host-native REVM identity replay; it
+performs no SP1 guest execution.
 It accepts an evidence-only descendant commit only when every fitting source, manifest, registry,
 and guest artifact remains byte-identical to the measured revision.
 

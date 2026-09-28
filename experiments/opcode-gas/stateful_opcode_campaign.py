@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import pathlib
 import re
@@ -76,11 +77,14 @@ STATEFUL_RESULT_OWNERSHIP = MappingProxyType(
     }
 )
 STATEFUL_RESULT_FIT_SOURCE_PATHS = (
+    "Cargo.toml",
+    "Cargo.lock",
     "experiments/opcode-gas/stateful_opcode_campaign.py",
     "experiments/opcode-gas/opcode_gas.py",
     "experiments/opcode-gas/calibration_model.py",
     "experiments/opcode-gas/composite_estimator.py",
     "experiments/opcode-gas/hierarchical_model.py",
+    "experiments/opcode-gas/manifests/sp1-calibration-v1.toml",
     "experiments/opcode-gas/manifests/sp1-stateful-opcode-v1.json",
 )
 STATEFUL_RESULT_DESCENDANT_PATHS = (
@@ -3788,6 +3792,126 @@ def _load_canonical_json_bytes(
     return payload
 
 
+@functools.lru_cache(maxsize=1)
+def _current_stateful_calibration_contract_bytes() -> bytes:
+    controlled_manifest = (
+        opcode_gas.REPO_ROOT
+        / "experiments/opcode-gas/manifests/sp1-calibration-v1.toml"
+    )
+    controlled_data = opcode_gas.tomllib.loads(controlled_manifest.read_text())
+    schedule = opcode_gas.current_uzen_schedule()
+    workspace = opcode_gas.tomllib.loads(
+        (opcode_gas.REPO_ROOT / "Cargo.toml").read_text()
+    )
+    guest_artifacts = {
+        str(path.relative_to(opcode_gas.REPO_ROOT)): opcode_gas.sha256_file(path)
+        for path in sorted(
+            (opcode_gas.REPO_ROOT / "crates/guests/elf").glob("sp1*")
+        )
+        if path.is_file()
+        and (path.name.endswith(".elf") or path.name.endswith(".vk.bin"))
+    }
+    contract = {
+        "alethia_reth_revision": workspace["workspace"]["dependencies"][
+            "alethia-reth-chainspec"
+        ]["rev"],
+        "rust_version": opcode_gas._rust_version(),
+        "sp1_sdk_version": opcode_gas._locked_package_version("sp1-sdk"),
+        "controlled_manifest_sha256": opcode_gas.sha256_file(
+            controlled_manifest
+        ),
+        "controlled_manifest_rows_sha256": (
+            opcode_gas.controlled_manifest_rows_sha256(controlled_manifest)
+        ),
+        "complete_schedule_sha256": opcode_gas.schedule_sha256(schedule),
+        "guest_artifacts": guest_artifacts,
+        "guest_artifacts_sha256": sha256_bytes(canonical_json(guest_artifacts)),
+        "normalization_reference_key": "opcode:0x01",
+        "sp1_execution_parameters": opcode_gas.sp1_execution_parameters(),
+        "primary_metric": "proverGas",
+        "sp1_instruction_count": "secondary_non_gating",
+        "workload_identity_schema_version": 1,
+        "workload_canonicalization": "sha256(canonical_json(workload_spec))",
+        "primary_formulas": {
+            "candidate_cost": "g_p(k) / r(k)",
+            "candidate_multiplier": "c_p(k) / c_p(opcode:0x01)",
+        },
+        "q_formula": list(opcode_gas.Q_FORMULA),
+        "out_of_fit_checkpoint": {
+            "mapping": opcode_gas.OUT_OF_FIT_CHECKPOINTS,
+            "ape_max": 0.10,
+        },
+        "quality_gates": {"checkpoint_ape_max": 0.10},
+        "bridge": {
+            "bridge_key_ids": controlled_data["bridge_key_ids"],
+            "model": "through_origin_equal_key_median",
+            "controlled_ape_max": "0.10",
+            "proposal_ape_max": "0.10",
+            "missing_data": "insufficient_data_is_sealable_and_non_gating",
+        },
+        "version_identity": opcode_gas.calibration_version_identity(schedule),
+    }
+    return canonical_json(contract)
+
+
+def _current_stateful_calibration_contract() -> dict[str, Any]:
+    # Return a fresh tree so a caller cannot mutate the cached authority.
+    return json.loads(_current_stateful_calibration_contract_bytes())
+
+
+def _validate_sealed_calibration_identity(identity: Mapping[str, Any]) -> None:
+    if not isinstance(identity, Mapping):
+        raise ValueError("sealed stateful calibration identity must be an object")
+    contract = _current_stateful_calibration_contract()
+    expected_keys = {
+        "implementation_revision",
+        "guest_launcher_sha256",
+        *contract.keys(),
+    }
+    try:
+        _require_sha256(
+            identity.get("guest_launcher_sha256"),
+            "sealed calibration guest launcher",
+        )
+    except ValueError as error:
+        raise ValueError("sealed stateful calibration identity differs") from error
+    revision = identity.get("implementation_revision")
+    if (
+        set(identity) != expected_keys
+        or not isinstance(revision, str)
+        or re.fullmatch(r"[0-9a-f]{40}", revision) is None
+        or any(identity.get(key) != value for key, value in contract.items())
+    ):
+        raise ValueError("sealed stateful calibration identity differs")
+
+
+def _canonical_fixture_inventory_sha256(
+    manifest: StatefulCampaignManifest,
+) -> str:
+    fixture_rows = []
+    seen = set()
+    for spec in stateful_campaign_row_specs(manifest):
+        key = spec.scenario, spec.relation_count, spec.lane
+        if key in seen:
+            continue
+        seen.add(key)
+        fixture = generate_stateful_fixture(
+            manifest, spec.scenario, lane=spec.lane, count=spec.relation_count
+        )
+        case_bytes = canonical_json(fixture["case_record"]) + b"\n"
+        input_bytes = canonical_json(fixture["guest_input"]) + b"\n"
+        fixture_rows.append(
+            {
+                "scenario": spec.scenario,
+                "relation_count": spec.relation_count,
+                "lane": spec.lane,
+                "case_sha256": sha256_bytes(case_bytes),
+                "guest_input_sha256": sha256_bytes(input_bytes),
+            }
+        )
+    return sha256_bytes(canonical_json(fixture_rows))
+
+
 def _validate_sealed_campaign_identity(
     campaign_identity: Mapping[str, Any],
     calibration_identity: Mapping[str, Any],
@@ -3887,6 +4011,8 @@ def _validate_sealed_campaign_identity(
         or fixture_path.is_absolute()
         or ".." in fixture_path.parts
         or str(fixture_path) != fixture_root
+        or campaign_identity.get("fixture_inventory_sha256")
+        != _canonical_fixture_inventory_sha256(manifest)
         or campaign_identity.get("row_inventory_sha256")
         != sha256_bytes(
             canonical_json([spec.logical_identity for spec in specs])
@@ -4107,7 +4233,78 @@ def _validate_stateful_result_checkout(
                 )
 
 
-def verify_stateful_opcode_result(directory: pathlib.Path) -> dict[str, Any]:
+def _replay_sealed_task4_rows(
+    manifest: StatefulCampaignManifest,
+    rows: Sequence[Mapping[str, Any]],
+    campaign_identity: Mapping[str, Any],
+    calibration_identity: Mapping[str, Any],
+    *,
+    guest_launcher: pathlib.Path,
+    identity_replayer=None,
+) -> list[dict[str, Any]]:
+    launcher_sha256 = opcode_gas.validate_calibration_guest_launcher(
+        calibration_identity, guest_launcher
+    )
+    if (
+        campaign_identity.get("guest_launcher", {}).get("file_sha256")
+        != launcher_sha256
+    ):
+        raise ValueError("sealed stateful host-native helper identity differs")
+    if identity_replayer is None:
+        identity_replayer = opcode_gas.replay_revm_opcode_identity
+    specs = stateful_campaign_row_specs(manifest)
+    if len(rows) != len(specs):
+        raise ValueError("sealed stateful Task 4 row inventory differs")
+    rows_by_identity = {
+        row.get("logical_identity"): row
+        for row in rows
+        if isinstance(row, Mapping)
+    }
+    if len(rows_by_identity) != len(specs):
+        raise ValueError("sealed stateful Task 4 row identity is duplicated")
+
+    def reject_guest_execution(**_kwargs):
+        raise ValueError("sealed stateful replay cannot execute the SP1 guest")
+
+    with tempfile.TemporaryDirectory(
+        prefix="stateful-result-replay."
+    ) as temporary:
+        root = pathlib.Path(temporary)
+        fixtures_root = root / "fixtures"
+        run = root / "run"
+        rows_root = run / "rows"
+        rows_root.mkdir(parents=True)
+        generate_stateful_fixtures(manifest, fixtures_root)
+        for spec in specs:
+            row = rows_by_identity.get(spec.logical_identity)
+            if row is None:
+                raise ValueError("sealed stateful Task 4 logical row is missing")
+            (_row_path(run, spec)).write_bytes(canonical_json(row) + b"\n")
+        replayed = run_stateful_campaign_rows(
+            manifest,
+            specs,
+            fixtures_root=fixtures_root,
+            run=run,
+            guest_launcher=guest_launcher,
+            elf=opcode_gas.REPO_ROOT / EXECUTION_CONTRACT["elf_path"],
+            launcher_sha256=launcher_sha256,
+            elf_sha256=campaign_identity["guest_elf"]["file_sha256"],
+            batch_executor=reject_guest_execution,
+            identity_replayer=identity_replayer,
+            calibration_run_id=campaign_identity["calibration_id"],
+            verification_only=True,
+        )
+    if canonical_json(replayed) != canonical_json(rows):
+        raise ValueError("sealed stateful Task 4 rows differ from exact replay")
+    return replayed
+
+
+def verify_stateful_opcode_result(
+    directory: pathlib.Path,
+    *,
+    guest_launcher: pathlib.Path,
+    identity_replayer=None,
+) -> dict[str, Any]:
     """Replay a sealed result from its directory without executing guest code."""
     absolute = directory.absolute()
     if (
@@ -4159,6 +4356,7 @@ def verify_stateful_opcode_result(directory: pathlib.Path) -> dict[str, Any]:
     model_report = _load_canonical_json_bytes(
         raw["model-report.json"], label="stateful model report", pretty=True
     )
+    _validate_sealed_calibration_identity(calibration_identity)
     manifest = StatefulCampaignManifest.from_mapping(manifest_payload)
     registry = load_stateful_reference_registry(
         registry_payload,
@@ -4224,6 +4422,14 @@ def verify_stateful_opcode_result(directory: pathlib.Path) -> dict[str, Any]:
         raise ValueError("stateful result Task 4 terminal payload differs")
     _validate_verified_task4_row_identities(manifest, rows)
     _validate_sealed_task4_row_evidence(rows, campaign_identity)
+    rows = _replay_sealed_task4_rows(
+        manifest,
+        rows,
+        campaign_identity,
+        calibration_identity,
+        guest_launcher=guest_launcher,
+        identity_replayer=identity_replayer,
+    )
 
     replayed_report = _fit_stateful_task4_rows(manifest, rows, registry_payload)
     replayed_report["task4_provenance"] = {

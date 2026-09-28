@@ -1817,9 +1817,72 @@ class StatefulResultSealingTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.manifest = stateful.load_stateful_campaign_manifest(STATEFUL_MANIFEST)
+        cls.revision = "a" * 40
+        cls.launcher_bytes = b"reviewed synthetic host-native identity helper\n"
+        cls.launcher_sha256 = opcode_gas.sha256_bytes(cls.launcher_bytes)
         cls.elf_sha256 = opcode_gas.sha256_file(
             ROOT / "crates/guests/elf/sp1_revm_opcode_lab.elf"
         )
+        schedule = opcode_gas.current_uzen_schedule()
+        controlled_manifest = (
+            ROOT
+            / "experiments/opcode-gas/manifests/sp1-calibration-v1.toml"
+        )
+        controlled_data = opcode_gas.tomllib.loads(controlled_manifest.read_text())
+        bridge_key_ids = controlled_data["bridge_key_ids"]
+        guest_artifacts = {
+            str(path.relative_to(ROOT)): opcode_gas.sha256_file(path)
+            for path in sorted((ROOT / "crates/guests/elf").glob("sp1*"))
+            if path.is_file()
+            and (path.name.endswith(".elf") or path.name.endswith(".vk.bin"))
+        }
+        cls.calibration_identity = {
+            "implementation_revision": cls.revision,
+            "alethia_reth_revision": opcode_gas.tomllib.loads(
+                (ROOT / "Cargo.toml").read_text()
+            )["workspace"]["dependencies"]["alethia-reth-chainspec"]["rev"],
+            "rust_version": opcode_gas._rust_version(),
+            "sp1_sdk_version": opcode_gas._locked_package_version("sp1-sdk"),
+            "controlled_manifest_sha256": opcode_gas.sha256_file(
+                controlled_manifest
+            ),
+            "controlled_manifest_rows_sha256": (
+                opcode_gas.controlled_manifest_rows_sha256(controlled_manifest)
+            ),
+            "complete_schedule_sha256": opcode_gas.schedule_sha256(schedule),
+            "guest_artifacts": guest_artifacts,
+            "guest_artifacts_sha256": opcode_gas.sha256_bytes(
+                opcode_gas.canonical_json(guest_artifacts)
+            ),
+            "guest_launcher_sha256": cls.launcher_sha256,
+            "normalization_reference_key": "opcode:0x01",
+            "sp1_execution_parameters": opcode_gas.sp1_execution_parameters(),
+            "primary_metric": "proverGas",
+            "sp1_instruction_count": "secondary_non_gating",
+            "workload_identity_schema_version": 1,
+            "workload_canonicalization": "sha256(canonical_json(workload_spec))",
+            "primary_formulas": {
+                "candidate_cost": "g_p(k) / r(k)",
+                "candidate_multiplier": "c_p(k) / c_p(opcode:0x01)",
+            },
+            "q_formula": list(opcode_gas.Q_FORMULA),
+            "out_of_fit_checkpoint": {
+                "mapping": opcode_gas.OUT_OF_FIT_CHECKPOINTS,
+                "ape_max": 0.10,
+            },
+            "quality_gates": {"checkpoint_ape_max": 0.10},
+            "bridge": {
+                "bridge_key_ids": bridge_key_ids,
+                "model": "through_origin_equal_key_median",
+                "controlled_ape_max": "0.10",
+                "proposal_ape_max": "0.10",
+                "missing_data": "insufficient_data_is_sealable_and_non_gating",
+            },
+            "version_identity": opcode_gas.calibration_version_identity(schedule),
+        }
+        cls.calibration_id = opcode_gas.sha256_bytes(
+            opcode_gas.canonical_json(cls.calibration_identity)
+        )[:24]
         registry = json.loads(STATEFUL_REFERENCE_REGISTRY.read_text())
         typed_registry = stateful.load_stateful_reference_registry(
             registry,
@@ -1828,130 +1891,126 @@ class StatefulResultSealingTests(unittest.TestCase):
             ],
         )
         specs = stateful.stateful_campaign_row_specs(cls.manifest)
-        backend_hashes = {
-            (spec.scenario, spec.relation_count, spec.repeat_index, spec.lane):
-            hashlib.sha256(
-                (
-                    f"{spec.scenario}:{spec.relation_count}:"
-                    f"{spec.repeat_index}:{spec.lane}"
-                ).encode()
-            ).hexdigest()
+        specs_by_key = {
+            (spec.scenario, spec.relation_count, spec.repeat_index, spec.lane): spec
             for spec in specs
         }
         fixture_cache = {}
-        rows = []
-        for spec in specs:
-            scenario = cls.manifest.scenario(spec.scenario)
-            fixture_key = spec.scenario, spec.relation_count, spec.lane
-            fixture = fixture_cache.setdefault(
-                fixture_key,
-                stateful.generate_stateful_fixture(
-                    cls.manifest,
-                    spec.scenario,
-                    lane=spec.lane,
-                    count=spec.relation_count,
-                ),
-            )
-            counts = stateful._expected_executed_opcode_counts(
-                fixture["case_record"]
-            )
-            raw_gas = {
-                key: value
-                * StatefulPairLedgerExtractionTests.raw_gas_for(scenario, key)
-                for key, value in counts.items()
-            }
-            backend_hash = backend_hashes[
-                spec.scenario,
-                spec.relation_count,
-                spec.repeat_index,
-                spec.lane,
-            ]
-            semantic_check = {
-                "scenario": spec.scenario,
-                "lane": spec.lane,
-                "relation_count": spec.relation_count,
-            }
-            formal = {
-                "gas": 10_000
-                + spec.repeat_index
-                + (
-                    10 + 200 * spec.relation_count
-                    if spec.lane == "target"
-                    else 0
-                ),
-                "controlled_trace": {
-                    "backend_input_sha256": backend_hash,
-                    "executed_opcode_counts": counts,
-                    "executed_opcode_raw_gas": raw_gas,
-                    "semantic_check": semantic_check,
-                },
-            }
-            other_lane = "control" if spec.lane == "target" else "target"
-            target_hash = (
-                backend_hash
-                if spec.lane == "target"
-                else backend_hashes[
-                    spec.scenario,
-                    spec.relation_count,
-                    spec.repeat_index,
-                    other_lane,
-                ]
-            )
-            control_hash = (
-                backend_hash
-                if spec.lane == "control"
-                else backend_hashes[
-                    spec.scenario,
-                    spec.relation_count,
-                    spec.repeat_index,
-                    other_lane,
-                ]
-            )
-            trace_hash = opcode_gas.sha256_bytes(
-                opcode_gas.canonical_json(formal["controlled_trace"])
-            )
-            row = {
-                "schema_version": 1,
-                "purpose": stateful.PURPOSE,
-                "scenario": spec.scenario,
-                "lane": spec.lane,
-                "relation_count": spec.relation_count,
-                "repeat_index": spec.repeat_index,
-                "logical_identity": spec.logical_identity,
-                "backend_input_sha256": backend_hash,
-                "elf_sha256": cls.elf_sha256,
-                "launcher_sha256": "3" * 64,
-                "trace_sha256": trace_hash,
-                "semantic_check_sha256": opcode_gas.sha256_bytes(
-                    opcode_gas.canonical_json(semantic_check)
-                ),
-                "identity_evidence_sha256": "5" * 64,
-                "guest_input_json_file_sha256": "6" * 64,
-                "ordered_pair_identity": stateful.stateful_ordered_pair_identity(
-                    scenario=spec.scenario,
-                    measurement_opcode=scenario.measurement_opcode,
-                    relation_count=spec.relation_count,
-                    repeat_index=spec.repeat_index,
-                    target_hash=target_hash,
-                    control_hash=control_hash,
-                ),
-                "formal_report": formal,
-                "formal_report_sha256": opcode_gas.sha256_bytes(
-                    opcode_gas.canonical_json(formal)
-                ),
-                "normalized_report": {"prover_gas": formal["gas"]},
-            }
-            row["row_identity"] = stateful.stateful_execution_row_identity(
-                scenario=spec.scenario,
-                lane=spec.lane,
-                relation_count=spec.relation_count,
-                repeat_index=spec.repeat_index,
-                backend_input_sha256=backend_hash,
-                elf_sha256=row["elf_sha256"],
-                launcher_sha256=row["launcher_sha256"],
-                trace_sha256=trace_hash,
-            )
-            rows.append(row)
+        bundle_by_input_bytes = {}
+        rows_by_identity = {}
+        fixture_inventory = []
+        with tempfile.TemporaryDirectory() as directory:
+            fixtures_root = pathlib.Path(directory) / "fixtures"
+            for scenario in cls.manifest.scenarios:
+                for count in scenario.counts:
+                    lane_data = {}
+                    for lane in ("control", "target"):
+                        fixture = stateful.generate_stateful_fixture(
+                            cls.manifest, scenario.name, lane=lane, count=count
+                        )
+                        fixture_cache[scenario.name, count, lane] = fixture
+                        fixture_dir = fixtures_root / scenario.name / str(count) / lane
+                        fixture_dir.mkdir(parents=True)
+                        case_bytes = (
+                            opcode_gas.canonical_json(fixture["case_record"]) + b"\n"
+                        )
+                        input_bytes = (
+                            opcode_gas.canonical_json(fixture["guest_input"]) + b"\n"
+                        )
+                        (fixture_dir / "case.json").write_bytes(case_bytes)
+                        input_path = fixture_dir / "guest-input.json"
+                        input_path.write_bytes(input_bytes)
+                        bundle = _synthetic_bundle(fixture)
+                        trace = bundle["report"]["controlled_trace"]
+                        raw_gas = {
+                            key: value
+                            * StatefulPairLedgerExtractionTests.raw_gas_for(
+                                scenario, key
+                            )
+                            for key, value in trace[
+                                "executed_opcode_counts"
+                            ].items()
+                        }
+                        trace["executed_opcode_raw_gas"] = raw_gas
+                        trace["total_raw_gas"] = sum(raw_gas.values())
+                        trace["non_target_raw_gas"] = (
+                            trace["total_raw_gas"]
+                            - trace["executed_target_raw_gas"]
+                        )
+                        bundle_by_input_bytes[input_bytes] = bundle
+                        lane_data[lane] = (fixture, input_path, bundle)
+                        fixture_inventory.append(
+                            {
+                                "scenario": scenario.name,
+                                "relation_count": count,
+                                "lane": lane,
+                                "case_sha256": opcode_gas.sha256_bytes(case_bytes),
+                                "guest_input_sha256": opcode_gas.sha256_bytes(
+                                    input_bytes
+                                ),
+                            }
+                        )
+                    for repeat_index in range(cls.manifest.repeats):
+                        reports = {}
+                        for lane in ("target", "control"):
+                            fixture, input_path, bundle = lane_data[lane]
+                            gas = 10_000 + repeat_index + (
+                                10 + 200 * count if lane == "target" else 0
+                            )
+                            report = copy.deepcopy(bundle["report"])
+                            report.update(
+                                {
+                                    "stage": "revm-opcode-lab",
+                                    "mode": "execute",
+                                    "proof_mode": "compressed",
+                                    "input": str(input_path),
+                                    "exit_code": 0,
+                                    "gas": gas,
+                                    "primary_workload_metric": {
+                                        "label": "prover_gas",
+                                        "count": gas,
+                                    },
+                                    "public_values": bundle[
+                                        "expected_public_values"
+                                    ],
+                                    "sp1_execution_engine": "gas-estimator",
+                                    "sp1_gas_trace_chunk_threshold": (
+                                        opcode_gas.SP1_GAS_TRACE_CHUNK_THRESHOLD
+                                    ),
+                                    "sp1_gas_trace_chunk_slots": (
+                                        opcode_gas.SP1_GAS_TRACE_CHUNK_SLOTS
+                                    ),
+                                }
+                            )
+                            reports[lane] = report
+                        target, control = stateful._pair_records(
+                            cls.manifest,
+                            target_spec=specs_by_key[
+                                scenario.name, count, repeat_index, "target"
+                            ],
+                            control_spec=specs_by_key[
+                                scenario.name, count, repeat_index, "control"
+                            ],
+                            target_fixture=lane_data["target"][0],
+                            control_fixture=lane_data["control"][0],
+                            target_bundle=lane_data["target"][2],
+                            control_bundle=lane_data["control"][2],
+                            target_report=reports["target"],
+                            control_report=reports["control"],
+                            target_input=lane_data["target"][1],
+                            control_input=lane_data["control"][1],
+                            fixtures_root=fixtures_root,
+                            launcher_sha256=cls.launcher_sha256,
+                            elf_sha256=cls.elf_sha256,
+                            calibration_run_id=cls.calibration_id,
+                        )
+                        rows_by_identity[target["logical_identity"]] = target
+                        rows_by_identity[control["logical_identity"]] = control
+        rows = [rows_by_identity[spec.logical_identity] for spec in specs]
+        cls.bundle_by_input_bytes = bundle_by_input_bytes
+        cls.fixture_inventory_sha256 = opcode_gas.sha256_bytes(
+            opcode_gas.canonical_json(fixture_inventory)
+        )
         cls.rows = rows
         cls.rows_bytes = b"".join(
             opcode_gas.canonical_json(row) + b"\n" for row in rows
@@ -1967,17 +2026,12 @@ class StatefulResultSealingTests(unittest.TestCase):
         self.run = self.root / "task4-run"
         self.run.mkdir()
         self.out = self.root / "results"
-        self.revision = "a" * 40
-        self.calibration_identity = {
-            "implementation_revision": self.revision,
-            "guest_launcher_sha256": "3" * 64,
-            "guest_artifacts": {
-                "crates/guests/elf/sp1_revm_opcode_lab.elf": self.elf_sha256
-            },
-        }
-        self.calibration_id = opcode_gas.sha256_bytes(
-            opcode_gas.canonical_json(self.calibration_identity)
-        )[:24]
+        self.identity_replay_calls = []
+        self.revision = type(self).revision
+        self.calibration_identity = copy.deepcopy(type(self).calibration_identity)
+        self.calibration_id = type(self).calibration_id
+        self.launcher = self.root / "guest-launcher"
+        self.launcher.write_bytes(self.launcher_bytes)
         specs = stateful.stateful_campaign_row_specs(self.manifest)
         self.campaign_identity = {
             "schema_version": 1,
@@ -1994,7 +2048,7 @@ class StatefulResultSealingTests(unittest.TestCase):
             "execution": dict(self.manifest.execution),
             "guest_launcher": {
                 "path": "guest-launcher",
-                "file_sha256": "3" * 64,
+                "file_sha256": self.launcher_sha256,
             },
             "guest_elf": {
                 "path": "crates/guests/elf/sp1_revm_opcode_lab.elf",
@@ -2007,7 +2061,7 @@ class StatefulResultSealingTests(unittest.TestCase):
                 ),
             },
             "fixtures_root": "fixtures",
-            "fixture_inventory_sha256": "4" * 64,
+            "fixture_inventory_sha256": self.fixture_inventory_sha256,
             "row_inventory_sha256": opcode_gas.sha256_bytes(
                 opcode_gas.canonical_json(
                     [spec.logical_identity for spec in specs]
@@ -2059,18 +2113,31 @@ class StatefulResultSealingTests(unittest.TestCase):
                 manifest_path=STATEFUL_MANIFEST,
                 calibration_run=self.root / self.calibration_id,
                 fixtures_root=self.root / "fixtures",
-                guest_launcher=self.root / "guest-launcher",
+                guest_launcher=self.launcher,
                 elf=ROOT / "crates/guests/elf/sp1_revm_opcode_lab.elf",
                 run=self.run,
             )
         fitter.assert_called_once()
         return result
 
+    def replay_identity(self, _launcher, input_path, _cache):
+        self.identity_replay_calls.append(input_path.read_bytes())
+        return copy.deepcopy(
+            self.bundle_by_input_bytes[input_path.read_bytes()]
+        )
+
     def verify(self, directory):
+        self.identity_replay_calls = []
         with mock.patch.object(opcode_gas, "git_head", return_value=self.revision), mock.patch.object(
             opcode_gas, "git_worktree_status", return_value=""
         ):
-            return stateful.verify_stateful_opcode_result(directory)
+            result = stateful.verify_stateful_opcode_result(
+                directory,
+                guest_launcher=self.launcher,
+                identity_replayer=self.replay_identity,
+            )
+        self.last_identity_replay_calls = self.identity_replay_calls
+        return result
 
     def test_seal_is_deterministic_exact_idempotent_and_freezes_boundaries(self):
         first = self.seal()
@@ -2081,6 +2148,7 @@ class StatefulResultSealingTests(unittest.TestCase):
         self.assertEqual({path.name for path in directory.iterdir()}, self.EXPECTED_INVENTORY)
         verified = self.verify(directory)
         self.assertEqual(verified["result_id"], first["result_id"])
+        self.assertEqual(len(self.last_identity_replay_calls), 376)
 
         result = json.loads((directory / "result.json").read_text())
         self.assertFalse(result["candidate_eligible"])
@@ -2125,6 +2193,52 @@ class StatefulResultSealingTests(unittest.TestCase):
                 stateful._validate_sealed_task4_row_evidence(
                     changed, self.campaign_identity
                 )
+
+    def test_sealed_calibration_fixture_and_helper_authorities_are_independent(self):
+        stateful._validate_sealed_calibration_identity(
+            self.calibration_identity
+        )
+        abbreviated = {
+            "implementation_revision": self.revision,
+            "guest_launcher_sha256": self.launcher_sha256,
+            "guest_artifacts": {
+                "crates/guests/elf/sp1_revm_opcode_lab.elf": self.elf_sha256
+            },
+        }
+        with self.assertRaisesRegex(ValueError, "calibration identity"):
+            stateful._validate_sealed_calibration_identity(abbreviated)
+
+        changed_campaign = copy.deepcopy(self.campaign_identity)
+        changed_campaign["fixture_inventory_sha256"] = "4" * 64
+        with self.assertRaisesRegex(ValueError, "campaign identity"):
+            stateful._validate_sealed_campaign_identity(
+                changed_campaign,
+                self.calibration_identity,
+                self.manifest,
+                manifest_file_sha256=opcode_gas.sha256_file(STATEFUL_MANIFEST),
+                registry_artifact_sha256=stateful.REFERENCE_REGISTRY[
+                    "artifact_sha256"
+                ],
+                registry_file_sha256=opcode_gas.sha256_file(
+                    STATEFUL_REFERENCE_REGISTRY
+                ),
+            )
+
+        sealed = self.seal()
+        wrong_helper = self.root / "wrong-helper"
+        wrong_helper.write_bytes(b"not the reviewed identity helper\n")
+        with mock.patch.object(
+            opcode_gas, "git_head", return_value=self.revision
+        ), mock.patch.object(
+            opcode_gas, "git_worktree_status", return_value=""
+        ), self.assertRaisesRegex(ValueError, "guest-launcher differs"):
+            stateful.verify_stateful_opcode_result(
+                pathlib.Path(sealed["directory"]),
+                guest_launcher=wrong_helper,
+                identity_replayer=lambda *_args: self.fail(
+                    "unbound helper reached identity replay"
+                ),
+            )
 
     def test_verifier_rejects_inventory_symlinks_escape_and_noncanonical_bytes(self):
         sealed = self.seal()
@@ -2218,11 +2332,108 @@ class StatefulResultSealingTests(unittest.TestCase):
         with mock.patch.object(opcode_gas, "git_head", return_value="b" * 40), self.assertRaisesRegex(
             ValueError, "implementation revision"
         ):
-            stateful.verify_stateful_opcode_result(source)
+            stateful.verify_stateful_opcode_result(
+                source,
+                guest_launcher=self.launcher,
+                identity_replayer=self.replay_identity,
+            )
         with mock.patch.object(opcode_gas, "git_head", return_value=self.revision), mock.patch.object(
             opcode_gas, "git_worktree_status", return_value=" M experiments/opcode-gas/opcode_gas.py\n"
         ), self.assertRaisesRegex(ValueError, "dirty implementation"):
-            stateful.verify_stateful_opcode_result(source)
+            stateful.verify_stateful_opcode_result(
+                source,
+                guest_launcher=self.launcher,
+                identity_replayer=self.replay_identity,
+            )
+
+    def test_verifier_rejects_coherently_resealed_semantic_forgery_before_fit(self):
+        sealed = self.seal()
+        directory = pathlib.Path(sealed["directory"])
+        campaign_identity = json.loads(
+            (directory / "campaign-identity.json").read_text()
+        )
+        calibration_identity = json.loads(
+            (directory / "calibration-identity.json").read_text()
+        )
+        registry = json.loads((directory / "source-registry.json").read_text())
+        rows = list(opcode_gas.iter_jsonl(directory / "rows.jsonl"))
+        forged = rows[0]
+        forged["formal_report"]["controlled_trace"]["semantic_check"] = {
+            "forged": True
+        }
+        trace = forged["formal_report"]["controlled_trace"]
+        forged["semantic_check_sha256"] = opcode_gas.sha256_bytes(
+            opcode_gas.canonical_json(trace["semantic_check"])
+        )
+        forged["trace_sha256"] = opcode_gas.sha256_bytes(
+            opcode_gas.canonical_json(trace)
+        )
+        forged["formal_report_sha256"] = opcode_gas.sha256_bytes(
+            opcode_gas.canonical_json(forged["formal_report"])
+        )
+        forged["row_identity"] = stateful.stateful_execution_row_identity(
+            scenario=forged["scenario"],
+            lane=forged["lane"],
+            relation_count=forged["relation_count"],
+            repeat_index=forged["repeat_index"],
+            backend_input_sha256=forged["backend_input_sha256"],
+            elf_sha256=forged["elf_sha256"],
+            launcher_sha256=forged["launcher_sha256"],
+            trace_sha256=forged["trace_sha256"],
+        )
+        rows_bytes, decisions, decisions_bytes = stateful._terminal_campaign_payloads(
+            campaign_identity, rows
+        )
+        decisions_seal = (opcode_gas.sha256_bytes(decisions_bytes) + "\n").encode()
+        (directory / "rows.jsonl").write_bytes(rows_bytes)
+        (directory / "campaign-decisions.json").write_bytes(decisions_bytes)
+        (directory / "campaign-decisions.sha256").write_bytes(decisions_seal)
+
+        model_report = json.loads((directory / "model-report.json").read_text())
+        model_report["task4_provenance"] = {
+            "campaign_identity_sha256": decisions["campaign_identity_sha256"],
+            "row_ledger_sha256": decisions["row_ledger_sha256"],
+            "terminal_artifact_file_sha256": {
+                "rows.jsonl": opcode_gas.sha256_bytes(rows_bytes),
+                "decisions.json": opcode_gas.sha256_bytes(decisions_bytes),
+                "decisions.sha256": opcode_gas.sha256_bytes(decisions_seal),
+            },
+        }
+        model_report_bytes = opcode_gas._canonical_json_file_bytes(model_report)
+        (directory / "model-report.json").write_bytes(model_report_bytes)
+        identity = stateful._stateful_result_identity(
+            implementation_revision=calibration_identity["implementation_revision"],
+            campaign_identity_sha256=decisions["campaign_identity_sha256"],
+            row_ledger_sha256=decisions["row_ledger_sha256"],
+            manifest_file_sha256=opcode_gas.sha256_file(
+                directory / "campaign-manifest.json"
+            ),
+            calibration_identity_file_sha256=opcode_gas.sha256_file(
+                directory / "calibration-identity.json"
+            ),
+            campaign_identity_file_sha256=opcode_gas.sha256_file(
+                directory / "campaign-identity.json"
+            ),
+            decisions_file_sha256=opcode_gas.sha256_bytes(decisions_bytes),
+            decisions_seal_file_sha256=opcode_gas.sha256_bytes(decisions_seal),
+            registry_artifact_sha256=registry["artifact_sha256"],
+            registry_file_sha256=opcode_gas.sha256_file(
+                directory / "source-registry.json"
+            ),
+        )
+        envelope = stateful._stateful_result_envelope(identity, model_report_bytes)
+        (directory / "result.json").write_bytes(
+            opcode_gas._canonical_json_file_bytes(envelope)
+        )
+        forged_directory = directory.with_name(envelope["result_id"])
+        directory.rename(forged_directory)
+
+        with mock.patch.object(
+            stateful,
+            "_fit_stateful_task4_rows",
+            side_effect=AssertionError("forged semantic evidence reached fitting"),
+        ), self.assertRaisesRegex(ValueError, "semantic"):
+            self.verify(forged_directory)
 
     def test_verifier_allows_only_byte_identical_evidence_descendant(self):
         sealed = self.seal()
@@ -2246,7 +2457,11 @@ class StatefulResultSealingTests(unittest.TestCase):
             opcode_gas, "git_file_bytes_at_revision", side_effect=frozen_bytes
         ):
             self.assertEqual(
-                stateful.verify_stateful_opcode_result(source)["result_id"],
+                stateful.verify_stateful_opcode_result(
+                    source,
+                    guest_launcher=self.launcher,
+                    identity_replayer=self.replay_identity,
+                )["result_id"],
                 sealed["result_id"],
             )
 
@@ -2270,7 +2485,11 @@ class StatefulResultSealingTests(unittest.TestCase):
             "git_file_bytes_at_revision",
             side_effect=drifted_frozen_bytes,
         ), self.assertRaisesRegex(ValueError, "non-evidence source"):
-            stateful.verify_stateful_opcode_result(source)
+            stateful.verify_stateful_opcode_result(
+                source,
+                guest_launcher=self.launcher,
+                identity_replayer=self.replay_identity,
+            )
 
     def test_cli_exposes_direct_seal_and_verify_result_paths(self):
         parser = opcode_gas.build_parser()
@@ -2287,7 +2506,11 @@ class StatefulResultSealingTests(unittest.TestCase):
             ]
         )
         verify = parser.parse_args(
-            ["verify-stateful-opcode-result", "--result", "results/abc"]
+            [
+                "verify-stateful-opcode-result",
+                "--result", "results/abc",
+                "--guest-launcher", "guest-launcher",
+            ]
         )
         self.assertIs(seal.func, opcode_gas.cmd_seal_stateful_opcode_result)
         self.assertIs(verify.func, opcode_gas.cmd_verify_stateful_opcode_result)

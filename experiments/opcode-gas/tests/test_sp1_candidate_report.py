@@ -302,26 +302,7 @@ def canonical_formal_relation_round_rows(
         )
         lane = fixture["lane"]
         count = fixture["diagnostic_count"]
-        workload_spec = {
-            "schema_version": 1,
-            "key_id": f"opcode:0x{guest_input['opcode']:02x}",
-            "case_id": guest_input["case"],
-            "target_count": guest_input["target_count"],
-            "lane": "target",
-            "state": {},
-            "environment": {"evm_spec": "prague"},
-            "input": {
-                "bytecode": guest_input["bytecode"],
-                "opcode": guest_input["opcode"],
-                "target_raw_gas": guest_input["target_raw_gas"],
-                "tx_gas_limit": guest_input["tx_gas_limit"],
-                "generator_max_count": guest_input["generator_max_count"],
-            },
-            "expected_operation_deltas": {
-                f"opcode:0x{guest_input['opcode']:02x}": guest_input["target_count"]
-            },
-            "expected_feature_deltas": {},
-        }
+        workload_spec = opcode_gas._formal_opcode_workload_spec(guest_input)
         workload_id = opcode_gas.controlled_workload_id(workload_spec)
         backend_input = hashlib.sha256(
             opcode_gas.canonical_json(guest_input)
@@ -341,7 +322,7 @@ def canonical_formal_relation_round_rows(
                 actual_map[key] = actual_map.get(key, 0) + value * count
             prover_gas = int(Decimal(100_000) + slope * count)
         controlled_trace = {
-            "schema_version": 1,
+            "schema_version": 3,
             "kind": "revm_opcode",
             "workload_id": workload_id,
             "backend_input_sha256": backend_input,
@@ -1138,6 +1119,77 @@ class MeasurementGateTests(unittest.TestCase):
 
 
 class FormalOpcodeRelationTests(unittest.TestCase):
+    def test_formal_opcode_workload_spec_matches_current_launcher_schema(self):
+        guest_input = {
+            "case": "add",
+            "scenario": "arithmetic",
+            "opcode": 0x01,
+            "target_count": 1,
+            "target_raw_gas": 3,
+            "bytecode": "0x600160020100",
+            "generator_max_count": 8,
+            "fixed_bytecode_len": 6,
+            "tx_gas_limit": 1_000_024,
+        }
+
+        workload_spec = opcode_gas._formal_opcode_workload_spec(guest_input)
+        self.assertEqual(
+            workload_spec,
+            {
+                "schema_version": 2,
+                "key_id": "opcode:0x01",
+                "case_id": "add",
+                "target_count": 1,
+                "lane": "target",
+                "state": {},
+                "environment": {
+                    "block_timestamp": 1,
+                    "evm_spec": "osaka",
+                    "revm_version": "41.0.0",
+                    "shared_constructor": "raiko2-opcode-lab",
+                },
+                "input": {
+                    "bytecode": "0x600160020100",
+                    "calldata": "0x",
+                    "opcode": 0x01,
+                    "target_raw_gas": 3,
+                    "tx_value": "0x" + "00" * 32,
+                    "tx_gas_limit": 1_000_024,
+                    "generator_max_count": 8,
+                },
+                "expected_operation_deltas": {"opcode:0x01": 1},
+                "expected_feature_deltas": {},
+            },
+        )
+        self.assertEqual(
+            opcode_gas.controlled_workload_id(workload_spec),
+            "e03a47456cf5dd40de8fe32c956d61bdec4698d0b46a92bdc77ec902a55bb3c4",
+        )
+
+    def test_current_formal_rows_cannot_select_legacy_workload_identity(self):
+        manifest = formal_relation_manifest()
+        relation = next(
+            item for item in manifest.opcode_relations if item.signed_raw_gas_by_key
+        )
+        rows = [
+            copy.deepcopy(row)
+            for row in formal_relation_rows(manifest)
+            if row["relation_id"] == relation.id
+        ]
+        for row in rows:
+            row["controlled_trace"]["schema_version"] = 1
+
+        with self.assertRaisesRegex(
+            ValueError, "controlled trace schema differs"
+        ):
+            opcode_gas.fit_formal_relation_round(
+                manifest,
+                rows,
+                [relation.id],
+                8,
+                expected_provenance=formal_relation_provenance(rows),
+            )
+
     def _persist_terminal_formal_run(self, root):
         full_manifest = formal_relation_manifest()
         manifest = full_manifest

@@ -984,6 +984,11 @@ fn opcode_identity_bundle_is_deterministic_and_contains_a_separate_real_report()
     let second = controlled_opcode_identity_bundle(&input).unwrap();
 
     assert_eq!(first, second);
+    assert_eq!(
+        first.identity.workload_id,
+        "e03a47456cf5dd40de8fe32c956d61bdec4698d0b46a92bdc77ec902a55bb3c4",
+        "Rust opcode workload identity must equal the Python canonical identity",
+    );
     assert_eq!(first.schema_version, 2);
     assert!(first.expected_public_values.starts_with("0x"));
     assert_eq!(first.expected_public_values.len(), 66);

@@ -7659,7 +7659,10 @@ def _formal_opcode_guest_input(row: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _formal_opcode_workload_spec(guest_input: Mapping[str, Any]) -> dict[str, Any]:
+def _legacy_formal_opcode_workload_spec(
+    guest_input: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Reconstruct the immutable schema-v1 identity used by historical rows."""
     opcode = guest_input["opcode"]
     target_count = guest_input["target_count"]
     return {
@@ -7684,13 +7687,50 @@ def _formal_opcode_workload_spec(guest_input: Mapping[str, Any]) -> dict[str, An
     }
 
 
+def _formal_opcode_workload_spec(guest_input: Mapping[str, Any]) -> dict[str, Any]:
+    """Reconstruct the current Rust launcher's schema-v2 workload identity."""
+    opcode = guest_input["opcode"]
+    target_count = guest_input["target_count"]
+    return {
+        "schema_version": 2,
+        "key_id": f"opcode:0x{opcode:02x}",
+        "case_id": guest_input["case"],
+        "target_count": target_count,
+        "lane": "target",
+        "state": {},
+        "environment": {
+            "block_timestamp": 1,
+            "evm_spec": "osaka",
+            "revm_version": "41.0.0",
+            "shared_constructor": "raiko2-opcode-lab",
+        },
+        "input": {
+            "bytecode": guest_input["bytecode"],
+            "calldata": "0x",
+            "opcode": opcode,
+            "target_raw_gas": guest_input["target_raw_gas"],
+            "tx_value": "0x" + "00" * 32,
+            "tx_gas_limit": guest_input["tx_gas_limit"],
+            "generator_max_count": guest_input["generator_max_count"],
+        },
+        "expected_operation_deltas": {
+            f"opcode:0x{opcode:02x}": target_count
+        },
+        "expected_feature_deltas": {},
+    }
+
+
 def _validate_formal_relation_row_evidence(
     manifest: Manifest,
     relation: OpcodeRelationSpec,
     rows: list[Mapping[str, Any]],
     generator_max_count: int,
+    *,
+    workload_identity_schema_version: int = 2,
 ) -> None:
     """Bind persisted formal rows to canonical fixtures and execution identities."""
+    if workload_identity_schema_version not in {1, 2}:
+        raise ValueError("formal relation workload identity schema differs")
     cases = {case.name: case for case in manifest.cases}
     case = cases.get(relation.case_id)
     if case is None or case.opcode is None:
@@ -7747,9 +7787,20 @@ def _validate_formal_relation_row_evidence(
                 )
         if not _exact_json_equal(_formal_opcode_guest_input(row), guest_input):
             raise ValueError("formal relation canonical guest input differs")
-        workload_id = controlled_workload_id(
-            _formal_opcode_workload_spec(guest_input)
+        trace = row.get("controlled_trace")
+        trace_schema = (
+            trace.get("schema_version") if isinstance(trace, Mapping) else None
         )
+        expected_trace_schema = (
+            1 if workload_identity_schema_version == 1 else 3
+        )
+        if trace_schema != expected_trace_schema:
+            raise ValueError("formal relation controlled trace schema differs")
+        if workload_identity_schema_version == 1:
+            workload_spec = _legacy_formal_opcode_workload_spec(guest_input)
+        else:
+            workload_spec = _formal_opcode_workload_spec(guest_input)
+        workload_id = controlled_workload_id(workload_spec)
         backend_input_sha256 = row.get("backend_input_sha256")
         repeat_index = row.get("repeat_index")
         expected_execution_row_id = (
@@ -7764,7 +7815,6 @@ def _validate_formal_relation_row_evidence(
             if type(repeat_index) is int and _is_sha256(backend_input_sha256)
             else None
         )
-        trace = row.get("controlled_trace")
         trace_identity = (
             trace.get("workload_id"),
             trace.get("backend_input_sha256"),
@@ -8092,6 +8142,7 @@ def fit_formal_relation_round(
     generator_max_count: int,
     *,
     expected_provenance: Mapping[str, Any],
+    workload_identity_schema_version: int = 2,
 ) -> list[dict[str, Any]]:
     """Replay one relation subset, distinguishing fit quality from hard evidence errors."""
     selected_relation_ids = list(selected_relation_ids)
@@ -8178,6 +8229,7 @@ def fit_formal_relation_round(
                 relations[relation_id],
                 relation_rows,
                 generator_max_count,
+                workload_identity_schema_version=workload_identity_schema_version,
             )
             fit = _fit_one_opcode_relation(
                 relations[relation_id],

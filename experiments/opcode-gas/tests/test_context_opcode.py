@@ -151,6 +151,32 @@ def passing_production_canary(*, source_identity=None):
         output_root=legacy_root,
         controlled_manifest=TEST_CALIBRATION_RUN / "controlled-manifest.toml",
         historical_observations=historical_observations,
+        workload_identity_schema_version=1,
+    )
+    legacy_replay = rebind_legacy_replay_to_current_identity(legacy_replay)
+    legacy_provenance = copy.deepcopy(legacy["provenance"])
+    replay_historical, replay_current = context._replay_legacy_osaka_evidence(
+        legacy_replay, legacy_provenance
+    )
+    legacy = opcode_gas.build_osaka_compatibility_canary(
+        replay_historical,
+        replay_current,
+        baseline_artifact_sha256=(
+            context.HISTORICAL_OSAKA_RELATION_ARTIFACT_SHA256
+        ),
+        expected_baseline_artifact_sha256=(
+            context.HISTORICAL_OSAKA_RELATION_ARTIFACT_SHA256
+        ),
+    )
+    legacy["provenance"] = legacy_provenance
+    legacy["artifact_sha256"] = context.sha256_bytes(
+        context.canonical_json(
+            {
+                key: value
+                for key, value in legacy.items()
+                if key != "artifact_sha256"
+            }
+        )
     )
     anchor_root = ROOT / "experiments/opcode-gas/runs/09ebb08d76d3f461086b0cf4"
     historical = json.loads((anchor_root / "anchor-probe-fit.json").read_text())
@@ -231,6 +257,43 @@ def passing_production_canary(*, source_identity=None):
     )
 
 
+def rebind_legacy_replay_to_current_identity(replay):
+    replay = copy.deepcopy(replay)
+    replay["workload_identity_schema_version"] = 2
+    for embedded, source in zip(
+        replay["rounds"], replay["decisions"]["rounds"]
+    ):
+        for row in embedded["rows"]:
+            guest_input = opcode_gas._formal_opcode_guest_input(row)
+            workload_id = opcode_gas.controlled_workload_id(
+                opcode_gas._formal_opcode_workload_spec(guest_input)
+            )
+            row["workload_id"] = workload_id
+            row["controlled_trace"]["schema_version"] = 3
+            row["controlled_trace"]["workload_id"] = workload_id
+            row["execution_row_id"] = opcode_gas.controlled_execution_row_id(
+                workload_id,
+                backend="sp1",
+                execution_engine=row["sp1_execution_engine"],
+                run_id=row["calibration_id"],
+                repeat_index=row["repeat_index"],
+                backend_input_sha256=row["backend_input_sha256"],
+            )
+        embedded["rows_sha256"] = context.sha256_bytes(
+            context.canonical_json(embedded["rows"])
+        )
+        raw_bytes = b"".join(
+            context.canonical_json(row) + b"\n" for row in embedded["rows"]
+        )
+        raw_sha256 = context.sha256_bytes(raw_bytes)
+        embedded["source_raw_file_sha256"] = raw_sha256
+        source["raw_runs_sha256"] = raw_sha256
+    replay["decisions_sha256"] = context.sha256_bytes(
+        context.canonical_json(replay["decisions"])
+    )
+    return replay
+
+
 def materialize_context_canary_source(calibration, canary):
     root = pathlib.Path(calibration) / "context-compatibility"
     anchor = root / "control-anchors"
@@ -291,6 +354,31 @@ def materialize_context_canary_source(calibration, canary):
         TEST_CALIBRATION_RUN / "osaka-opcode-supplement",
         root / "legacy-osaka",
     )
+    legacy_root = root / "legacy-osaka"
+    legacy_replay = canary["legacy_osaka_replay"]
+    decisions_bytes = (
+        json.dumps(legacy_replay["decisions"], indent=2, sort_keys=True) + "\n"
+    ).encode()
+    (legacy_root / "canary-decisions.json").write_bytes(decisions_bytes)
+    (legacy_root / "canary-decisions.sha256").write_text(
+        context.sha256_bytes(decisions_bytes) + "\n"
+    )
+    for embedded, source in zip(
+        legacy_replay["rounds"], legacy_replay["decisions"]["rounds"]
+    ):
+        raw_path = legacy_root / source["raw_runs"]
+        result_path = legacy_root / source["result"]
+        raw_path.parent.mkdir(parents=True, exist_ok=True)
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        raw_path.write_bytes(
+            b"".join(
+                context.canonical_json(row) + b"\n"
+                for row in embedded["rows"]
+            )
+        )
+        result_path.write_text(
+            json.dumps(embedded["result"], indent=2, sort_keys=True) + "\n"
+        )
     (root / "compatibility-canary.json").write_text(
         json.dumps(canary, indent=2, sort_keys=True) + "\n"
     )
@@ -915,6 +1003,22 @@ class ContextFitTests(unittest.TestCase):
         context.validate_context_compatibility_canary(canary)
         del canary["control_relations"]["opcode:0x90"]
         with self.assertRaisesRegex(ValueError, "control relation"):
+            context.validate_context_compatibility_canary(canary)
+
+    def test_production_canary_rejects_legacy_workload_identity_replay(self):
+        canary = passing_production_canary()
+        canary["legacy_osaka_replay"]["workload_identity_schema_version"] = 1
+        canary["artifact_sha256"] = context.sha256_bytes(
+            context.canonical_json(
+                {
+                    key: value
+                    for key, value in canary.items()
+                    if key != "artifact_sha256"
+                }
+            )
+        )
+
+        with self.assertRaisesRegex(ValueError, "current workload identity"):
             context.validate_context_compatibility_canary(canary)
 
     def test_compatibility_canary_uses_exact_ape_and_distinct_guest_artifacts(self):

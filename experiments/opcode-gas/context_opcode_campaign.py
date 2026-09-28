@@ -2251,7 +2251,11 @@ def _capture_legacy_osaka_replay(
     output_root: pathlib.Path,
     controlled_manifest: pathlib.Path,
     historical_observations: list[Mapping[str, Any]],
+    workload_identity_schema_version: int,
 ) -> dict[str, Any]:
+    if workload_identity_schema_version not in {1, 2}:
+        raise ValueError("context legacy replay workload identity schema differs")
+    expected_trace_schema = 1 if workload_identity_schema_version == 1 else 3
     decisions_path = output_root / "canary-decisions.json"
     decisions = json.loads(decisions_path.read_bytes())
     rounds = []
@@ -2261,6 +2265,13 @@ def _capture_legacy_osaka_replay(
         if any(path.is_symlink() or not path.is_file() for path in (raw_path, result_path)):
             raise ValueError("context legacy canary persisted source differs")
         rows = [json.loads(line) for line in raw_path.read_bytes().splitlines()]
+        if any(
+            not isinstance(row.get("controlled_trace"), Mapping)
+            or row["controlled_trace"].get("schema_version")
+            != expected_trace_schema
+            for row in rows
+        ):
+            raise ValueError("context legacy replay controlled trace schema differs")
         result = json.loads(result_path.read_bytes())
         if (
             sha256_bytes(raw_path.read_bytes()) != record.get("raw_runs_sha256")
@@ -2283,6 +2294,7 @@ def _capture_legacy_osaka_replay(
     return {
         "schema_version": 1,
         "purpose": "context_legacy_osaka_portable_replay",
+        "workload_identity_schema_version": workload_identity_schema_version,
         "historical_derivation_artifact_sha256": (
             HISTORICAL_ANCHOR_DERIVATION_SHA256
         ),
@@ -2310,9 +2322,13 @@ def _replay_legacy_osaka_evidence(
     rounds = replay.get("rounds")
     decisions = replay.get("decisions")
     manifest_text = replay.get("controlled_manifest_utf8")
+    workload_identity_schema_version = replay.get(
+        "workload_identity_schema_version"
+    )
     if (
         replay.get("schema_version") != 1
         or replay.get("purpose") != "context_legacy_osaka_portable_replay"
+        or workload_identity_schema_version not in {1, 2}
         or replay.get("historical_derivation_artifact_sha256")
         != HISTORICAL_ANCHOR_DERIVATION_SHA256
         or replay.get("historical_relation_artifact_sha256")
@@ -2371,6 +2387,7 @@ def _replay_legacy_osaka_evidence(
             relation_ids,
             bound,
             expected_provenance=formal_provenance,
+            workload_identity_schema_version=workload_identity_schema_version,
         )
         expected_result = opcode_gas._formal_relation_result_payload(
             bound, relation_ids, results
@@ -2420,6 +2437,10 @@ def _build_context_compatibility_canary(
     )
     if not isinstance(legacy_osaka_replay, Mapping):
         raise ValueError("context compatibility canary requires portable Osaka replay")
+    if legacy_osaka_replay.get("workload_identity_schema_version") != 2:
+        raise ValueError(
+            "context production compatibility canary requires current workload identity"
+        )
     provenance = legacy_osaka_canary.get("provenance")
     if not isinstance(provenance, Mapping):
         raise ValueError("context compatibility canary provenance differs")
@@ -2615,6 +2636,10 @@ def validate_context_compatibility_canary(canary: Mapping[str, Any]) -> None:
         raise ValueError("context legacy compatibility canary provenance differs")
     if not isinstance(legacy_replay, Mapping):
         raise ValueError("context legacy compatibility replay is missing")
+    if legacy_replay.get("workload_identity_schema_version") != 2:
+        raise ValueError(
+            "context production compatibility canary requires current workload identity"
+        )
     replay_historical, replay_current = _replay_legacy_osaka_evidence(
         legacy_replay, provenance
     )
@@ -2916,6 +2941,7 @@ def run_context_compatibility_canary(
         output_root=legacy_root,
         controlled_manifest=controlled_manifest,
         historical_observations=list(historical_observations),
+        workload_identity_schema_version=2,
     )
 
     historical_anchor_run = pathlib.Path(historical_anchor_run).resolve(strict=True)

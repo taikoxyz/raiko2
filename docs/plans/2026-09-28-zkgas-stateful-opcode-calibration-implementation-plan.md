@@ -514,7 +514,8 @@ the fixed selection order is `M_fixed`, `M_access`, `M_typed`. The raw-gas relat
   cargo test -p raiko2-primitives opcode_lab
   cargo test -p raiko2-opcode-lab
   cargo test --manifest-path guests/sp1/Cargo.toml revm_opcode_lab
-  cargo test -p guest-launcher controlled_workload
+  cargo test -p guest-launcher --test controlled_workload
+  cargo build -r -p guest-launcher
   ~/.venv/bin/python -m pytest experiments/opcode-gas/tests -q
   git diff --check
   ```

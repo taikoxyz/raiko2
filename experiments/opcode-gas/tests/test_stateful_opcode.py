@@ -2920,7 +2920,7 @@ class StatefulTraceAdmissionTests(unittest.TestCase):
             input_path.write_bytes(
                 opcode_gas.canonical_json(fixture["guest_input"]) + b"\n"
             )
-            launcher = ROOT / "target" / "debug" / "guest-launcher"
+            launcher = ROOT / "target" / "release" / "guest-launcher"
             self.assertTrue(launcher.is_file(), "reviewed guest-launcher binary is missing")
             for output_path in (expected_bundle_path, formal_bundle_path):
                 subprocess.run(

@@ -266,6 +266,85 @@ The existing Prague-derived 101-supported core coefficients remain the sealed hi
 and are reused unchanged. The Osaka follow-up samples only ISZERO and CLZ; an augmented artifact must
 bind both the baseline and this supplemental evidence without claiming a full 103-key resample.
 
+### Stateful SLOAD/SSTORE campaign
+
+Run the stateful campaign only from the repository root and only after the reviewed
+`sp1_revm_opcode_lab` ELF/VK/provenance refresh is committed and the worktree is clean. The
+campaign executes 1,128 target/control rows (40 predeclared scenarios, their declared counts, and
+three repeats) through the production SP1 gas-estimator path. Fixture generation, verification,
+exact fitting, and result replay normally take seconds to a few minutes; formal guest execution is
+the long step and can take hours depending on the host. It is resumable from its immutable per-row
+records and should not be wrapped in an optimistic short timeout.
+
+Prepare the calibration identity, generate the frozen fixtures, execute/resume the run, and replay
+the terminal Task 4 evidence with:
+
+```bash
+RUN_PATH_FILE=target/zkgas-stateful-calibration.path
+STATEFUL_FIXTURES=target/zkgas-stateful-fixtures
+STATEFUL_RUN=target/zkgas-stateful-run
+
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py prepare-calibration \
+  --controlled-manifest experiments/opcode-gas/manifests/sp1-calibration-v1.toml \
+  --guest-launcher target/release/guest-launcher \
+  --out experiments/opcode-gas \
+  --run-path-file "$RUN_PATH_FILE"
+CALIBRATION_RUN="$(<"$RUN_PATH_FILE")"
+
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py generate-stateful \
+  --manifest experiments/opcode-gas/manifests/sp1-stateful-opcode-v1.json \
+  --out "$STATEFUL_FIXTURES"
+
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py run-stateful-opcode-campaign \
+  --manifest experiments/opcode-gas/manifests/sp1-stateful-opcode-v1.json \
+  --calibration-run "$CALIBRATION_RUN" \
+  --fixtures "$STATEFUL_FIXTURES" \
+  --guest-launcher target/release/guest-launcher \
+  --elf crates/guests/elf/sp1_revm_opcode_lab.elf \
+  --out "$STATEFUL_RUN"
+
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py verify-stateful-opcode-campaign \
+  --manifest experiments/opcode-gas/manifests/sp1-stateful-opcode-v1.json \
+  --calibration-run "$CALIBRATION_RUN" \
+  --fixtures "$STATEFUL_FIXTURES" \
+  --guest-launcher target/release/guest-launcher \
+  --elf crates/guests/elf/sp1_revm_opcode_lab.elf \
+  --run "$STATEFUL_RUN"
+```
+
+Seal only through the verified-run entrypoint. There is intentionally no `--rows` or precomputed
+model-report option:
+
+```bash
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py seal-stateful-opcode-result \
+  --manifest experiments/opcode-gas/manifests/sp1-stateful-opcode-v1.json \
+  --calibration-run "$CALIBRATION_RUN" \
+  --fixtures "$STATEFUL_FIXTURES" \
+  --guest-launcher target/release/guest-launcher \
+  --elf crates/guests/elf/sp1_revm_opcode_lab.elf \
+  --run "$STATEFUL_RUN" \
+  --out experiments/opcode-gas/derivations
+
+RESULT_DIR=experiments/opcode-gas/derivations/<result-id-printed-by-seal>
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py verify-stateful-opcode-result \
+  --result "$RESULT_DIR"
+```
+
+The calibration directory, fixtures, and campaign run are generated/ignored evidence. The stateful
+manifest, sealed 103-opcode source registry, and this operator documentation are tracked inputs.
+After successful replay, the one flat content-addressed result directory under
+`experiments/opcode-gas/derivations/` is the only generated result intended to become tracked. Its
+verifier reads that directory, checks an exact nine-file inventory, and performs no guest execution.
+It accepts an evidence-only descendant commit only when every fitting source, manifest, registry,
+and guest artifact remains byte-identical to the measured revision.
+
+This campaign measures stateful REVM execution, including storage execution, journal updates, and
+result-state construction. It excludes witness materialization, persistent dirty-state commit, trie
+hashing, and final-root construction. The sealed result always remains
+`candidate_eligible=false`, `proposal_validated=false`, and
+`production_registry_modified=false`. Do not run proposal replay, edit the production registry or
+multiplier table, change runtime configuration, or promote the result under this workflow.
+
 ### Bounded Osaka supplement
 
 Run these commands from the repository root. First verify the exact tracked historical-schema

@@ -46,6 +46,47 @@ REFERENCE_REGISTRY = {
     "path": "experiments/opcode-gas/derivations/f945e67bb2c38c9c8ef50530/core-opcode-submodel.json",
     "artifact_sha256": "b66d7951bfa416810f93319f99c30ce91969026ee9fa3a402a74cbc2214f7e8b",
 }
+STATEFUL_RESULT_SCHEMA_VERSION = 1
+STATEFUL_RESULT_PURPOSE = "stateful_opcode_calibration_result"
+STATEFUL_RESULT_INVENTORY = frozenset(
+    {
+        "result.json",
+        "campaign-manifest.json",
+        "calibration-identity.json",
+        "campaign-identity.json",
+        "rows.jsonl",
+        "campaign-decisions.json",
+        "campaign-decisions.sha256",
+        "source-registry.json",
+        "model-report.json",
+    }
+)
+STATEFUL_RESULT_OWNERSHIP = MappingProxyType(
+    {
+        "measured": (
+            "stateful REVM execution cost including storage execution, journal "
+            "updates, and result-state construction"
+        ),
+        "excluded": (
+            "witness materialization",
+            "persistent dirty-state commit",
+            "trie hashing",
+            "final state root",
+        ),
+    }
+)
+STATEFUL_RESULT_FIT_SOURCE_PATHS = (
+    "experiments/opcode-gas/stateful_opcode_campaign.py",
+    "experiments/opcode-gas/opcode_gas.py",
+    "experiments/opcode-gas/calibration_model.py",
+    "experiments/opcode-gas/composite_estimator.py",
+    "experiments/opcode-gas/hierarchical_model.py",
+    "experiments/opcode-gas/manifests/sp1-stateful-opcode-v1.json",
+)
+STATEFUL_RESULT_DESCENDANT_PATHS = (
+    "experiments/opcode-gas/README.md",
+    "docs/plans/2026-09-26-zkgas-calibration-progress.md",
+)
 EXECUTION_CONTRACT = {
     "elf_path": "crates/guests/elf/sp1_revm_opcode_lab.elf",
     "evm_spec": "osaka",
@@ -3501,6 +3542,71 @@ def _validate_verified_task4_row_identities(
             raise ValueError("verified stateful Task 4 ordered pair identity differs")
 
 
+def _validate_sealed_task4_row_evidence(
+    rows: Sequence[Mapping[str, Any]], campaign_identity: Mapping[str, Any]
+) -> None:
+    expected_keys = {
+        "schema_version",
+        "purpose",
+        "scenario",
+        "lane",
+        "relation_count",
+        "repeat_index",
+        "logical_identity",
+        "row_identity",
+        "ordered_pair_identity",
+        "backend_input_sha256",
+        "elf_sha256",
+        "launcher_sha256",
+        "trace_sha256",
+        "semantic_check_sha256",
+        "identity_evidence_sha256",
+        "guest_input_json_file_sha256",
+        "formal_report_sha256",
+        "formal_report",
+        "normalized_report",
+    }
+    elf = campaign_identity.get("guest_elf")
+    launcher = campaign_identity.get("guest_launcher")
+    expected_elf = elf.get("file_sha256") if isinstance(elf, Mapping) else None
+    expected_launcher = (
+        launcher.get("file_sha256") if isinstance(launcher, Mapping) else None
+    )
+    for row in rows:
+        formal = row.get("formal_report")
+        trace = formal.get("controlled_trace") if isinstance(formal, Mapping) else None
+        semantic = trace.get("semantic_check") if isinstance(trace, Mapping) else None
+        try:
+            for field in (
+                "backend_input_sha256",
+                "elf_sha256",
+                "launcher_sha256",
+                "trace_sha256",
+                "semantic_check_sha256",
+                "identity_evidence_sha256",
+                "guest_input_json_file_sha256",
+                "formal_report_sha256",
+            ):
+                _require_sha256(row.get(field), f"sealed Task 4 row {field}")
+        except ValueError as error:
+            raise ValueError("sealed stateful Task 4 row evidence differs") from error
+        if (
+            set(row) != expected_keys
+            or row.get("schema_version") != 1
+            or row.get("purpose") != PURPOSE
+            or not isinstance(trace, Mapping)
+            or not isinstance(semantic, Mapping)
+            or row.get("backend_input_sha256")
+            != trace.get("backend_input_sha256")
+            or row.get("elf_sha256") != expected_elf
+            or row.get("launcher_sha256") != expected_launcher
+            or row.get("trace_sha256") != sha256_bytes(canonical_json(trace))
+            or row.get("semantic_check_sha256")
+            != sha256_bytes(canonical_json(semantic))
+        ):
+            raise ValueError("sealed stateful Task 4 row evidence differs")
+
+
 def fit_stateful_task4_run(
     *,
     manifest_path: pathlib.Path,
@@ -3596,6 +3702,579 @@ def fit_stateful_task4_run(
                 "decisions.sha256": sha256_bytes(seal_bytes),
             },
         },
+    }
+
+
+def _stateful_result_ownership() -> dict[str, Any]:
+    return {
+        "measured": STATEFUL_RESULT_OWNERSHIP["measured"],
+        "excluded": list(STATEFUL_RESULT_OWNERSHIP["excluded"]),
+    }
+
+
+def _stateful_result_identity(
+    *,
+    implementation_revision: str,
+    campaign_identity_sha256: str,
+    row_ledger_sha256: str,
+    manifest_file_sha256: str,
+    calibration_identity_file_sha256: str,
+    campaign_identity_file_sha256: str,
+    decisions_file_sha256: str,
+    decisions_seal_file_sha256: str,
+    registry_artifact_sha256: str,
+    registry_file_sha256: str,
+) -> dict[str, Any]:
+    return {
+        "analysis_schema_version": STATEFUL_RESULT_SCHEMA_VERSION,
+        "analysis_implementation_revision": implementation_revision,
+        "task4": {
+            "campaign_identity_sha256": campaign_identity_sha256,
+            "row_ledger_sha256": row_ledger_sha256,
+        },
+        "input_hashes": {
+            "campaign_manifest_file_sha256": manifest_file_sha256,
+            "calibration_identity_file_sha256": calibration_identity_file_sha256,
+            "campaign_identity_file_sha256": campaign_identity_file_sha256,
+            "campaign_decisions_file_sha256": decisions_file_sha256,
+            "campaign_decisions_seal_file_sha256": decisions_seal_file_sha256,
+            "source_registry_artifact_sha256": registry_artifact_sha256,
+            "source_registry_file_sha256": registry_file_sha256,
+        },
+    }
+
+
+def _stateful_result_envelope(
+    identity: Mapping[str, Any], model_report_bytes: bytes
+) -> dict[str, Any]:
+    identity_sha256 = sha256_bytes(canonical_json(identity))
+    ownership = _stateful_result_ownership()
+    envelope: dict[str, Any] = {
+        "schema_version": STATEFUL_RESULT_SCHEMA_VERSION,
+        "purpose": STATEFUL_RESULT_PURPOSE,
+        "status": "sealed",
+        "result_id": identity_sha256[:24],
+        "result_identity_sha256": identity_sha256,
+        "result_identity": dict(identity),
+        "ownership": ownership,
+        "candidate_eligible": False,
+        "proposal_validated": False,
+        "production_registry_modified": False,
+        "output_hashes": {
+            "model_report_file_sha256": sha256_bytes(model_report_bytes),
+            "ownership_sha256": sha256_bytes(canonical_json(ownership)),
+        },
+    }
+    envelope["artifact_sha256"] = sha256_bytes(canonical_json(envelope))
+    return envelope
+
+
+def _load_canonical_json_bytes(
+    raw: bytes, *, label: str, pretty: bool
+) -> Mapping[str, Any]:
+    try:
+        payload = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError(f"{label} is invalid JSON") from error
+    if not isinstance(payload, Mapping):
+        raise ValueError(f"{label} must be a JSON object")
+    expected = (
+        opcode_gas._canonical_json_file_bytes(payload)
+        if pretty
+        else canonical_json(payload) + b"\n"
+    )
+    if raw != expected:
+        raise ValueError(f"{label} is not canonical JSON")
+    return payload
+
+
+def _validate_sealed_campaign_identity(
+    campaign_identity: Mapping[str, Any],
+    calibration_identity: Mapping[str, Any],
+    manifest: StatefulCampaignManifest,
+    *,
+    manifest_file_sha256: str,
+    registry_artifact_sha256: str,
+    registry_file_sha256: str,
+) -> None:
+    expected_keys = {
+        "schema_version",
+        "purpose",
+        "implementation_revision",
+        "calibration_id",
+        "calibration_identity_sha256",
+        "manifest",
+        "execution",
+        "guest_launcher",
+        "guest_elf",
+        "source_registry",
+        "fixtures_root",
+        "fixture_inventory_sha256",
+        "row_inventory_sha256",
+        "row_count",
+        "repeats",
+    }
+    calibration_sha256 = sha256_bytes(canonical_json(calibration_identity))
+    expected_calibration_id = calibration_sha256[:24]
+    guest_artifacts = calibration_identity.get("guest_artifacts")
+    guest_launcher_sha256 = calibration_identity.get("guest_launcher_sha256")
+    specs = stateful_campaign_row_specs(manifest)
+    manifest_identity = campaign_identity.get("manifest")
+    launcher_identity = campaign_identity.get("guest_launcher")
+    elf_identity = campaign_identity.get("guest_elf")
+    registry_identity = campaign_identity.get("source_registry")
+    fixture_root = campaign_identity.get("fixtures_root")
+    launcher_path = (
+        launcher_identity.get("path")
+        if isinstance(launcher_identity, Mapping)
+        else None
+    )
+    fixture_path = pathlib.PurePosixPath(fixture_root) if isinstance(
+        fixture_root, str
+    ) else None
+    launcher_relative = pathlib.PurePosixPath(launcher_path) if isinstance(
+        launcher_path, str
+    ) else None
+    digest_fields = (
+        campaign_identity.get("fixture_inventory_sha256"),
+        campaign_identity.get("row_inventory_sha256"),
+        guest_launcher_sha256,
+    )
+    try:
+        for index, digest in enumerate(digest_fields):
+            _require_sha256(digest, f"stateful campaign digest {index}")
+    except ValueError as error:
+        raise ValueError("stateful result campaign identity differs") from error
+    if (
+        set(campaign_identity) != expected_keys
+        or campaign_identity.get("schema_version") != 1
+        or campaign_identity.get("purpose") != PURPOSE
+        or campaign_identity.get("implementation_revision")
+        != calibration_identity.get("implementation_revision")
+        or campaign_identity.get("calibration_id") != expected_calibration_id
+        or campaign_identity.get("calibration_identity_sha256")
+        != calibration_sha256
+        or manifest_identity
+        != {
+            "path": "experiments/opcode-gas/manifests/sp1-stateful-opcode-v1.json",
+            "file_sha256": manifest_file_sha256,
+        }
+        or campaign_identity.get("execution") != dict(manifest.execution)
+        or not isinstance(launcher_identity, Mapping)
+        or set(launcher_identity) != {"path", "file_sha256"}
+        or launcher_identity.get("file_sha256") != guest_launcher_sha256
+        or launcher_relative is None
+        or launcher_relative.is_absolute()
+        or ".." in launcher_relative.parts
+        or str(launcher_relative) != launcher_path
+        or not isinstance(elf_identity, Mapping)
+        or elf_identity
+        != {
+            "path": EXECUTION_CONTRACT["elf_path"],
+            "file_sha256": (
+                guest_artifacts.get(EXECUTION_CONTRACT["elf_path"])
+                if isinstance(guest_artifacts, Mapping)
+                else None
+            ),
+        }
+        or registry_identity
+        != {
+            **dict(manifest.reference_registry),
+            "artifact_sha256": registry_artifact_sha256,
+            "file_sha256": registry_file_sha256,
+        }
+        or fixture_path is None
+        or fixture_path.is_absolute()
+        or ".." in fixture_path.parts
+        or str(fixture_path) != fixture_root
+        or campaign_identity.get("row_inventory_sha256")
+        != sha256_bytes(
+            canonical_json([spec.logical_identity for spec in specs])
+        )
+        or campaign_identity.get("row_count") != len(specs)
+        or campaign_identity.get("repeats") != manifest.repeats
+    ):
+        raise ValueError("stateful result campaign identity differs")
+
+
+def seal_stateful_opcode_result(
+    *,
+    out_root: pathlib.Path,
+    manifest_path: pathlib.Path,
+    calibration_run: pathlib.Path,
+    fixtures_root: pathlib.Path,
+    guest_launcher: pathlib.Path,
+    elf: pathlib.Path,
+    run: pathlib.Path,
+) -> dict[str, Any]:
+    """Seal the sole verified Task 4 fit authority into an immutable result."""
+    model_report = fit_stateful_task4_run(
+        manifest_path=manifest_path,
+        calibration_run=calibration_run,
+        fixtures_root=fixtures_root,
+        guest_launcher=guest_launcher,
+        elf=elf,
+        run=run,
+    )
+    if not isinstance(model_report, Mapping):
+        raise ValueError("stateful Task 4 fit did not return a model report")
+    calibration_identity = opcode_gas.validate_calibration_execution_identity(
+        calibration_run
+    )
+    if not isinstance(calibration_identity, Mapping):
+        raise ValueError("stateful calibration identity is invalid")
+
+    manifest_bytes = _regular_file(
+        manifest_path, label="stateful campaign manifest"
+    ).read_bytes()
+    manifest_payload = _load_canonical_json_bytes(
+        manifest_bytes, label="stateful campaign manifest", pretty=True
+    )
+    manifest = StatefulCampaignManifest.from_mapping(manifest_payload)
+    registry_path = opcode_gas.REPO_ROOT / manifest.reference_registry["path"]
+    registry_bytes = _regular_file(
+        registry_path, label="stateful source registry"
+    ).read_bytes()
+    registry_payload = _load_canonical_json_bytes(
+        registry_bytes, label="stateful source registry", pretty=True
+    )
+    registry = load_stateful_reference_registry(
+        registry_payload,
+        expected_artifact_sha256=manifest.reference_registry["artifact_sha256"],
+    )
+
+    campaign_identity_bytes = _regular_file(
+        run / "identity.json", label="stateful campaign identity"
+    ).read_bytes()
+    campaign_identity = _load_canonical_json_bytes(
+        campaign_identity_bytes, label="stateful campaign identity", pretty=False
+    )
+    rows_bytes = _regular_file(
+        run / "rows.jsonl", label="stateful row ledger"
+    ).read_bytes()
+    decisions_bytes = _regular_file(
+        run / "decisions.json", label="stateful decision ledger"
+    ).read_bytes()
+    decisions = _load_canonical_json_bytes(
+        decisions_bytes, label="stateful decision ledger", pretty=False
+    )
+    seal_bytes = _regular_file(
+        run / "decisions.sha256", label="stateful decision seal"
+    ).read_bytes()
+    _validate_sealed_campaign_identity(
+        campaign_identity,
+        calibration_identity,
+        manifest,
+        manifest_file_sha256=sha256_bytes(manifest_bytes),
+        registry_artifact_sha256=registry.artifact_sha256,
+        registry_file_sha256=sha256_bytes(registry_bytes),
+    )
+    provenance = model_report.get("task4_provenance")
+    terminal_hashes = (
+        provenance.get("terminal_artifact_file_sha256")
+        if isinstance(provenance, Mapping)
+        else None
+    )
+    implementation_revision = calibration_identity.get("implementation_revision")
+    if (
+        not isinstance(provenance, Mapping)
+        or not isinstance(terminal_hashes, Mapping)
+        or not isinstance(implementation_revision, str)
+        or re.fullmatch(r"[0-9a-f]{40}", implementation_revision) is None
+        or campaign_identity.get("calibration_id") != calibration_run.name
+        or decisions.get("campaign_identity_sha256")
+        != sha256_bytes(canonical_json(campaign_identity))
+        or decisions.get("row_ledger_sha256") != sha256_bytes(rows_bytes)
+        or provenance.get("campaign_identity_sha256")
+        != decisions.get("campaign_identity_sha256")
+        or provenance.get("row_ledger_sha256")
+        != decisions.get("row_ledger_sha256")
+        or terminal_hashes
+        != {
+            "rows.jsonl": sha256_bytes(rows_bytes),
+            "decisions.json": sha256_bytes(decisions_bytes),
+            "decisions.sha256": sha256_bytes(seal_bytes),
+        }
+        or seal_bytes != (sha256_bytes(decisions_bytes) + "\n").encode()
+    ):
+        raise ValueError("stateful result source provenance differs")
+
+    calibration_identity_bytes = opcode_gas._canonical_json_file_bytes(
+        calibration_identity
+    )
+    model_report_bytes = opcode_gas._canonical_json_file_bytes(model_report)
+    identity = _stateful_result_identity(
+        implementation_revision=implementation_revision,
+        campaign_identity_sha256=decisions["campaign_identity_sha256"],
+        row_ledger_sha256=decisions["row_ledger_sha256"],
+        manifest_file_sha256=sha256_bytes(manifest_bytes),
+        calibration_identity_file_sha256=sha256_bytes(
+            calibration_identity_bytes
+        ),
+        campaign_identity_file_sha256=sha256_bytes(campaign_identity_bytes),
+        decisions_file_sha256=sha256_bytes(decisions_bytes),
+        decisions_seal_file_sha256=sha256_bytes(seal_bytes),
+        registry_artifact_sha256=registry.artifact_sha256,
+        registry_file_sha256=sha256_bytes(registry_bytes),
+    )
+    envelope = _stateful_result_envelope(identity, model_report_bytes)
+    files = {
+        "result.json": opcode_gas._canonical_json_file_bytes(envelope),
+        "campaign-manifest.json": manifest_bytes,
+        "calibration-identity.json": calibration_identity_bytes,
+        "campaign-identity.json": campaign_identity_bytes,
+        "rows.jsonl": rows_bytes,
+        "campaign-decisions.json": decisions_bytes,
+        "campaign-decisions.sha256": seal_bytes,
+        "source-registry.json": registry_bytes,
+        "model-report.json": model_report_bytes,
+    }
+    directory = opcode_gas._publish_immutable_directory(
+        out_root,
+        envelope["result_id"],
+        files,
+        label="stateful result",
+    )
+    return {"result_id": envelope["result_id"], "directory": str(directory)}
+
+
+def _validate_stateful_result_checkout(
+    implementation_revision: str,
+    calibration_identity: Mapping[str, Any],
+    registry_path: str,
+    result_id: str,
+) -> None:
+    """Allow only byte-identical fitting inputs in an evidence-only descendant."""
+    head = opcode_gas.git_head()
+    descendant = head != implementation_revision
+    if descendant:
+        if not opcode_gas.git_revision_is_ancestor(implementation_revision):
+            raise ValueError("stateful result implementation revision is not an ancestor")
+        changed_paths = opcode_gas.git_changed_paths_since(implementation_revision)
+        result_prefix = f"experiments/opcode-gas/derivations/{result_id}/"
+        if any(
+            not any(
+                path.startswith(allowed)
+                if allowed.endswith("/")
+                else path == allowed
+                for allowed in STATEFUL_RESULT_DESCENDANT_PATHS
+            )
+            and not path.startswith(result_prefix)
+            for path in changed_paths
+        ):
+            raise ValueError("stateful result descendant changes non-evidence source")
+    opcode_gas.assert_generated_paths_only(opcode_gas.git_worktree_status())
+
+    relevant_paths = (*STATEFUL_RESULT_FIT_SOURCE_PATHS, registry_path)
+    guest_artifacts = calibration_identity.get("guest_artifacts")
+    if not isinstance(guest_artifacts, Mapping) or not guest_artifacts:
+        raise ValueError("stateful result calibration guest artifacts are missing")
+    for relative, expected_sha256 in guest_artifacts.items():
+        if (
+            not isinstance(relative, str)
+            or pathlib.PurePosixPath(relative).is_absolute()
+            or ".." in pathlib.PurePosixPath(relative).parts
+            or str(pathlib.PurePosixPath(relative)) != relative
+        ):
+            raise ValueError("stateful result calibration guest artifact path differs")
+        _require_sha256(expected_sha256, "stateful result guest artifact")
+        path = opcode_gas.REPO_ROOT / relative
+        if (
+            path.is_symlink()
+            or not path.is_file()
+            or not path.resolve().is_relative_to(opcode_gas.REPO_ROOT.resolve())
+            or opcode_gas.sha256_file(path) != expected_sha256
+        ):
+            raise ValueError("stateful result calibration guest artifact differs")
+        if descendant and opcode_gas.git_file_bytes_at_revision(
+            implementation_revision, relative
+        ) != path.read_bytes():
+            raise ValueError("stateful result guest artifact changed after measurement")
+
+    if descendant:
+        for relative in relevant_paths:
+            path = opcode_gas.REPO_ROOT / relative
+            if (
+                path.is_symlink()
+                or not path.is_file()
+                or opcode_gas.git_file_bytes_at_revision(
+                    implementation_revision, relative
+                )
+                != path.read_bytes()
+            ):
+                raise ValueError(
+                    "stateful result fitting source changed after measurement"
+                )
+
+
+def verify_stateful_opcode_result(directory: pathlib.Path) -> dict[str, Any]:
+    """Replay a sealed result from its directory without executing guest code."""
+    absolute = directory.absolute()
+    if (
+        not directory.is_dir()
+        or directory.is_symlink()
+        or absolute != directory.resolve()
+        or {path.name for path in directory.iterdir()} != STATEFUL_RESULT_INVENTORY
+    ):
+        raise ValueError("stateful result directory inventory differs")
+    paths = {name: directory / name for name in STATEFUL_RESULT_INVENTORY}
+    if any(
+        path.is_symlink()
+        or not path.is_file()
+        or path.absolute().parent != absolute
+        or not path.resolve().is_relative_to(absolute)
+        for path in paths.values()
+    ):
+        raise ValueError("stateful result directory inventory differs")
+
+    raw = {name: path.read_bytes() for name, path in paths.items()}
+    envelope = _load_canonical_json_bytes(
+        raw["result.json"], label="stateful result", pretty=True
+    )
+    manifest_payload = _load_canonical_json_bytes(
+        raw["campaign-manifest.json"],
+        label="stateful campaign manifest",
+        pretty=True,
+    )
+    calibration_identity = _load_canonical_json_bytes(
+        raw["calibration-identity.json"],
+        label="stateful calibration identity",
+        pretty=True,
+    )
+    campaign_identity = _load_canonical_json_bytes(
+        raw["campaign-identity.json"],
+        label="stateful campaign identity",
+        pretty=False,
+    )
+    decisions = _load_canonical_json_bytes(
+        raw["campaign-decisions.json"],
+        label="stateful campaign decisions",
+        pretty=False,
+    )
+    registry_payload = _load_canonical_json_bytes(
+        raw["source-registry.json"],
+        label="stateful source registry",
+        pretty=True,
+    )
+    model_report = _load_canonical_json_bytes(
+        raw["model-report.json"], label="stateful model report", pretty=True
+    )
+    manifest = StatefulCampaignManifest.from_mapping(manifest_payload)
+    registry = load_stateful_reference_registry(
+        registry_payload,
+        expected_artifact_sha256=manifest.reference_registry["artifact_sha256"],
+    )
+
+    tracked_manifest = (
+        opcode_gas.REPO_ROOT
+        / "experiments/opcode-gas/manifests/sp1-stateful-opcode-v1.json"
+    )
+    tracked_registry = opcode_gas.REPO_ROOT / manifest.reference_registry["path"]
+    if (
+        raw["campaign-manifest.json"]
+        != _regular_file(
+            tracked_manifest, label="tracked stateful campaign manifest"
+        ).read_bytes()
+        or raw["source-registry.json"]
+        != _regular_file(
+            tracked_registry, label="tracked stateful source registry"
+        ).read_bytes()
+    ):
+        raise ValueError("stateful result tracked source artifact differs")
+
+    implementation_revision = calibration_identity.get("implementation_revision")
+    if (
+        not isinstance(implementation_revision, str)
+        or re.fullmatch(r"[0-9a-f]{40}", implementation_revision) is None
+    ):
+        raise ValueError("stateful result implementation revision differs")
+    _validate_stateful_result_checkout(
+        implementation_revision,
+        calibration_identity,
+        manifest.reference_registry["path"],
+        directory.name,
+    )
+    _validate_sealed_campaign_identity(
+        campaign_identity,
+        calibration_identity,
+        manifest,
+        manifest_file_sha256=sha256_bytes(raw["campaign-manifest.json"]),
+        registry_artifact_sha256=registry.artifact_sha256,
+        registry_file_sha256=sha256_bytes(raw["source-registry.json"]),
+    )
+
+    try:
+        rows = list(opcode_gas.iter_jsonl(paths["rows.jsonl"]))
+    except (ValueError, json.JSONDecodeError) as error:
+        raise ValueError("stateful result row ledger is invalid") from error
+    if raw["rows.jsonl"] != b"".join(
+        canonical_json(row) + b"\n" for row in rows
+    ):
+        raise ValueError("stateful result row ledger is not canonical JSONL")
+    expected_rows, expected_decisions, expected_decisions_bytes = (
+        _terminal_campaign_payloads(campaign_identity, rows)
+    )
+    if (
+        raw["rows.jsonl"] != expected_rows
+        or raw["campaign-decisions.json"] != expected_decisions_bytes
+        or raw["campaign-decisions.sha256"]
+        != (sha256_bytes(expected_decisions_bytes) + "\n").encode()
+        or decisions != expected_decisions
+    ):
+        raise ValueError("stateful result Task 4 terminal payload differs")
+    _validate_verified_task4_row_identities(manifest, rows)
+    _validate_sealed_task4_row_evidence(rows, campaign_identity)
+
+    replayed_report = _fit_stateful_task4_rows(manifest, rows, registry_payload)
+    replayed_report["task4_provenance"] = {
+        "campaign_identity_sha256": expected_decisions[
+            "campaign_identity_sha256"
+        ],
+        "row_ledger_sha256": expected_decisions["row_ledger_sha256"],
+        "terminal_artifact_file_sha256": {
+            "rows.jsonl": sha256_bytes(raw["rows.jsonl"]),
+            "decisions.json": sha256_bytes(raw["campaign-decisions.json"]),
+            "decisions.sha256": sha256_bytes(
+                raw["campaign-decisions.sha256"]
+            ),
+        },
+    }
+    if canonical_json(model_report) != canonical_json(replayed_report):
+        raise ValueError("stateful result model report differs from exact replay")
+
+    identity = _stateful_result_identity(
+        implementation_revision=implementation_revision,
+        campaign_identity_sha256=expected_decisions[
+            "campaign_identity_sha256"
+        ],
+        row_ledger_sha256=expected_decisions["row_ledger_sha256"],
+        manifest_file_sha256=sha256_bytes(raw["campaign-manifest.json"]),
+        calibration_identity_file_sha256=sha256_bytes(
+            raw["calibration-identity.json"]
+        ),
+        campaign_identity_file_sha256=sha256_bytes(
+            raw["campaign-identity.json"]
+        ),
+        decisions_file_sha256=sha256_bytes(raw["campaign-decisions.json"]),
+        decisions_seal_file_sha256=sha256_bytes(
+            raw["campaign-decisions.sha256"]
+        ),
+        registry_artifact_sha256=registry.artifact_sha256,
+        registry_file_sha256=sha256_bytes(raw["source-registry.json"]),
+    )
+    expected_envelope = _stateful_result_envelope(
+        identity, raw["model-report.json"]
+    )
+    if canonical_json(envelope) != canonical_json(expected_envelope):
+        raise ValueError("stateful result identity, ownership, or output differs")
+    if directory.name != expected_envelope["result_id"]:
+        raise ValueError("stateful result directory name differs from identity")
+    return {
+        "status": "sealed",
+        "result_id": expected_envelope["result_id"],
+        "selected_model": model_report.get("selection", {}).get(
+            "selected_model"
+        ),
     }
 
 

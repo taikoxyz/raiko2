@@ -12426,6 +12426,57 @@ def git_worktree_status(source_root: pathlib.Path = REPO_ROOT) -> str:
     return subprocess.run(["git", "status", "--porcelain"], cwd=source_root, check=True, capture_output=True, text=True).stdout
 
 
+def git_revision_is_ancestor(
+    revision: str, source_root: pathlib.Path = REPO_ROOT
+) -> bool:
+    if not _is_git_revision(revision):
+        return False
+    return (
+        subprocess.run(
+            ["git", "merge-base", "--is-ancestor", revision, "HEAD"],
+            cwd=source_root,
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        ).returncode
+        == 0
+    )
+
+
+def git_changed_paths_since(
+    revision: str, source_root: pathlib.Path = REPO_ROOT
+) -> tuple[str, ...]:
+    if not _is_git_revision(revision):
+        raise ValueError("source revision is invalid")
+    completed = subprocess.run(
+        ["git", "diff", "--name-only", "--diff-filter=ACDMRTUXB", f"{revision}..HEAD"],
+        cwd=source_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return tuple(line for line in completed.stdout.splitlines() if line)
+
+
+def git_file_bytes_at_revision(
+    revision: str, relative_path: str, source_root: pathlib.Path = REPO_ROOT
+) -> bytes:
+    if (
+        not _is_git_revision(revision)
+        or pathlib.PurePosixPath(relative_path).is_absolute()
+        or ".." in pathlib.PurePosixPath(relative_path).parts
+        or str(pathlib.PurePosixPath(relative_path)) != relative_path
+    ):
+        raise ValueError("source revision file path is invalid")
+    completed = subprocess.run(
+        ["git", "show", f"{revision}:{relative_path}"],
+        cwd=source_root,
+        check=True,
+        capture_output=True,
+    )
+    return completed.stdout
+
+
 def assert_generated_paths_only(status: str) -> None:
     for line in status.splitlines():
         if line and not any(line[3:].split(" -> ")[-1].startswith(prefix) for prefix in GENERATED_EXPERIMENT_PREFIXES):
@@ -14203,6 +14254,45 @@ def cmd_verify_stateful_opcode_campaign(args: argparse.Namespace) -> None:
         run=_resolve_repo_path_without_symlinks(args.run, field_name="stateful campaign run"),
     )
     print(f"verified stateful campaign {result['status']}: {result['row_count']} row(s)")
+
+
+def cmd_seal_stateful_opcode_result(args: argparse.Namespace) -> None:
+    from stateful_opcode_campaign import seal_stateful_opcode_result
+
+    result = seal_stateful_opcode_result(
+        out_root=_resolve_repo_path_without_symlinks(
+            args.out, field_name="stateful result output root"
+        ),
+        manifest_path=_resolve_repo_path_without_symlinks(
+            args.manifest, field_name="stateful campaign manifest"
+        ),
+        calibration_run=_resolve_repo_path_without_symlinks(
+            args.calibration_run, field_name="calibration run"
+        ),
+        fixtures_root=_resolve_repo_path_without_symlinks(
+            args.fixtures, field_name="stateful fixtures"
+        ),
+        guest_launcher=_resolve_repo_path_without_symlinks(
+            args.guest_launcher, field_name="guest launcher"
+        ),
+        elf=_resolve_repo_path_without_symlinks(
+            args.elf, field_name="stateful guest ELF"
+        ),
+        run=_resolve_repo_path_without_symlinks(
+            args.run, field_name="stateful campaign run"
+        ),
+    )
+    print(f"sealed stateful opcode result {result['result_id']}")
+
+
+def cmd_verify_stateful_opcode_result(args: argparse.Namespace) -> None:
+    from stateful_opcode_campaign import verify_stateful_opcode_result
+
+    result_path = _resolve_repo_path_without_symlinks(
+        args.result, field_name="stateful result"
+    )
+    result = verify_stateful_opcode_result(result_path)
+    print(f"verified stateful opcode result {result['result_id']}")
 
 
 def cmd_generate_relations(args: argparse.Namespace) -> None:
@@ -18011,52 +18101,61 @@ def _validate_osaka_augmentation_provenance(
     }
 
 
-def _publish_osaka_augmentation(
+def _publish_immutable_directory(
     out_root: pathlib.Path,
-    augmentation_id: str,
-    envelope: Mapping[str, Any],
-    canary: Mapping[str, Any],
-    supplement: Mapping[str, Any],
-    augmented_core: Mapping[str, Any],
+    artifact_id: str,
+    files: Mapping[str, bytes],
+    *,
+    label: str,
 ) -> pathlib.Path:
+    """Atomically publish one flat, content-addressed immutable directory."""
+    if (
+        not isinstance(artifact_id, str)
+        or len(artifact_id) != 24
+        or any(character not in "0123456789abcdef" for character in artifact_id)
+        or not files
+        or any(
+            not isinstance(name, str)
+            or pathlib.PurePosixPath(name).name != name
+            or name in {"", ".", ".."}
+            or not isinstance(content, bytes)
+            for name, content in files.items()
+        )
+    ):
+        raise ValueError(f"{label} publication payload is invalid")
     if out_root.exists() and (not out_root.is_dir() or out_root.is_symlink()):
-        raise ValueError("augmentation output root is invalid")
+        raise ValueError(f"{label} output root is invalid")
     out_root.mkdir(parents=True, exist_ok=True)
-    target = out_root / augmentation_id
-    lock_path = out_root / f".{augmentation_id}.lock"
+    target = out_root / artifact_id
+    lock_path = out_root / f".{artifact_id}.lock"
     lock_descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
     temporary: pathlib.Path | None = None
     try:
         fcntl.flock(lock_descriptor, fcntl.LOCK_EX)
         if target.exists() or target.is_symlink():
-            expected = {
-                "augmentation.json": envelope,
-                "compatibility-canary.json": canary,
-                "opcode-supplement.json": supplement,
-                "core-opcode-submodel.json": augmented_core,
-            }
             if target.is_symlink() or not target.is_dir() or {
                 path.name for path in target.iterdir()
-            } != set(expected):
-                raise ValueError(f"augmentation directory already exists: {target}")
-            for name, payload in expected.items():
+            } != set(files):
+                raise ValueError(f"{label} directory already exists: {target}")
+            for name, content in files.items():
                 path = target / name
-                if path.is_symlink() or not path.is_file() or path.read_bytes() != _canonical_json_file_bytes(payload):
-                    raise ValueError(f"augmentation directory already exists: {target}")
-            # A failed pointer publication may leave exactly this directory.
-            # Returning it makes a retry create the missing pointer without
-            # accepting a different pre-existing augmentation.
+                if (
+                    path.is_symlink()
+                    or not path.is_file()
+                    or path.absolute().parent != target.absolute()
+                    or path.read_bytes() != content
+                ):
+                    raise ValueError(f"{label} directory already exists: {target}")
             return target
         temporary = pathlib.Path(
-            tempfile.mkdtemp(prefix=f".{augmentation_id}.", dir=out_root)
+            tempfile.mkdtemp(prefix=f".{artifact_id}.", dir=out_root)
         )
-        for name, payload in (
-            ("augmentation.json", envelope),
-            ("compatibility-canary.json", canary),
-            ("opcode-supplement.json", supplement),
-            ("core-opcode-submodel.json", augmented_core),
-        ):
-            _write_derivation_json(temporary / name, payload)
+        for name, content in files.items():
+            path = temporary / name
+            with path.open("xb") as output:
+                output.write(content)
+                output.flush()
+                os.fsync(output.fileno())
         _fsync_directory(temporary)
         os.rename(temporary, target)
         temporary = None
@@ -18066,6 +18165,27 @@ def _publish_osaka_augmentation(
         if temporary is not None and temporary.exists():
             shutil.rmtree(temporary)
         os.close(lock_descriptor)
+
+
+def _publish_osaka_augmentation(
+    out_root: pathlib.Path,
+    augmentation_id: str,
+    envelope: Mapping[str, Any],
+    canary: Mapping[str, Any],
+    supplement: Mapping[str, Any],
+    augmented_core: Mapping[str, Any],
+) -> pathlib.Path:
+    return _publish_immutable_directory(
+        out_root,
+        augmentation_id,
+        {
+            "augmentation.json": _canonical_json_file_bytes(envelope),
+            "compatibility-canary.json": _canonical_json_file_bytes(canary),
+            "opcode-supplement.json": _canonical_json_file_bytes(supplement),
+            "core-opcode-submodel.json": _canonical_json_file_bytes(augmented_core),
+        },
+        label="augmentation",
+    )
 
 
 def _osaka_current_source_evidence(
@@ -24845,6 +24965,37 @@ def build_parser() -> argparse.ArgumentParser:
     )
     stateful_verify.add_argument("--run", type=pathlib.Path, required=True)
     stateful_verify.set_defaults(func=cmd_verify_stateful_opcode_campaign)
+
+    stateful_seal_result = subcommands.add_parser(
+        "seal-stateful-opcode-result",
+        help="fit the verified Task 4 run and seal its immutable result directory",
+    )
+    stateful_seal_result.add_argument("--manifest", type=pathlib.Path, required=True)
+    stateful_seal_result.add_argument(
+        "--calibration-run", type=pathlib.Path, required=True
+    )
+    stateful_seal_result.add_argument("--fixtures", type=pathlib.Path, required=True)
+    stateful_seal_result.add_argument(
+        "--guest-launcher", type=pathlib.Path, required=True
+    )
+    stateful_seal_result.add_argument(
+        "--elf",
+        type=pathlib.Path,
+        choices=(pathlib.Path("crates/guests/elf/sp1_revm_opcode_lab.elf"),),
+        required=True,
+    )
+    stateful_seal_result.add_argument("--run", type=pathlib.Path, required=True)
+    stateful_seal_result.add_argument("--out", type=pathlib.Path, required=True)
+    stateful_seal_result.set_defaults(func=cmd_seal_stateful_opcode_result)
+
+    stateful_verify_result = subcommands.add_parser(
+        "verify-stateful-opcode-result",
+        help="replay one sealed stateful result without executing guest code",
+    )
+    stateful_verify_result.add_argument(
+        "--result", type=pathlib.Path, required=True
+    )
+    stateful_verify_result.set_defaults(func=cmd_verify_stateful_opcode_result)
 
     matched_generate = subcommands.add_parser(
         "generate-matched-control",

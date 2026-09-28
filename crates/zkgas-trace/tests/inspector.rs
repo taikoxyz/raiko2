@@ -5,13 +5,16 @@ use alethia_reth_evm::{
     zk_gas::schedule::schedule_for,
 };
 use alloy_evm::{Evm, EvmEnv, EvmFactory};
-use alloy_primitives::{Address, address};
+use alloy_primitives::{Address, B256, U256, address};
 use raiko2_zkgas_trace::{
     DispatchStatus, OpcodeModelInput, OperationComponent, OperationPhase, PricingBasis,
     TraceCollector, TraceInspector, TraceSink,
 };
 use reth_revm::{
-    context::TxEnv,
+    context::{
+        TxEnv,
+        transaction::{AccessList, AccessListItem},
+    },
     db::InMemoryDB,
     primitives::{Bytes, TxKind},
     state::{AccountInfo, Bytecode, bytecode::opcode},
@@ -155,6 +158,23 @@ fn tx_env(gas_limit: u64) -> TxEnv {
         .expect("valid transaction environment")
 }
 
+fn storage_tx_env(gas_limit: u64, warm: bool) -> TxEnv {
+    let mut builder = TxEnv::builder()
+        .caller(CALLER)
+        .kind(TxKind::Call(TARGET))
+        .chain_id(Some(167))
+        .gas_limit(gas_limit);
+    if warm {
+        builder = builder
+            .tx_type(None)
+            .access_list(AccessList(vec![AccessListItem {
+                address: TARGET,
+                storage_keys: vec![B256::ZERO],
+            }]));
+    }
+    builder.build().expect("valid storage transaction")
+}
+
 fn db_with_contract(bytecode: Bytecode) -> InMemoryDB {
     let mut db = InMemoryDB::default();
     insert_contract(&mut db, TARGET, bytecode);
@@ -205,6 +225,59 @@ fn execute(bytecode: Bytecode, gas_limit: u64) -> (TraceSink, bool) {
         .expect("transaction execution");
     sink.lock().finish_transaction();
     (sink, result.result.is_success())
+}
+
+fn execute_storage(
+    bytecode: Bytecode,
+    gas_limit: u64,
+    original: u64,
+    warm: bool,
+) -> (TraceSink, bool) {
+    let sink = TraceSink::default();
+    sink.lock().start_transaction(0);
+    let mut db = db_with_contract(bytecode);
+    db.insert_account_storage(TARGET, U256::ZERO, U256::from(original))
+        .expect("insert target storage");
+    let mut evm =
+        TaikoEvmFactory.create_evm_with_inspector(db, evm_env(), TraceInspector::new(sink.clone()));
+    let result = evm
+        .transact(storage_tx_env(gas_limit, warm))
+        .expect("storage transaction execution");
+    sink.lock().finish_transaction();
+    (sink, result.result.is_success())
+}
+
+fn last_storage_component(sink: &TraceSink, expected_opcode: u8) -> Value {
+    let collector = sink.snapshot();
+    let operation = collector
+        .operations()
+        .iter()
+        .rev()
+        .find(|operation| match &operation.component {
+            OperationComponent::Opcode { opcode, .. }
+            | OperationComponent::OpcodeFeatureError { opcode, .. } => *opcode == expected_opcode,
+            OperationComponent::Precompile { .. } => false,
+        })
+        .unwrap_or_else(|| panic!("storage opcode 0x{expected_opcode:02x} operation"));
+    serde_json::to_value(&operation.component).expect("serialize storage component")
+}
+
+fn sload_program() -> Bytecode {
+    Bytecode::new_raw(Bytes::from(vec![
+        opcode::PUSH0,
+        opcode::SLOAD,
+        opcode::POP,
+        opcode::STOP,
+    ]))
+}
+
+fn sstore_program(values: &[u8], tail: &[u8]) -> Bytecode {
+    let mut code = Vec::with_capacity(values.len() * 4 + tail.len());
+    for value in values {
+        code.extend_from_slice(&[opcode::PUSH1, *value, opcode::PUSH0, opcode::SSTORE]);
+    }
+    code.extend_from_slice(tail);
+    Bytecode::new_raw(Bytes::from(code))
 }
 
 fn executed_opcode_component(bytecode: Vec<u8>, expected_opcode: u8) -> Value {
@@ -542,6 +615,408 @@ fn static_opcode_emits_explicit_tagged_model_input() {
         component["model_input"],
         json!({"kind": "static_raw_gas", "raw_gas": 3})
     );
+}
+
+#[test]
+fn sload_emits_exact_cold_and_warm_access_inputs() {
+    for (warm, expected_access) in [(false, "cold"), (true, "warm")] {
+        let (sink, success) = execute_storage(sload_program(), 100_000, 7, warm);
+        assert!(success);
+        let component = last_storage_component(&sink, opcode::SLOAD);
+        assert_eq!(
+            component["model_input"],
+            json!({"kind": "storage_load", "access": expected_access})
+        );
+    }
+}
+
+#[test]
+fn sstore_emits_every_frozen_branch_from_original_current_and_new() {
+    let cases: &[(&str, u64, &[u8])] = &[
+        ("noop", 0, &[0]),
+        ("set", 0, &[1]),
+        ("clear", 1, &[0]),
+        ("reset", 1, &[2]),
+        ("dirty_rewrite", 0, &[1, 2]),
+        ("restore_original", 0, &[1, 0]),
+    ];
+    for (expected_branch, original, values) in cases {
+        let (sink, success) = execute_storage(
+            sstore_program(values, &[opcode::STOP]),
+            200_000,
+            *original,
+            true,
+        );
+        assert!(success, "{expected_branch}");
+        let component = last_storage_component(&sink, opcode::SSTORE);
+        assert_eq!(
+            component["model_input"],
+            json!({
+                "kind": "storage_store",
+                "access": "warm",
+                "branch": expected_branch,
+            }),
+            "{expected_branch}",
+        );
+    }
+}
+
+#[test]
+fn clean_sstore_preserves_cold_or_access_list_warm_classification() {
+    for (warm, expected_access) in [(false, "cold"), (true, "warm")] {
+        let (sink, success) =
+            execute_storage(sstore_program(&[1], &[opcode::STOP]), 100_000, 0, warm);
+        assert!(success);
+        let component = last_storage_component(&sink, opcode::SSTORE);
+        assert_eq!(
+            component["model_input"],
+            json!({
+                "kind": "storage_store",
+                "access": expected_access,
+                "branch": "set",
+            })
+        );
+    }
+}
+
+#[test]
+fn stale_cached_slot_resets_transaction_original_to_present_value() {
+    let sink = TraceSink::default();
+    let bytecode = sstore_program(&[1], &[opcode::STOP]);
+    let mut db = db_with_contract(bytecode);
+    db.insert_account_storage(TARGET, U256::ZERO, U256::ZERO)
+        .expect("insert target storage");
+    let mut evm =
+        TaikoEvmFactory.create_evm_with_inspector(db, evm_env(), TraceInspector::new(sink.clone()));
+
+    sink.lock().start_transaction(0);
+    let first = evm
+        .transact_commit(storage_tx_env(100_000, false))
+        .expect("first storage transaction");
+    assert!(first.is_success());
+    sink.lock().finish_transaction();
+
+    sink.lock().start_transaction(1);
+    let mut second_tx = storage_tx_env(100_000, false);
+    second_tx.nonce = 1;
+    let second = evm
+        .transact_commit(second_tx)
+        .expect("second storage transaction");
+    assert!(second.is_success());
+    sink.lock().finish_transaction();
+
+    let collector = sink.snapshot();
+    let component = collector
+        .operations()
+        .iter()
+        .rev()
+        .find(|operation| {
+            operation.tx_index == Some(1)
+                && matches!(
+                    operation.component,
+                    OperationComponent::Opcode {
+                        opcode: opcode::SSTORE,
+                        ..
+                    }
+                )
+        })
+        .expect("second transaction SSTORE");
+    assert_eq!(
+        serde_json::to_value(&component.component).unwrap()["model_input"],
+        json!({"kind": "storage_store", "access": "cold", "branch": "noop"})
+    );
+}
+
+#[test]
+fn completed_sstore_is_retained_when_transaction_later_reverts() {
+    let (sink, success) = execute_storage(
+        sstore_program(&[1], &[opcode::PUSH0, opcode::PUSH0, opcode::REVERT]),
+        100_000,
+        0,
+        false,
+    );
+    assert!(!success);
+    assert_eq!(
+        last_storage_component(&sink, opcode::SSTORE)["model_input"],
+        json!({"kind": "storage_store", "access": "cold", "branch": "set"})
+    );
+}
+
+#[test]
+fn nested_call_and_delegatecall_use_the_active_frame_storage_owner() {
+    for (family, owner) in [
+        (SpawnFamily::Call, CHILD),
+        (SpawnFamily::DelegateCall, TARGET),
+    ] {
+        let sink = TraceSink::default();
+        sink.lock().start_transaction(0);
+        let mut db = db_with_contract(family.spawned_bytecode());
+        insert_contract(&mut db, CHILD, sstore_program(&[0], &[opcode::STOP]));
+        db.insert_account_storage(owner, U256::ZERO, U256::from(1))
+            .expect("insert active-frame storage");
+        let other = if owner == TARGET { CHILD } else { TARGET };
+        db.insert_account_storage(other, U256::ZERO, U256::ZERO)
+            .expect("insert non-owner storage");
+        let mut evm = TaikoEvmFactory.create_evm_with_inspector(
+            db,
+            evm_env(),
+            TraceInspector::new(sink.clone()),
+        );
+        let result = evm.transact(tx_env(500_000)).expect("nested execution");
+        sink.lock().finish_transaction();
+        assert!(result.result.is_success(), "{}", family.name());
+        assert_eq!(
+            last_storage_component(&sink, opcode::SSTORE)["model_input"],
+            json!({"kind": "storage_store", "access": "cold", "branch": "clear"}),
+            "{} storage owner",
+            family.name(),
+        );
+    }
+}
+
+#[test]
+fn completed_sstore_is_retained_when_child_frame_reverts() {
+    let sink = TraceSink::default();
+    sink.lock().start_transaction(0);
+    let mut db = db_with_contract(SpawnFamily::Call.spawned_bytecode());
+    insert_contract(
+        &mut db,
+        CHILD,
+        sstore_program(&[1], &[opcode::PUSH0, opcode::PUSH0, opcode::REVERT]),
+    );
+    db.insert_account_storage(CHILD, U256::ZERO, U256::ZERO)
+        .expect("insert child storage");
+    let mut evm =
+        TaikoEvmFactory.create_evm_with_inspector(db, evm_env(), TraceInspector::new(sink.clone()));
+    let result = evm.transact(tx_env(500_000)).expect("nested execution");
+    sink.lock().finish_transaction();
+
+    assert!(
+        result.result.is_success(),
+        "parent keeps the failed CALL result"
+    );
+    assert_eq!(
+        last_storage_component(&sink, opcode::SSTORE)["model_input"],
+        json!({"kind": "storage_store", "access": "cold", "branch": "set"})
+    );
+}
+
+#[test]
+fn static_context_sstore_rejection_fails_closed_before_typing() {
+    let sink = TraceSink::default();
+    sink.lock().start_transaction(0);
+    let mut db = db_with_contract(SpawnFamily::StaticCall.spawned_bytecode());
+    insert_contract(&mut db, CHILD, sstore_program(&[1], &[opcode::STOP]));
+    db.insert_account_storage(CHILD, U256::ZERO, U256::ZERO)
+        .expect("insert child storage");
+    let mut evm =
+        TaikoEvmFactory.create_evm_with_inspector(db, evm_env(), TraceInspector::new(sink.clone()));
+    let result = evm
+        .transact(tx_env(500_000))
+        .expect("static child execution");
+    sink.lock().finish_transaction();
+
+    assert!(
+        result.result.is_success(),
+        "parent keeps the failed STATICCALL result"
+    );
+    let component = last_storage_component(&sink, opcode::SSTORE);
+    assert_eq!(
+        component["error"],
+        json!({"kind": "storage_state", "reason": "instruction_halted"})
+    );
+    assert!(component.get("model_input").is_none());
+}
+
+#[test]
+fn completed_sstore_is_retained_when_outer_zk_gas_limit_rejects_it() {
+    let schedule = schedule_for(TaikoSpecId::UNZEN).expect("Unzen schedule");
+    let raw_charge = |target: u8, raw_gas: u64| {
+        raw_gas * u64::from(schedule.opcode_multipliers[usize::from(target)])
+    };
+    let prefix_charge = raw_charge(opcode::PUSH1, 3) + raw_charge(opcode::PUSH0, 2);
+    let store_charge = raw_charge(opcode::SSTORE, 22_100);
+    let admitted = prefix_charge + store_charge - 1;
+
+    let sink = TraceSink::default();
+    sink.lock().start_transaction(0);
+    let bytecode = sstore_program(&[1], &[opcode::STOP]);
+    let mut db = db_with_contract(bytecode);
+    db.insert_account_storage(TARGET, U256::ZERO, U256::ZERO)
+        .expect("insert target storage");
+    let mut evm =
+        TaikoEvmFactory.create_evm_with_inspector(db, evm_env(), TraceInspector::new(sink.clone()));
+    evm.reserve_block_zk_gas(schedule.block_limit - admitted)
+        .expect("reservation fits");
+    let error = evm
+        .transact(storage_tx_env(100_000, false))
+        .expect_err("SSTORE zkGas charge must exceed the remaining block budget");
+    sink.lock().finish_transaction();
+
+    assert!(error.to_string().contains("zk gas limit exceeded"));
+    assert_eq!(
+        last_storage_component(&sink, opcode::SSTORE)["model_input"],
+        json!({"kind": "storage_store", "access": "cold", "branch": "set"})
+    );
+}
+
+#[test]
+fn dirty_noop_fails_closed_as_storage_feature_error() {
+    let (sink, success) =
+        execute_storage(sstore_program(&[1, 1], &[opcode::STOP]), 100_000, 0, false);
+    assert!(success);
+    assert_eq!(
+        last_storage_component(&sink, opcode::SSTORE),
+        json!({
+            "kind": "opcode_feature_error",
+            "opcode": opcode::SSTORE,
+            "interpreter_raw_gas": 100,
+            "error": {"kind": "storage_state", "reason": "dirty_noop"},
+        })
+    );
+}
+
+#[test]
+fn storage_instruction_halts_fail_closed_before_typing() {
+    let (sink, success) = execute(Bytecode::new_raw(Bytes::from(vec![opcode::SLOAD])), 100_000);
+    assert!(!success);
+    let component = last_storage_component(&sink, opcode::SLOAD);
+    assert_eq!(
+        component["error"],
+        json!({"kind": "stack_underflow", "feature": "storage_key"})
+    );
+    assert!(component.get("model_input").is_none());
+    let roundtrip: OperationComponent =
+        serde_json::from_value(component.clone()).expect("SLOAD stack error roundtrip");
+    assert_eq!(serde_json::to_value(roundtrip).unwrap(), component);
+
+    for (gas_limit, stage) in [(23_100, "stipend"), (24_000, "dynamic charge")] {
+        let (sink, success) =
+            execute_storage(sstore_program(&[1], &[opcode::STOP]), gas_limit, 0, false);
+        assert!(!success, "SSTORE {stage} rejection");
+        let component = last_storage_component(&sink, opcode::SSTORE);
+        assert_eq!(
+            component["error"],
+            json!({"kind": "storage_state", "reason": "instruction_halted"}),
+            "{stage}",
+        );
+        assert!(component.get("model_input").is_none(), "{stage}");
+    }
+}
+
+#[test]
+fn storage_stack_feature_error_schema_is_exact() {
+    for valid in [
+        json!({
+            "kind": "opcode_feature_error",
+            "opcode": opcode::SLOAD,
+            "interpreter_raw_gas": 0,
+            "error": {"kind": "stack_underflow", "feature": "storage_key"},
+        }),
+        json!({
+            "kind": "opcode_feature_error",
+            "opcode": opcode::SSTORE,
+            "interpreter_raw_gas": 0,
+            "error": {"kind": "stack_underflow", "feature": "new_storage_value"},
+        }),
+    ] {
+        let roundtrip: OperationComponent =
+            serde_json::from_value(valid.clone()).expect("valid storage stack error");
+        assert_eq!(serde_json::to_value(roundtrip).unwrap(), valid);
+    }
+
+    for wrong_feature in ["new_storage_value", "raw_gas"] {
+        let malformed = json!({
+            "kind": "opcode_feature_error",
+            "opcode": opcode::SLOAD,
+            "interpreter_raw_gas": 0,
+            "error": {"kind": "stack_underflow", "feature": wrong_feature},
+        });
+        assert!(serde_json::from_value::<OperationComponent>(malformed).is_err());
+    }
+
+    let malformed = json!({
+        "kind": "opcode_feature_error",
+        "opcode": opcode::SLOAD,
+        "interpreter_raw_gas": 0,
+        "error": {"kind": "storage_state", "reason": "dirty_noop"},
+    });
+    assert!(serde_json::from_value::<OperationComponent>(malformed).is_err());
+}
+
+#[test]
+fn storage_model_input_schema_is_exact_and_rejects_dirty_cold() {
+    for valid in [
+        json!({
+            "kind": "opcode",
+            "opcode": opcode::SLOAD,
+            "pricing_basis": "raw_gas_slope",
+            "interpreter_raw_gas": 2100,
+            "model_input": {"kind": "storage_load", "access": "cold"},
+            "spawned": false,
+            "dispatch_status": "not_applicable",
+        }),
+        json!({
+            "kind": "opcode",
+            "opcode": opcode::SSTORE,
+            "pricing_basis": "raw_gas_slope",
+            "interpreter_raw_gas": 100,
+            "model_input": {
+                "kind": "storage_store",
+                "access": "warm",
+                "branch": "dirty_rewrite",
+            },
+            "spawned": false,
+            "dispatch_status": "not_applicable",
+        }),
+    ] {
+        let roundtrip: OperationComponent =
+            serde_json::from_value(valid.clone()).expect("valid typed storage input");
+        assert_eq!(serde_json::to_value(roundtrip).unwrap(), valid);
+    }
+
+    for malformed in [
+        json!({
+            "kind": "opcode",
+            "opcode": opcode::SLOAD,
+            "pricing_basis": "raw_gas_slope",
+            "interpreter_raw_gas": 2100,
+            "model_input": {"kind": "static_raw_gas", "raw_gas": 2100},
+            "spawned": false,
+            "dispatch_status": "not_applicable",
+        }),
+        json!({
+            "kind": "opcode",
+            "opcode": opcode::SSTORE,
+            "pricing_basis": "raw_gas_slope",
+            "interpreter_raw_gas": 2200,
+            "model_input": {
+                "kind": "storage_store",
+                "access": "cold",
+                "branch": "dirty_rewrite",
+            },
+            "spawned": false,
+            "dispatch_status": "not_applicable",
+        }),
+        json!({
+            "kind": "opcode",
+            "opcode": opcode::SSTORE,
+            "pricing_basis": "raw_gas_slope",
+            "interpreter_raw_gas": 2200,
+            "model_input": {
+                "kind": "storage_store",
+                "access": "cold",
+                "branch": "restore_original",
+            },
+            "spawned": false,
+            "dispatch_status": "not_applicable",
+        }),
+    ] {
+        assert!(
+            serde_json::from_value::<OperationComponent>(malformed).is_err(),
+            "invalid typed storage input must fail closed",
+        );
+    }
 }
 
 #[test]

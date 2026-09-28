@@ -1,7 +1,7 @@
 //! REVM inspector-backed operation collection.
 
 use alethia_reth_evm::alloy::TaikoEvmContext;
-use alloy_primitives::Address;
+use alloy_primitives::{Address, U256};
 use reth_revm::{
     Database, Inspector,
     bytecode::OpCode,
@@ -11,7 +11,7 @@ use reth_revm::{
         CallInputs, CallOutcome, CreateInputs, CreateOutcome, FrameInput, Interpreter,
         InterpreterAction,
         interpreter::EthInterpreter,
-        interpreter_types::{Jumps, LoopControl},
+        interpreter_types::{InputsTr, Jumps, LoopControl},
     },
 };
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
@@ -68,7 +68,41 @@ pub enum OpcodeModelInput {
         memory_evm_gas_delta: u64,
         memory_4k_boundary_event: u64,
     },
+    StorageLoad {
+        access: StorageAccess,
+    },
+    StorageStore {
+        access: StorageAccess,
+        branch: StorageStoreBranch,
+    },
     Invalid,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StorageAccess {
+    Cold,
+    Warm,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StorageStoreBranch {
+    Noop,
+    Set,
+    Clear,
+    Reset,
+    DirtyRewrite,
+    RestoreOriginal,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StorageStateError {
+    InstructionHalted,
+    DirtyNoop,
+    DirtyCold,
+    MissingPostState,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -76,6 +110,7 @@ pub enum OpcodeModelInput {
 pub enum OpcodeFeatureError {
     StackUnderflow { feature: String },
     ValueOutOfRange { feature: String },
+    StorageState { reason: StorageStateError },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -195,6 +230,30 @@ fn validate_opcode_feature_error(
     error: &OpcodeFeatureError,
 ) -> Result<(), &'static str> {
     let feature = match error {
+        OpcodeFeatureError::StorageState { reason } => {
+            return if matches!(
+                (opcode, reason),
+                (0x54, StorageStateError::InstructionHalted) | (0x55, _)
+            ) {
+                Ok(())
+            } else {
+                Err("storage feature error is incompatible with the opcode")
+            };
+        }
+        OpcodeFeatureError::StackUnderflow { feature } if opcode == 0x54 => {
+            return if feature == "storage_key" {
+                Ok(())
+            } else {
+                Err("SLOAD feature error names the wrong feature")
+            };
+        }
+        OpcodeFeatureError::StackUnderflow { feature } if opcode == 0x55 => {
+            return if matches!(feature.as_str(), "storage_key" | "new_storage_value") {
+                Ok(())
+            } else {
+                Err("SSTORE feature error names the wrong feature")
+            };
+        }
         OpcodeFeatureError::StackUnderflow { feature }
         | OpcodeFeatureError::ValueOutOfRange { feature } => feature.as_str(),
     };
@@ -258,6 +317,18 @@ fn validate_opcode_component(
         ),
         0x20 => matches!(model_input, OpcodeModelInput::Keccak { .. }),
         0x51..=0x53 => matches!(model_input, OpcodeModelInput::MemoryAccess { .. }),
+        0x54 => matches!(model_input, OpcodeModelInput::StorageLoad { .. }),
+        0x55 => matches!(
+            model_input,
+            OpcodeModelInput::StorageStore { access, branch }
+                if !matches!(
+                    (access, branch),
+                    (
+                        StorageAccess::Cold,
+                        StorageStoreBranch::DirtyRewrite | StorageStoreBranch::RestoreOriginal
+                    )
+                )
+        ),
         0x5e => matches!(model_input, OpcodeModelInput::MemoryCopy { .. }),
         _ if OpCode::info_by_op(opcode).is_none() => {
             matches!(model_input, OpcodeModelInput::Invalid)
@@ -505,13 +576,26 @@ enum PendingOpcodeModelInput {
     Keccak { input_length: u64 },
     MemoryAccess,
     MemoryCopy { copy_words: u64 },
+    StorageLoad(PendingStorageInput),
+    StorageStore(PendingStorageInput),
     Invalid,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct PendingStorageInput {
+    target: Address,
+    key: U256,
+    access: StorageAccess,
+    original: Option<U256>,
+    current: Option<U256>,
+    new: Option<U256>,
+}
+
 impl PendingOpcodeModelInput {
-    fn capture(
+    fn capture<DB: Database>(
         interp: &Interpreter<EthInterpreter>,
         opcode: u8,
+        context: &TaikoEvmContext<DB>,
     ) -> Result<Self, OpcodeFeatureError> {
         let stack_value = |index, feature: &'static str| {
             interp
@@ -539,6 +623,14 @@ impl PendingOpcodeModelInput {
                 input_length: stack_u64(1, "input_length")?,
             }),
             0x51..=0x53 => Ok(Self::MemoryAccess),
+            0x54 => Ok(Self::StorageLoad(capture_storage_input(
+                interp, context, None,
+            )?)),
+            0x55 => Ok(Self::StorageStore(capture_storage_input(
+                interp,
+                context,
+                Some(1),
+            )?)),
             0x5e => Ok(Self::MemoryCopy {
                 copy_words: stack_u64(2, "copy_words")?.div_ceil(32),
             }),
@@ -547,13 +639,14 @@ impl PendingOpcodeModelInput {
         }
     }
 
-    fn finish(
+    fn finish<DB: Database>(
         self,
         interpreter_raw_gas: u64,
         before_memory_words: usize,
         before_memory_expansion_cost: u64,
         interp: &Interpreter<EthInterpreter>,
-    ) -> OpcodeModelInput {
+        context: &TaikoEvmContext<DB>,
+    ) -> Result<OpcodeModelInput, StorageStateError> {
         let after_memory_words = interp.memory.len().div_ceil(32);
         let memory_grew = after_memory_words > before_memory_words;
         let memory_growth_event = u64::from(memory_grew);
@@ -568,7 +661,7 @@ impl PendingOpcodeModelInput {
         };
         let memory_4k_boundary_event =
             u64::from(extra_4k_pages(after_memory_words) > extra_4k_pages(before_memory_words));
-        match self {
+        Ok(match self {
             Self::StaticRawGas => OpcodeModelInput::StaticRawGas {
                 raw_gas: interpreter_raw_gas,
             },
@@ -594,9 +687,145 @@ impl PendingOpcodeModelInput {
                 memory_evm_gas_delta,
                 memory_4k_boundary_event,
             },
+            Self::StorageLoad(storage) => finish_storage_load(storage, context)?,
+            Self::StorageStore(storage) => finish_storage_store(storage, context)?,
             Self::Invalid => OpcodeModelInput::Invalid,
-        }
+        })
     }
+}
+
+fn capture_storage_input<DB: Database>(
+    interp: &Interpreter<EthInterpreter>,
+    context: &TaikoEvmContext<DB>,
+    new_stack_index: Option<usize>,
+) -> Result<PendingStorageInput, OpcodeFeatureError> {
+    let key = interp
+        .stack
+        .peek(0)
+        .map_err(|_| OpcodeFeatureError::StackUnderflow {
+            feature: "storage_key".to_string(),
+        })?;
+    let new = new_stack_index
+        .map(|index| {
+            interp
+                .stack
+                .peek(index)
+                .map_err(|_| OpcodeFeatureError::StackUnderflow {
+                    feature: "new_storage_value".to_string(),
+                })
+        })
+        .transpose()?;
+    let target = interp.input.target_address();
+    let journal = &context.journaled_state.inner;
+    let access_list_warm = journal.warm_addresses.is_storage_warm(&target, &key);
+    let cached = journal
+        .state
+        .get(&target)
+        .and_then(|account| account.storage.get(&key));
+    let (access, original, current) = cached.map_or_else(
+        || {
+            (
+                if access_list_warm {
+                    StorageAccess::Warm
+                } else {
+                    StorageAccess::Cold
+                },
+                None,
+                None,
+            )
+        },
+        |slot| {
+            let stale = slot.is_cold_transaction_id(journal.transaction_id);
+            (
+                if stale && !access_list_warm {
+                    StorageAccess::Cold
+                } else {
+                    StorageAccess::Warm
+                },
+                Some(if stale {
+                    slot.present_value()
+                } else {
+                    slot.original_value()
+                }),
+                Some(slot.present_value()),
+            )
+        },
+    );
+    Ok(PendingStorageInput {
+        target,
+        key,
+        access,
+        original,
+        current,
+        new,
+    })
+}
+
+fn finish_storage_load<DB: Database>(
+    storage: PendingStorageInput,
+    context: &TaikoEvmContext<DB>,
+) -> Result<OpcodeModelInput, StorageStateError> {
+    match (storage.original, storage.current) {
+        (Some(_), Some(_)) => {}
+        (None, None)
+            if context
+                .journaled_state
+                .inner
+                .state
+                .get(&storage.target)
+                .and_then(|account| account.storage.get(&storage.key))
+                .is_some() => {}
+        _ => return Err(StorageStateError::MissingPostState),
+    }
+    Ok(OpcodeModelInput::StorageLoad {
+        access: storage.access,
+    })
+}
+
+fn finish_storage_store<DB: Database>(
+    storage: PendingStorageInput,
+    context: &TaikoEvmContext<DB>,
+) -> Result<OpcodeModelInput, StorageStateError> {
+    let (original, current) = match (storage.original, storage.current) {
+        (Some(original), Some(current)) => (original, current),
+        (None, None) => {
+            let slot = context
+                .journaled_state
+                .inner
+                .state
+                .get(&storage.target)
+                .and_then(|account| account.storage.get(&storage.key))
+                .ok_or(StorageStateError::MissingPostState)?;
+            (slot.original_value(), slot.original_value())
+        }
+        _ => return Err(StorageStateError::MissingPostState),
+    };
+    let new = storage.new.ok_or(StorageStateError::MissingPostState)?;
+    let branch = if current != original {
+        if new == current {
+            return Err(StorageStateError::DirtyNoop);
+        }
+        if storage.access == StorageAccess::Cold {
+            return Err(StorageStateError::DirtyCold);
+        }
+        if new == original {
+            StorageStoreBranch::RestoreOriginal
+        } else {
+            StorageStoreBranch::DirtyRewrite
+        }
+    } else if new == current {
+        StorageStoreBranch::Noop
+    } else if current.is_zero() {
+        StorageStoreBranch::Set
+    } else if new.is_zero() {
+        StorageStoreBranch::Clear
+    } else {
+        StorageStoreBranch::Reset
+    };
+    Ok(OpcodeModelInput::StorageStore {
+        access: storage.access,
+        branch,
+    })
 }
 
 const fn extra_4k_pages(memory_words: usize) -> usize {
@@ -635,7 +864,7 @@ where
     ) {
         let depth = context.journal().depth();
         let opcode = interp.bytecode.opcode();
-        let model_input = PendingOpcodeModelInput::capture(interp, opcode);
+        let model_input = PendingOpcodeModelInput::capture(interp, opcode, context);
         self.pending_steps.insert(
             depth,
             StepSnapshot {
@@ -674,12 +903,35 @@ where
                 return;
             }
         };
-        let model_input = pending_model_input.finish(
+        if matches!(step.opcode, 0x54 | 0x55) && interp.bytecode.instruction_result().is_some() {
+            self.sink.lock().record_opcode_feature_error(
+                step.opcode,
+                depth,
+                interpreter_raw_gas,
+                OpcodeFeatureError::StorageState {
+                    reason: StorageStateError::InstructionHalted,
+                },
+            );
+            return;
+        }
+        let model_input = match pending_model_input.finish(
             interpreter_raw_gas,
             step.memory_words,
             step.memory_expansion_cost,
             interp,
-        );
+            context,
+        ) {
+            Ok(model_input) => model_input,
+            Err(reason) => {
+                self.sink.lock().record_opcode_feature_error(
+                    step.opcode,
+                    depth,
+                    interpreter_raw_gas,
+                    OpcodeFeatureError::StorageState { reason },
+                );
+                return;
+            }
+        };
         self.sink.lock().record_opcode(
             step.opcode,
             depth,

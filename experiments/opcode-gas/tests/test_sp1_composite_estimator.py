@@ -38,7 +38,14 @@ COVERAGE_SOURCE = (
     / "experiments"
     / "opcode-gas"
     / "manifests"
-    / "operation-coverage-v3.json"
+    / "operation-coverage-v4.json"
+)
+STATEFUL_SOURCE = (
+    ROOT
+    / "experiments"
+    / "opcode-gas"
+    / "derivations"
+    / "64065fa462311bdc1848e9d0"
 )
 
 
@@ -287,7 +294,7 @@ def _complete_trace(*operations):
         },
     ]
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "guest_input_sha256": guest_hash,
         "guest_input_bincode_length": 1234,
         "status": "complete",
@@ -344,6 +351,7 @@ class CompositeEstimatorTests(unittest.TestCase):
                 augmented_core_path=CORE_SOURCE,
                 operation_coverage_path=COVERAGE_SOURCE,
                 higher_layer_package=HIGHER_LAYER_SOURCE,
+                stateful_result_path=STATEFUL_SOURCE,
             )
 
     def test_strict_registry_loader_rejects_float_and_slot_drift(self):
@@ -378,6 +386,7 @@ class CompositeEstimatorTests(unittest.TestCase):
                 augmented_core_path=CORE_SOURCE,
                 operation_coverage_path=COVERAGE_SOURCE,
                 higher_layer_package=HIGHER_LAYER_SOURCE,
+                stateful_result_path=STATEFUL_SOURCE,
             )
 
         self.assertEqual(repeated, self.estimator)
@@ -390,7 +399,22 @@ class CompositeEstimatorTests(unittest.TestCase):
             self.estimator["source_artifacts"]["operation_coverage"]["file_sha256"],
             opcode_gas.sha256_file(COVERAGE_SOURCE),
         )
-        self.assertEqual(self.estimator["trace_schema"]["schema_version"], 2)
+        self.assertEqual(self.estimator["trace_schema"]["schema_version"], 3)
+        self.assertEqual(
+            self.estimator["source_artifacts"]["stateful_storage"]["result_id"],
+            "64065fa462311bdc1848e9d0",
+        )
+        self.assertEqual(
+            set(
+                self.estimator["source_artifacts"]["stateful_storage"][
+                    "file_sha256s"
+                ]
+            ),
+            opcode_gas._COMPOSITE_STATEFUL_RESULT_INVENTORY,
+        )
+        self.assertEqual(
+            self.estimator["storage_model"]["family"], "M_typed"
+        )
         self.assertEqual(
             self.estimator["artifact_sha256"],
             opcode_gas.sha256_bytes(
@@ -462,6 +486,160 @@ class CompositeEstimatorTests(unittest.TestCase):
         )
         self.assertEqual(report["validation_status"], "evaluated")
 
+    def test_storage_inputs_use_exact_typed_model_without_common_dispatch(self):
+        operations = [
+            _opcode(
+                0,
+                0x54,
+                {"kind": "storage_load", "access": "warm"},
+            ),
+            _opcode(
+                1,
+                0x54,
+                {"kind": "storage_load", "access": "cold"},
+            ),
+        ]
+        for index, branch in enumerate(
+            ("noop", "set", "clear", "reset", "dirty_rewrite", "restore_original"),
+            start=2,
+        ):
+            operations.append(
+                _opcode(
+                    index,
+                    0x55,
+                    {
+                        "kind": "storage_store",
+                        "access": "warm",
+                        "branch": branch,
+                    },
+                )
+            )
+        for index, branch in enumerate(
+            ("noop", "set", "clear", "reset"),
+            start=8,
+        ):
+            operations.append(
+                _opcode(
+                    index,
+                    0x55,
+                    {
+                        "kind": "storage_store",
+                        "access": "cold",
+                        "branch": branch,
+                    },
+                )
+            )
+        report = opcode_gas.estimate_composite_trace(
+            self.estimator, _complete_trace(*operations)
+        )
+        model = self.estimator["storage_model"]["parameters"]
+        with localcontext(opcode_gas._OPCODE_DECIMAL_CONTEXT):
+            expected = Decimal(model["sload_warm_body"])
+            expected += Decimal(model["sload_warm_body"]) + Decimal(
+                model["sload_cold_extra"]
+            )
+            for branch in (
+                "noop",
+                "set",
+                "clear",
+                "reset",
+                "dirty_rewrite",
+                "restore_original",
+            ):
+                expected += Decimal(model[f"sstore_branch:{branch}"])
+            for branch in ("noop", "set", "clear", "reset"):
+                expected += Decimal(model[f"sstore_branch:{branch}"]) + Decimal(
+                    model["sstore_cold_extra"]
+                )
+
+        self.assertEqual(report["gaps"], [])
+        self.assertEqual(
+            report["layer_contributions"]["operations"],
+            {"count": 12, "prover_gas": opcode_gas._decimal_text(expected)},
+        )
+        self.assertEqual(report["coverage"]["typed_feature"]["numerator"], 12)
+
+    def test_stateful_source_binds_every_terminal_file(self):
+        read_regular_file_bytes_once = opcode_gas._read_regular_file_bytes_once
+
+        def corrupt_manifest(path, *, label):
+            raw = read_regular_file_bytes_once(path, label=label)
+            if pathlib.Path(path).name == "campaign-manifest.json":
+                return raw + b"\n"
+            return raw
+
+        with mock.patch.object(
+            opcode_gas,
+            "_read_regular_file_bytes_once",
+            side_effect=corrupt_manifest,
+        ), mock.patch.object(
+            opcode_gas, "git_head", return_value="f" * 40
+        ), mock.patch.object(
+            opcode_gas, "git_worktree_status", return_value=""
+        ), mock.patch.object(
+            opcode_gas, "git_has_local_commit", return_value=True
+        ), self.assertRaisesRegex(ValueError, "campaign-manifest.json source file hash"):
+            opcode_gas.build_composite_estimator_artifact(
+                augmented_core_path=CORE_SOURCE,
+                operation_coverage_path=COVERAGE_SOURCE,
+                higher_layer_package=HIGHER_LAYER_SOURCE,
+                stateful_result_path=STATEFUL_SOURCE,
+            )
+
+    def test_storage_prediction_ignores_raw_gas_but_rejects_unmeasured_combinations(self):
+        warm = _opcode(
+            0,
+            0x54,
+            {"kind": "storage_load", "access": "warm"},
+        )
+        warm["component"]["interpreter_raw_gas"] = 100
+        changed = copy.deepcopy(warm)
+        changed["component"]["interpreter_raw_gas"] = 9_999_999
+        first = opcode_gas.estimate_composite_trace(
+            self.estimator, _complete_trace(warm)
+        )
+        second = opcode_gas.estimate_composite_trace(
+            self.estimator, _complete_trace(changed)
+        )
+        self.assertEqual(
+            first["layer_contributions"]["operations"],
+            second["layer_contributions"]["operations"],
+        )
+
+        cold_dirty = _opcode(
+            0,
+            0x55,
+            {
+                "kind": "storage_store",
+                "access": "cold",
+                "branch": "dirty_rewrite",
+            },
+        )
+        malformed = opcode_gas.estimate_composite_trace(
+            self.estimator, _complete_trace(cold_dirty)
+        )
+        self.assertEqual(
+            malformed["gaps"][0]["reason"],
+            "opcode_model_input_incompatible",
+        )
+
+        dirty_noop = _opcode(
+            0,
+            0x55,
+            {
+                "kind": "storage_store",
+                "access": "warm",
+                "branch": "dirty_noop",
+            },
+        )
+        uncalibrated = opcode_gas.estimate_composite_trace(
+            self.estimator, _complete_trace(dirty_noop)
+        )
+        self.assertEqual(
+            uncalibrated["gaps"][0]["reason"],
+            "opcode_model_input_incompatible",
+        )
+
     def test_resealed_semantic_policy_or_coverage_tamper_is_rejected(self):
         for mutate, expected in (
             (
@@ -481,6 +659,12 @@ class CompositeEstimatorTests(unittest.TestCase):
                     "native_value_transfer", "accepted"
                 ),
                 "fixed cost statuses",
+            ),
+            (
+                lambda artifact: artifact["storage_model"]["parameters"].__setitem__(
+                    "sstore_branch:noop", "4475"
+                ),
+                "storage model source digest",
             ),
         ):
             with self.subTest(expected=expected):
@@ -578,7 +762,7 @@ class CompositeEstimatorTests(unittest.TestCase):
 
     def test_unmeasured_execution_and_feature_errors_are_exact_gaps(self):
         unsupported = _opcode(
-            0, 0x55, {"kind": "static_raw_gas", "raw_gas": 100}
+            0, 0x31, {"kind": "static_raw_gas", "raw_gas": 100}
         )
         precompile = {
             "operation_id": 1,
@@ -771,6 +955,7 @@ class CompositeEstimatorTests(unittest.TestCase):
                     augmented_core_path=CORE_SOURCE,
                     operation_coverage_path=COVERAGE_SOURCE,
                     higher_layer_package=HIGHER_LAYER_SOURCE,
+                    stateful_result_path=STATEFUL_SOURCE,
                     out_root=out_root,
                     estimator_path_file=pointer,
                 )
@@ -783,6 +968,7 @@ class CompositeEstimatorTests(unittest.TestCase):
                         augmented_core_path=CORE_SOURCE,
                         operation_coverage_path=COVERAGE_SOURCE,
                         higher_layer_package=HIGHER_LAYER_SOURCE,
+                        stateful_result_path=STATEFUL_SOURCE,
                         out_root=out_root,
                         estimator_path_file=pointer,
                     )
@@ -795,6 +981,57 @@ class CompositeEstimatorTests(unittest.TestCase):
                     ValueError, "canonical JSON|artifact SHA256"
                 ):
                     opcode_gas.verify_composite_estimator(sealed)
+
+    def test_seal_rejects_source_and_handoff_overlap_before_writing(self):
+        stateful_before = {
+            path.name: opcode_gas.sha256_file(path)
+            for path in STATEFUL_SOURCE.iterdir()
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            cases = (
+                (
+                    "estimator root inside stateful source",
+                    STATEFUL_SOURCE,
+                    root / "pointer",
+                ),
+                (
+                    "handoff overwrites stateful source",
+                    root / "estimators-a",
+                    STATEFUL_SOURCE / "campaign-decisions.sha256",
+                ),
+                (
+                    "handoff inside estimator root",
+                    root / "estimators-b",
+                    root / "estimators-b" / "pointer",
+                ),
+            )
+            for label, out_root, pointer in cases:
+                with self.subTest(label=label), mock.patch.object(
+                    opcode_gas, "git_head", return_value="f" * 40
+                ), mock.patch.object(
+                    opcode_gas, "git_worktree_status", return_value=""
+                ), mock.patch.object(
+                    opcode_gas, "git_has_local_commit", return_value=True
+                ), self.assertRaisesRegex(ValueError, "overlaps"):
+                    opcode_gas.seal_composite_estimator(
+                        augmented_core_path=CORE_SOURCE,
+                        operation_coverage_path=COVERAGE_SOURCE,
+                        higher_layer_package=HIGHER_LAYER_SOURCE,
+                        stateful_result_path=STATEFUL_SOURCE,
+                        out_root=out_root,
+                        estimator_path_file=pointer,
+                    )
+
+            self.assertFalse((root / "estimators-a").exists())
+            self.assertFalse((root / "estimators-b").exists())
+        self.assertEqual(
+            stateful_before,
+            {
+                path.name: opcode_gas.sha256_file(path)
+                for path in STATEFUL_SOURCE.iterdir()
+            },
+        )
 
     def test_failed_path_handoff_rolls_back_new_estimator_directory(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -814,6 +1051,7 @@ class CompositeEstimatorTests(unittest.TestCase):
                     augmented_core_path=CORE_SOURCE,
                     operation_coverage_path=COVERAGE_SOURCE,
                     higher_layer_package=HIGHER_LAYER_SOURCE,
+                    stateful_result_path=STATEFUL_SOURCE,
                     out_root=out_root,
                     estimator_path_file=pathlib.Path(temporary) / "estimator-path",
                 )
@@ -849,6 +1087,7 @@ class CompositeEstimatorTests(unittest.TestCase):
                         augmented_core_path=CORE_SOURCE,
                         operation_coverage_path=COVERAGE_SOURCE,
                         higher_layer_package=HIGHER_LAYER_SOURCE,
+                        stateful_result_path=STATEFUL_SOURCE,
                         out_root=out_root,
                         estimator_path_file=pointer,
                     )
@@ -901,6 +1140,20 @@ class CompositeEstimatorTests(unittest.TestCase):
                     self.assertEqual(output.read_bytes(), b"preserve\n")
                 elif case == "estimator_child":
                     self.assertFalse(output.exists())
+
+    def test_trace_estimate_output_cannot_mutate_stateful_source(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            estimator_dir = pathlib.Path(temporary) / "estimator"
+            estimator_dir.mkdir()
+            output = STATEFUL_SOURCE / "unexpected-estimate.json"
+            self.assertFalse(output.exists())
+            with self.assertRaisesRegex(ValueError, "overlaps a sealed input"):
+                opcode_gas._composite_output_path(
+                    output,
+                    estimator_directory=estimator_dir,
+                    estimator=self.estimator,
+                )
+            self.assertFalse(output.exists())
 
     def test_trace_estimate_publishes_one_new_canonical_output(self):
         with tempfile.TemporaryDirectory() as temporary:

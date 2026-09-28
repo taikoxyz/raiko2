@@ -510,14 +510,47 @@ finding. Independent behavioral verification recomputed all nine typed parameter
 intercepts using exact rational arithmetic, checked all 564 pair joins, observed 376 host-native
 identity replays and zero SP1 executions, and confirmed that sealed-file hashes did not change.
 
+## Completed Milestone: Typed Storage Promotion Implementation
+
+The schema-3 operation trace now classifies completed storage execution from REVM journal state:
+
+- `SLOAD` records exact warm/cold access;
+- `SSTORE` records warm/cold access plus the frozen `noop`, `set`, `clear`, `reset`,
+  `dirty_rewrite`, or `restore_original` branch;
+- stale transaction IDs, access-list warming, nested CALL/DELEGATECALL storage owners, later frame
+  or transaction reverts, and outer Taiko zkGas-limit failures have live-inspector coverage;
+- malformed stacks, static-context rejection, stipend/dynamic-charge halts, missing post-state,
+  uncalibrated dirty no-ops, and impossible dirty+cold inputs fail closed as explicit feature gaps.
+
+The schema-2 review-only composite estimator now binds all nine files of sealed derivation
+`64065fa462311bdc1848e9d0`, imports only its exact `M_typed` vector, and applies the storage terms as
+absolute event costs without adding the core registry's common-dispatch term again. The historical
+opcode registry remains unchanged. A new `operation-coverage-v4.json` preserves V2 and V3
+byte-for-byte while refreshing current schema-3 trace-source provenance; the estimator overlay
+promotes only `opcode:0x54` and `opcode:0x55`, leaving the other 166 coverage rows unchanged.
+
+Pre-seal verification passed:
+
+- `cargo test -p raiko2-zkgas-trace`: 6 unit, 31 inspector, and 9 reconstruction tests;
+- complete opcode-gas Python suite: 581 passed, one opt-in skip, and 821 subtests;
+- release `guest-launcher` build and the real Rust-to-Python stateful admission round trip;
+- Rust formatting, Python byte-compilation, path hygiene, and diff checks;
+- independent adversarial review after fixing full sealed-source validation and publication/source
+  overlap guards;
+- independent behavioral recomputation of all nine parameters, all 12 valid typed predictions,
+  both invalid-input gaps, the exact coverage delta, and V2/V3/V4 provenance.
+
+No new estimator artifact has been sealed at this checkpoint. The production zkGas registry,
+runtime configuration, block limit, Boundless configuration, and final proposal-validation corpus
+remain untouched.
+
 ## Next Gate
 
-Write and independently review the separate typed-storage promotion design. It must add execution-time
-trace fields for SLOAD warmth and the SSTORE semantic branch without inferring them from final raw
-gas, and it must keep persistent dirty-state/trie events in their existing higher-layer ownership
-domain. Then build a new non-production composite estimator from derivation
-`64065fa462311bdc1848e9d0` and replay the two existing ad-hoc proposal fixtures exactly once without
-tuning from their results.
+Commit the independently reviewed implementation, then seal and exact-replay a new non-production
+composite estimator from a clean checkout. After that, recreate schema-3 traces for the two existing
+ad-hoc proposal fixtures and apply the sealed estimator exactly once without tuning from their
+results. If their immutable GuestInputs are unavailable, record that acquisition blocker and do not
+substitute a final-validation proposal.
 
 After that storage checkpoint, close LOG/EXTCODE, CALL-family wrappers, and direct precompiles in
 descending observed impact. Re-seal and replay the same diagnostics after each independently reviewed

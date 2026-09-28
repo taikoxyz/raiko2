@@ -17,9 +17,9 @@ from hierarchical_model import (
 )
 
 
-ESTIMATOR_SCHEMA_VERSION = 1
+ESTIMATOR_SCHEMA_VERSION = 2
 ESTIMATOR_PURPOSE = "sp1_composite_block_estimator"
-TRACE_SCHEMA_VERSION = 2
+TRACE_SCHEMA_VERSION = 3
 SP1_GAS_TRACE_CHUNK_THRESHOLD = 134_217_728
 SP1_GAS_TRACE_CHUNK_SLOTS = 2
 ESTIMATOR_FORMULA = (
@@ -68,12 +68,28 @@ SOURCE_CODE_PATHS = frozenset(
         "crates/zkgas-trace/src/transactions.rs",
         "crates/zkgas-trace/src/reconstruct.rs",
         "docs/plans/2026-09-26-zkgas-calibration-design.md",
+        "docs/plans/2026-09-29-zkgas-typed-storage-promotion-design.md",
     }
 )
 
 _DECIMAL_CONTEXT = Context(prec=80, rounding=ROUND_HALF_EVEN, traps=[])
 _FIXED_COST_KEYS = frozenset(FIXED_COST_STATUSES)
 _SPAWN_OPCODES = frozenset({0xF0, 0xF1, 0xF2, 0xF4, 0xF5, 0xFA})
+_STORAGE_OPCODES = frozenset({0x54, 0x55})
+_STORAGE_BRANCHES = (
+    "noop",
+    "set",
+    "clear",
+    "reset",
+    "dirty_rewrite",
+    "restore_original",
+)
+_STORAGE_MODEL_PARAMETER_ORDER = (
+    "sload_warm_body",
+    "sload_cold_extra",
+    *tuple(f"sstore_branch:{branch}" for branch in _STORAGE_BRANCHES),
+    "sstore_cold_extra",
+)
 _EXPECTED_ESTIMATOR_FIELDS = frozenset(
     {
         "schema_version",
@@ -88,6 +104,7 @@ _EXPECTED_ESTIMATOR_FIELDS = frozenset(
         "registry_parameter_basis",
         "trace_schema",
         "registry",
+        "storage_model",
         "execution_coverage",
         "ownership_policy",
         "fixed_costs",
@@ -299,6 +316,61 @@ def _validate_coverage(
             raise ValueError(f"composite estimator opcode coverage differs: {key}")
         model_id = registry.opcode_model_ids[opcode]
         if model_id is None:
+            if opcode in _STORAGE_OPCODES:
+                source = artifact["source_artifacts"]["stateful_storage"]
+                reference = row.get("artifact_ref")
+                evidence = row.get("source_evidence")
+                machine_evidence = [
+                    item
+                    for item in evidence
+                    if isinstance(item, Mapping)
+                    and item.get("kind") == "machine_trace_selector"
+                ] if isinstance(evidence, list) else []
+                stateful_evidence = [
+                    item
+                    for item in evidence
+                    if isinstance(item, Mapping)
+                    and item.get("kind") == "sealed_stateful_model"
+                ] if isinstance(evidence, list) else []
+                if (
+                    row.get("classification") != "structured_storage"
+                    or row.get("model_status") != "measured"
+                    or not isinstance(reference, Mapping)
+                    or set(reference)
+                    != {
+                        "path",
+                        "result_id",
+                        "result_identity_sha256",
+                        "model_family",
+                        "model_sha256",
+                    }
+                    or reference.get("path") != source.get("path")
+                    or reference.get("result_id") != source.get("result_id")
+                    or reference.get("result_identity_sha256")
+                    != source.get("result_identity_sha256")
+                    or reference.get("model_family") != "M_typed"
+                    or reference.get("model_sha256") != source.get("model_sha256")
+                    or len(machine_evidence) != 1
+                    or machine_evidence[0].get("path")
+                    != "crates/zkgas-trace/src/inspector.rs"
+                    or machine_evidence[0].get("sha256")
+                    != artifact["source_artifacts"]["source_code_sha256s"][
+                        "crates/zkgas-trace/src/inspector.rs"
+                    ]
+                    or len(stateful_evidence) != 1
+                    or stateful_evidence[0].get("result_id")
+                    != source.get("result_id")
+                    or stateful_evidence[0].get("result_identity_sha256")
+                    != source.get("result_identity_sha256")
+                    or stateful_evidence[0].get("model_family") != "M_typed"
+                    or stateful_evidence[0].get("model_sha256")
+                    != source.get("model_sha256")
+                    or "reason" in row
+                ):
+                    raise ValueError(
+                        f"composite estimator storage coverage differs: {key}"
+                    )
+                continue
             reason = row.get("reason")
             if (
                 row.get("classification") != "explicitly_unsupported"
@@ -359,6 +431,7 @@ def _validate_sources(sources: Any) -> None:
         "augmented_core",
         "operation_coverage",
         "corrected_higher_layer",
+        "stateful_storage",
         "source_code_sha256s",
     }:
         raise ValueError("composite estimator source artifacts differ")
@@ -404,6 +477,46 @@ def _validate_sources(sources: Any) -> None:
         or any(not _is_sha256(value) for value in higher["file_sha256s"].values())
     ):
         raise ValueError("composite estimator higher-layer source differs")
+    stateful = sources["stateful_storage"]
+    stateful_path = stateful.get("path") if isinstance(stateful, Mapping) else None
+    stateful_pure = PurePosixPath(stateful_path) if isinstance(stateful_path, str) else None
+    if (
+        not isinstance(stateful, Mapping)
+        or set(stateful)
+        != {
+            "path",
+            "result_id",
+            "result_identity_sha256",
+            "artifact_sha256",
+            "file_sha256s",
+            "model_sha256",
+        }
+        or stateful_pure is None
+        or stateful_pure.is_absolute()
+        or ".." in stateful_pure.parts
+        or str(stateful_pure) != stateful_path
+        or not isinstance(stateful.get("result_id"), str)
+        or len(stateful["result_id"]) != 24
+        or not _is_sha256(stateful.get("result_identity_sha256"))
+        or stateful["result_identity_sha256"][:24] != stateful["result_id"]
+        or not _is_sha256(stateful.get("artifact_sha256"))
+        or not _is_sha256(stateful.get("model_sha256"))
+        or not isinstance(stateful.get("file_sha256s"), Mapping)
+        or set(stateful["file_sha256s"])
+        != {
+            "calibration-identity.json",
+            "campaign-decisions.json",
+            "campaign-decisions.sha256",
+            "campaign-identity.json",
+            "campaign-manifest.json",
+            "model-report.json",
+            "result.json",
+            "rows.jsonl",
+            "source-registry.json",
+        }
+        or any(not _is_sha256(value) for value in stateful["file_sha256s"].values())
+    ):
+        raise ValueError("composite estimator stateful-storage source differs")
     source_code = sources["source_code_sha256s"]
     if (
         not isinstance(source_code, Mapping)
@@ -533,6 +646,54 @@ def _validate_ownership_policy(policy: Any) -> None:
             raise ValueError("composite estimator side-effect ownership differs")
 
 
+def _validate_storage_model(model: Any) -> dict[str, Decimal]:
+    if (
+        not isinstance(model, Mapping)
+        or set(model) != {"family", "parameter_order", "parameters", "ownership"}
+        or model.get("family") != "M_typed"
+        or model.get("parameter_order") != list(_STORAGE_MODEL_PARAMETER_ORDER)
+        or not isinstance(model.get("parameters"), Mapping)
+        or set(model["parameters"]) != set(_STORAGE_MODEL_PARAMETER_ORDER)
+        or model.get("ownership")
+        != {
+            "measured": (
+                "stateful REVM execution cost including storage execution, journal "
+                "updates, and result-state construction"
+            ),
+            "excluded": [
+                "witness materialization",
+                "persistent dirty-state commit",
+                "trie hashing",
+                "final state root",
+            ],
+        }
+    ):
+        raise ValueError("composite estimator storage model differs")
+    parameters = {
+        key: _canonical_decimal(
+            value, label=f"composite storage parameter {key}"
+        )
+        for key, value in model["parameters"].items()
+    }
+    if any(
+        parameters[key] <= 0
+        for key in _STORAGE_MODEL_PARAMETER_ORDER
+        if key not in {"sload_cold_extra", "sstore_cold_extra"}
+    ):
+        raise ValueError("composite estimator storage body parameter must be positive")
+    if (
+        parameters["sload_warm_body"] + parameters["sload_cold_extra"] <= 0
+        or any(
+            parameters[f"sstore_branch:{branch}"]
+            + parameters["sstore_cold_extra"]
+            <= 0
+            for branch in _STORAGE_BRANCHES
+        )
+    ):
+        raise ValueError("composite estimator storage prediction must be positive")
+    return parameters
+
+
 def validate_estimator_artifact(artifact: Mapping[str, Any]) -> OpcodeRegistry:
     """Validate every semantic field used to evaluate a sealed artifact."""
     if not isinstance(artifact, Mapping):
@@ -578,6 +739,11 @@ def validate_estimator_artifact(artifact: Mapping[str, Any]) -> OpcodeRegistry:
     _validate_sources(artifact.get("source_artifacts"))
     _validate_ownership_policy(artifact.get("ownership_policy"))
     registry = load_registry_payload(artifact.get("registry"))
+    _validate_storage_model(artifact.get("storage_model"))
+    if _sha256(_canonical_json(artifact["storage_model"])) != artifact[
+        "source_artifacts"
+    ]["stateful_storage"]["model_sha256"]:
+        raise ValueError("composite estimator storage model source digest differs")
     _validate_coverage(artifact, registry)
     if trace_schema["source_sha256"] != artifact["source_artifacts"][
         "source_code_sha256s"
@@ -653,6 +819,41 @@ def _opcode_event(opcode: int, component: Mapping[str, Any]) -> OpcodeEvent:
     if kind == "invalid" and set(model_input) == {"kind"}:
         return OpcodeEvent(**common)
     raise ValueError("opcode model input kind is unsupported")
+
+
+def _storage_cost(
+    opcode: int,
+    component: Mapping[str, Any],
+    parameters: Mapping[str, Decimal],
+) -> Decimal:
+    model_input = component.get("model_input")
+    if not isinstance(model_input, Mapping):
+        raise ValueError("storage opcode model input is missing")
+    access = model_input.get("access")
+    if access not in {"warm", "cold"}:
+        raise ValueError("storage access class is invalid")
+    if opcode == 0x54:
+        if set(model_input) != {"kind", "access"} or model_input.get("kind") != "storage_load":
+            raise ValueError("SLOAD model input fields differ")
+        cost = parameters["sload_warm_body"]
+        if access == "cold":
+            cost += parameters["sload_cold_extra"]
+        return cost
+    if opcode == 0x55:
+        if (
+            set(model_input) != {"kind", "access", "branch"}
+            or model_input.get("kind") != "storage_store"
+            or model_input.get("branch") not in _STORAGE_BRANCHES
+        ):
+            raise ValueError("SSTORE model input fields differ")
+        branch = model_input["branch"]
+        if access == "cold" and branch in {"dirty_rewrite", "restore_original"}:
+            raise ValueError("dirty SSTORE branch must be warm")
+        cost = parameters[f"sstore_branch:{branch}"]
+        if access == "cold":
+            cost += parameters["sstore_cold_extra"]
+        return cost
+    raise ValueError("storage model received a non-storage opcode")
 
 
 def _gap(
@@ -849,6 +1050,7 @@ def _estimate_trace(
     sp1_report: Mapping[str, Any] | None,
 ) -> Mapping[str, Any]:
     registry = validate_estimator_artifact(estimator)
+    storage_parameters = _validate_storage_model(estimator["storage_model"])
     _validate_trace_header(trace, estimator)
     gaps: list[dict[str, Any]] = []
     if trace.get("status") != "complete":
@@ -1207,6 +1409,28 @@ def _estimate_trace(
                     operation_id=operation_id,
                     execution_key=key,
                 )
+                continue
+            if coverage.get("classification") == "structured_storage":
+                total_typed_feature_count += 1
+                try:
+                    predicted = _storage_cost(
+                        opcode, component, storage_parameters
+                    )
+                except (TypeError, ValueError) as error:
+                    _gap(
+                        gaps,
+                        reason="opcode_model_input_incompatible",
+                        layer="operation",
+                        block_index=block_index,
+                        operation_id=operation_id,
+                        execution_key=key,
+                        detail=str(error),
+                    )
+                    continue
+                operation_cost += predicted
+                measured_operation_count += 1
+                measured_raw_gas += Decimal(raw_gas)
+                measured_typed_feature_count += 1
                 continue
             if coverage.get("classification") == "explicitly_unsupported":
                 _gap(

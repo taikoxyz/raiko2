@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import pathlib
+import re
 import shutil
 import statistics
 import stat
@@ -6203,11 +6204,48 @@ _HIGHER_LAYER_OPERATION_COVERAGE_REF = {
     "file_sha256": "75fec3c4307c59539cc6180e6511dd7fc1111197746c6b0abd9a872902c665a3",
 }
 _COMPOSITE_OPERATION_COVERAGE_REF = {
-    "path": "experiments/opcode-gas/manifests/operation-coverage-v3.json",
+    "path": "experiments/opcode-gas/manifests/operation-coverage-v4.json",
     "artifact_sha256": (
-        "fbe97920148965d065f5d297194b220b70b866f25136cf217e081632d3003520"
+        "2383d9788302f8447522abdcdc99a1f6490cc2b910c376ef9b4e265cc1c978be"
     ),
-    "file_sha256": "be5cd1621be3502a21536ea6925629c0a7ab417a1c3f4301ab5c82f5edf7c256",
+    "file_sha256": "941170c66baa285c1019592e9e5a215c3461695e8b548f0c5d810ebce06cf7cf",
+}
+_COMPOSITE_STATEFUL_STORAGE_REF = {
+    "path": "experiments/opcode-gas/derivations/64065fa462311bdc1848e9d0",
+    "result_id": "64065fa462311bdc1848e9d0",
+    "result_identity_sha256": (
+        "64065fa462311bdc1848e9d0071930dacb4f3aa78d52d9e1fe7e5bb4e9ef4a90"
+    ),
+    "artifact_sha256": (
+        "185dedb58925304433a0e591016d049abf2bf23aa6807e2165a49e5880ceb953"
+    ),
+    "file_sha256s": {
+        "calibration-identity.json": (
+            "33cdc777c7fe5348bd87f3a3e2f8c5d2a9cbbe3827963e9bf7ea578f437101ac"
+        ),
+        "campaign-decisions.json": (
+            "498b201c5d420b40fd9f2b51a7f5e54887d7f40286d7531ff5a33ad2f02b65d8"
+        ),
+        "campaign-decisions.sha256": (
+            "e18aafbb6ad83f9c397f1caa14ddc3a146fad401a96bf0bfc612267f08801369"
+        ),
+        "campaign-identity.json": (
+            "bcdea847cfdec257f92fec76cd0be327a8e49275e794ff8c4f50864b50b3118a"
+        ),
+        "campaign-manifest.json": (
+            "dffd6fed4de3b45968e74000e3005c6840b1cca5e7a8bb1b1440325a20842422"
+        ),
+        "result.json": "dde37295a7c34bb7bb4621a4e30e3b989352fa30060b1b17c69c73a1b59b493b",
+        "model-report.json": (
+            "124676b34172bd5715b73107eecc4174c9fb99310298143fe58ce420afeabf89"
+        ),
+        "rows.jsonl": (
+            "f8a3977df12e461426dc48daeaa974d830e3e86e1ed9404e54a7d41856e9bd34"
+        ),
+        "source-registry.json": (
+            "8bfcef84bf5b42a643bd98bcb7dd9a7a8122e0ce1f8a2a4ed6f18b082f16693e"
+        ),
+    },
 }
 _HIGHER_LAYER_AUGMENTED_CORE_REF = {
     "path": _OPERATION_AUGMENTED_CORE_REF,
@@ -24024,7 +24062,217 @@ _COMPOSITE_SOURCE_PATHS = (
     "crates/zkgas-trace/src/transactions.rs",
     "crates/zkgas-trace/src/reconstruct.rs",
     "docs/plans/2026-09-26-zkgas-calibration-design.md",
+    "docs/plans/2026-09-29-zkgas-typed-storage-promotion-design.md",
 )
+
+_COMPOSITE_STATEFUL_RESULT_INVENTORY = {
+    "result.json",
+    "campaign-manifest.json",
+    "calibration-identity.json",
+    "campaign-identity.json",
+    "rows.jsonl",
+    "campaign-decisions.json",
+    "campaign-decisions.sha256",
+    "source-registry.json",
+    "model-report.json",
+}
+
+_COMPOSITE_STORAGE_PARAMETER_ORDER = (
+    "sload_warm_body",
+    "sload_cold_extra",
+    "sstore_branch:noop",
+    "sstore_branch:set",
+    "sstore_branch:clear",
+    "sstore_branch:reset",
+    "sstore_branch:dirty_rewrite",
+    "sstore_branch:restore_original",
+    "sstore_cold_extra",
+)
+
+
+def _load_composite_stateful_storage(
+    directory: pathlib.Path,
+) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
+    """Load the exact selected storage vector without replaying or refitting it."""
+    directory = pathlib.Path(directory)
+    root = REPO_ROOT.resolve(strict=True)
+    resolved = directory.resolve(strict=True)
+    try:
+        relative = resolved.relative_to(root).as_posix()
+    except ValueError as error:
+        raise ValueError("composite stateful result must be in the repository") from error
+    if (
+        directory.is_symlink()
+        or not directory.is_dir()
+        or directory.absolute() != resolved
+        or relative != _COMPOSITE_STATEFUL_STORAGE_REF["path"]
+        or {entry.name for entry in directory.iterdir()}
+        != _COMPOSITE_STATEFUL_RESULT_INVENTORY
+    ):
+        raise ValueError("composite stateful result path or inventory differs")
+
+    documents = {}
+    for name, expected_sha256 in _COMPOSITE_STATEFUL_STORAGE_REF[
+        "file_sha256s"
+    ].items():
+        path = directory / name
+        if path.is_symlink() or not path.is_file() or path.resolve().parent != resolved:
+            raise ValueError("composite stateful result file inventory differs")
+        if name in {"result.json", "model-report.json"}:
+            documents[name] = _read_canonical_json_mapping_once(
+                path,
+                label=f"composite stateful {name}",
+                expected_sha256=expected_sha256,
+            )
+            continue
+        raw = _read_regular_file_bytes_once(
+            path, label=f"composite stateful {name}"
+        )
+        if sha256_bytes(raw) != expected_sha256:
+            raise ValueError(f"composite stateful {name} source file hash differs")
+
+    result = documents["result.json"]
+    model_report = documents["model-report.json"]
+    _validate_content_addressed_artifact(result, label="composite stateful result")
+    if (
+        result.get("schema_version") != 1
+        or result.get("purpose") != "stateful_opcode_calibration_result"
+        or result.get("status") != "sealed"
+        or result.get("result_id")
+        != _COMPOSITE_STATEFUL_STORAGE_REF["result_id"]
+        or result.get("result_identity_sha256")
+        != _COMPOSITE_STATEFUL_STORAGE_REF["result_identity_sha256"]
+        or result.get("artifact_sha256")
+        != _COMPOSITE_STATEFUL_STORAGE_REF["artifact_sha256"]
+        or result.get("candidate_eligible") is not False
+        or result.get("proposal_validated") is not False
+        or result.get("production_registry_modified") is not False
+        or result.get("output_hashes", {}).get("model_report_file_sha256")
+        != _COMPOSITE_STATEFUL_STORAGE_REF["file_sha256s"]["model-report.json"]
+    ):
+        raise ValueError("composite stateful result identity differs")
+    ownership = result.get("ownership")
+    selected = model_report.get("selection")
+    reports = model_report.get("model_reports")
+    typed = reports.get("M_typed") if isinstance(reports, Mapping) else None
+    fit = model_report.get("frozen_fit_models", {}).get("M_typed")
+    if (
+        model_report.get("schema_version") != 1
+        or model_report.get("purpose") != "stateful_opcode_model_comparison"
+        or model_report.get("candidate_eligible") is not False
+        or selected
+        != {
+            "order": ["M_fixed", "M_access", "M_typed"],
+            "selected_model": "M_typed",
+            "status": "selected",
+        }
+        or not isinstance(typed, Mapping)
+        or typed.get("eligible") is not True
+        or typed.get("diagnostic_only") is not False
+        or typed.get("rejection_reasons") != []
+        or not isinstance(fit, Mapping)
+        or typed.get("parameter_order") != list(_COMPOSITE_STORAGE_PARAMETER_ORDER)
+        or fit.get("parameter_order") != list(_COMPOSITE_STORAGE_PARAMETER_ORDER)
+        or typed.get("parameters_exact") != fit.get("parameters_exact")
+        or ownership
+        != {
+            "measured": (
+                "stateful REVM execution cost including storage execution, journal "
+                "updates, and result-state construction"
+            ),
+            "excluded": [
+                "witness materialization",
+                "persistent dirty-state commit",
+                "trie hashing",
+                "final state root",
+            ],
+        }
+    ):
+        raise ValueError("composite stateful selected model differs")
+
+    exact_parameters = typed.get("parameters_exact")
+    if (
+        not isinstance(exact_parameters, Mapping)
+        or set(exact_parameters) != set(_COMPOSITE_STORAGE_PARAMETER_ORDER)
+    ):
+        raise ValueError("composite stateful parameter inventory differs")
+    parameters = {}
+    for key in _COMPOSITE_STORAGE_PARAMETER_ORDER:
+        payload = exact_parameters[key]
+        if (
+            not isinstance(payload, Mapping)
+            or set(payload) != {"decimal", "denominator", "numerator"}
+            or not isinstance(payload.get("denominator"), str)
+            or not payload["denominator"].isdigit()
+            or int(payload["denominator"]) <= 0
+            or not isinstance(payload.get("numerator"), str)
+            or re.fullmatch(r"-?[0-9]+", payload["numerator"]) is None
+        ):
+            raise ValueError("composite stateful exact parameter differs")
+        _canonical_artifact_decimal(
+            payload.get("decimal"), label=f"composite stateful parameter {key}"
+        )
+        parameters[key] = payload["decimal"]
+
+    model = {
+        "family": "M_typed",
+        "parameter_order": list(_COMPOSITE_STORAGE_PARAMETER_ORDER),
+        "parameters": parameters,
+        "ownership": json.loads(json.dumps(ownership)),
+    }
+    source = {
+        "path": relative,
+        "result_id": result["result_id"],
+        "result_identity_sha256": result["result_identity_sha256"],
+        "artifact_sha256": result["artifact_sha256"],
+        "file_sha256s": dict(_COMPOSITE_STATEFUL_STORAGE_REF["file_sha256s"]),
+        "model_sha256": sha256_bytes(canonical_json(model)),
+    }
+    return model, source
+
+
+def _promote_composite_storage_coverage(
+    rows: Sequence[Mapping[str, Any]],
+    stateful_source: Mapping[str, Any],
+    *,
+    inspector_sha256: str,
+) -> list[Mapping[str, Any]]:
+    promoted = json.loads(json.dumps(rows))
+    for row in promoted:
+        if row.get("key") not in {"opcode:0x54", "opcode:0x55"}:
+            continue
+        row["classification"] = "structured_storage"
+        row["model_status"] = "measured"
+        row.pop("reason", None)
+        row["artifact_ref"] = {
+            "path": stateful_source["path"],
+            "result_id": stateful_source["result_id"],
+            "result_identity_sha256": stateful_source[
+                "result_identity_sha256"
+            ],
+            "model_family": "M_typed",
+            "model_sha256": stateful_source["model_sha256"],
+        }
+        row["source_evidence"] = [
+            evidence
+            for evidence in row.get("source_evidence", [])
+            if evidence.get("kind") != "sealed_registry_unsupported"
+        ]
+        for evidence in row["source_evidence"]:
+            if evidence.get("kind") == "machine_trace_selector":
+                evidence["sha256"] = inspector_sha256
+        row["source_evidence"].append(
+            {
+                "kind": "sealed_stateful_model",
+                "result_id": stateful_source["result_id"],
+                "result_identity_sha256": stateful_source[
+                    "result_identity_sha256"
+                ],
+                "model_family": "M_typed",
+                "model_sha256": stateful_source["model_sha256"],
+            }
+        )
+    return promoted
 
 
 def load_composite_registry(
@@ -24123,6 +24371,7 @@ def build_composite_estimator_artifact(
     augmented_core_path: pathlib.Path,
     operation_coverage_path: pathlib.Path,
     higher_layer_package: pathlib.Path,
+    stateful_result_path: pathlib.Path,
 ) -> Mapping[str, Any]:
     """Build the deterministic coverage-qualified SP1 composite estimator."""
     assert_generated_paths_only(git_worktree_status())
@@ -24162,6 +24411,9 @@ def build_composite_estimator_artifact(
     )
     load_composite_registry(core, coverage)
     corrected = build_corrected_higher_layer_projection(higher_layer_package)
+    storage_model, stateful_source = _load_composite_stateful_storage(
+        stateful_result_path
+    )
 
     package = pathlib.Path(higher_layer_package).resolve(strict=True)
     root = REPO_ROOT.resolve(strict=True)
@@ -24213,8 +24465,13 @@ def build_composite_estimator_artifact(
             ],
         },
         "registry": json.loads(json.dumps(core["registry"])),
-        "execution_coverage": json.loads(
-            json.dumps(coverage["execution_coverage"])
+        "storage_model": storage_model,
+        "execution_coverage": _promote_composite_storage_coverage(
+            coverage["execution_coverage"],
+            stateful_source,
+            inspector_sha256=source_sha256s[
+                "crates/zkgas-trace/src/inspector.rs"
+            ],
         ),
         "ownership_policy": {
             "trace_selectors": json.loads(json.dumps(coverage["trace_selectors"])),
@@ -24263,6 +24520,7 @@ def build_composite_estimator_artifact(
                 ),
                 "projection_artifact_sha256": corrected["artifact_sha256"],
             },
+            "stateful_storage": stateful_source,
             "source_code_sha256s": dict(sorted(source_sha256s.items())),
         },
     }
@@ -24338,11 +24596,61 @@ def _restore_composite_path_handoff(
             os.close(directory_fd)
 
 
+def _composite_protected_inputs(
+    estimator: Mapping[str, Any],
+    *,
+    estimator_directory: pathlib.Path | None = None,
+) -> tuple[set[pathlib.Path], set[pathlib.Path]]:
+    protected_directories = set()
+    if estimator_directory is not None:
+        protected_directories.add(
+            pathlib.Path(estimator_directory).resolve(strict=True)
+        )
+    protected_files = set()
+    sources = estimator["source_artifacts"]
+    for name in ("augmented_core", "operation_coverage"):
+        protected_files.add(
+            _resolve_repo_path(
+                sources[name]["path"], field_name=f"composite {name} source"
+            ).resolve(strict=True)
+        )
+    for name, label in (
+        ("corrected_higher_layer", "higher-layer"),
+        ("stateful_storage", "stateful"),
+    ):
+        protected_directories.add(
+            _resolve_repo_path(
+                sources[name]["path"], field_name=f"composite {label} source"
+            ).resolve(strict=True)
+        )
+    protected_files.update(
+        _resolve_repo_path(path, field_name="composite source-code input").resolve(
+            strict=True
+        )
+        for path in sources["source_code_sha256s"]
+    )
+    return protected_directories, protected_files
+
+
+def _composite_path_overlaps_inputs(
+    path: pathlib.Path,
+    *,
+    protected_directories: set[pathlib.Path],
+    protected_files: set[pathlib.Path],
+) -> bool:
+    resolved = pathlib.Path(path).absolute().resolve(strict=False)
+    return resolved in protected_files or any(
+        resolved == directory or resolved.is_relative_to(directory)
+        for directory in protected_directories
+    )
+
+
 def seal_composite_estimator(
     *,
     augmented_core_path: pathlib.Path,
     operation_coverage_path: pathlib.Path,
     higher_layer_package: pathlib.Path,
+    stateful_result_path: pathlib.Path,
     out_root: pathlib.Path,
     estimator_path_file: pathlib.Path,
 ) -> pathlib.Path:
@@ -24351,8 +24659,27 @@ def seal_composite_estimator(
         augmented_core_path=augmented_core_path,
         operation_coverage_path=operation_coverage_path,
         higher_layer_package=higher_layer_package,
+        stateful_result_path=stateful_result_path,
     )
     out_root = pathlib.Path(out_root)
+    estimator_path_file = pathlib.Path(estimator_path_file)
+    protected_directories, protected_files = _composite_protected_inputs(artifact)
+    if _composite_path_overlaps_inputs(
+        out_root,
+        protected_directories=protected_directories,
+        protected_files=protected_files,
+    ) or _composite_path_overlaps_inputs(
+        estimator_path_file,
+        protected_directories=protected_directories,
+        protected_files=protected_files,
+    ):
+        raise ValueError("composite estimator publication overlaps a sealed input")
+    resolved_out_root = out_root.absolute().resolve(strict=False)
+    resolved_handoff = estimator_path_file.absolute().resolve(strict=False)
+    if resolved_handoff == resolved_out_root or resolved_handoff.is_relative_to(
+        resolved_out_root
+    ):
+        raise ValueError("composite estimator handoff overlaps the estimator root")
     if out_root.exists() and (out_root.is_symlink() or not out_root.is_dir()):
         raise ValueError("composite estimator root must be a non-symlink directory")
     out_root.mkdir(parents=True, exist_ok=True)
@@ -24380,7 +24707,7 @@ def seal_composite_estimator(
         handoff_snapshot = _snapshot_composite_path_handoff(estimator_path_file)
         handoff_attempted = True
         write_run_path_file(
-            pathlib.Path(estimator_path_file),
+            estimator_path_file,
             target,
             durable_identity_name="estimator.json",
         )
@@ -24428,7 +24755,10 @@ def verify_composite_estimator(directory: pathlib.Path) -> Mapping[str, Any]:
     core = sources.get("augmented_core")
     coverage = sources.get("operation_coverage")
     higher = sources.get("corrected_higher_layer")
-    if not all(isinstance(item, Mapping) for item in (core, coverage, higher)):
+    stateful = sources.get("stateful_storage")
+    if not all(
+        isinstance(item, Mapping) for item in (core, coverage, higher, stateful)
+    ):
         raise ValueError("composite estimator sources differ")
     rebuilt = build_composite_estimator_artifact(
         augmented_core_path=_resolve_repo_path(
@@ -24439,6 +24769,9 @@ def verify_composite_estimator(directory: pathlib.Path) -> Mapping[str, Any]:
         ),
         higher_layer_package=_resolve_repo_path(
             higher.get("path"), field_name="composite higher-layer package"
+        ),
+        stateful_result_path=_resolve_repo_path(
+            stateful.get("path"), field_name="composite stateful result"
         ),
     )
     if not _exact_json_equal(artifact, rebuilt):
@@ -24613,6 +24946,7 @@ def cmd_seal_composite_estimator(args: argparse.Namespace) -> None:
         augmented_core_path=args.augmented_core,
         operation_coverage_path=args.operation_coverage,
         higher_layer_package=args.higher_layer,
+        stateful_result_path=args.stateful_result,
         out_root=args.out_root,
         estimator_path_file=args.estimator_path_file,
     )
@@ -24666,32 +25000,14 @@ def _composite_output_path(
                 "composite estimate output parent must be a non-symlink directory"
             )
     resolved = parent.resolve(strict=True) / absolute.name
-    protected_directories = {
-        pathlib.Path(estimator_directory).resolve(strict=True),
-    }
-    protected_files = set()
-    sources = estimator["source_artifacts"]
-    for name in ("augmented_core", "operation_coverage"):
-        protected_files.add(
-            _resolve_repo_path(
-                sources[name]["path"], field_name=f"composite {name} source"
-            ).resolve(strict=True)
-        )
-    protected_directories.add(
-        _resolve_repo_path(
-            sources["corrected_higher_layer"]["path"],
-            field_name="composite higher-layer source",
-        ).resolve(strict=True)
+    protected_directories, protected_files = _composite_protected_inputs(
+        estimator,
+        estimator_directory=estimator_directory,
     )
-    protected_files.update(
-        _resolve_repo_path(path, field_name="composite source-code input").resolve(
-            strict=True
-        )
-        for path in sources["source_code_sha256s"]
-    )
-    if resolved in protected_files or any(
-        resolved == directory or resolved.is_relative_to(directory)
-        for directory in protected_directories
+    if _composite_path_overlaps_inputs(
+        resolved,
+        protected_directories=protected_directories,
+        protected_files=protected_files,
     ):
         raise ValueError("composite estimate output overlaps a sealed input")
     return resolved
@@ -24870,6 +25186,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     composite_seal.add_argument(
         "--higher-layer", type=pathlib.Path, required=True
+    )
+    composite_seal.add_argument(
+        "--stateful-result", type=pathlib.Path, required=True
     )
     composite_seal.add_argument("--out-root", type=pathlib.Path, required=True)
     composite_seal.add_argument(

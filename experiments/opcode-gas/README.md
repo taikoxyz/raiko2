@@ -1064,28 +1064,31 @@ for this campaign.
 ## Coverage-Qualified Composite Estimator
 
 Seal the review-only SP1 composite estimator only from a clean committed checkout. The artifact
-binds the exact opcode registry, operation coverage ledger, corrected higher-layer replay, trace
-schema, ownership policy, implementation revision, and source hashes. Sealing is create-only: an
-existing content-addressed directory is never replaced.
+binds the exact opcode registry, operation coverage ledger, corrected higher-layer replay, sealed
+typed-storage result, trace schema, ownership policy, implementation revision, and source hashes.
+Sealing is create-only: an existing content-addressed directory is never replaced.
 
-The composite estimator uses `operation-coverage-v3.json`, which replays the current schema-v2
-typed trace sources. `operation-coverage-v2.json` remains immutable historical input to the sealed
-higher-layer derivation; do not substitute v3 when replaying that campaign.
+The composite estimator derives a coverage overlay from `operation-coverage-v4.json`: schema 3
+promotes only SLOAD/SSTORE through sealed result `64065fa462311bdc1848e9d0`; the historical core
+registry remains unchanged. V4 refreshes the exact trace-source hashes after typed-storage tracing.
+`operation-coverage-v2.json` remains immutable historical input to the sealed higher-layer
+derivation, and V3 remains the immutable pre-storage trace snapshot; do not substitute either one
+when replaying its original campaign.
 
 ```bash
-PYTHON_BIN="${PYTHON_BIN:-python3.11}"
 ESTIMATOR_PATH_FILE="$(mktemp)"
-"$PYTHON_BIN" experiments/opcode-gas/opcode_gas.py \
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py \
   seal-composite-estimator \
   --augmented-core experiments/opcode-gas/derivations/f945e67bb2c38c9c8ef50530/core-opcode-submodel.json \
-  --operation-coverage experiments/opcode-gas/manifests/operation-coverage-v3.json \
+  --operation-coverage experiments/opcode-gas/manifests/operation-coverage-v4.json \
   --higher-layer experiments/opcode-gas/derivations/3e4de6eecb5e92aa59a6a4b9 \
+  --stateful-result experiments/opcode-gas/derivations/64065fa462311bdc1848e9d0 \
   --out-root experiments/opcode-gas/estimators \
   --estimator-path-file "$ESTIMATOR_PATH_FILE"
 ESTIMATOR_PATH="$(<"$ESTIMATOR_PATH_FILE")"
-"$PYTHON_BIN" experiments/opcode-gas/opcode_gas.py \
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py \
   verify-composite-estimator --estimator "$ESTIMATOR_PATH"
-"$PYTHON_BIN" experiments/opcode-gas/opcode_gas.py \
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py \
   estimate-composite-trace \
   --estimator "$ESTIMATOR_PATH" \
   --trace proposal-operation-trace.json.gz \
@@ -1104,8 +1107,9 @@ otherwise complete prediction.
 Proposal startup is charged once, block base once per block, and transaction base once per started
 non-Anchor transaction. The frozen native-transfer approximation applies only to committed native
 EOA transfers without operation traces. System and Anchor operations are block-owned. Unmeasured
-opcodes or precompiles, confirmed spawn wrappers, missing typed features, partial traces, recovery
-failures, and parity failures remain explicit gaps; the estimator has no fallback multiplier. Omit
+opcodes or precompiles, confirmed spawn wrappers, missing typed features, uncalibrated dirty SSTORE
+no-ops, invalid dirty+cold combinations, partial traces, recovery failures, and parity failures remain
+explicit gaps; the estimator has no fallback multiplier. Omit
 `--sp1-report` for prediction-only use. Both plain JSON and gzip-compressed trace input are accepted.
 When `--out` is supplied, its parent must already be a non-symlink directory and the destination
 must not exist. Output is published atomically and create-only; paths inside the estimator directory
@@ -1129,7 +1133,6 @@ read-only operation. The `--target-raw-gas 1` arguments are legacy raw-run metad
 the composite estimate.
 
 ```bash
-PYTHON_BIN="${PYTHON_BIN:-python3.11}"
 SMOKE_ROOT=experiments/opcode-gas/runs/task-4-integration-smoke
 HOODI_INPUT="$SMOKE_ROOT/inputs/taiko_hoodi-proposal-79852.json"
 MAINNET_INPUT="$SMOKE_ROOT/inputs/taiko_mainnet-proposal-38261.json"
@@ -1138,44 +1141,45 @@ mkdir -p "$SMOKE_ROOT/inputs" "$SMOKE_ROOT/hoodi" "$SMOKE_ROOT/mainnet"
 cargo build --release -p preflight -p guest-launcher --features sp1-sdk/profiling
 
 ESTIMATOR_PATH_FILE="$(mktemp)"
-"$PYTHON_BIN" experiments/opcode-gas/opcode_gas.py \
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py \
   seal-composite-estimator \
   --augmented-core experiments/opcode-gas/derivations/f945e67bb2c38c9c8ef50530/core-opcode-submodel.json \
-  --operation-coverage experiments/opcode-gas/manifests/operation-coverage-v3.json \
+  --operation-coverage experiments/opcode-gas/manifests/operation-coverage-v4.json \
   --higher-layer experiments/opcode-gas/derivations/3e4de6eecb5e92aa59a6a4b9 \
+  --stateful-result experiments/opcode-gas/derivations/64065fa462311bdc1848e9d0 \
   --out-root experiments/opcode-gas/estimators \
   --estimator-path-file "$ESTIMATOR_PATH_FILE"
 ESTIMATOR_PATH="$(<"$ESTIMATOR_PATH_FILE")"
-"$PYTHON_BIN" experiments/opcode-gas/opcode_gas.py \
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py \
   verify-composite-estimator --estimator "$ESTIMATOR_PATH"
 
-"$PYTHON_BIN" experiments/opcode-gas/opcode_gas.py prepare-integration-smoke \
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py prepare-integration-smoke \
   --network taiko_hoodi --proposal-id 79852 --guest-input "$HOODI_INPUT" \
   --out "$SMOKE_ROOT/hoodi/record.json"
-"$PYTHON_BIN" experiments/opcode-gas/opcode_gas.py run-proposal \
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py run-proposal \
   --guest-launcher target/release/guest-launcher --guest-input "$HOODI_INPUT" \
   --proof-type sp1 --case integration-smoke-hoodi-79852 \
   --target-raw-gas 1 --purpose integration_smoke \
   --network taiko_hoodi --proposal-id 79852 \
   --smoke-record "$SMOKE_ROOT/hoodi/record.json" \
   --out "$SMOKE_ROOT/hoodi/run.jsonl"
-"$PYTHON_BIN" experiments/opcode-gas/opcode_gas.py estimate-composite-trace \
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py estimate-composite-trace \
   --estimator "$ESTIMATOR_PATH" \
   --trace "$SMOKE_ROOT/hoodi/run.proposal-trace.json.gz" \
   --sp1-report "$SMOKE_ROOT/hoodi/run.guest-launcher.json" \
   --out "$SMOKE_ROOT/hoodi/estimate.json"
 
-"$PYTHON_BIN" experiments/opcode-gas/opcode_gas.py prepare-integration-smoke \
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py prepare-integration-smoke \
   --network taiko_mainnet --proposal-id 38261 --guest-input "$MAINNET_INPUT" \
   --out "$SMOKE_ROOT/mainnet/record.json"
-"$PYTHON_BIN" experiments/opcode-gas/opcode_gas.py run-proposal \
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py run-proposal \
   --guest-launcher target/release/guest-launcher --guest-input "$MAINNET_INPUT" \
   --proof-type sp1 --case integration-smoke-mainnet-38261 \
   --target-raw-gas 1 --purpose integration_smoke \
   --network taiko_mainnet --proposal-id 38261 \
   --smoke-record "$SMOKE_ROOT/mainnet/record.json" \
   --out "$SMOKE_ROOT/mainnet/run.jsonl"
-"$PYTHON_BIN" experiments/opcode-gas/opcode_gas.py estimate-composite-trace \
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py estimate-composite-trace \
   --estimator "$ESTIMATOR_PATH" \
   --trace "$SMOKE_ROOT/mainnet/run.proposal-trace.json.gz" \
   --sp1-report "$SMOKE_ROOT/mainnet/run.guest-launcher.json" \

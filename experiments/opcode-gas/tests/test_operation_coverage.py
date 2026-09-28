@@ -28,6 +28,13 @@ MANIFEST_PATH = (
     / "experiments"
     / "opcode-gas"
     / "manifests"
+    / "operation-coverage-v4.json"
+)
+V3_MANIFEST_PATH = (
+    ROOT
+    / "experiments"
+    / "opcode-gas"
+    / "manifests"
     / "operation-coverage-v3.json"
 )
 V2_MANIFEST_PATH = (
@@ -61,6 +68,12 @@ V3_ARTIFACT_SHA256 = (
 )
 V3_FILE_SHA256 = (
     "be5cd1621be3502a21536ea6925629c0a7ab417a1c3f4301ab5c82f5edf7c256"
+)
+V4_ARTIFACT_SHA256 = (
+    "2383d9788302f8447522abdcdc99a1f6490cc2b910c376ef9b4e265cc1c978be"
+)
+V4_FILE_SHA256 = (
+    "941170c66baa285c1019592e9e5a215c3461695e8b548f0c5d810ebce06cf7cf"
 )
 
 
@@ -708,7 +721,7 @@ class OperationCoverageTests(unittest.TestCase):
         self.assertEqual(system_result["charge_source"], "block")
 
     def test_committed_manifest_is_exact_source_replay(self):
-        self.assertTrue(MANIFEST_PATH.is_file(), "canonical v3 manifest is missing")
+        self.assertTrue(MANIFEST_PATH.is_file(), "canonical v4 manifest is missing")
         committed = json.loads(MANIFEST_PATH.read_text())
         schedule = opcode_gas.load_current_uzen_schedule()
         expected = opcode_gas.build_operation_coverage_manifest(
@@ -717,8 +730,8 @@ class OperationCoverageTests(unittest.TestCase):
             augmented_core_ref=CORE_REF,
         )
 
-        self.assertEqual(committed["artifact_sha256"], V3_ARTIFACT_SHA256)
-        self.assertEqual(opcode_gas.sha256_file(MANIFEST_PATH), V3_FILE_SHA256)
+        self.assertEqual(committed["artifact_sha256"], V4_ARTIFACT_SHA256)
+        self.assertEqual(opcode_gas.sha256_file(MANIFEST_PATH), V4_FILE_SHA256)
         self.assertEqual(
             MANIFEST_PATH.read_bytes(),
             opcode_gas._canonical_json_file_bytes(committed),
@@ -750,6 +763,16 @@ class OperationCoverageTests(unittest.TestCase):
         )
         self.assertEqual(historical["artifact_sha256"], V2_ARTIFACT_SHA256)
         self.assertEqual(opcode_gas.sha256_file(V2_MANIFEST_PATH), V2_FILE_SHA256)
+
+    def test_historical_v3_path_and_hashes_are_preserved(self):
+        historical = json.loads(V3_MANIFEST_PATH.read_text())
+
+        self.assertEqual(
+            V3_MANIFEST_PATH.relative_to(ROOT).as_posix(),
+            "experiments/opcode-gas/manifests/operation-coverage-v3.json",
+        )
+        self.assertEqual(historical["artifact_sha256"], V3_ARTIFACT_SHA256)
+        self.assertEqual(opcode_gas.sha256_file(V3_MANIFEST_PATH), V3_FILE_SHA256)
 
 
 if __name__ == "__main__":

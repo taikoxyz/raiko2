@@ -31,7 +31,7 @@ use crate::{
     },
 };
 
-pub const OPERATION_TRACE_SCHEMA_VERSION: u32 = 2;
+pub const OPERATION_TRACE_SCHEMA_VERSION: u32 = 3;
 
 fn deserialize_operation_trace_schema_version<'de, D>(deserializer: D) -> Result<u32, D::Error>
 where

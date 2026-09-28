@@ -33,6 +33,7 @@ HOLDOUT_COUNT = 32
 CHECKPOINT_COUNT = 64
 STRUCTURAL_ZERO_COUNT = 0
 REPEATS = 3
+STATEFUL_EXECUTION_PAIR_CHUNK_SIZE = 8
 PRIMARY_COUNTS = (0, *FIT_COUNTS, HOLDOUT_COUNT, CHECKPOINT_COUNT)
 DIAGNOSTIC_COUNTS = (0, CHECKPOINT_COUNT)
 GENERATOR_MAX_COUNT = CHECKPOINT_COUNT
@@ -1763,12 +1764,21 @@ def run_stateful_campaign_rows(
         pair_groups.setdefault(
             (spec.scenario, spec.relation_count, spec.repeat_index), {}
         )[spec.lane] = spec
-    missing_specs: list[StatefulCampaignRowSpec] = []
+    pending_pairs: list[
+        tuple[
+            tuple[str, int, int],
+            dict[str, StatefulCampaignRowSpec],
+            tuple[StatefulCampaignRowSpec, ...],
+        ]
+    ] = []
     for pair_key, lanes in pair_groups.items():
+        missing = []
         for lane in ("control", "target"):
             key = (pair_key[0], pair_key[1], lane, pair_key[2])
             if key not in existing_reports:
-                missing_specs.append(lanes[lane])
+                missing.append(lanes[lane])
+        if missing:
+            pending_pairs.append((pair_key, lanes, tuple(missing)))
 
     # Validate every surviving lane against the freshly replayed host identity before
     # executing a missing sibling. Exact pair/row equality is checked after recovery.
@@ -1819,41 +1829,16 @@ def run_stateful_campaign_rows(
         if canonical_json(payload) != canonical_json(expected_row):
             raise ValueError("persisted stateful lane differs from fresh replay")
 
-    if verification_only and missing_specs:
+    if verification_only and pending_pairs:
         raise ValueError("portable stateful verification found a missing row")
 
-    new_reports: dict[tuple[str, int, str, int], Mapping[str, Any]] = {}
-    if missing_specs:
-        input_paths = [
-            fixtures[(spec.scenario, spec.relation_count, spec.lane)][1]
-            for spec in missing_specs
-        ]
-        with tempfile.TemporaryDirectory(prefix="stateful-opcode-reports-") as temporary:
-            reports_path = pathlib.Path(temporary) / "reports.jsonl"
-            batch_executor(
-                guest_launcher=guest_launcher,
-                elf_path=elf,
-                input_paths=input_paths,
-                reports_jsonl=reports_path,
-                stage=EXECUTION_CONTRACT["stage"],
-            )
-            reports = list(opcode_gas.iter_jsonl(reports_path))
-        if len(reports) != len(missing_specs):
-            raise ValueError("stateful batch execution report inventory differs")
-        for spec, input_path, report in zip(missing_specs, input_paths, reports, strict=True):
-            key = (spec.scenario, spec.relation_count, spec.lane, spec.repeat_index)
-            new_reports[key] = _portable_formal_report(
-                report,
-                input_path=input_path,
-                fixtures_root=fixtures_root,
-                expected_public_values=bundle_evidence[
-                    (spec.scenario, spec.relation_count, spec.lane)
-                ]["expected_public_values"],
-            )
-
-    all_reports = {**existing_reports, **new_reports}
     records: dict[tuple[str, int, str, int], dict[str, Any]] = {}
-    for pair_key, lanes in pair_groups.items():
+
+    def build_pair_records(
+        pair_key: tuple[str, int, int],
+        lanes: Mapping[str, StatefulCampaignRowSpec],
+        reports: Mapping[tuple[str, int, str, int], Mapping[str, Any]],
+    ) -> dict[tuple[str, int, str, int], dict[str, Any]]:
         scenario, count, repeat_index = pair_key
         target_key = (scenario, count, "target")
         control_key = (scenario, count, "control")
@@ -1867,8 +1852,8 @@ def run_stateful_campaign_rows(
             control_fixture=control_fixture,
             target_bundle=bundles[target_key],
             control_bundle=bundles[control_key],
-            target_report=all_reports[(scenario, count, "target", repeat_index)],
-            control_report=all_reports[(scenario, count, "control", repeat_index)],
+            target_report=reports[(scenario, count, "target", repeat_index)],
+            control_report=reports[(scenario, count, "control", repeat_index)],
             target_input=target_input,
             control_input=control_input,
             fixtures_root=fixtures_root,
@@ -1876,6 +1861,7 @@ def run_stateful_campaign_rows(
             elf_sha256=elf_sha256,
             calibration_run_id=calibration_run_id,
         )
+        pair_records = {}
         for spec, record in (
             (lanes["target"], target_record),
             (lanes["control"], control_record),
@@ -1884,23 +1870,97 @@ def run_stateful_campaign_rows(
             old = existing_payloads.get(key)
             if old is not None and canonical_json(old) != canonical_json(record):
                 raise ValueError("persisted stateful row differs from exact replay")
-            records[key] = record
-    public_values_by_lane: dict[tuple[str, int, str], set[str]] = {}
-    for key, record in records.items():
-        lane_key = key[:3]
-        public_values_by_lane.setdefault(lane_key, set()).add(
-            record["formal_report"]["public_values"]
-        )
-    if any(len(values) != 1 for values in public_values_by_lane.values()):
-        raise ValueError("stateful repeated public output differs")
-    for spec in specs:
-        key = (spec.scenario, spec.relation_count, spec.lane, spec.repeat_index)
-        if key not in existing_payloads:
-            if verification_only:
-                raise ValueError("portable stateful verification found a missing row")
-            opcode_gas.persist_immutable_bytes(
-                _row_path(run, spec), canonical_json(records[key]) + b"\n"
+            pair_records[key] = record
+        return pair_records
+
+    def validate_repeated_public_outputs(
+        candidate_records: Mapping[
+            tuple[str, int, str, int], Mapping[str, Any]
+        ],
+    ) -> None:
+        public_values_by_lane: dict[tuple[str, int, str], set[str]] = {}
+        for key, record in candidate_records.items():
+            public_values_by_lane.setdefault(key[:3], set()).add(
+                record["formal_report"]["public_values"]
             )
+        if any(len(values) != 1 for values in public_values_by_lane.values()):
+            raise ValueError("stateful repeated public output differs")
+
+    for pair_key, lanes in pair_groups.items():
+        if all(
+            (pair_key[0], pair_key[1], lane, pair_key[2]) in existing_reports
+            for lane in ("control", "target")
+        ):
+            records.update(build_pair_records(pair_key, lanes, existing_reports))
+    validate_repeated_public_outputs(records)
+
+    for offset in range(0, len(pending_pairs), STATEFUL_EXECUTION_PAIR_CHUNK_SIZE):
+        pair_chunk = pending_pairs[
+            offset : offset + STATEFUL_EXECUTION_PAIR_CHUNK_SIZE
+        ]
+        missing_specs = tuple(
+            spec for _pair_key, _lanes, missing in pair_chunk for spec in missing
+        )
+        input_paths = tuple(
+            fixtures[(spec.scenario, spec.relation_count, spec.lane)][1]
+            for spec in missing_specs
+        )
+        with tempfile.TemporaryDirectory(
+            prefix="stateful-opcode-reports-"
+        ) as temporary:
+            reports_path = pathlib.Path(temporary) / "reports.jsonl"
+            batch_executor(
+                guest_launcher=guest_launcher,
+                elf_path=elf,
+                input_paths=input_paths,
+                reports_jsonl=reports_path,
+                stage=EXECUTION_CONTRACT["stage"],
+            )
+            reports = list(opcode_gas.iter_jsonl(reports_path))
+        if len(reports) != len(missing_specs):
+            raise ValueError("stateful batch execution report inventory differs")
+
+        chunk_reports = {}
+        for spec, input_path, report in zip(
+            missing_specs, input_paths, reports, strict=True
+        ):
+            key = (spec.scenario, spec.relation_count, spec.lane, spec.repeat_index)
+            chunk_reports[key] = _portable_formal_report(
+                report,
+                input_path=input_path,
+                fixtures_root=fixtures_root,
+                expected_public_values=bundle_evidence[
+                    (spec.scenario, spec.relation_count, spec.lane)
+                ]["expected_public_values"],
+            )
+
+        available_reports = {**existing_reports, **chunk_reports}
+        chunk_records = {}
+        for pair_key, lanes, _missing in pair_chunk:
+            chunk_records.update(
+                build_pair_records(pair_key, lanes, available_reports)
+            )
+        validate_repeated_public_outputs({**records, **chunk_records})
+
+        for _pair_key, _lanes, missing in pair_chunk:
+            for spec in missing:
+                key = (
+                    spec.scenario,
+                    spec.relation_count,
+                    spec.lane,
+                    spec.repeat_index,
+                )
+                record = chunk_records[key]
+                opcode_gas.persist_immutable_bytes(
+                    _row_path(run, spec), canonical_json(record) + b"\n"
+                )
+                existing_payloads[key] = record
+                existing_reports[key] = record["formal_report"]
+        records.update(chunk_records)
+
+    validate_repeated_public_outputs(records)
+    if len(records) != len(specs):
+        raise ValueError("stateful campaign row inventory differs after execution")
     return [
         records[(spec.scenario, spec.relation_count, spec.lane, spec.repeat_index)]
         for spec in specs

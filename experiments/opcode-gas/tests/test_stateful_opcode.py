@@ -666,6 +666,138 @@ class StatefulCampaignRowIdentityTests(unittest.TestCase):
             )
             self.assertEqual(rows, fresh)
 
+    def test_campaign_persists_verified_pair_chunks_and_resumes_only_missing_rows(self):
+        manifest = stateful.load_stateful_campaign_manifest(STATEFUL_MANIFEST)
+        specs = stateful.stateful_campaign_row_specs(manifest)[:24]
+        self.assertEqual(len(specs), 24)
+        with tempfile.TemporaryDirectory(dir=ROOT / "target") as directory:
+            root = pathlib.Path(directory)
+            fixtures_root = root / "fixtures"
+            fixtures_by_input = {}
+            seen = set()
+            for spec in specs:
+                key = spec.scenario, spec.relation_count, spec.lane
+                if key in seen:
+                    continue
+                seen.add(key)
+                fixture = stateful.generate_stateful_fixture(
+                    manifest,
+                    spec.scenario,
+                    lane=spec.lane,
+                    count=spec.relation_count,
+                )
+                fixture_dir = (
+                    fixtures_root
+                    / spec.scenario
+                    / str(spec.relation_count)
+                    / spec.lane
+                )
+                fixture_dir.mkdir(parents=True)
+                (fixture_dir / "case.json").write_bytes(
+                    opcode_gas.canonical_json(fixture["case_record"]) + b"\n"
+                )
+                input_path = fixture_dir / "guest-input.json"
+                input_path.write_bytes(
+                    opcode_gas.canonical_json(fixture["guest_input"]) + b"\n"
+                )
+                fixtures_by_input[input_path.resolve()] = fixture
+
+            launcher = root / "guest-launcher"
+            launcher.write_bytes(b"stateful-chunk-test-launcher")
+            elf = ROOT / stateful.EXECUTION_CONTRACT["elf_path"]
+            execution_identity = {
+                "implementation_revision": "9" * 40,
+                "guest_launcher_sha256": opcode_gas.sha256_file(launcher),
+                "guest_artifacts": {
+                    stateful.EXECUTION_CONTRACT["elf_path"]: opcode_gas.sha256_file(
+                        elf
+                    )
+                },
+            }
+
+            def replay(_launcher, input_path, _cache):
+                return _synthetic_bundle(fixtures_by_input[input_path.resolve()])
+
+            def write_reports(kwargs):
+                repeats_by_input = {}
+                with kwargs["reports_jsonl"].open("w") as output:
+                    for input_path in kwargs["input_paths"]:
+                        resolved = input_path.resolve()
+                        repeat_index = repeats_by_input.get(resolved, 0)
+                        repeats_by_input[resolved] = repeat_index + 1
+                        output.write(
+                            json.dumps(
+                                self._formal_report(
+                                    fixtures_by_input[resolved],
+                                    input_path,
+                                    repeat_index,
+                                )
+                            )
+                            + "\n"
+                        )
+
+            initial_calls = []
+
+            def interrupt_second_chunk(**kwargs):
+                initial_calls.append(tuple(kwargs["input_paths"]))
+                if len(initial_calls) == 2:
+                    raise RuntimeError("injected second chunk interruption")
+                write_reports(kwargs)
+
+            run = root / "run"
+            common = {
+                "manifest_path": STATEFUL_MANIFEST,
+                "calibration_run": root / "calibration",
+                "fixtures_root": fixtures_root,
+                "guest_launcher": launcher,
+                "elf": elf,
+                "run": run,
+                "identity_replayer": replay,
+                "execution_identity_loader": lambda _run: execution_identity,
+                "launcher_validator": lambda _identity, _launcher: (
+                    execution_identity["guest_launcher_sha256"]
+                ),
+            }
+            with mock.patch.object(
+                stateful, "stateful_campaign_row_specs", return_value=specs
+            ), self.assertRaisesRegex(RuntimeError, "second chunk"):
+                stateful.run_stateful_opcode_campaign(
+                    **common,
+                    batch_executor=interrupt_second_chunk,
+                )
+
+            self.assertEqual(stateful.STATEFUL_EXECUTION_PAIR_CHUNK_SIZE, 8)
+            self.assertEqual([len(call) for call in initial_calls], [16, 8])
+            for call in initial_calls:
+                for control, target in zip(call[::2], call[1::2], strict=True):
+                    self.assertEqual(control.parent.name, "control")
+                    self.assertEqual(target.parent.name, "target")
+                    self.assertEqual(control.parent.parent, target.parent.parent)
+            self.assertEqual(len(list((run / "rows").glob("*.json"))), 16)
+            self.assertTrue((run / "identity.json").is_file())
+            for terminal in ("rows.jsonl", "decisions.json", "decisions.sha256"):
+                self.assertFalse((run / terminal).exists())
+
+            resumed_calls = []
+
+            def resume_missing(**kwargs):
+                resumed_calls.append(tuple(kwargs["input_paths"]))
+                write_reports(kwargs)
+
+            with mock.patch.object(
+                stateful, "stateful_campaign_row_specs", return_value=specs
+            ):
+                completed = stateful.run_stateful_opcode_campaign(
+                    **common,
+                    batch_executor=resume_missing,
+                )
+
+            self.assertEqual([len(call) for call in resumed_calls], [8])
+            self.assertEqual(completed["row_count"], 24)
+            self.assertEqual(len(list((run / "rows").glob("*.json"))), 24)
+            for terminal in ("rows.jsonl", "decisions.json", "decisions.sha256"):
+                self.assertTrue((run / terminal).is_file())
+
     def test_row_runner_rejects_tampered_orphan_before_guest_execution(self):
         manifest = stateful.StatefulCampaignManifest.from_mapping(
             stateful.canonical_stateful_manifest_payload()

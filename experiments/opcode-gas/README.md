@@ -274,7 +274,11 @@ campaign executes 1,128 target/control rows (40 predeclared scenarios, their dec
 three repeats) through the production SP1 gas-estimator path. Fixture generation, verification,
 exact fitting, and result replay normally take seconds to a few minutes; formal guest execution is
 the long step and can take hours depending on the host. It is resumable from its immutable per-row
-records and should not be wrapped in an optimistic short timeout.
+records and should not be wrapped in an optimistic short timeout. The runner uses a fixed chunk of
+eight complete target/control pairs (at most 16 missing inputs; a partial-pair resume may contain
+only the missing lane). Each fully validated chunk is persisted immediately, so an interruption
+loses at most the current chunk. Terminal rows and decision files are created only after every row
+is complete; chunk size never adapts to observed reports.
 
 Prepare the calibration identity, generate the frozen fixtures, execute/resume the run, and replay
 the terminal Task 4 evidence with:

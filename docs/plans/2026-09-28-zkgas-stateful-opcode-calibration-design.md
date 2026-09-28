@@ -2,7 +2,8 @@
 
 ## Status
 
-Proposed. Review this design before writing the implementation plan or changing experiment code.
+Approved on 2026-09-28. The executable plan is
+`docs/plans/2026-09-28-zkgas-stateful-opcode-calibration-implementation-plan.md`.
 
 This is a bounded follow-up to the first composite-proposal diagnostics. It measures `SLOAD` and
 `SSTORE` in a stateful REVM laboratory before deciding whether either operation can be represented
@@ -94,6 +95,8 @@ may use enums, but its serialized meaning must be equivalent to:
 
 ```text
 storage = {
+    measurement_opcode: 0x54 | 0x55,
+    lane: target | control,
     slot: 32-byte canonical hex,
     original_value: 32-byte canonical hex,
     access: cold | warm,
@@ -104,6 +107,15 @@ storage = {
                }
 }
 ```
+
+`measurement_opcode` names the stateful operation under study. The existing top-level `opcode`
+continues to name the opcode whose count/raw gas the concrete lane declares: it equals
+`measurement_opcode` in the target lane and the matched reference opcode in the control lane. The
+structured `operation` describes the target semantic scenario in both lanes so the pair carries
+identical prestate and access-list state. Validation is lane-aware: the target must execute the
+declared state operation, while the control must execute no `SLOAD`/`SSTORE` and must match the
+sealed reference ledger. This avoids pretending that the control bytecode itself performs the
+state transition.
 
 The primary matrix uses values `0`, `1`, and `2` because the required semantic classes depend on
 zero and equality relationships. The wire contract nevertheless carries complete 256-bit values,
@@ -119,8 +131,11 @@ changes.
 
 Every storage slot and new-value operand uses a canonical `PUSH32`, including low values `0`, `1`,
 and `2`. Low-value and high-limb variants must have identical opcode counts, bytecode length,
-operand positions, and signed reference ledger; only the 32 immediate bytes may differ. This keeps
-the high-limb diagnostic from measuring a `PUSH0`/`PUSH1` versus `PUSH32` setup difference.
+operand positions, and signed reference ledger; only the declared 32-byte immediate spans may
+differ. Generation persists the ordered immediate spans and a program-shape hash computed after
+zeroing those spans. Admission compares the masked programs byte-for-byte and rejects any other
+byte difference. This keeps the high-limb diagnostic from measuring a `PUSH0`/`PUSH1` versus
+`PUSH32` setup difference or an unrelated program-shape change.
 
 The guest and host footprint tracer must share one database and `TxEnv` constructor. Both must
 execute Osaka. A fixture is invalid unless the host trace confirms the declared target count, raw

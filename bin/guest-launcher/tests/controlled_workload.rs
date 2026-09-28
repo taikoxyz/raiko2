@@ -889,6 +889,8 @@ fn opcode_identity_bundle_is_deterministic_and_contains_a_separate_real_report()
 
     assert_eq!(first, second);
     assert_eq!(first.schema_version, 1);
+    assert!(first.expected_public_values.starts_with("0x"));
+    assert_eq!(first.expected_public_values.len(), 66);
     assert_eq!(first.identity.input, input);
     assert_eq!(
         first.report.guest_input_sha256,
@@ -904,6 +906,20 @@ fn opcode_identity_bundle_is_deterministic_and_contains_a_separate_real_report()
     assert_eq!(
         trace.backend_input_sha256,
         first.identity.backend_input_sha256
+    );
+}
+
+#[test]
+fn native_identity_public_values_match_the_frozen_guest_baseline() {
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/revm-opcode-lab-add-32.json");
+    let input: OpcodeLabInput = serde_json::from_slice(&std::fs::read(fixture).unwrap()).unwrap();
+
+    let bundle = controlled_opcode_identity_bundle(&input).unwrap();
+
+    assert_eq!(
+        bundle.expected_public_values,
+        "0x9318bc580c9b2aa315a8649bd205867ef84a5d28fecdb187ec57ba86f409ec16"
     );
 }
 

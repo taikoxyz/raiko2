@@ -8495,6 +8495,7 @@ version = "0.1.0"
 name = "raiko2-opcode-lab"
 version = "0.1.0"
 dependencies = [
+ "alloy-primitives",
  "raiko2-primitives",
  "revm",
 ]

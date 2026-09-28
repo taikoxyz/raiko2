@@ -237,8 +237,7 @@ class StatefulCampaignRowIdentityTests(unittest.TestCase):
                     "label": "prover_gas",
                     "count": 10_000 + repeat_index,
                 },
-                "public_values": "0x"
-                + hashlib.sha256(fixture["case_record"]["case_id"].encode()).hexdigest(),
+                "public_values": _synthetic_expected_public_values(fixture),
                 "sp1_execution_engine": "gas-estimator",
                 "sp1_gas_trace_chunk_threshold": opcode_gas.SP1_GAS_TRACE_CHUNK_THRESHOLD,
                 "sp1_gas_trace_chunk_slots": opcode_gas.SP1_GAS_TRACE_CHUNK_SLOTS,
@@ -501,12 +500,53 @@ class StatefulCampaignRowIdentityTests(unittest.TestCase):
                             report["public_values"] = "0x" + "00" * 32
                         output.write(json.dumps(report) + "\n")
 
-            with self.assertRaisesRegex(ValueError, "public output differs"):
+            with self.assertRaisesRegex(ValueError, "canonical guest output"):
                 stateful.run_stateful_campaign_rows(
                     manifest, specs, fixtures_root=root / "fixtures", run=root / "run",
                     guest_launcher=root / "launcher", elf=root / "elf",
                     launcher_sha256="a" * 64, elf_sha256="b" * 64,
                     batch_executor=execute, identity_replayer=replay,
+                )
+            self.assertEqual(list((root / "run" / "rows").glob("*.json")), [])
+
+    def test_row_runner_rejects_consistently_wrong_canonical_public_output(self):
+        manifest = stateful.StatefulCampaignManifest.from_mapping(
+            stateful.canonical_stateful_manifest_payload()
+        )
+        specs = self._pair_specs(manifest)
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            _paths, fixtures = self._write_pair_fixtures(root / "fixtures", manifest)
+
+            def replay(_launcher, input_path, _cache):
+                lane = json.loads(input_path.read_text())["storage"]["lane"]
+                return _synthetic_bundle(fixtures[lane])
+
+            def execute(**kwargs):
+                counters = {}
+                with kwargs["reports_jsonl"].open("w") as output:
+                    for input_path in kwargs["input_paths"]:
+                        lane = json.loads(input_path.read_text())["storage"]["lane"]
+                        repeat = counters.get(lane, 0)
+                        counters[lane] = repeat + 1
+                        report = self._formal_report(
+                            fixtures[lane], input_path, repeat
+                        )
+                        report["public_values"] = "0x" + "00" * 32
+                        output.write(json.dumps(report) + "\n")
+
+            with self.assertRaisesRegex(ValueError, "canonical guest output"):
+                stateful.run_stateful_campaign_rows(
+                    manifest,
+                    specs,
+                    fixtures_root=root / "fixtures",
+                    run=root / "run",
+                    guest_launcher=root / "launcher",
+                    elf=root / "elf",
+                    launcher_sha256="a" * 64,
+                    elf_sha256="b" * 64,
+                    batch_executor=execute,
+                    identity_replayer=replay,
                 )
             self.assertEqual(list((root / "run" / "rows").glob("*.json")), [])
 
@@ -598,6 +638,97 @@ class StatefulCampaignRowIdentityTests(unittest.TestCase):
                 calibration_run_id="same-run",
             )
             self.assertEqual(rows, fresh)
+
+    def test_row_runner_rejects_tampered_orphan_before_guest_execution(self):
+        manifest = stateful.StatefulCampaignManifest.from_mapping(
+            stateful.canonical_stateful_manifest_payload()
+        )
+        specs = self._pair_specs(manifest)
+        for label, mutate in (
+            (
+                "ordered pair identity",
+                lambda payload: payload.__setitem__("ordered_pair_identity", "f" * 64),
+            ),
+            (
+                "unexpected field",
+                lambda payload: payload.__setitem__("unexpected", "field"),
+            ),
+        ):
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                root = pathlib.Path(directory)
+                _paths, fixtures = self._write_pair_fixtures(
+                    root / "fixtures", manifest
+                )
+
+                def replay(_launcher, input_path, _cache):
+                    lane = json.loads(input_path.read_text())["storage"]["lane"]
+                    return _synthetic_bundle(fixtures[lane])
+
+                def execute(**kwargs):
+                    counters = {}
+                    with kwargs["reports_jsonl"].open("w") as output:
+                        for input_path in kwargs["input_paths"]:
+                            lane = json.loads(input_path.read_text())["storage"]["lane"]
+                            repeat = counters.get(lane, 0)
+                            counters[lane] = repeat + 1
+                            output.write(
+                                json.dumps(
+                                    self._formal_report(
+                                        fixtures[lane], input_path, repeat
+                                    )
+                                )
+                                + "\n"
+                            )
+
+                run = root / "run"
+                stateful.run_stateful_campaign_rows(
+                    manifest,
+                    specs,
+                    fixtures_root=root / "fixtures",
+                    run=run,
+                    guest_launcher=root / "launcher",
+                    elf=root / "elf",
+                    launcher_sha256="a" * 64,
+                    elf_sha256="b" * 64,
+                    batch_executor=execute,
+                    identity_replayer=replay,
+                )
+                survivor = next(
+                    spec
+                    for spec in specs
+                    if spec.repeat_index == 0 and spec.lane == "control"
+                )
+                missing = next(
+                    spec
+                    for spec in specs
+                    if spec.repeat_index == 0 and spec.lane == "target"
+                )
+                survivor_path = stateful._row_path(run, survivor)
+                payload = json.loads(survivor_path.read_text())
+                mutate(payload)
+                survivor_path.write_bytes(opcode_gas.canonical_json(payload) + b"\n")
+                stateful._row_path(run, missing).unlink()
+                executor_calls = 0
+
+                def fail_executor(**_kwargs):
+                    nonlocal executor_calls
+                    executor_calls += 1
+                    self.fail("tampered orphan reached guest execution")
+
+                with self.assertRaisesRegex(ValueError, "persisted stateful lane"):
+                    stateful.run_stateful_campaign_rows(
+                        manifest,
+                        specs,
+                        fixtures_root=root / "fixtures",
+                        run=run,
+                        guest_launcher=root / "launcher",
+                        elf=root / "elf",
+                        launcher_sha256="a" * 64,
+                        elf_sha256="b" * 64,
+                        batch_executor=fail_executor,
+                        identity_replayer=replay,
+                    )
+                self.assertEqual(executor_calls, 0)
 
     def test_row_runner_rejects_symlinked_rows_before_replay_or_write(self):
         manifest = stateful.StatefulCampaignManifest.from_mapping(
@@ -1164,11 +1295,18 @@ def _synthetic_identity(fixture, report):
     }
 
 
+def _synthetic_expected_public_values(fixture):
+    return "0x" + hashlib.sha256(
+        fixture["case_record"]["case_id"].encode()
+    ).hexdigest()
+
+
 def _synthetic_bundle(fixture):
     lane = fixture["case_record"]["lane"]
     native_report = _synthetic_report(fixture, lane)
     return {
         "schema_version": 1,
+        "expected_public_values": _synthetic_expected_public_values(fixture),
         "identity": _synthetic_identity(fixture, native_report),
         "report": native_report,
     }

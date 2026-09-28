@@ -4,8 +4,9 @@
 
 extern crate alloc;
 
-use alloc::vec;
-use raiko2_primitives::{OpcodeLabStorageAccess, OpcodeLabStorageInput};
+use alloc::{vec, vec::Vec};
+use alloy_primitives::keccak256;
+use raiko2_primitives::{OpcodeLabInput, OpcodeLabStorageAccess, OpcodeLabStorageInput};
 use revm::{
     bytecode::Bytecode,
     context::{
@@ -13,6 +14,7 @@ use revm::{
         transaction::{AccessList, AccessListItem},
         tx::TxEnvBuildError,
     },
+    context_interface::result::ExecutionResult,
     database::{
         BENCH_CALLER, BENCH_CALLER_BALANCE, BENCH_TARGET, BENCH_TARGET_BALANCE, InMemoryDB,
     },
@@ -22,6 +24,43 @@ use revm::{
 
 /// Hardfork used by every stateful opcode-laboratory execution.
 pub const OPCODE_LAB_SPEC_ID: SpecId = SpecId::OSAKA;
+
+/// Folds one canonical REVM execution result into the value committed by the opcode-lab guest.
+#[must_use]
+pub fn fold_revm_opcode_execution_result<H>(result: &ExecutionResult<H>) -> u64 {
+    let mut accumulator = result
+        .tx_gas_used()
+        .wrapping_mul(31)
+        .wrapping_add(u64::from(result.is_success()));
+    if let Some(output) = result.output() {
+        accumulator = accumulator
+            .wrapping_mul(31)
+            .wrapping_add(output.len() as u64);
+        for byte in output.iter().take(32) {
+            accumulator = accumulator.wrapping_mul(31).wrapping_add(u64::from(*byte));
+        }
+    }
+    accumulator
+}
+
+/// Folds one fixed microprogram result into the cross-program accumulator.
+#[must_use]
+pub const fn fold_revm_opcode_program(accumulator: u64, program_result: u64) -> u64 {
+    accumulator.wrapping_mul(31).wrapping_add(program_result)
+}
+
+/// Computes the exact 32-byte public output committed by `sp1-revm-opcode-lab`.
+#[must_use]
+pub fn revm_opcode_public_values(input: &OpcodeLabInput, accumulator: u64) -> B256 {
+    let mut output = Vec::new();
+    output.extend_from_slice(input.case.as_bytes());
+    output.extend_from_slice(input.scenario.as_bytes());
+    output.extend_from_slice(&input.opcode.to_le_bytes());
+    output.extend_from_slice(&input.target_count.to_le_bytes());
+    output.extend_from_slice(&input.target_raw_gas.to_le_bytes());
+    output.extend_from_slice(&accumulator.to_le_bytes());
+    keccak256(output)
+}
 
 /// Builds the canonical benchmark database for one fixed microprogram.
 #[must_use]
@@ -91,7 +130,10 @@ extern crate std;
 
 #[cfg(test)]
 mod tests {
-    use super::{OPCODE_LAB_SPEC_ID, build_benchmark_db, build_benchmark_tx};
+    use super::{
+        OPCODE_LAB_SPEC_ID, build_benchmark_db, build_benchmark_tx, fold_revm_opcode_program,
+        revm_opcode_public_values,
+    };
     use raiko2_primitives::{
         OpcodeLabStorageAccess, OpcodeLabStorageInput, OpcodeLabStorageLane,
         OpcodeLabStorageOperation,
@@ -126,6 +168,29 @@ mod tests {
     #[test]
     fn opcode_lab_uses_osaka() {
         assert_eq!(OPCODE_LAB_SPEC_ID, SpecId::OSAKA);
+    }
+
+    #[test]
+    fn public_values_follow_the_frozen_guest_commitment() {
+        let input = raiko2_primitives::OpcodeLabInput {
+            case: "case".into(),
+            scenario: "scenario".into(),
+            opcode: 0x01,
+            target_count: 2,
+            target_raw_gas: 3,
+            ..Default::default()
+        };
+
+        assert_eq!(fold_revm_opcode_program(7, 11), 228);
+        assert_eq!(
+            revm_opcode_public_values(&input, 4),
+            B256::from_slice(
+                &alloy_primitives::hex::decode(
+                    "97fadfb98a033ca1f2c4a5fc10e77a2e2fee83ebcff769c6a1af05d943f4345d",
+                )
+                .unwrap(),
+            )
+        );
     }
 
     #[test]

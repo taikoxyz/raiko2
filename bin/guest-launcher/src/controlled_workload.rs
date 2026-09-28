@@ -11,7 +11,10 @@ use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::{SolCall, sol};
 use alloy_trie::EMPTY_ROOT_HASH;
 use anyhow::{Result, bail};
-use raiko2_opcode_lab::{OPCODE_LAB_SPEC_ID, build_benchmark_db, build_benchmark_tx};
+use raiko2_opcode_lab::{
+    OPCODE_LAB_SPEC_ID, build_benchmark_db, build_benchmark_tx, fold_revm_opcode_execution_result,
+    fold_revm_opcode_program, revm_opcode_public_values,
+};
 use raiko2_primitives::{
     ExecutionWitness, OpcodeLabInput, OpcodeLabStorageInput, OpcodeLabStorageLane,
     OpcodeLabStorageOperation, PrecompileLabInput, PrecompileLabLane, ProofType, StatelessInput,
@@ -37,7 +40,7 @@ use raiko2_zkgas_trace::{
 };
 use reth_ethereum_primitives::TransactionSigned;
 use revm::{
-    Context, InspectEvm, Inspector, MainBuilder, MainContext,
+    Context, ExecuteEvm, InspectEvm, Inspector, MainBuilder, MainContext,
     bytecode::Bytecode,
     context::TxEnv,
     context_interface::result::ExecutionResult,
@@ -176,6 +179,7 @@ pub struct ControlledOpcodeIdentityReport {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ControlledOpcodeIdentityBundle {
     pub schema_version: u32,
+    pub expected_public_values: String,
     pub identity: ControlledOpcodeIdentityEvidence,
     pub report: ControlledOpcodeIdentityReport,
 }
@@ -3073,8 +3077,10 @@ pub fn controlled_opcode_identity_bundle(
 ) -> Result<ControlledOpcodeIdentityBundle> {
     let identity = controlled_opcode_identity(input)?;
     let trace = trace_revm_opcode_workload(input)?;
+    let expected_public_values = expected_revm_opcode_public_values(input)?;
     Ok(ControlledOpcodeIdentityBundle {
         schema_version: 1,
+        expected_public_values,
         report: ControlledOpcodeIdentityReport {
             guest_input_sha256: format!("0x{}", identity.backend_input_sha256),
             guest_input_bincode_length: identity.backend_input_len,
@@ -3082,6 +3088,33 @@ pub fn controlled_opcode_identity_bundle(
         },
         identity,
     })
+}
+
+fn expected_revm_opcode_public_values(input: &OpcodeLabInput) -> Result<String> {
+    input
+        .validate_controlled_contract()
+        .map_err(anyhow::Error::msg)?;
+    let gas_limit = input
+        .execution_gas_limit()
+        .max(OpcodeLabInput::MIN_EXECUTION_GAS_LIMIT);
+    let mut accumulator = 0u64;
+    for program in input.execution_programs().map_err(anyhow::Error::msg)? {
+        let bytecode = Bytecode::new_legacy(program.to_vec().into());
+        let context = Context::mainnet()
+            .modify_cfg_chained(|cfg| cfg.set_spec_and_mainnet_gas_params(OPCODE_LAB_SPEC_ID))
+            .with_db(build_benchmark_db(bytecode, input.storage.as_ref()));
+        let execution = context
+            .build_mainnet()
+            .transact(build_benchmark_tx(gas_limit, input.storage.as_ref())?)?;
+        accumulator = fold_revm_opcode_program(
+            accumulator,
+            fold_revm_opcode_execution_result(&execution.result),
+        );
+    }
+    Ok(format!(
+        "{:#x}",
+        revm_opcode_public_values(input, accumulator)
+    ))
 }
 
 pub fn validate_fixed_footprint(rows: &[ControlledFootprint]) -> Result<()> {

@@ -3,8 +3,8 @@
 #![allow(missing_docs)]
 sp1_zkvm::entrypoint!(main);
 
-use alloy_primitives::keccak256;
 use raiko2_guest_sp1::revm_opcode_lab_impl::execute_revm_bytecode_with_storage;
+use raiko2_opcode_lab::{fold_revm_opcode_program, revm_opcode_public_values};
 use raiko2_primitives::OpcodeLabInput;
 use sp1_zkvm::io;
 
@@ -22,25 +22,14 @@ pub fn main() {
         .execution_programs()
         .expect("valid fixed-footprint microprogram framing")
     {
-        accumulator =
-            accumulator
-                .wrapping_mul(31)
-                .wrapping_add(execute_revm_bytecode_with_storage(
-                    program,
-                    gas_limit,
-                    input.storage.as_ref(),
-                ));
+        accumulator = fold_revm_opcode_program(
+            accumulator,
+            execute_revm_bytecode_with_storage(program, gas_limit, input.storage.as_ref()),
+        );
     }
     #[cfg(feature = "bench")]
     println!("cycle-tracker-report-end: revm_opcode_lab_execute");
 
-    let mut output = Vec::new();
-    output.extend_from_slice(input.case.as_bytes());
-    output.extend_from_slice(input.scenario.as_bytes());
-    output.extend_from_slice(&input.opcode.to_le_bytes());
-    output.extend_from_slice(&input.target_count.to_le_bytes());
-    output.extend_from_slice(&input.target_raw_gas.to_le_bytes());
-    output.extend_from_slice(&accumulator.to_le_bytes());
-    let digest = keccak256(output);
+    let digest = revm_opcode_public_values(&input, accumulator);
     io::commit_slice(digest.as_slice());
 }

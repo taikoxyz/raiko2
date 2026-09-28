@@ -862,49 +862,27 @@ def _validate_semantic_check(
     return sha256_bytes(canonical_json(semantic))
 
 
-def admit_stateful_fixture_trace(
-    manifest: StatefulCampaignManifest,
-    fixture: Mapping[str, Any],
-    report_matches: Sequence[Mapping[str, Any]],
-    *,
-    expected_bundle: Mapping[str, Any],
-    repeat_index: int,
+def _admit_expected_identity_bundle(
+    fixture: Mapping[str, Any], expected_bundle: Mapping[str, Any]
 ) -> dict[str, Any]:
-    """Admits one lane against a replayed Rust identity/native-trace bundle.
-
-    The caller must regenerate ``expected_bundle`` from the explicitly supplied canonical
-    guest-input with the reviewed host helper before reading formal run reports. A bundle copied
-    from a run directory or derived from ``report_matches`` is not an independent evidence source.
-    """
-
-    if type(repeat_index) is not int or not 0 <= repeat_index < manifest.repeats:
-        raise ValueError("repeat index differs from the frozen campaign")
-    if len(report_matches) != 1:
-        raise ValueError("stateful fixture requires exactly one host trace report")
-    if not isinstance(fixture, Mapping):
-        raise ValueError("stateful fixture must be an object")
-    case_record = fixture.get("case_record")
     guest_input = fixture.get("guest_input")
-    if not isinstance(case_record, Mapping) or not isinstance(guest_input, Mapping):
-        raise ValueError("stateful fixture is missing case or guest input")
-    scenario_name = case_record.get("scenario")
-    lane = case_record.get("lane")
-    relation_count = case_record.get("relation_count")
-    scenario = manifest.scenario(scenario_name)
-    expected_fixture = generate_stateful_fixture(
-        manifest, scenario_name, lane=lane, count=relation_count
-    )
-    if json.loads(canonical_json(fixture)) != expected_fixture:
-        raise ValueError("stateful fixture differs from canonical generated layout")
-
+    if not isinstance(guest_input, Mapping):
+        raise ValueError("stateful fixture is missing its guest input")
     if not isinstance(expected_bundle, Mapping) or set(expected_bundle) != {
         "schema_version",
+        "expected_public_values",
         "identity",
         "report",
     }:
         raise ValueError("canonical Rust identity bundle has an invalid shape")
     if expected_bundle.get("schema_version") != 1:
         raise ValueError("canonical Rust identity bundle schema differs")
+    expected_public_values = expected_bundle.get("expected_public_values")
+    if (
+        not isinstance(expected_public_values, str)
+        or re.fullmatch(r"0x[0-9a-f]{64}", expected_public_values) is None
+    ):
+        raise ValueError("canonical Rust guest output is invalid")
     expected_identity = expected_bundle.get("identity")
     identity_fields = {
         "schema_version",
@@ -966,6 +944,57 @@ def admit_stateful_fixture_trace(
         != expected_backend_sha256
     ):
         raise ValueError("canonical Rust native report differs from its identity evidence")
+    return {
+        "backend_input_sha256": expected_backend_sha256,
+        "backend_input_len": expected_backend_len,
+        "expected_public_values": expected_public_values,
+        "identity": expected_identity,
+        "identity_evidence_sha256": identity_evidence_sha256,
+        "native_trace": expected_native_trace,
+    }
+
+
+def admit_stateful_fixture_trace(
+    manifest: StatefulCampaignManifest,
+    fixture: Mapping[str, Any],
+    report_matches: Sequence[Mapping[str, Any]],
+    *,
+    expected_bundle: Mapping[str, Any],
+    repeat_index: int,
+) -> dict[str, Any]:
+    """Admits one lane against a replayed Rust identity/native-trace bundle.
+
+    The caller must regenerate ``expected_bundle`` from the explicitly supplied canonical
+    guest-input with the reviewed host helper before reading formal run reports. A bundle copied
+    from a run directory or derived from ``report_matches`` is not an independent evidence source.
+    """
+
+    if type(repeat_index) is not int or not 0 <= repeat_index < manifest.repeats:
+        raise ValueError("repeat index differs from the frozen campaign")
+    if len(report_matches) != 1:
+        raise ValueError("stateful fixture requires exactly one host trace report")
+    if not isinstance(fixture, Mapping):
+        raise ValueError("stateful fixture must be an object")
+    case_record = fixture.get("case_record")
+    guest_input = fixture.get("guest_input")
+    if not isinstance(case_record, Mapping) or not isinstance(guest_input, Mapping):
+        raise ValueError("stateful fixture is missing case or guest input")
+    scenario_name = case_record.get("scenario")
+    lane = case_record.get("lane")
+    relation_count = case_record.get("relation_count")
+    scenario = manifest.scenario(scenario_name)
+    expected_fixture = generate_stateful_fixture(
+        manifest, scenario_name, lane=lane, count=relation_count
+    )
+    if json.loads(canonical_json(fixture)) != expected_fixture:
+        raise ValueError("stateful fixture differs from canonical generated layout")
+
+    expected = _admit_expected_identity_bundle(fixture, expected_bundle)
+    expected_identity = expected["identity"]
+    expected_backend_sha256 = expected["backend_input_sha256"]
+    expected_backend_len = expected["backend_input_len"]
+    expected_native_trace = expected["native_trace"]
+    identity_evidence_sha256 = expected["identity_evidence_sha256"]
 
     report = report_matches[0]
     if not isinstance(report, Mapping):
@@ -1412,7 +1441,11 @@ def _load_fixture_for_spec(
 
 
 def _portable_formal_report(
-    report: Mapping[str, Any], *, input_path: pathlib.Path, fixtures_root: pathlib.Path
+    report: Mapping[str, Any],
+    *,
+    input_path: pathlib.Path,
+    fixtures_root: pathlib.Path,
+    expected_public_values: str | None = None,
 ) -> dict[str, Any]:
     if not isinstance(report, Mapping):
         raise ValueError("stateful execution report must be an object")
@@ -1441,6 +1474,8 @@ def _portable_formal_report(
         or re.fullmatch(r"0x[0-9a-f]{64}", public_values) is None
     ):
         raise ValueError("stateful execution report has noncanonical public values")
+    if expected_public_values is not None and public_values != expected_public_values:
+        raise ValueError("formal public values differ from canonical guest output")
     if portable.get("exit_code") != 0:
         raise ValueError("stateful guest execution failed")
     prover_gas = portable.get("prover_gas", portable.get("gas"))
@@ -1455,6 +1490,64 @@ def _portable_formal_report(
         portable, workload_kind="opcode", expected_engine="gas-estimator"
     )
     return portable
+
+
+def _build_stateful_row(
+    *,
+    spec: StatefulCampaignRowSpec,
+    fixture: Mapping[str, Any],
+    report: Mapping[str, Any],
+    admission: Mapping[str, Any],
+    ordered_pair_identity: str,
+    launcher_sha256: str,
+    elf_sha256: str,
+    calibration_run_id: str,
+) -> dict[str, Any]:
+    normalized = opcode_gas.raw_run_from_report(
+        dict(fixture["case_record"]), dict(report)
+    )
+    normalized["repeat_index"] = spec.repeat_index
+    normalized["execution_row_id"] = opcode_gas.controlled_execution_row_id(
+        normalized["workload_id"],
+        backend="sp1",
+        execution_engine=normalized["sp1_execution_engine"],
+        run_id=calibration_run_id,
+        repeat_index=spec.repeat_index,
+        backend_input_sha256=admission["backend_input_sha256"],
+    )
+    row_identity = stateful_execution_row_identity(
+        scenario=spec.scenario,
+        lane=spec.lane,
+        relation_count=spec.relation_count,
+        repeat_index=spec.repeat_index,
+        backend_input_sha256=admission["backend_input_sha256"],
+        elf_sha256=elf_sha256,
+        launcher_sha256=launcher_sha256,
+        trace_sha256=admission["trace_sha256"],
+    )
+    return {
+        "schema_version": 1,
+        "purpose": PURPOSE,
+        "scenario": spec.scenario,
+        "lane": spec.lane,
+        "relation_count": spec.relation_count,
+        "repeat_index": spec.repeat_index,
+        "logical_identity": spec.logical_identity,
+        "row_identity": row_identity,
+        "ordered_pair_identity": ordered_pair_identity,
+        "backend_input_sha256": admission["backend_input_sha256"],
+        "elf_sha256": elf_sha256,
+        "launcher_sha256": launcher_sha256,
+        "trace_sha256": admission["trace_sha256"],
+        "semantic_check_sha256": admission["semantic_check_sha256"],
+        "identity_evidence_sha256": admission["identity_evidence_sha256"],
+        "guest_input_json_file_sha256": fixture["case_record"][
+            "guest_input_json_file_sha256"
+        ],
+        "formal_report_sha256": sha256_bytes(canonical_json(report)),
+        "formal_report": dict(report),
+        "normalized_report": normalized,
+    }
 
 
 def _pair_records(
@@ -1477,11 +1570,19 @@ def _pair_records(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     if target_spec.repeat_index != control_spec.repeat_index:
         raise ValueError("stateful target/control repeat pairing differs")
+    target_expected = _admit_expected_identity_bundle(target_fixture, target_bundle)
+    control_expected = _admit_expected_identity_bundle(control_fixture, control_bundle)
     target_portable = _portable_formal_report(
-        target_report, input_path=target_input, fixtures_root=fixtures_root
+        target_report,
+        input_path=target_input,
+        fixtures_root=fixtures_root,
+        expected_public_values=target_expected["expected_public_values"],
     )
     control_portable = _portable_formal_report(
-        control_report, input_path=control_input, fixtures_root=fixtures_root
+        control_report,
+        input_path=control_input,
+        fixtures_root=fixtures_root,
+        expected_public_values=control_expected["expected_public_values"],
     )
     pair = admit_stateful_pair(
         manifest,
@@ -1494,61 +1595,27 @@ def _pair_records(
         repeat_index=target_spec.repeat_index,
     )
 
-    def build(
-        spec: StatefulCampaignRowSpec,
-        fixture: Mapping[str, Any],
-        report: Mapping[str, Any],
-        admission: Mapping[str, Any],
-    ) -> dict[str, Any]:
-        normalized = opcode_gas.raw_run_from_report(
-            dict(fixture["case_record"]), dict(report)
-        )
-        normalized["repeat_index"] = spec.repeat_index
-        normalized["execution_row_id"] = opcode_gas.controlled_execution_row_id(
-            normalized["workload_id"],
-            backend="sp1",
-            execution_engine=normalized["sp1_execution_engine"],
-            run_id=calibration_run_id,
-            repeat_index=spec.repeat_index,
-            backend_input_sha256=admission["backend_input_sha256"],
-        )
-        row_identity = stateful_execution_row_identity(
-            scenario=spec.scenario,
-            lane=spec.lane,
-            relation_count=spec.relation_count,
-            repeat_index=spec.repeat_index,
-            backend_input_sha256=admission["backend_input_sha256"],
-            elf_sha256=elf_sha256,
-            launcher_sha256=launcher_sha256,
-            trace_sha256=admission["trace_sha256"],
-        )
-        return {
-            "schema_version": 1,
-            "purpose": PURPOSE,
-            "scenario": spec.scenario,
-            "lane": spec.lane,
-            "relation_count": spec.relation_count,
-            "repeat_index": spec.repeat_index,
-            "logical_identity": spec.logical_identity,
-            "row_identity": row_identity,
-            "ordered_pair_identity": pair["ordered_pair_identity"],
-            "backend_input_sha256": admission["backend_input_sha256"],
-            "elf_sha256": elf_sha256,
-            "launcher_sha256": launcher_sha256,
-            "trace_sha256": admission["trace_sha256"],
-            "semantic_check_sha256": admission["semantic_check_sha256"],
-            "identity_evidence_sha256": admission["identity_evidence_sha256"],
-            "guest_input_json_file_sha256": fixture["case_record"][
-                "guest_input_json_file_sha256"
-            ],
-            "formal_report_sha256": sha256_bytes(canonical_json(report)),
-            "formal_report": dict(report),
-            "normalized_report": normalized,
-        }
-
     return (
-        build(target_spec, target_fixture, target_portable, pair["target"]),
-        build(control_spec, control_fixture, control_portable, pair["control"]),
+        _build_stateful_row(
+            spec=target_spec,
+            fixture=target_fixture,
+            report=target_portable,
+            admission=pair["target"],
+            ordered_pair_identity=pair["ordered_pair_identity"],
+            launcher_sha256=launcher_sha256,
+            elf_sha256=elf_sha256,
+            calibration_run_id=calibration_run_id,
+        ),
+        _build_stateful_row(
+            spec=control_spec,
+            fixture=control_fixture,
+            report=control_portable,
+            admission=pair["control"],
+            ordered_pair_identity=pair["ordered_pair_identity"],
+            launcher_sha256=launcher_sha256,
+            elf_sha256=elf_sha256,
+            calibration_run_id=calibration_run_id,
+        ),
     )
 
 
@@ -1601,9 +1668,12 @@ def run_stateful_campaign_rows(
         identity_replayer = opcode_gas.replay_revm_opcode_identity
     replay_cache: dict[tuple[str, str], Mapping[str, Any]] = {}
     bundles: dict[tuple[str, int, str], Mapping[str, Any]] = {}
+    bundle_evidence: dict[tuple[str, int, str], Mapping[str, Any]] = {}
     # Provenance authority boundary: finish every native replay before reading any run row.
-    for key, (_fixture, input_path) in fixtures.items():
-        bundles[key] = identity_replayer(guest_launcher, input_path, replay_cache)
+    for key, (fixture, input_path) in fixtures.items():
+        bundle = identity_replayer(guest_launcher, input_path, replay_cache)
+        bundles[key] = bundle
+        bundle_evidence[key] = _admit_expected_identity_bundle(fixture, bundle)
 
     if not verification_only:
         run.mkdir(parents=True, exist_ok=True)
@@ -1645,7 +1715,12 @@ def run_stateful_campaign_rows(
         scenario, count, lane, repeat_index = key
         fixture, input_path = fixtures[(scenario, count, lane)]
         portable = _portable_formal_report(
-            report, input_path=input_path, fixtures_root=fixtures_root
+            report,
+            input_path=input_path,
+            fixtures_root=fixtures_root,
+            expected_public_values=bundle_evidence[
+                (scenario, count, lane)
+            ]["expected_public_values"],
         )
         admission = admit_stateful_fixture_trace(
             manifest,
@@ -1655,54 +1730,32 @@ def run_stateful_campaign_rows(
             repeat_index=repeat_index,
         )
         spec = pair_groups[(scenario, count, repeat_index)][lane]
-        normalized = opcode_gas.raw_run_from_report(
-            dict(fixture["case_record"]), dict(portable)
-        )
-        normalized["repeat_index"] = repeat_index
-        normalized["execution_row_id"] = opcode_gas.controlled_execution_row_id(
-            normalized["workload_id"],
-            backend="sp1",
-            execution_engine=normalized["sp1_execution_engine"],
-            run_id=calibration_run_id,
+        target_hash = bundle_evidence[(scenario, count, "target")][
+            "backend_input_sha256"
+        ]
+        control_hash = bundle_evidence[(scenario, count, "control")][
+            "backend_input_sha256"
+        ]
+        ordered_pair_identity = stateful_ordered_pair_identity(
+            scenario=scenario,
+            measurement_opcode=manifest.scenario(scenario).measurement_opcode,
+            relation_count=count,
             repeat_index=repeat_index,
-            backend_input_sha256=admission["backend_input_sha256"],
+            target_hash=target_hash,
+            control_hash=control_hash,
         )
-        expected_fields = {
-            "schema_version": 1,
-            "purpose": PURPOSE,
-            "scenario": scenario,
-            "lane": lane,
-            "relation_count": count,
-            "repeat_index": repeat_index,
-            "logical_identity": spec.logical_identity,
-            "row_identity": stateful_execution_row_identity(
-                scenario=scenario,
-                lane=lane,
-                relation_count=count,
-                repeat_index=repeat_index,
-                backend_input_sha256=admission["backend_input_sha256"],
-                elf_sha256=elf_sha256,
-                launcher_sha256=launcher_sha256,
-                trace_sha256=admission["trace_sha256"],
-            ),
-            "backend_input_sha256": admission["backend_input_sha256"],
-            "elf_sha256": elf_sha256,
-            "launcher_sha256": launcher_sha256,
-            "trace_sha256": admission["trace_sha256"],
-            "semantic_check_sha256": admission["semantic_check_sha256"],
-            "identity_evidence_sha256": admission["identity_evidence_sha256"],
-            "guest_input_json_file_sha256": fixture["case_record"][
-                "guest_input_json_file_sha256"
-            ],
-            "formal_report_sha256": sha256_bytes(canonical_json(portable)),
-            "formal_report": portable,
-            "normalized_report": normalized,
-        }
+        expected_row = _build_stateful_row(
+            spec=spec,
+            fixture=fixture,
+            report=portable,
+            admission=admission,
+            ordered_pair_identity=ordered_pair_identity,
+            launcher_sha256=launcher_sha256,
+            elf_sha256=elf_sha256,
+            calibration_run_id=calibration_run_id,
+        )
         payload = existing_payloads[key]
-        if any(
-            canonical_json(payload.get(field)) != canonical_json(expected)
-            for field, expected in expected_fields.items()
-        ):
+        if canonical_json(payload) != canonical_json(expected_row):
             raise ValueError("persisted stateful lane differs from fresh replay")
 
     if verification_only and missing_specs:
@@ -1729,7 +1782,12 @@ def run_stateful_campaign_rows(
         for spec, input_path, report in zip(missing_specs, input_paths, reports, strict=True):
             key = (spec.scenario, spec.relation_count, spec.lane, spec.repeat_index)
             new_reports[key] = _portable_formal_report(
-                report, input_path=input_path, fixtures_root=fixtures_root
+                report,
+                input_path=input_path,
+                fixtures_root=fixtures_root,
+                expected_public_values=bundle_evidence[
+                    (spec.scenario, spec.relation_count, spec.lane)
+                ]["expected_public_values"],
             )
 
     all_reports = {**existing_reports, **new_reports}

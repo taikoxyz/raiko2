@@ -1,4 +1,7 @@
-use raiko2_opcode_lab::{build_benchmark_db, build_benchmark_tx, OPCODE_LAB_SPEC_ID};
+use raiko2_opcode_lab::{
+    OPCODE_LAB_SPEC_ID, build_benchmark_db, build_benchmark_tx,
+    fold_revm_opcode_execution_result,
+};
 use raiko2_primitives::OpcodeLabStorageInput;
 use revm::{
     bytecode::Bytecode, context_interface::result::ResultAndState, primitives::hardfork::SpecId,
@@ -42,21 +45,7 @@ pub fn execute_revm_bytecode_with_storage(
         execute_revm_bytecode_result(bytecode, gas_limit, storage, configured_revm_spec!());
     #[cfg(test)]
     record_test_revm_success(&execution);
-    let result = execution.result;
-
-    let mut accumulator = result
-        .tx_gas_used()
-        .wrapping_mul(31)
-        .wrapping_add(u64::from(result.is_success()));
-    if let Some(output) = result.output() {
-        accumulator = accumulator
-            .wrapping_mul(31)
-            .wrapping_add(output.len() as u64);
-        for byte in output.iter().take(32) {
-            accumulator = accumulator.wrapping_mul(31).wrapping_add(u64::from(*byte));
-        }
-    }
-    accumulator
+    fold_revm_opcode_execution_result(&execution.result)
 }
 
 fn execute_revm_bytecode_result(

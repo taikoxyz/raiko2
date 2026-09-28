@@ -3139,6 +3139,7 @@ mod tests {
         let bundle: serde_json::Value =
             serde_json::from_slice(&fs::read(&output_path).unwrap()).unwrap();
         assert_eq!(bundle["schema_version"], 1);
+        assert_eq!(bundle["expected_public_values"].as_str().unwrap().len(), 66);
         assert_eq!(
             bundle["identity"]["input"],
             serde_json::to_value(input).unwrap()

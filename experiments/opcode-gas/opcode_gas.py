@@ -23795,6 +23795,22 @@ def verify_sealed_higher_layer_calibration(
     }
 
 
+def _validate_composite_sp1_proposal_guest_identity(guest: Any) -> None:
+    expected_paths = {
+        "elf_path": str(_HIGHER_LAYER_ELF_PATH),
+        "vk_path": str(_HIGHER_LAYER_VK_PATH),
+    }
+    if (
+        not isinstance(guest, Mapping)
+        or set(guest)
+        != {"elf_path", "elf_sha256", "vk_path", "vk_sha256"}
+        or any(guest.get(field) != value for field, value in expected_paths.items())
+        or not _is_sha256(guest.get("elf_sha256"))
+        or not _is_sha256(guest.get("vk_sha256"))
+    ):
+        raise ValueError("composite SP1 proposal guest identity differs")
+
+
 def _load_composite_higher_layer_source(
     package: pathlib.Path,
 ) -> tuple[
@@ -23875,17 +23891,9 @@ def _load_composite_higher_layer_source(
             raise ValueError(f"composite {label} artifact differs")
         source_artifacts[field] = artifact
 
-    guest = source_payload.get("sp1_proposal_guest")
-    if not isinstance(guest, Mapping):
-        raise ValueError("composite SP1 proposal guest identity is missing")
-    for path_field, hash_field in (
-        ("elf_path", "elf_sha256"),
-        ("vk_path", "vk_sha256"),
-    ):
-        path = _resolve_repo_path(guest.get(path_field), field_name=path_field)
-        raw = _read_regular_file_bytes_once(path, label=path_field)
-        if sha256_bytes(raw) != guest.get(hash_field):
-            raise ValueError("composite SP1 proposal guest artifact differs")
+    _validate_composite_sp1_proposal_guest_identity(
+        source_payload.get("sp1_proposal_guest")
+    )
 
     manifest = _higher_layer_manifest_from_artifact(
         source_artifacts["higher_layer_manifest"]

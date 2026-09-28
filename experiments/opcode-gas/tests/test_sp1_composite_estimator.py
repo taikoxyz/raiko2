@@ -149,6 +149,62 @@ class CorrectedHigherLayerProjectionTests(unittest.TestCase):
             },
         )
 
+    def test_historical_projection_does_not_read_live_proposal_guest(self):
+        live_guest_paths = {
+            (ROOT / "crates/guests/elf/sp1_shasta_proposal.elf").resolve(),
+            (ROOT / "crates/guests/elf/sp1_shasta_proposal.vk.bin").resolve(),
+        }
+        read_regular_file_bytes_once = opcode_gas._read_regular_file_bytes_once
+
+        def reject_live_guest_read(path, *, label):
+            if pathlib.Path(path).resolve() in live_guest_paths:
+                self.fail(f"historical projection read live proposal guest: {path}")
+            return read_regular_file_bytes_once(path, label=label)
+
+        with mock.patch.object(
+            opcode_gas,
+            "_read_regular_file_bytes_once",
+            side_effect=reject_live_guest_read,
+        ):
+            artifact = self.build()
+
+        self.assertEqual(artifact["selected_round"], 128)
+
+    def test_historical_proposal_guest_identity_is_strict_and_canonical(self):
+        valid = {
+            "elf_path": "crates/guests/elf/sp1_shasta_proposal.elf",
+            "elf_sha256": "1" * 64,
+            "vk_path": "crates/guests/elf/sp1_shasta_proposal.vk.bin",
+            "vk_sha256": "a" * 64,
+        }
+        opcode_gas._validate_composite_sp1_proposal_guest_identity(valid)
+
+        invalid = []
+        for field in valid:
+            missing = dict(valid)
+            missing.pop(field)
+            invalid.append(missing)
+        invalid.extend(
+            [
+                {**valid, "unexpected": True},
+                {**valid, "elf_path": "/tmp/sp1_shasta_proposal.elf"},
+                {
+                    **valid,
+                    "vk_path": "crates/guests/elf/./sp1_shasta_proposal.vk.bin",
+                },
+                {**valid, "elf_sha256": "A" * 64},
+                {**valid, "vk_sha256": "a" * 63},
+                {**valid, "vk_sha256": "g" * 64},
+            ]
+        )
+        for guest in invalid:
+            with self.subTest(guest=guest), self.assertRaisesRegex(
+                ValueError, "proposal guest identity"
+            ):
+                opcode_gas._validate_composite_sp1_proposal_guest_identity(
+                    guest
+                )
+
     def test_reads_and_hashes_the_same_bytes_across_path_replacement(self):
         original = {"artifact_sha256": "1" * 64, "value": 1}
         replacement = {"artifact_sha256": "2" * 64, "value": 2}

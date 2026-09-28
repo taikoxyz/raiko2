@@ -4,6 +4,7 @@ members = [
     "xtask",
     "xtask/build-guest",
     "crates/guest-common",
+    "crates/opcode-lab",
     "crates/pipeline",
     "crates/guests",
     "crates/primitives",
@@ -63,6 +64,7 @@ opt-level = 1
 [workspace.dependencies]
 # Raiko2 crates
 raiko2-primitives = { path = "./crates/primitives", default-features = false }
+raiko2-opcode-lab = { path = "./crates/opcode-lab" }
 raiko2-guest-common = { path = "./crates/guest-common" }
 raiko2-prover = { path = "./crates/prover" }
 raiko2-pipeline = { path = "./crates/pipeline" }

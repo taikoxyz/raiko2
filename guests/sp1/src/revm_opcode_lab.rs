@@ -4,7 +4,7 @@
 sp1_zkvm::entrypoint!(main);
 
 use alloy_primitives::keccak256;
-use raiko2_guest_sp1::revm_opcode_lab_impl::execute_revm_bytecode;
+use raiko2_guest_sp1::revm_opcode_lab_impl::execute_revm_bytecode_with_storage;
 use raiko2_primitives::OpcodeLabInput;
 use sp1_zkvm::io;
 
@@ -22,9 +22,14 @@ pub fn main() {
         .execution_programs()
         .expect("valid fixed-footprint microprogram framing")
     {
-        accumulator = accumulator
-            .wrapping_mul(31)
-            .wrapping_add(execute_revm_bytecode(program, gas_limit));
+        accumulator =
+            accumulator
+                .wrapping_mul(31)
+                .wrapping_add(execute_revm_bytecode_with_storage(
+                    program,
+                    gas_limit,
+                    input.storage.as_ref(),
+                ));
     }
     #[cfg(feature = "bench")]
     println!("cycle-tracker-report-end: revm_opcode_lab_execute");

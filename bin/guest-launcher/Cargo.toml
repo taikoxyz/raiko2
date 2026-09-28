@@ -14,6 +14,7 @@ bincode.workspace = true
 clap.workspace = true
 flate2.workspace = true
 raiko2-primitives = { workspace = true, features = ["kzg-host"] }
+raiko2-opcode-lab.workspace = true
 raiko2-pipeline.workspace = true
 raiko2-primitives-shasta.workspace = true
 raiko2-protocol.workspace = true

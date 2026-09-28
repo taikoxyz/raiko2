@@ -1,12 +1,14 @@
+use raiko2_opcode_lab::{build_benchmark_db, build_benchmark_tx, OPCODE_LAB_SPEC_ID};
+use raiko2_primitives::OpcodeLabStorageInput;
 use revm::{
-    bytecode::Bytecode, context::TxEnv, database::BenchmarkDB, primitives::hardfork::SpecId,
+    bytecode::Bytecode, context_interface::result::ResultAndState, primitives::hardfork::SpecId,
     Context, ExecuteEvm, MainBuilder, MainContext,
 };
 
 #[cfg(test)]
 std::thread_local! {
     static TEST_REVM_SPEC_ID: std::cell::Cell<SpecId> = const {
-        std::cell::Cell::new(SpecId::OSAKA)
+        std::cell::Cell::new(OPCODE_LAB_SPEC_ID)
     };
     static TEST_REVM_SUCCESS: std::cell::Cell<Option<bool>> = const {
         std::cell::Cell::new(None)
@@ -16,7 +18,7 @@ std::thread_local! {
 #[cfg(not(test))]
 macro_rules! configured_revm_spec {
     () => {
-        SpecId::OSAKA
+        OPCODE_LAB_SPEC_ID
     };
 }
 
@@ -28,23 +30,19 @@ macro_rules! configured_revm_spec {
 }
 
 pub fn execute_revm_bytecode(bytecode: &[u8], gas_limit: u64) -> u64 {
-    let bytecode = Bytecode::new_legacy(bytecode.to_vec().into());
-    let ctx = Context::mainnet()
-        .modify_cfg_chained(|cfg| cfg.set_spec_and_mainnet_gas_params(configured_revm_spec!()))
-        .with_db(BenchmarkDB::new_bytecode(bytecode));
-    let mut evm = ctx.build_mainnet();
-    let result = evm
-        .transact(
-            TxEnv::builder_for_bench()
-                .gas_limit(gas_limit.max(100_000))
-                .build()
-                .expect("valid revm benchmark tx"),
-        )
-        .expect("revm opcode lab execution")
-        .result;
+    execute_revm_bytecode_with_storage(bytecode, gas_limit, None)
+}
 
+pub fn execute_revm_bytecode_with_storage(
+    bytecode: &[u8],
+    gas_limit: u64,
+    storage: Option<&OpcodeLabStorageInput>,
+) -> u64 {
+    let execution =
+        execute_revm_bytecode_result(bytecode, gas_limit, storage, configured_revm_spec!());
     #[cfg(test)]
-    TEST_REVM_SUCCESS.with(|success| success.set(Some(result.is_success())));
+    record_test_revm_success(&execution);
+    let result = execution.result;
 
     let mut accumulator = result
         .tx_gas_used()
@@ -61,9 +59,81 @@ pub fn execute_revm_bytecode(bytecode: &[u8], gas_limit: u64) -> u64 {
     accumulator
 }
 
+fn execute_revm_bytecode_result(
+    bytecode: &[u8],
+    gas_limit: u64,
+    storage: Option<&OpcodeLabStorageInput>,
+    spec_id: SpecId,
+) -> ResultAndState {
+    let bytecode = Bytecode::new_legacy(bytecode.to_vec().into());
+    let ctx = Context::mainnet()
+        .modify_cfg_chained(|cfg| cfg.set_spec_and_mainnet_gas_params(spec_id))
+        .with_db(build_benchmark_db(bytecode, storage));
+    let mut evm = ctx.build_mainnet();
+    evm.transact(
+        build_benchmark_tx(gas_limit.max(100_000), storage).expect("valid revm benchmark tx"),
+    )
+    .expect("revm opcode lab execution")
+}
+
+#[cfg(test)]
+fn record_test_revm_success(result: &ResultAndState) {
+    TEST_REVM_SUCCESS.with(|success| success.set(Some(result.result.is_success())));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use raiko2_primitives::{
+        OpcodeLabStorageAccess, OpcodeLabStorageInput, OpcodeLabStorageLane,
+        OpcodeLabStorageOperation,
+    };
+    use revm::{database::BENCH_TARGET, primitives::U256};
+
+    const SLOT: [u8; 32] = [0x11; 32];
+
+    fn storage_load(original_value: [u8; 32]) -> OpcodeLabStorageInput {
+        OpcodeLabStorageInput {
+            measurement_opcode: 0x54,
+            lane: OpcodeLabStorageLane::Target,
+            slot: SLOT,
+            original_value,
+            access: OpcodeLabStorageAccess::Cold,
+            operation: OpcodeLabStorageOperation::Load {
+                expected_value: original_value,
+            },
+        }
+    }
+
+    fn storage_store(original_value: [u8; 32], new_value: [u8; 32]) -> OpcodeLabStorageInput {
+        OpcodeLabStorageInput {
+            measurement_opcode: 0x55,
+            lane: OpcodeLabStorageLane::Target,
+            slot: SLOT,
+            original_value,
+            access: OpcodeLabStorageAccess::Warm,
+            operation: OpcodeLabStorageOperation::Store {
+                current_value: original_value,
+                new_value,
+            },
+        }
+    }
+
+    fn sload_return_program() -> Vec<u8> {
+        let mut bytecode = vec![0x7f];
+        bytecode.extend_from_slice(&SLOT);
+        bytecode.extend_from_slice(&[0x54, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xf3]);
+        bytecode
+    }
+
+    fn sstore_program(new_value: [u8; 32]) -> Vec<u8> {
+        let mut bytecode = vec![0x7f];
+        bytecode.extend_from_slice(&new_value);
+        bytecode.push(0x7f);
+        bytecode.extend_from_slice(&SLOT);
+        bytecode.extend_from_slice(&[0x55, 0x00]);
+        bytecode
+    }
 
     fn execute_revm_bytecode_for_spec(
         bytecode: &[u8],
@@ -90,5 +160,47 @@ mod tests {
         assert!(osaka_success);
         assert_eq!((osaka_accumulator / 31) % 31, 1);
         assert!(!prague_success);
+    }
+
+    #[test]
+    fn revm_opcode_lab_sload_returns_zero_and_nonzero_prestate() {
+        for original_value in [[0u8; 32], [0x22; 32]] {
+            let storage = storage_load(original_value);
+            let execution = execute_revm_bytecode_result(
+                &sload_return_program(),
+                100_000,
+                Some(&storage),
+                SpecId::OSAKA,
+            );
+
+            assert!(execution.result.is_success());
+            assert_eq!(
+                execution.result.output().expect("SLOAD returns one word"),
+                original_value.as_slice()
+            );
+        }
+    }
+
+    #[test]
+    fn revm_opcode_lab_sstore_applies_zero_to_one_and_one_to_zero() {
+        let one = U256::from(1);
+        for (original_value, new_value, expected) in [
+            ([0u8; 32], one.to_be_bytes(), one),
+            (one.to_be_bytes(), [0u8; 32], U256::ZERO),
+        ] {
+            let storage = storage_store(original_value, new_value);
+            let execution = execute_revm_bytecode_result(
+                &sstore_program(new_value),
+                100_000,
+                Some(&storage),
+                SpecId::OSAKA,
+            );
+
+            assert!(execution.result.is_success());
+            assert_eq!(
+                execution.state[&BENCH_TARGET].storage[&U256::from_be_bytes(SLOT)].present_value,
+                expected
+            );
+        }
     }
 }

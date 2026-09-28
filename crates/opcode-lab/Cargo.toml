@@ -1,0 +1,12 @@
+[package]
+name = "raiko2-opcode-lab"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+raiko2-primitives.workspace = true
+revm.workspace = true

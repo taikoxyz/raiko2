@@ -5479,6 +5479,7 @@ dependencies = [
  "predicates",
  "protocol",
  "raiko2-guest-common",
+ "raiko2-opcode-lab",
  "raiko2-pipeline",
  "raiko2-primitives",
  "raiko2-primitives-shasta",
@@ -8489,6 +8490,14 @@ dependencies = [
 [[package]]
 name = "raiko2-guests"
 version = "0.1.0"
+
+[[package]]
+name = "raiko2-opcode-lab"
+version = "0.1.0"
+dependencies = [
+ "raiko2-primitives",
+ "revm",
+]
 
 [[package]]
 name = "raiko2-pipeline"

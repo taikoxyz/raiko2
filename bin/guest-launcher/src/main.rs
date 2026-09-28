@@ -1656,6 +1656,13 @@ fn install_controlled_trace(
     report: &mut BenchReport,
     trace: controlled_workload::ControlledTrace,
 ) -> Result<()> {
+    if let controlled_workload::ControlledTrace::RevmOpcode(opcode_trace) = &trace
+        && (!opcode_trace.semantic_check.passed
+            || opcode_trace.semantic_check.backend_input_sha256
+                != opcode_trace.backend_input_sha256)
+    {
+        bail!("controlled semantic backend input identity differs from host trace");
+    }
     let (backend_input_sha256, backend_input_len) = match &trace {
         controlled_workload::ControlledTrace::RevmOpcode(trace) => {
             (&trace.backend_input_sha256, trace.backend_input_len)
@@ -1689,9 +1696,9 @@ fn apply_controlled_opcode_trace(
     if stage == Stage::RevmOpcodeLab {
         install_controlled_trace(
             report,
-            controlled_workload::ControlledTrace::RevmOpcode(
+            controlled_workload::ControlledTrace::RevmOpcode(Box::new(
                 controlled_workload::trace_revm_opcode_workload(input)?,
-            ),
+            )),
         )?;
     }
     Ok(())
@@ -1944,9 +1951,9 @@ fn execute_opcode_lab_batch_gas_estimator(
     for (input_path, input) in inputs {
         let (guest_input_sha256, guest_input_bincode_length) = opcode_lab_input_identity(&input)?;
         let controlled_trace = if stage == Stage::RevmOpcodeLab {
-            Some(controlled_workload::ControlledTrace::RevmOpcode(
+            Some(controlled_workload::ControlledTrace::RevmOpcode(Box::new(
                 controlled_workload::trace_revm_opcode_workload(&input)?,
-            ))
+            )))
         } else {
             None
         };
@@ -1979,9 +1986,9 @@ where
     for (input_path, input) in inputs {
         let (guest_input_sha256, guest_input_bincode_length) = opcode_lab_input_identity(&input)?;
         let controlled_trace = if stage == Stage::RevmOpcodeLab {
-            Some(controlled_workload::ControlledTrace::RevmOpcode(
+            Some(controlled_workload::ControlledTrace::RevmOpcode(Box::new(
                 controlled_workload::trace_revm_opcode_workload(&input)?,
-            ))
+            )))
         } else {
             None
         };
@@ -2306,10 +2313,10 @@ mod tests {
         apply_risc0_execution_metadata, apply_sp1_metadata, canonical_sp1_core_opts,
         canonicalize_sp1_core_opts, execute_opcode_lab_gas_estimator_with_opts,
         finalize_opcode_lab_execution_report, finalize_sp1_proposal_gas_estimator_report,
-        guest_launcher_executable_path, install_opcode_lab_input_identity,
-        new_controlled_overhead_report, parse_sp1_program, read_input, read_opcode_lab_input,
-        read_opcode_lab_input_list, risc0_padded_cycles, run_controlled_state_holdout_trace,
-        validate_proposal_gas_estimator_guest_elf_override,
+        guest_launcher_executable_path, install_controlled_trace,
+        install_opcode_lab_input_identity, new_controlled_overhead_report, parse_sp1_program,
+        read_input, read_opcode_lab_input, read_opcode_lab_input_list, risc0_padded_cycles,
+        run_controlled_state_holdout_trace, validate_proposal_gas_estimator_guest_elf_override,
     };
     use alloy_primitives::{Address, B256, hex};
     use clap::Parser as _;
@@ -3273,6 +3280,38 @@ mod tests {
             .expect_err("conflicting canonical and trace identities must fail closed");
 
         assert!(error.to_string().contains("input identity differs"));
+    }
+
+    #[test]
+    fn revm_opcode_report_rejects_a_semantic_check_for_another_backend_input() {
+        let input = OpcodeLabInput {
+            case: "add".into(),
+            scenario: "arithmetic".into(),
+            opcode: 0x01,
+            target_count: 1,
+            target_raw_gas: 3,
+            tx_gas_limit: Some(1_000_024),
+            bytecode: vec![0x60, 0x01, 0x60, 0x02, 0x01, 0x00],
+            generator_max_count: Some(8),
+            fixed_bytecode_len: Some(6),
+            storage: None,
+        };
+        let mut trace = super::controlled_workload::trace_revm_opcode_workload(&input).unwrap();
+        trace.semantic_check.backend_input_sha256 = "00".repeat(32);
+        let mut report =
+            BenchReport::new("revm-opcode-lab", "execute", "core", "input.json".into());
+
+        let error = install_controlled_trace(
+            &mut report,
+            super::controlled_workload::ControlledTrace::RevmOpcode(Box::new(trace)),
+        )
+        .expect_err("semantic evidence for another input must not enter the report");
+
+        assert!(
+            error
+                .to_string()
+                .contains("semantic backend input identity")
+        );
     }
 
     #[test]

@@ -11,9 +11,11 @@ use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::{SolCall, sol};
 use alloy_trie::EMPTY_ROOT_HASH;
 use anyhow::{Result, bail};
+use raiko2_opcode_lab::{OPCODE_LAB_SPEC_ID, build_benchmark_db, build_benchmark_tx};
 use raiko2_primitives::{
-    ExecutionWitness, OpcodeLabInput, PrecompileLabInput, PrecompileLabLane, ProofType,
-    StatelessInput, SupportedChainSpecs, WitnessHeader, WitnessStateNode,
+    ExecutionWitness, OpcodeLabInput, OpcodeLabStorageInput, OpcodeLabStorageLane,
+    OpcodeLabStorageOperation, PrecompileLabInput, PrecompileLabLane, ProofType, StatelessInput,
+    SupportedChainSpecs, WitnessHeader, WitnessStateNode,
     blob::util::{blob_to_commitment, blob_to_proof_of_equivalence, commitment_to_version_hash},
     builtin_taiko_chain_spec,
     chain_spec::{ForkCondition, ForkId, TaikoFork},
@@ -38,9 +40,10 @@ use revm::{
     Context, InspectEvm, Inspector, MainBuilder, MainContext,
     bytecode::Bytecode,
     context::TxEnv,
-    database::BenchmarkDB,
+    context_interface::result::ExecutionResult,
+    database::BENCH_TARGET,
     interpreter::{Interpreter, interpreter::EthInterpreter, interpreter_types::Jumps},
-    primitives::hardfork::SpecId,
+    primitives::U256 as RevmU256,
 };
 use risc0_ethereum_trie::Trie;
 use serde::{Deserialize, Serialize};
@@ -132,6 +135,44 @@ pub struct ControlledOpcodeTrace {
     pub non_target_raw_gas: u64,
     pub total_raw_gas: u64,
     pub bytecode_len: usize,
+    pub evm_spec: &'static str,
+    pub revm_version: &'static str,
+    pub shared_constructor: &'static str,
+    pub transaction_envelope_sha256: String,
+    pub access_list_sha256: String,
+    pub prestate_sha256: String,
+    pub bytecode_sha256: String,
+    pub program_sha256: Vec<String>,
+    pub executed_opcode_counts: BTreeMap<String, u64>,
+    pub executed_opcode_raw_gas: BTreeMap<String, u64>,
+    pub executed_measurement_count: u64,
+    pub executed_measurement_raw_gas: u64,
+    pub executed_prefix_count: u64,
+    pub result_statuses: BTreeMap<String, u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub storage: Option<OpcodeLabStorageInput>,
+    pub semantic_check: ControlledOpcodeSemanticCheck,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ControlledOpcodeProgramSemantic {
+    pub program_index: usize,
+    pub result_status: String,
+    pub expected_load_values: Vec<String>,
+    pub observed_load_values: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_final_storage: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed_final_storage: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ControlledOpcodeSemanticCheck {
+    pub schema_version: u32,
+    pub backend_input_sha256: String,
+    pub checked_programs: usize,
+    pub passed: bool,
+    pub programs: Vec<ControlledOpcodeProgramSemantic>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -154,7 +195,7 @@ pub struct ControlledPrecompileTrace {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ControlledTrace {
-    RevmOpcode(ControlledOpcodeTrace),
+    RevmOpcode(Box<ControlledOpcodeTrace>),
     Precompile(ControlledPrecompileTrace),
 }
 
@@ -2416,11 +2457,18 @@ pub fn trace_precompile_workload(input: &PrecompileLabInput) -> Result<Controlle
     })
 }
 
+#[derive(Clone, Copy, Debug)]
+struct OpcodeFootprintEvent {
+    opcode: u8,
+    raw_gas: u64,
+}
+
 #[derive(Default)]
 struct OpcodeFootprintInspector {
     pending: Option<(u8, u64)>,
     counts: BTreeMap<u8, u64>,
     raw_gas: BTreeMap<u8, u64>,
+    events: Vec<OpcodeFootprintEvent>,
 }
 
 impl<CTX> Inspector<CTX, EthInterpreter> for OpcodeFootprintInspector {
@@ -2432,9 +2480,36 @@ impl<CTX> Inspector<CTX, EthInterpreter> for OpcodeFootprintInspector {
         let Some((opcode, gas_before)) = self.pending.take() else {
             return;
         };
+        let raw_gas = gas_before.saturating_sub(interpreter.gas.remaining());
         *self.counts.entry(opcode).or_default() += 1;
-        *self.raw_gas.entry(opcode).or_default() +=
-            gas_before.saturating_sub(interpreter.gas.remaining());
+        *self.raw_gas.entry(opcode).or_default() += raw_gas;
+        self.events.push(OpcodeFootprintEvent { opcode, raw_gas });
+    }
+}
+
+#[derive(Default)]
+struct StorageSemanticInspector {
+    pending_sload: bool,
+    observed_loads: Vec<RevmU256>,
+    storage_opcode_count: u64,
+}
+
+impl<CTX> Inspector<CTX, EthInterpreter> for StorageSemanticInspector {
+    fn step(&mut self, interpreter: &mut Interpreter<EthInterpreter>, _context: &mut CTX) {
+        let opcode = interpreter.bytecode.opcode();
+        self.pending_sload = opcode == 0x54;
+        if matches!(opcode, 0x54 | 0x55) {
+            self.storage_opcode_count = self.storage_opcode_count.saturating_add(1);
+        }
+    }
+
+    fn step_end(&mut self, interpreter: &mut Interpreter<EthInterpreter>, _context: &mut CTX) {
+        if self.pending_sload
+            && let Ok(value) = interpreter.stack.peek(0)
+        {
+            self.observed_loads.push(value);
+        }
+        self.pending_sload = false;
     }
 }
 
@@ -2478,14 +2553,35 @@ pub fn controlled_execution_row_id(identity: &ControlledExecutionIdentity) -> Re
 
 pub fn controlled_opcode_workload_spec(input: &OpcodeLabInput) -> ControlledWorkloadSpec {
     let key_id = format!("opcode:0x{:02x}", input.opcode);
+    let lane = match input.storage.as_ref().map(|storage| storage.lane) {
+        Some(OpcodeLabStorageLane::Control) => ControlledLane::Control,
+        _ => ControlledLane::Target,
+    };
+    let state = input
+        .storage
+        .as_ref()
+        .map(|storage| {
+            BTreeMap::from([(
+                "storage".into(),
+                serde_json::to_value(storage).unwrap_or(Value::Null),
+            )])
+        })
+        .unwrap_or_default();
     ControlledWorkloadSpec {
         schema_version: 1,
         key_id: key_id.clone(),
         case_id: input.case.clone(),
         target_count: input.target_count,
-        lane: ControlledLane::Target,
-        state: BTreeMap::new(),
-        environment: BTreeMap::from([("evm_spec".into(), Value::String("prague".into()))]),
+        lane,
+        state,
+        environment: BTreeMap::from([
+            ("evm_spec".into(), Value::String("osaka".into())),
+            ("revm_version".into(), Value::String("41.0.0".into())),
+            (
+                "shared_constructor".into(),
+                Value::String("raiko2-opcode-lab".into()),
+            ),
+        ]),
         input: BTreeMap::from([
             (
                 "bytecode".into(),
@@ -2513,6 +2609,292 @@ pub fn controlled_opcode_workload_spec(input: &OpcodeLabInput) -> ControlledWork
     }
 }
 
+fn result_status(result: &ExecutionResult) -> &'static str {
+    match result {
+        ExecutionResult::Success { .. } => "success",
+        ExecutionResult::Revert { .. } => "revert",
+        ExecutionResult::Halt { .. } => "halt",
+    }
+}
+
+fn word_hex(value: RevmU256) -> String {
+    alloy_primitives::hex::encode_prefixed(value.to_be_bytes::<32>())
+}
+
+fn storage_prestate_sha256(storage: Option<&OpcodeLabStorageInput>) -> Result<String> {
+    let value = match storage {
+        Some(storage) => serde_json::json!({
+            "original_value": alloy_primitives::hex::encode_prefixed(storage.original_value),
+            "slot": alloy_primitives::hex::encode_prefixed(storage.slot),
+        }),
+        None => Value::Null,
+    };
+    Ok(alloy_primitives::hex::encode(Sha256::digest(
+        serde_json::to_vec(&value)?,
+    )))
+}
+
+fn transaction_identities(tx: &TxEnv) -> Result<(String, String)> {
+    let access_list = tx
+        .access_list
+        .0
+        .iter()
+        .map(|item| {
+            serde_json::json!({
+                "address": alloy_primitives::hex::encode_prefixed(item.address),
+                "storage_keys": item
+                    .storage_keys
+                    .iter()
+                    .map(alloy_primitives::hex::encode_prefixed)
+                    .collect::<Vec<_>>(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let access_list_sha256 =
+        alloy_primitives::hex::encode(Sha256::digest(serde_json::to_vec(&access_list)?));
+    let kind = match tx.kind {
+        TxKind::Call(address) => serde_json::json!({
+            "kind": "call",
+            "address": alloy_primitives::hex::encode_prefixed(address),
+        }),
+        TxKind::Create => serde_json::json!({"kind": "create"}),
+    };
+    let envelope = BTreeMap::from([
+        ("access_list", serde_json::to_value(&access_list)?),
+        (
+            "authorization_count",
+            Value::from(tx.authorization_list.len()),
+        ),
+        (
+            "blob_hashes",
+            serde_json::to_value(
+                tx.blob_hashes
+                    .iter()
+                    .map(alloy_primitives::hex::encode_prefixed)
+                    .collect::<Vec<_>>(),
+            )?,
+        ),
+        (
+            "caller",
+            Value::String(alloy_primitives::hex::encode_prefixed(tx.caller)),
+        ),
+        (
+            "chain_id",
+            tx.chain_id.map(Value::from).unwrap_or(Value::Null),
+        ),
+        (
+            "data",
+            Value::String(alloy_primitives::hex::encode_prefixed(&tx.data)),
+        ),
+        ("gas_limit", Value::from(tx.gas_limit)),
+        ("gas_price", Value::String(tx.gas_price.to_string())),
+        (
+            "gas_priority_fee",
+            tx.gas_priority_fee
+                .map(|value| Value::String(value.to_string()))
+                .unwrap_or(Value::Null),
+        ),
+        ("kind", kind),
+        (
+            "max_fee_per_blob_gas",
+            Value::String(tx.max_fee_per_blob_gas.to_string()),
+        ),
+        ("nonce", Value::from(tx.nonce)),
+        ("tx_type", Value::from(tx.tx_type)),
+        ("value", Value::String(word_hex(tx.value))),
+    ]);
+    let transaction_envelope_sha256 =
+        alloy_primitives::hex::encode(Sha256::digest(serde_json::to_vec(&envelope)?));
+    Ok((transaction_envelope_sha256, access_list_sha256))
+}
+
+fn exact_opcode_ledger(
+    counts: &BTreeMap<u8, u64>,
+    raw_gas: &BTreeMap<u8, u64>,
+) -> (BTreeMap<String, u64>, BTreeMap<String, u64>) {
+    let names = |values: &BTreeMap<u8, u64>| {
+        values
+            .iter()
+            .map(|(opcode, value)| (format!("opcode:0x{opcode:02x}"), *value))
+            .collect()
+    };
+    (names(counts), names(raw_gas))
+}
+
+fn measured_events<'a>(
+    input: &OpcodeLabInput,
+    programs: &'a [Vec<OpcodeFootprintEvent>],
+) -> (Vec<&'a OpcodeFootprintEvent>, u64) {
+    let Some(storage) = &input.storage else {
+        return (
+            programs
+                .iter()
+                .flatten()
+                .filter(|event| event.opcode == input.opcode)
+                .collect(),
+            0,
+        );
+    };
+    let dirty = matches!(
+        &storage.operation,
+        OpcodeLabStorageOperation::Store { current_value, .. }
+            if current_value != &storage.original_value
+    );
+    let mut measured = Vec::new();
+    let mut prefix_count = 0u64;
+    for program in programs {
+        let state_events = program
+            .iter()
+            .filter(|event| event.opcode == storage.measurement_opcode)
+            .collect::<Vec<_>>();
+        if dirty && !state_events.is_empty() {
+            prefix_count = prefix_count.saturating_add(1);
+        }
+        if storage.lane == OpcodeLabStorageLane::Target {
+            measured.extend(state_events.into_iter().skip(usize::from(dirty)));
+        }
+    }
+    (measured, prefix_count)
+}
+
+/// Executes the canonical input in a separate host-native pass and checks the declared storage
+/// result. This pass is not linked into or called by the measured guest.
+pub fn check_revm_opcode_semantics(
+    input: &OpcodeLabInput,
+) -> Result<ControlledOpcodeSemanticCheck> {
+    input
+        .validate_controlled_contract()
+        .map_err(anyhow::Error::msg)?;
+    let backend_input = bincode::serialize(input)?;
+    let backend_input_sha256 = alloy_primitives::hex::encode(Sha256::digest(&backend_input));
+    let mut observations = Vec::new();
+    let mut observed_storage_opcode_count = 0u64;
+    for (program_index, program) in input
+        .execution_programs()
+        .map_err(anyhow::Error::msg)?
+        .into_iter()
+        .enumerate()
+    {
+        let bytecode = Bytecode::new_legacy(program.to_vec().into());
+        let context = Context::mainnet()
+            .modify_cfg_chained(|cfg| cfg.set_spec_and_mainnet_gas_params(OPCODE_LAB_SPEC_ID))
+            .with_db(build_benchmark_db(bytecode, input.storage.as_ref()));
+        let mut evm = context.build_mainnet_with_inspector(StorageSemanticInspector::default());
+        let execution = evm.inspect_tx(build_benchmark_tx(
+            input
+                .execution_gas_limit()
+                .max(OpcodeLabInput::MIN_EXECUTION_GAS_LIMIT),
+            input.storage.as_ref(),
+        )?)?;
+        let status = result_status(&execution.result).to_string();
+        if status != "success" {
+            bail!("opcode-lab semantic program {program_index} did not succeed: {status}");
+        }
+        observed_storage_opcode_count =
+            observed_storage_opcode_count.saturating_add(evm.inspector.storage_opcode_count);
+        let observed_load_values = evm
+            .inspector
+            .observed_loads
+            .iter()
+            .copied()
+            .map(word_hex)
+            .collect::<Vec<_>>();
+        let mut expected_load_values = Vec::new();
+        let mut expected_final_storage = None;
+        let mut observed_final_storage = None;
+        if let Some(storage) = &input.storage {
+            match &storage.operation {
+                OpcodeLabStorageOperation::Load { expected_value } => {
+                    if storage.lane == OpcodeLabStorageLane::Target {
+                        expected_load_values =
+                            vec![
+                                alloy_primitives::hex::encode_prefixed(expected_value);
+                                observed_load_values.len()
+                            ];
+                    }
+                    if observed_load_values != expected_load_values {
+                        bail!(
+                            "SLOAD semantic output differs from declared expected value in program {program_index}"
+                        );
+                    }
+                }
+                OpcodeLabStorageOperation::Store {
+                    current_value,
+                    new_value,
+                } => {
+                    let dirty = current_value != &storage.original_value;
+                    let measured = storage.lane == OpcodeLabStorageLane::Target
+                        && evm.inspector.storage_opcode_count > u64::from(dirty);
+                    let expected = if measured {
+                        *new_value
+                    } else if dirty {
+                        *current_value
+                    } else {
+                        storage.original_value
+                    };
+                    let slot = RevmU256::from_be_bytes(storage.slot);
+                    let observed = execution
+                        .state
+                        .get(&BENCH_TARGET)
+                        .and_then(|account| account.storage.get(&slot))
+                        .map(|value| value.present_value)
+                        .unwrap_or_else(|| RevmU256::from_be_bytes(storage.original_value));
+                    expected_final_storage = Some(alloy_primitives::hex::encode_prefixed(expected));
+                    observed_final_storage = Some(word_hex(observed));
+                    if expected_final_storage != observed_final_storage {
+                        bail!(
+                            "SSTORE semantic result differs from declared transition in program {program_index}"
+                        );
+                    }
+                }
+            }
+        }
+        observations.push(ControlledOpcodeProgramSemantic {
+            program_index,
+            result_status: status,
+            expected_load_values,
+            observed_load_values,
+            expected_final_storage,
+            observed_final_storage,
+        });
+    }
+    if let Some(storage) = &input.storage {
+        let dirty = matches!(
+            &storage.operation,
+            OpcodeLabStorageOperation::Store { current_value, .. }
+                if current_value != &storage.original_value
+        );
+        let expected_storage_opcode_count = match (&storage.operation, storage.lane) {
+            (OpcodeLabStorageOperation::Load { .. }, OpcodeLabStorageLane::Target) => {
+                input.target_count
+            }
+            (OpcodeLabStorageOperation::Load { .. }, OpcodeLabStorageLane::Control) => 0,
+            (OpcodeLabStorageOperation::Store { .. }, OpcodeLabStorageLane::Target) => {
+                input.target_count.saturating_add(
+                    u64::from(dirty)
+                        .saturating_mul(u64::try_from(observations.len()).unwrap_or(u64::MAX)),
+                )
+            }
+            (OpcodeLabStorageOperation::Store { .. }, OpcodeLabStorageLane::Control) => {
+                u64::from(dirty)
+                    .saturating_mul(u64::try_from(observations.len()).unwrap_or(u64::MAX))
+            }
+        };
+        if observed_storage_opcode_count != expected_storage_opcode_count {
+            bail!(
+                "semantic storage opcode count {observed_storage_opcode_count} differs from declared {expected_storage_opcode_count}"
+            );
+        }
+    }
+    Ok(ControlledOpcodeSemanticCheck {
+        schema_version: 1,
+        backend_input_sha256,
+        checked_programs: observations.len(),
+        passed: true,
+        programs: observations,
+    })
+}
+
 pub fn trace_revm_opcode_workload(input: &OpcodeLabInput) -> Result<ControlledOpcodeTrace> {
     input
         .validate_controlled_contract()
@@ -2520,28 +2902,61 @@ pub fn trace_revm_opcode_workload(input: &OpcodeLabInput) -> Result<ControlledOp
     let backend_input = bincode::serialize(input)?;
     let backend_input_len = backend_input.len();
     let backend_input_sha256 = alloy_primitives::hex::encode(Sha256::digest(&backend_input));
+    let programs = input.execution_programs().map_err(anyhow::Error::msg)?;
+    let program_sha256 = programs
+        .iter()
+        .map(|program| alloy_primitives::hex::encode(Sha256::digest(program)))
+        .collect::<Vec<_>>();
+    let canonical_tx = build_benchmark_tx(
+        input
+            .execution_gas_limit()
+            .max(OpcodeLabInput::MIN_EXECUTION_GAS_LIMIT),
+        input.storage.as_ref(),
+    )?;
+    let (transaction_envelope_sha256, access_list_sha256) = transaction_identities(&canonical_tx)?;
     let mut inspector = OpcodeFootprintInspector::default();
-    for program in input.execution_programs().map_err(anyhow::Error::msg)? {
+    let mut program_events = Vec::with_capacity(programs.len());
+    let mut result_statuses = BTreeMap::new();
+    for program in programs {
         let bytecode = Bytecode::new_legacy(program.to_vec().into());
         let context = Context::mainnet()
-            .modify_cfg_chained(|cfg| cfg.set_spec_and_mainnet_gas_params(SpecId::PRAGUE))
-            .with_db(BenchmarkDB::new_bytecode(bytecode));
+            .modify_cfg_chained(|cfg| cfg.set_spec_and_mainnet_gas_params(OPCODE_LAB_SPEC_ID))
+            .with_db(build_benchmark_db(bytecode, input.storage.as_ref()));
         let mut evm = context.build_mainnet_with_inspector(OpcodeFootprintInspector::default());
-        evm.inspect_one_tx(
-            TxEnv::builder_for_bench()
-                .gas_limit(input.execution_gas_limit().max(100_000))
-                .build()?,
-        )?;
+        let execution = evm.inspect_one_tx(canonical_tx.clone())?;
+        *result_statuses
+            .entry(result_status(&execution).to_string())
+            .or_default() += 1;
         for (opcode, count) in evm.inspector.counts {
             *inspector.counts.entry(opcode).or_default() += count;
         }
         for (opcode, gas) in evm.inspector.raw_gas {
             *inspector.raw_gas.entry(opcode).or_default() += gas;
         }
+        program_events.push(evm.inspector.events);
     }
 
-    let target_count = inspector.counts.remove(&input.opcode).unwrap_or_default();
-    let target_raw_gas = inspector.raw_gas.remove(&input.opcode).unwrap_or_default();
+    if result_statuses.len() != 1 || !result_statuses.contains_key("success") {
+        bail!("opcode-lab trace contains a non-successful REVM result");
+    }
+    let (measurement_events, executed_prefix_count) = measured_events(input, &program_events);
+    let executed_measurement_count = measurement_events.len() as u64;
+    let executed_measurement_raw_gas = measurement_events.iter().map(|event| event.raw_gas).sum();
+    let target_events = if input
+        .storage
+        .as_ref()
+        .is_some_and(|storage| storage.lane == OpcodeLabStorageLane::Target)
+    {
+        measurement_events
+    } else {
+        program_events
+            .iter()
+            .flatten()
+            .filter(|event| event.opcode == input.opcode)
+            .collect()
+    };
+    let target_count = target_events.len() as u64;
+    let target_raw_gas = target_events.iter().map(|event| event.raw_gas).sum();
     if target_count != input.target_count {
         bail!(
             "executed target count {target_count} differs from declared {}",
@@ -2554,14 +2969,27 @@ pub fn trace_revm_opcode_workload(input: &OpcodeLabInput) -> Result<ControlledOp
             "executed target raw gas {target_raw_gas} differs from declared {expected_target_raw_gas}"
         );
     }
-    let non_target_raw_gas = inspector.raw_gas.values().copied().sum();
-    let non_target_counts = inspector
-        .counts
+    let (executed_opcode_counts, executed_opcode_raw_gas) =
+        exact_opcode_ledger(&inspector.counts, &inspector.raw_gas);
+    let total_raw_gas = inspector.raw_gas.values().copied().sum();
+    let mut non_target_raw = inspector.raw_gas.clone();
+    if let Some(value) = non_target_raw.get_mut(&input.opcode) {
+        *value = value.saturating_sub(target_raw_gas);
+    }
+    non_target_raw.retain(|_, value| *value != 0);
+    let non_target_raw_gas = non_target_raw.values().copied().sum();
+    let mut non_target_count_values = inspector.counts.clone();
+    if let Some(value) = non_target_count_values.get_mut(&input.opcode) {
+        *value = value.saturating_sub(target_count);
+    }
+    non_target_count_values.retain(|_, value| *value != 0);
+    let non_target_counts = non_target_count_values
         .into_iter()
         .map(|(opcode, count)| (format!("opcode:0x{opcode:02x}"), count))
         .collect();
+    let semantic_check = check_revm_opcode_semantics(input)?;
     Ok(ControlledOpcodeTrace {
-        schema_version: 1,
+        schema_version: u32::from(input.storage.is_some()) + 1,
         workload_id: controlled_workload_id(&controlled_opcode_workload_spec(input))?,
         backend_input_sha256,
         backend_input_len,
@@ -2573,8 +3001,24 @@ pub fn trace_revm_opcode_workload(input: &OpcodeLabInput) -> Result<ControlledOp
         executed_target_raw_gas: target_raw_gas,
         non_target_counts,
         non_target_raw_gas,
-        total_raw_gas: target_raw_gas.saturating_add(non_target_raw_gas),
+        total_raw_gas,
         bytecode_len: input.bytecode.len(),
+        evm_spec: "osaka",
+        revm_version: "41.0.0",
+        shared_constructor: "raiko2-opcode-lab",
+        transaction_envelope_sha256,
+        access_list_sha256,
+        prestate_sha256: storage_prestate_sha256(input.storage.as_ref())?,
+        bytecode_sha256: alloy_primitives::hex::encode(Sha256::digest(&input.bytecode)),
+        program_sha256,
+        executed_opcode_counts,
+        executed_opcode_raw_gas,
+        executed_measurement_count,
+        executed_measurement_raw_gas,
+        executed_prefix_count,
+        result_statuses,
+        storage: input.storage.clone(),
+        semantic_check,
     })
 }
 

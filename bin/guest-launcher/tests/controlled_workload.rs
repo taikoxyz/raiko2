@@ -12,14 +12,16 @@ use controlled_workload::{
     ControlledWorkloadSpec, PairedPrecompileShape, build_controlled_block_fixture,
     build_controlled_block_fixture_with_extra_prestate_account_for_test,
     build_controlled_state_holdout_fixtures, build_required_overhead_fixtures,
-    controlled_block_row_id, controlled_execution_row_id, controlled_overhead_workload_id,
+    check_revm_opcode_semantics, controlled_block_row_id, controlled_execution_row_id,
+    controlled_opcode_workload_spec, controlled_overhead_workload_id,
     controlled_precompile_workload_spec, controlled_workload_id, observe_controlled_block_fixture,
     operation_units_delta, trace_precompile_workload, trace_revm_opcode_workload,
     validate_controlled_block_fixture, validate_controlled_state_holdout_fixtures,
     validate_fixed_footprint, validate_precompile_pair, validate_required_overhead_fixtures,
 };
 use raiko2_primitives::{
-    OpcodeLabInput, PrecompileLabInput, PrecompileLabLane, SupportedChainSpecs,
+    OpcodeLabInput, OpcodeLabStorageAccess, OpcodeLabStorageInput, OpcodeLabStorageLane,
+    OpcodeLabStorageOperation, PrecompileLabInput, PrecompileLabLane, SupportedChainSpecs,
     chain_spec::{ForkCondition, ForkId, TaikoFork},
 };
 use raiko2_protocol_shasta::libhash::hash_proposal;
@@ -39,6 +41,60 @@ fn workload_spec() -> ControlledWorkloadSpec {
         input: BTreeMap::from([("calldata".into(), json!("0x"))]),
         expected_operation_deltas: BTreeMap::from([("opcode:0x01".into(), 4)]),
         expected_feature_deltas: BTreeMap::new(),
+    }
+}
+
+fn word(value: u64) -> [u8; 32] {
+    alloy_primitives::U256::from(value).to_be_bytes()
+}
+
+fn encode_fixed_programs(programs: &[Vec<u8>]) -> Vec<u8> {
+    let mut encoded = OpcodeLabInput::FIXED_MICROPROGRAM_MAGIC.to_vec();
+    encoded.extend(u32::try_from(programs.len()).unwrap().to_be_bytes());
+    for program in programs {
+        encoded.extend(u32::try_from(program.len()).unwrap().to_be_bytes());
+        encoded.extend(program);
+    }
+    encoded
+}
+
+fn push32(program: &mut Vec<u8>, value: [u8; 32]) {
+    program.push(0x7f);
+    program.extend(value);
+}
+
+fn stateful_input(
+    scenario: &str,
+    access: OpcodeLabStorageAccess,
+    operation: OpcodeLabStorageOperation,
+    original_value: [u8; 32],
+    slot: [u8; 32],
+    program: Vec<u8>,
+    target_raw_gas: u64,
+) -> OpcodeLabInput {
+    let bytecode = encode_fixed_programs(&[program]);
+    let measurement_opcode = match &operation {
+        OpcodeLabStorageOperation::Load { .. } => 0x54,
+        OpcodeLabStorageOperation::Store { .. } => 0x55,
+    };
+    OpcodeLabInput {
+        case: format!("{scenario}-case"),
+        scenario: scenario.into(),
+        opcode: measurement_opcode,
+        target_count: 1,
+        target_raw_gas,
+        tx_gas_limit: Some(2_500_000),
+        fixed_bytecode_len: Some(bytecode.len() as u64),
+        generator_max_count: Some(1),
+        bytecode,
+        storage: Some(OpcodeLabStorageInput {
+            measurement_opcode,
+            lane: OpcodeLabStorageLane::Target,
+            slot,
+            original_value,
+            access,
+            operation,
+        }),
     }
 }
 
@@ -751,6 +807,10 @@ fn revm_trace_executes_and_binds_the_exact_sp1_input() {
     };
     let alternate_trace = trace_revm_opcode_workload(&alternate_backend_encoding).unwrap();
 
+    assert_eq!(
+        trace.schema_version, 1,
+        "stateless trace schema stays compatible"
+    );
     assert_eq!(trace.backend_input_sha256, expected_input_sha256);
     assert_eq!(
         trace.backend_input_len,
@@ -772,9 +832,298 @@ fn revm_trace_executes_and_binds_the_exact_sp1_input() {
         alternate_trace.backend_input_sha256
     );
     assert!(matches!(
-        ControlledTrace::RevmOpcode(trace),
+        ControlledTrace::RevmOpcode(Box::new(trace)),
         ControlledTrace::RevmOpcode(_)
     ));
+}
+
+#[test]
+fn stateful_sload_trace_uses_osaka_and_records_exact_warm_and_cold_ledgers() {
+    let slot = word(7);
+    let value = word(9);
+    let mut program = Vec::new();
+    push32(&mut program, slot);
+    program.extend([0x54, 0x50, 0x00]);
+
+    let traces = [
+        (OpcodeLabStorageAccess::Warm, 100),
+        (OpcodeLabStorageAccess::Cold, 2_100),
+    ]
+    .map(|(access, raw_gas)| {
+        let input = stateful_input(
+            "sload",
+            access,
+            OpcodeLabStorageOperation::Load {
+                expected_value: value,
+            },
+            value,
+            slot,
+            program.clone(),
+            raw_gas,
+        );
+        (input.clone(), trace_revm_opcode_workload(&input).unwrap())
+    });
+
+    for (input, trace) in &traces {
+        let workload = controlled_opcode_workload_spec(input);
+        assert_eq!(trace.schema_version, 2);
+        assert_eq!(trace.evm_spec, "osaka");
+        assert_eq!(trace.revm_version, "41.0.0");
+        assert_eq!(trace.shared_constructor, "raiko2-opcode-lab");
+        assert_eq!(trace.executed_opcode_counts["opcode:0x54"], 1);
+        assert_eq!(
+            trace.executed_opcode_raw_gas["opcode:0x54"],
+            input.target_raw_gas
+        );
+        assert_eq!(trace.executed_measurement_count, 1);
+        assert_eq!(trace.executed_measurement_raw_gas, input.target_raw_gas);
+        assert_eq!(trace.result_statuses.get("success"), Some(&1));
+        assert_eq!(trace.backend_input_sha256.len(), 64);
+        assert_eq!(trace.transaction_envelope_sha256.len(), 64);
+        assert_eq!(trace.access_list_sha256.len(), 64);
+        assert_eq!(trace.prestate_sha256.len(), 64);
+        assert_eq!(trace.bytecode_sha256.len(), 64);
+        assert_eq!(trace.program_sha256.len(), 1);
+        assert_eq!(
+            trace.semantic_check.backend_input_sha256,
+            trace.backend_input_sha256
+        );
+        assert!(trace.semantic_check.passed);
+        assert_eq!(workload.environment["evm_spec"], "osaka");
+        assert_eq!(
+            workload.state["storage"],
+            serde_json::to_value(input.storage.as_ref().unwrap()).unwrap()
+        );
+        assert_eq!(
+            trace.semantic_check.programs[0].observed_load_values,
+            vec![format!("0x{}", alloy_primitives::hex::encode(value))]
+        );
+    }
+    assert_ne!(
+        traces[0].1.access_list_sha256,
+        traces[1].1.access_list_sha256
+    );
+    assert_eq!(traces[0].1.executed_target_raw_gas, 100);
+    assert_eq!(traces[1].1.executed_target_raw_gas, 2_100);
+}
+
+#[test]
+fn stateful_sstore_semantics_cover_clean_branches_and_high_u256_words() {
+    let high_slot: alloy_primitives::U256 = alloy_primitives::U256::from(1) << 255;
+    let high_value = high_slot + alloy_primitives::U256::from(1);
+    let cases = [
+        (word(0), word(0), OpcodeLabStorageAccess::Warm, 100),
+        (word(0), word(0), OpcodeLabStorageAccess::Cold, 2_200),
+        (word(1), word(1), OpcodeLabStorageAccess::Warm, 100),
+        (word(1), word(1), OpcodeLabStorageAccess::Cold, 2_200),
+        (word(0), word(1), OpcodeLabStorageAccess::Warm, 20_000),
+        (word(0), word(1), OpcodeLabStorageAccess::Cold, 22_100),
+        (word(1), word(0), OpcodeLabStorageAccess::Warm, 2_900),
+        (word(1), word(0), OpcodeLabStorageAccess::Cold, 5_000),
+        (word(1), word(2), OpcodeLabStorageAccess::Warm, 2_900),
+        (word(1), word(2), OpcodeLabStorageAccess::Cold, 5_000),
+        (
+            high_slot.to_be_bytes(),
+            high_value.to_be_bytes(),
+            OpcodeLabStorageAccess::Warm,
+            2_900,
+        ),
+    ];
+
+    for (original, new, access, raw_gas) in cases {
+        let slot = high_slot.to_be_bytes();
+        let mut program = Vec::new();
+        push32(&mut program, new);
+        push32(&mut program, slot);
+        program.extend([0x55, 0x5b, 0x00]);
+        let input = stateful_input(
+            "sstore-clean",
+            access,
+            OpcodeLabStorageOperation::Store {
+                current_value: original,
+                new_value: new,
+            },
+            original,
+            slot,
+            program,
+            raw_gas,
+        );
+
+        let trace = trace_revm_opcode_workload(&input).unwrap();
+        let semantic = check_revm_opcode_semantics(&input).unwrap();
+        let expected = format!("0x{}", alloy_primitives::hex::encode(new));
+        assert_eq!(trace.executed_opcode_counts["opcode:0x55"], 1);
+        assert_eq!(trace.executed_measurement_count, 1);
+        assert_eq!(trace.executed_prefix_count, 0);
+        assert_eq!(trace.executed_measurement_raw_gas, raw_gas);
+        assert_eq!(
+            semantic.programs[0].expected_final_storage.as_deref(),
+            Some(expected.as_str())
+        );
+        assert_eq!(
+            semantic.programs[0].observed_final_storage.as_deref(),
+            Some(expected.as_str())
+        );
+        assert!(semantic.passed);
+    }
+}
+
+#[test]
+fn dirty_sstore_trace_separates_prefix_from_measured_transition() {
+    let slot = word(3);
+    for (original, current, new) in [
+        (word(0), word(1), word(2)),
+        (word(0), word(1), word(0)),
+        (word(1), word(2), word(0)),
+        (word(1), word(2), word(1)),
+    ] {
+        let mut program = Vec::new();
+        push32(&mut program, current);
+        push32(&mut program, slot);
+        program.push(0x55);
+        push32(&mut program, new);
+        push32(&mut program, slot);
+        program.extend([0x55, 0x5b, 0x00]);
+        let input = stateful_input(
+            "sstore-dirty",
+            OpcodeLabStorageAccess::Warm,
+            OpcodeLabStorageOperation::Store {
+                current_value: current,
+                new_value: new,
+            },
+            original,
+            slot,
+            program,
+            100,
+        );
+
+        let trace = trace_revm_opcode_workload(&input).unwrap();
+        assert_eq!(trace.executed_opcode_counts["opcode:0x55"], 2);
+        assert_eq!(trace.executed_measurement_count, 1);
+        assert_eq!(trace.executed_prefix_count, 1);
+        assert_eq!(trace.executed_target_count, 1);
+        assert_eq!(trace.executed_target_raw_gas, 100);
+        assert_eq!(trace.non_target_counts["opcode:0x55"], 1);
+        assert_eq!(
+            trace.semantic_check.programs[0]
+                .observed_final_storage
+                .as_deref(),
+            Some(format!("0x{}", alloy_primitives::hex::encode(new)).as_str())
+        );
+    }
+}
+
+#[test]
+fn stateful_control_executes_only_the_declared_reference_and_dirty_prefix() {
+    let slot = word(9);
+    let mut load_program = Vec::new();
+    push32(&mut load_program, slot);
+    load_program.extend([0x19, 0x50, 0x00]);
+    let mut load = stateful_input(
+        "sload-control",
+        OpcodeLabStorageAccess::Cold,
+        OpcodeLabStorageOperation::Load {
+            expected_value: word(7),
+        },
+        word(7),
+        slot,
+        load_program,
+        3,
+    );
+    load.opcode = 0x19;
+    load.storage.as_mut().unwrap().lane = OpcodeLabStorageLane::Control;
+
+    let load_trace = trace_revm_opcode_workload(&load).unwrap();
+    assert_eq!(load_trace.executed_target_count, 1);
+    assert_eq!(load_trace.executed_measurement_count, 0);
+    assert_eq!(load_trace.executed_prefix_count, 0);
+    assert!(
+        !load_trace
+            .executed_opcode_counts
+            .contains_key("opcode:0x54")
+    );
+
+    let mut store_program = Vec::new();
+    push32(&mut store_program, word(2));
+    push32(&mut store_program, slot);
+    store_program.push(0x55);
+    push32(&mut store_program, word(1));
+    push32(&mut store_program, slot);
+    store_program.extend([0x50, 0x50, 0x00]);
+    let mut store = stateful_input(
+        "sstore-dirty-control",
+        OpcodeLabStorageAccess::Warm,
+        OpcodeLabStorageOperation::Store {
+            current_value: word(2),
+            new_value: word(1),
+        },
+        word(1),
+        slot,
+        store_program,
+        2,
+    );
+    store.opcode = 0x50;
+    store.target_count = 2;
+    store.storage.as_mut().unwrap().lane = OpcodeLabStorageLane::Control;
+
+    let store_trace = trace_revm_opcode_workload(&store).unwrap();
+    assert_eq!(store_trace.executed_target_count, 2);
+    assert_eq!(store_trace.executed_measurement_count, 0);
+    assert_eq!(store_trace.executed_prefix_count, 1);
+    assert_eq!(store_trace.executed_opcode_counts["opcode:0x55"], 1);
+    assert_eq!(store_trace.executed_opcode_counts["opcode:0x50"], 2);
+    assert_eq!(
+        store_trace.semantic_check.programs[0]
+            .observed_final_storage
+            .as_deref(),
+        Some(format!("0x{}", alloy_primitives::hex::encode(word(2))).as_str())
+    );
+}
+
+#[test]
+fn stateful_trace_rejects_a_malformed_declared_transition() {
+    let slot = word(0);
+    let mut program = Vec::new();
+    push32(&mut program, word(2));
+    push32(&mut program, slot);
+    program.extend([0x55, 0x5b, 0x00]);
+    let input = stateful_input(
+        "sstore-malformed",
+        OpcodeLabStorageAccess::Warm,
+        OpcodeLabStorageOperation::Store {
+            current_value: word(0),
+            new_value: word(1),
+        },
+        word(0),
+        slot,
+        program,
+        20_000,
+    );
+
+    let error = trace_revm_opcode_workload(&input)
+        .expect_err("declared transition must match the executed program");
+    assert!(error.to_string().contains("declared SSTORE operation"));
+}
+
+#[test]
+fn revm_trace_executes_the_osaka_clz_canary() {
+    let input = OpcodeLabInput {
+        case: "clz".into(),
+        scenario: "osaka-canary".into(),
+        opcode: 0x1e,
+        target_count: 1,
+        target_raw_gas: 5,
+        tx_gas_limit: Some(100_000),
+        bytecode: vec![0x60, 0x01, 0x1e, 0x00],
+        generator_max_count: None,
+        fixed_bytecode_len: Some(4),
+        storage: None,
+    };
+
+    let trace = trace_revm_opcode_workload(&input).unwrap();
+    assert_eq!(trace.evm_spec, "osaka");
+    assert_eq!(trace.executed_target_count, 1);
+    assert_eq!(trace.result_statuses.get("success"), Some(&1));
 }
 
 #[test]

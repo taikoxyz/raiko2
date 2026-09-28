@@ -10,7 +10,12 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Mapping, Sequence
 
-from opcode_gas import canonical_json, encode_fixed_microprograms, sha256_bytes
+from opcode_gas import (
+    canonical_json,
+    decode_fixed_microprograms,
+    encode_fixed_microprograms,
+    sha256_bytes,
+)
 
 
 SCHEMA_VERSION = 1
@@ -720,6 +725,356 @@ def generate_stateful_fixtures(
                 input_path.write_bytes(canonical_json(fixture["guest_input"]) + b"\n")
                 written.append(case_path)
     return written
+
+
+def _require_sha256(value: Any, field: str) -> str:
+    if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+        raise ValueError(f"{field} must be a lowercase SHA256")
+    return value
+
+
+def _expected_executed_opcode_counts(case_record: Mapping[str, Any]) -> dict[str, int]:
+    active_slots = (
+        case_record["relation_count"] if case_record["lane"] == "target" else 0
+    )
+    counts: dict[str, int] = {}
+    for index in range(case_record["generator_max_count"]):
+        program = (
+            case_record["active_program"]
+            if index < active_slots
+            else case_record["inactive_program"]
+        )
+        for opcode, count in program["opcode_counts"].items():
+            key = f"opcode:{opcode}"
+            counts[key] = counts.get(key, 0) + count
+    return dict(sorted(counts.items()))
+
+
+def _validate_semantic_check(
+    case_record: Mapping[str, Any],
+    semantic: Any,
+    backend_input_sha256: str,
+) -> str:
+    if not isinstance(semantic, Mapping):
+        raise ValueError("stateful semantic check is missing")
+    if semantic.get("schema_version") != 1 or semantic.get("passed") is not True:
+        raise ValueError("stateful semantic check did not pass")
+    if semantic.get("backend_input_sha256") != backend_input_sha256:
+        raise ValueError("semantic backend-input identity differs from trace")
+    programs = semantic.get("programs")
+    max_count = case_record["generator_max_count"]
+    if semantic.get("checked_programs") != max_count or not isinstance(programs, list):
+        raise ValueError("semantic program inventory differs from frozen layout")
+    if len(programs) != max_count:
+        raise ValueError("semantic program inventory differs from frozen layout")
+    storage = case_record["storage"]
+    operation = storage["operation"]
+    target_lane = case_record["lane"] == "target"
+    relation_count = case_record["relation_count"]
+    dirty = (
+        operation["kind"] == "store"
+        and operation["current_value"] != storage["original_value"]
+    )
+    for index, program in enumerate(programs):
+        if not isinstance(program, Mapping) or program.get("program_index") != index:
+            raise ValueError("semantic program order differs from frozen layout")
+        if program.get("result_status") != "success":
+            raise ValueError("semantic program result is not successful")
+        active = target_lane and index < relation_count
+        canonical_loads = (
+            [operation["expected_value"]]
+            if operation["kind"] == "load" and active
+            else []
+        )
+        if (
+            program.get("expected_load_values") != canonical_loads
+            or program.get("observed_load_values") != canonical_loads
+        ):
+            raise ValueError("semantic SLOAD expected/observed values differ")
+        canonical_final_storage = None
+        if operation["kind"] == "store":
+            canonical_final_storage = (
+                operation["new_value"]
+                if active
+                else operation["current_value"]
+                if dirty
+                else storage["original_value"]
+            )
+        if (
+            program.get("expected_final_storage") != canonical_final_storage
+            or program.get("observed_final_storage") != canonical_final_storage
+        ):
+            raise ValueError("semantic SSTORE expected/observed state differs")
+    return sha256_bytes(canonical_json(semantic))
+
+
+def admit_stateful_fixture_trace(
+    manifest: StatefulCampaignManifest,
+    fixture: Mapping[str, Any],
+    report_matches: Sequence[Mapping[str, Any]],
+    *,
+    repeat_index: int,
+) -> dict[str, Any]:
+    """Admits one generated lane only after an exact host trace and semantic check."""
+
+    if type(repeat_index) is not int or not 0 <= repeat_index < manifest.repeats:
+        raise ValueError("repeat index differs from the frozen campaign")
+    if len(report_matches) != 1:
+        raise ValueError("stateful fixture requires exactly one host trace report")
+    if not isinstance(fixture, Mapping):
+        raise ValueError("stateful fixture must be an object")
+    case_record = fixture.get("case_record")
+    guest_input = fixture.get("guest_input")
+    if not isinstance(case_record, Mapping) or not isinstance(guest_input, Mapping):
+        raise ValueError("stateful fixture is missing case or guest input")
+    scenario_name = case_record.get("scenario")
+    lane = case_record.get("lane")
+    relation_count = case_record.get("relation_count")
+    scenario = manifest.scenario(scenario_name)
+    expected_fixture = generate_stateful_fixture(
+        manifest, scenario_name, lane=lane, count=relation_count
+    )
+    if json.loads(canonical_json(fixture)) != expected_fixture:
+        raise ValueError("stateful fixture differs from canonical generated layout")
+
+    report = report_matches[0]
+    if not isinstance(report, Mapping):
+        raise ValueError("host trace report must be an object")
+    trace = report.get("controlled_trace")
+    if not isinstance(trace, Mapping) or trace.get("kind") != "revm_opcode":
+        raise ValueError("host trace report is not a REVM opcode trace")
+    backend_input_sha256 = _require_sha256(
+        trace.get("backend_input_sha256"), "trace backend_input_sha256"
+    )
+    if report.get("guest_input_sha256") != f"0x{backend_input_sha256}":
+        raise ValueError("trace/report backend-input identity differs")
+    if report.get("guest_input_bincode_length") != trace.get("backend_input_len"):
+        raise ValueError("trace/report backend-input length differs")
+    if trace.get("storage") != guest_input["storage"]:
+        raise ValueError("backend-input identity storage/lane differs from fixture")
+    if trace.get("schema_version") != 2:
+        raise ValueError("stateful trace schema differs")
+    if (
+        trace.get("evm_spec") != "osaka"
+        or trace.get("revm_version") != "41.0.0"
+        or trace.get("shared_constructor") != "raiko2-opcode-lab"
+    ):
+        raise ValueError("REVM identity differs from the stateful campaign")
+    for field in (
+        "workload_id",
+        "transaction_envelope_sha256",
+        "access_list_sha256",
+        "prestate_sha256",
+        "bytecode_sha256",
+    ):
+        _require_sha256(trace.get(field), field)
+
+    bytecode = bytes.fromhex(guest_input["bytecode"][2:])
+    programs = decode_fixed_microprograms(bytecode)
+    expected_program_hashes = [sha256_bytes(program) for program in programs]
+    if trace.get("bytecode_len") != len(bytecode):
+        raise ValueError("trace bytecode length differs from guest input")
+    if trace.get("bytecode_sha256") != sha256_bytes(bytecode):
+        raise ValueError("trace bytecode identity differs from guest input")
+    if trace.get("program_sha256") != expected_program_hashes:
+        raise ValueError("trace inactive-slot layout differs from guest input")
+    if (
+        trace.get("target_opcode") != guest_input["opcode"]
+        or trace.get("declared_target_count") != guest_input["target_count"]
+        or trace.get("declared_target_raw_gas") != guest_input["target_raw_gas"]
+        or trace.get("tx_gas_limit") != guest_input["tx_gas_limit"]
+    ):
+        raise ValueError("trace declaration differs from guest input")
+    if (
+        trace.get("executed_target_count") != guest_input["target_count"]
+        or trace.get("executed_target_raw_gas")
+        != guest_input["target_count"] * guest_input["target_raw_gas"]
+    ):
+        raise ValueError("trace concrete target execution differs from declaration")
+
+    expected_counts = _expected_executed_opcode_counts(case_record)
+    if trace.get("executed_opcode_counts") != expected_counts:
+        raise ValueError("trace exact opcode ledger differs from canonical programs")
+    raw_gas = trace.get("executed_opcode_raw_gas")
+    if not isinstance(raw_gas, Mapping) or set(raw_gas) != set(expected_counts):
+        raise ValueError("trace exact raw-gas ledger differs from opcode ledger")
+    if any(type(value) is not int or value < 0 for value in raw_gas.values()):
+        raise ValueError("trace exact raw-gas ledger contains an invalid value")
+    if trace.get("total_raw_gas") != sum(raw_gas.values()):
+        raise ValueError("trace total raw gas differs from exact ledger")
+
+    expected_measurement_count = relation_count if lane == "target" else 0
+    expected_measurement_raw_gas = (
+        relation_count * scenario.target_raw_gas if lane == "target" else 0
+    )
+    if (
+        trace.get("executed_measurement_count") != expected_measurement_count
+        or trace.get("executed_measurement_raw_gas")
+        != expected_measurement_raw_gas
+    ):
+        raise ValueError("trace measured storage execution differs from scenario")
+    expected_prefix_count = (
+        GENERATOR_MAX_COUNT
+        if scenario.operation_kind == "store" and scenario.dirty
+        else 0
+    )
+    if trace.get("executed_prefix_count") != expected_prefix_count:
+        raise ValueError("trace dirty-prefix execution differs from scenario")
+    if trace.get("result_statuses") != {"success": GENERATOR_MAX_COUNT}:
+        raise ValueError("trace result status differs from successful frozen execution")
+
+    semantic_check_sha256 = _validate_semantic_check(
+        case_record, trace.get("semantic_check"), backend_input_sha256
+    )
+    trace_sha256 = sha256_bytes(canonical_json(trace))
+    row_identity = sha256_bytes(
+        canonical_json(
+            {
+                "kind": "stateful_trace_admission",
+                "scenario": scenario_name,
+                "lane": lane,
+                "relation_count": relation_count,
+                "repeat_index": repeat_index,
+                "backend_input_sha256": backend_input_sha256,
+                "trace_sha256": trace_sha256,
+                "semantic_check_sha256": semantic_check_sha256,
+            }
+        )
+    )
+    return {
+        "scenario": scenario_name,
+        "lane": lane,
+        "relation_count": relation_count,
+        "repeat_index": repeat_index,
+        "pair_id": case_record["pair_id"],
+        "measurement_opcode": scenario.measurement_opcode,
+        "reference_ledger": dict(case_record["reference_ledger"]),
+        "backend_input_sha256": backend_input_sha256,
+        "trace_sha256": trace_sha256,
+        "semantic_check_sha256": semantic_check_sha256,
+        "row_identity": row_identity,
+        "transaction_envelope_sha256": trace["transaction_envelope_sha256"],
+        "access_list_sha256": trace["access_list_sha256"],
+        "prestate_sha256": trace["prestate_sha256"],
+        "tx_gas_limit": trace["tx_gas_limit"],
+        "bytecode_len": trace["bytecode_len"],
+        "executed_opcode_counts": dict(trace["executed_opcode_counts"]),
+        "executed_opcode_raw_gas": dict(trace["executed_opcode_raw_gas"]),
+        "revm_identity": {
+            "evm_spec": trace["evm_spec"],
+            "revm_version": trace["revm_version"],
+            "shared_constructor": trace["shared_constructor"],
+        },
+    }
+
+
+def stateful_ordered_pair_identity(
+    *,
+    scenario: str,
+    measurement_opcode: int,
+    relation_count: int,
+    repeat_index: int,
+    target_hash: str,
+    control_hash: str,
+) -> str:
+    _require_sha256(target_hash, "target_hash")
+    _require_sha256(control_hash, "control_hash")
+    return sha256_bytes(
+        canonical_json(
+            {
+                "kind": "stateful_ordered_pair",
+                "scenario": scenario,
+                "measurement_opcode": measurement_opcode,
+                "relation_count": relation_count,
+                "repeat_index": repeat_index,
+                "target_hash": target_hash,
+                "control_hash": control_hash,
+            }
+        )
+    )
+
+
+def admit_stateful_pair(
+    manifest: StatefulCampaignManifest,
+    target_fixture: Mapping[str, Any],
+    target_reports: Sequence[Mapping[str, Any]],
+    control_fixture: Mapping[str, Any],
+    control_reports: Sequence[Mapping[str, Any]],
+    *,
+    repeat_index: int,
+) -> dict[str, Any]:
+    """Admits an ordered target/control relation and rejects every pair confound."""
+
+    target_record = target_fixture.get("case_record", {})
+    control_record = control_fixture.get("case_record", {})
+    if target_record.get("lane") != "target":
+        raise ValueError("stateful pair first fixture must be the target lane")
+    if control_record.get("lane") != "control":
+        raise ValueError("stateful pair second fixture must be the control lane")
+    if (
+        target_record.get("pair_id") != control_record.get("pair_id")
+        or target_record.get("scenario") != control_record.get("scenario")
+        or target_record.get("relation_count") != control_record.get("relation_count")
+    ):
+        raise ValueError("stateful target and control do not belong to the same pair")
+    target = admit_stateful_fixture_trace(
+        manifest, target_fixture, target_reports, repeat_index=repeat_index
+    )
+    control = admit_stateful_fixture_trace(
+        manifest, control_fixture, control_reports, repeat_index=repeat_index
+    )
+    if target["backend_input_sha256"] == control["backend_input_sha256"]:
+        raise ValueError("stateful target/control require distinct backend-input hashes")
+    if target["reference_ledger"] != control["reference_ledger"]:
+        raise ValueError("stateful pair reference ledger differs")
+    comparisons = (
+        ("transaction envelope", "transaction_envelope_sha256"),
+        ("access list", "access_list_sha256"),
+        ("prestate", "prestate_sha256"),
+        ("gas limit", "tx_gas_limit"),
+        ("bytecode length", "bytecode_len"),
+        ("REVM identity", "revm_identity"),
+    )
+    for label, field in comparisons:
+        if target[field] != control[field]:
+            raise ValueError(f"stateful pair {label} differs")
+
+    all_keys = set(target["executed_opcode_counts"]) | set(
+        control["executed_opcode_counts"]
+    )
+    signed_total = {
+        key: target["executed_opcode_counts"].get(key, 0)
+        - control["executed_opcode_counts"].get(key, 0)
+        for key in sorted(all_keys)
+    }
+    signed_total = {key: value for key, value in signed_total.items() if value}
+    relation_count = target["relation_count"]
+    expected_total = {
+        key: value * relation_count
+        for key, value in target["reference_ledger"].items()
+        if value * relation_count
+    }
+    if signed_total != expected_total:
+        raise ValueError("stateful pair signed opcode ledger differs from reference ledger")
+
+    ordered_pair_identity = stateful_ordered_pair_identity(
+        scenario=target["scenario"],
+        measurement_opcode=target["measurement_opcode"],
+        relation_count=relation_count,
+        repeat_index=repeat_index,
+        target_hash=target["backend_input_sha256"],
+        control_hash=control["backend_input_sha256"],
+    )
+    return {
+        "scenario": target["scenario"],
+        "measurement_opcode": target["measurement_opcode"],
+        "relation_count": relation_count,
+        "repeat_index": repeat_index,
+        "target": target,
+        "control": control,
+        "signed_execution_ledger": target["reference_ledger"],
+        "ordered_pair_identity": ordered_pair_identity,
+    }
 
 
 def cmd_generate(args: Any) -> None:

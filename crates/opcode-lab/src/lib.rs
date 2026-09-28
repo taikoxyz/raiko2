@@ -76,10 +76,12 @@ pub fn build_benchmark_tx(
     if let Some(storage) = storage
         && storage.access == OpcodeLabStorageAccess::Warm
     {
-        builder = builder.access_list(AccessList(vec![AccessListItem {
-            address: BENCH_TARGET,
-            storage_keys: vec![B256::from(storage.slot)],
-        }]));
+        builder = builder
+            .tx_type(None)
+            .access_list(AccessList(vec![AccessListItem {
+                address: BENCH_TARGET,
+                storage_keys: vec![B256::from(storage.slot)],
+            }]));
     }
     builder.build()
 }
@@ -95,7 +97,7 @@ mod tests {
         OpcodeLabStorageOperation,
     };
     use revm::{
-        Database,
+        Context, Database, ExecuteEvm, MainBuilder, MainContext,
         bytecode::Bytecode,
         context::{
             TxEnv,
@@ -189,6 +191,36 @@ mod tests {
                 storage_keys: vec![B256::from(SLOT)],
             }])
         );
+        assert_eq!(
+            tx.tx_type, 1,
+            "warm access-list transaction must be EIP-2930"
+        );
+    }
+
+    #[test]
+    fn warm_access_list_changes_real_sload_execution_gas() {
+        let mut program = vec![0x7f];
+        program.extend_from_slice(&SLOT);
+        program.extend_from_slice(&[0x54, 0x50, 0x00]);
+        let bytecode = Bytecode::new_legacy(program.into());
+        let cold = storage([0x22; 32], OpcodeLabStorageAccess::Cold);
+        let warm = storage([0x22; 32], OpcodeLabStorageAccess::Warm);
+        let execute = |storage: &OpcodeLabStorageInput| {
+            let ctx = Context::mainnet()
+                .modify_cfg_chained(|cfg| cfg.set_spec_and_mainnet_gas_params(OPCODE_LAB_SPEC_ID))
+                .with_db(build_benchmark_db(bytecode.clone(), Some(storage)));
+            ctx.build_mainnet()
+                .transact(build_benchmark_tx(100_000, Some(storage)).expect("valid tx"))
+                .expect("SLOAD execution")
+                .result
+                .tx_gas_used()
+        };
+
+        let cold_gas = execute(&cold);
+        let warm_gas = execute(&warm);
+
+        assert_eq!(cold_gas, 23_105);
+        assert_eq!(warm_gas, 25_405);
     }
 
     #[test]

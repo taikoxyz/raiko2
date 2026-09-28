@@ -1341,6 +1341,59 @@ def _read_canonical_json_file(path: pathlib.Path, *, label: str) -> Mapping[str,
     return value
 
 
+def _require_safe_tree(root: pathlib.Path, *, label: str) -> None:
+    """Reject every symlink or non-regular descendant without following links."""
+    if root.is_symlink() or (root.exists() and not root.is_dir()):
+        raise ValueError(f"{label} must be a regular non-symlink directory")
+    if not root.exists():
+        return
+    for child in root.rglob("*"):
+        if child.is_symlink():
+            raise ValueError(f"{label} contains a symlink: {child}")
+        if not child.is_dir() and not child.is_file():
+            raise ValueError(f"{label} contains a non-regular entry: {child}")
+
+
+def _require_contained_path(
+    root: pathlib.Path, path: pathlib.Path, *, label: str, kind: str = "file"
+) -> None:
+    try:
+        relative = path.relative_to(root)
+    except ValueError as error:
+        raise ValueError(f"{label} must stay within its declared root") from error
+    current = root
+    for part in relative.parts:
+        current = current / part
+        if current.is_symlink():
+            raise ValueError(f"{label} path contains a symlink")
+    if path.exists():
+        expected = path.is_dir() if kind == "directory" else path.is_file()
+        if not expected:
+            raise ValueError(f"{label} must be a regular {kind}")
+
+
+def _require_run_inventory(
+    run: pathlib.Path, expected_rows: set[pathlib.Path]
+) -> None:
+    if not run.exists():
+        return
+    allowed_top = {
+        run / "identity.json",
+        run / "rows",
+        run / "rows.jsonl",
+        run / "decisions.json",
+        run / "decisions.sha256",
+    }
+    unexpected_top = set(run.iterdir()) - allowed_top
+    if unexpected_top:
+        raise ValueError("stateful campaign run contains an unexpected artifact")
+    rows = run / "rows"
+    if rows.exists():
+        actual = set(rows.iterdir())
+        if not actual.issubset(expected_rows) or any(not path.is_file() for path in actual):
+            raise ValueError("stateful row ledger contains a duplicate or unexpected row")
+
+
 def _load_fixture_for_spec(
     manifest: StatefulCampaignManifest,
     fixtures_root: pathlib.Path,
@@ -1376,11 +1429,28 @@ def _portable_formal_report(
         raise ValueError("stateful execution report belongs to another guest input")
     portable = dict(report)
     portable["input"] = expected_relative
+    public_values = portable.get("public_values")
+    if (
+        portable.get("stage") != EXECUTION_CONTRACT["stage"]
+        or portable.get("mode") != EXECUTION_CONTRACT["mode"]
+        or portable.get("proof_mode") != "compressed"
+    ):
+        raise ValueError("stateful execution report has the wrong execution context")
+    if (
+        not isinstance(public_values, str)
+        or re.fullmatch(r"0x[0-9a-f]{64}", public_values) is None
+    ):
+        raise ValueError("stateful execution report has noncanonical public values")
     if portable.get("exit_code") != 0:
         raise ValueError("stateful guest execution failed")
     prover_gas = portable.get("prover_gas", portable.get("gas"))
     if type(prover_gas) is not int or prover_gas <= 0:
         raise ValueError("stateful execution report has no positive prover gas")
+    if portable.get("primary_workload_metric") != {
+        "label": "prover_gas",
+        "count": prover_gas,
+    }:
+        raise ValueError("stateful execution report has an invalid result shape")
     opcode_gas.validate_sp1_execution_provenance(
         portable, workload_kind="opcode", expected_engine="gas-estimator"
     )
@@ -1499,6 +1569,7 @@ def run_stateful_campaign_rows(
     batch_executor=opcode_gas.run_guest_inputs,
     identity_replayer=None,
     calibration_run_id: str | None = None,
+    verification_only: bool = False,
 ) -> list[dict[str, Any]]:
     """Run or replay exact stateful rows without duplicating launcher execution logic."""
     validate_stateful_row_specs(specs, repeats=manifest.repeats)
@@ -1506,10 +1577,24 @@ def run_stateful_campaign_rows(
         calibration_run_id = run.name
     if not isinstance(calibration_run_id, str) or not calibration_run_id:
         raise ValueError("stateful calibration run identity is invalid")
+    _require_safe_tree(fixtures_root, label="stateful fixture root")
+    _require_safe_tree(run, label="stateful campaign run")
+    _require_contained_path(
+        run, run / "rows", label="stateful row directory", kind="directory"
+    )
+    expected_paths = {_row_path(run, spec) for spec in specs}
+    _require_run_inventory(run, expected_paths)
     fixtures: dict[tuple[str, int, str], tuple[dict[str, Any], pathlib.Path]] = {}
     for spec in specs:
         key = (spec.scenario, spec.relation_count, spec.lane)
         if key not in fixtures:
+            case_path, input_path = _fixture_paths(fixtures_root, spec)
+            _require_contained_path(
+                fixtures_root, case_path, label="stateful case"
+            )
+            _require_contained_path(
+                fixtures_root, input_path, label="stateful guest input"
+            )
             fixtures[key] = _load_fixture_for_spec(manifest, fixtures_root, spec)
 
     if identity_replayer is None:
@@ -1520,9 +1605,11 @@ def run_stateful_campaign_rows(
     for key, (_fixture, input_path) in fixtures.items():
         bundles[key] = identity_replayer(guest_launcher, input_path, replay_cache)
 
-    run.mkdir(parents=True, exist_ok=True)
-    (run / "rows").mkdir(exist_ok=True)
-    expected_paths = {_row_path(run, spec) for spec in specs}
+    if not verification_only:
+        run.mkdir(parents=True, exist_ok=True)
+        (run / "rows").mkdir(exist_ok=True)
+    elif not (run / "rows").is_dir():
+        raise ValueError("portable stateful verification requires the row directory")
     actual_paths = set((run / "rows").glob("*.json"))
     if not actual_paths.issubset(expected_paths):
         raise ValueError("stateful row ledger contains a duplicate or unexpected row")
@@ -1547,14 +1634,79 @@ def run_stateful_campaign_rows(
         )[spec.lane] = spec
     missing_specs: list[StatefulCampaignRowSpec] = []
     for pair_key, lanes in pair_groups.items():
-        present = [
-            (pair_key[0], pair_key[1], lane, pair_key[2]) in existing_reports
-            for lane in ("control", "target")
-        ]
-        if any(present) and not all(present):
-            raise ValueError("stateful row ledger contains an incomplete target/control pair")
-        if not any(present):
-            missing_specs.extend((lanes["control"], lanes["target"]))
+        for lane in ("control", "target"):
+            key = (pair_key[0], pair_key[1], lane, pair_key[2])
+            if key not in existing_reports:
+                missing_specs.append(lanes[lane])
+
+    # Validate every surviving lane against the freshly replayed host identity before
+    # executing a missing sibling. Exact pair/row equality is checked after recovery.
+    for key, report in existing_reports.items():
+        scenario, count, lane, repeat_index = key
+        fixture, input_path = fixtures[(scenario, count, lane)]
+        portable = _portable_formal_report(
+            report, input_path=input_path, fixtures_root=fixtures_root
+        )
+        admission = admit_stateful_fixture_trace(
+            manifest,
+            fixture,
+            [portable],
+            expected_bundle=bundles[(scenario, count, lane)],
+            repeat_index=repeat_index,
+        )
+        spec = pair_groups[(scenario, count, repeat_index)][lane]
+        normalized = opcode_gas.raw_run_from_report(
+            dict(fixture["case_record"]), dict(portable)
+        )
+        normalized["repeat_index"] = repeat_index
+        normalized["execution_row_id"] = opcode_gas.controlled_execution_row_id(
+            normalized["workload_id"],
+            backend="sp1",
+            execution_engine=normalized["sp1_execution_engine"],
+            run_id=calibration_run_id,
+            repeat_index=repeat_index,
+            backend_input_sha256=admission["backend_input_sha256"],
+        )
+        expected_fields = {
+            "schema_version": 1,
+            "purpose": PURPOSE,
+            "scenario": scenario,
+            "lane": lane,
+            "relation_count": count,
+            "repeat_index": repeat_index,
+            "logical_identity": spec.logical_identity,
+            "row_identity": stateful_execution_row_identity(
+                scenario=scenario,
+                lane=lane,
+                relation_count=count,
+                repeat_index=repeat_index,
+                backend_input_sha256=admission["backend_input_sha256"],
+                elf_sha256=elf_sha256,
+                launcher_sha256=launcher_sha256,
+                trace_sha256=admission["trace_sha256"],
+            ),
+            "backend_input_sha256": admission["backend_input_sha256"],
+            "elf_sha256": elf_sha256,
+            "launcher_sha256": launcher_sha256,
+            "trace_sha256": admission["trace_sha256"],
+            "semantic_check_sha256": admission["semantic_check_sha256"],
+            "identity_evidence_sha256": admission["identity_evidence_sha256"],
+            "guest_input_json_file_sha256": fixture["case_record"][
+                "guest_input_json_file_sha256"
+            ],
+            "formal_report_sha256": sha256_bytes(canonical_json(portable)),
+            "formal_report": portable,
+            "normalized_report": normalized,
+        }
+        payload = existing_payloads[key]
+        if any(
+            canonical_json(payload.get(field)) != canonical_json(expected)
+            for field, expected in expected_fields.items()
+        ):
+            raise ValueError("persisted stateful lane differs from fresh replay")
+
+    if verification_only and missing_specs:
+        raise ValueError("portable stateful verification found a missing row")
 
     new_reports: dict[tuple[str, int, str, int], Mapping[str, Any]] = {}
     if missing_specs:
@@ -1613,10 +1765,23 @@ def run_stateful_campaign_rows(
             old = existing_payloads.get(key)
             if old is not None and canonical_json(old) != canonical_json(record):
                 raise ValueError("persisted stateful row differs from exact replay")
-            opcode_gas.persist_immutable_bytes(
-                _row_path(run, spec), canonical_json(record) + b"\n"
-            )
             records[key] = record
+    public_values_by_lane: dict[tuple[str, int, str], set[str]] = {}
+    for key, record in records.items():
+        lane_key = key[:3]
+        public_values_by_lane.setdefault(lane_key, set()).add(
+            record["formal_report"]["public_values"]
+        )
+    if any(len(values) != 1 for values in public_values_by_lane.values()):
+        raise ValueError("stateful repeated public output differs")
+    for spec in specs:
+        key = (spec.scenario, spec.relation_count, spec.lane, spec.repeat_index)
+        if key not in existing_payloads:
+            if verification_only:
+                raise ValueError("portable stateful verification found a missing row")
+            opcode_gas.persist_immutable_bytes(
+                _row_path(run, spec), canonical_json(records[key]) + b"\n"
+            )
     return [
         records[(spec.scenario, spec.relation_count, spec.lane, spec.repeat_index)]
         for spec in specs
@@ -1656,7 +1821,8 @@ def _stateful_campaign_identity(
     ).resolve()
     if manifest_path.resolve() != expected_manifest:
         raise ValueError("stateful campaign requires the tracked frozen manifest")
-    if not fixtures_root.is_dir() or fixtures_root.is_symlink():
+    _require_safe_tree(fixtures_root, label="stateful fixture root")
+    if not fixtures_root.is_dir():
         raise ValueError("stateful fixture root must be a regular directory")
     _regular_file(guest_launcher, label="stateful guest launcher")
     _regular_file(elf, label="stateful guest ELF")
@@ -1681,14 +1847,30 @@ def _stateful_campaign_identity(
     registry_path = opcode_gas.REPO_ROOT / manifest.reference_registry["path"]
     _regular_file(registry_path, label="stateful source registry")
     try:
-        registry = json.loads(registry_path.read_bytes())
-    except (OSError, json.JSONDecodeError) as error:
+        registry_raw = registry_path.read_bytes()
+        registry = json.loads(registry_raw)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ValueError("stateful source registry is invalid JSON") from error
     if (
         not isinstance(registry, Mapping)
-        or registry.get("artifact_sha256")
-        != manifest.reference_registry["artifact_sha256"]
+        or registry_raw != opcode_gas._canonical_json_file_bytes(registry)
     ):
+        raise ValueError("stateful source registry is not canonical JSON")
+    registry_artifact_sha256 = opcode_gas._validate_content_addressed_artifact(
+        registry, label="stateful source registry"
+    )
+    registry_payload = registry.get("registry")
+    named_keys = (
+        registry_payload.get("named_opcode_keys")
+        if isinstance(registry_payload, Mapping)
+        else None
+    )
+    if not isinstance(named_keys, list) or any(
+        not isinstance(key, str) for key in named_keys
+    ):
+        raise ValueError("stateful source registry has invalid opcode inventory")
+    opcode_gas._validate_operation_core_registry(registry, set(named_keys))
+    if registry_artifact_sha256 != manifest.reference_registry["artifact_sha256"]:
         raise ValueError("stateful source registry artifact hash differs")
 
     fixture_rows = []
@@ -1699,6 +1881,10 @@ def _stateful_campaign_identity(
             continue
         seen.add(key)
         case_path, input_path = _fixture_paths(fixtures_root, spec)
+        _require_contained_path(fixtures_root, case_path, label="stateful case")
+        _require_contained_path(
+            fixtures_root, input_path, label="stateful guest input"
+        )
         _regular_file(case_path, label="stateful case")
         _regular_file(input_path, label="stateful guest input")
         fixture_rows.append(
@@ -1791,6 +1977,25 @@ def run_stateful_opcode_campaign(
 ) -> dict[str, Any]:
     if run.is_symlink() or (run.exists() and not run.is_dir()):
         raise ValueError("stateful campaign run must be a regular directory")
+    _require_safe_tree(run, label="stateful campaign run")
+    terminal_paths = tuple(
+        run / name for name in ("rows.jsonl", "decisions.json", "decisions.sha256")
+    )
+    terminal_present = [path.exists() or path.is_symlink() for path in terminal_paths]
+    if any(terminal_present):
+        if not all(terminal_present):
+            raise ValueError("terminal stateful campaign artifact set is incomplete")
+        return verify_stateful_opcode_campaign(
+            manifest_path=manifest_path,
+            calibration_run=calibration_run,
+            fixtures_root=fixtures_root,
+            guest_launcher=guest_launcher,
+            elf=elf,
+            run=run,
+            identity_replayer=identity_replayer,
+            execution_identity_loader=execution_identity_loader,
+            launcher_validator=launcher_validator,
+        )
     manifest = load_stateful_campaign_manifest(manifest_path)
     specs = stateful_campaign_row_specs(manifest)
     validate_stateful_row_specs(specs, repeats=manifest.repeats)
@@ -1854,6 +2059,7 @@ def verify_stateful_opcode_campaign(
 ) -> dict[str, Any]:
     if run.is_symlink() or not run.is_dir():
         raise ValueError("stateful campaign run must be a regular directory")
+    _require_safe_tree(run, label="stateful campaign run")
     manifest = load_stateful_campaign_manifest(manifest_path)
     specs = stateful_campaign_row_specs(manifest)
     identity, launcher_sha256, elf_sha256 = _stateful_campaign_identity(
@@ -1886,6 +2092,7 @@ def verify_stateful_opcode_campaign(
         batch_executor=reject_guest_execution,
         identity_replayer=identity_replayer,
         calibration_run_id=identity["calibration_id"],
+        verification_only=True,
     )
     rows_bytes, decisions, decisions_bytes = _terminal_campaign_payloads(
         identity, records

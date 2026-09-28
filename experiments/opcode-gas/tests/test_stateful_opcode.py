@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from dataclasses import replace
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "experiments" / "opcode-gas"))
@@ -58,8 +59,37 @@ EXPECTED_SCENARIOS = (
     "sstore_reset_nonzero_warm_high_slot",
 )
 
+STATEFUL_MANIFEST = (
+    ROOT / "experiments" / "opcode-gas" / "manifests" / "sp1-stateful-opcode-v1.json"
+)
+
 
 class StatefulOpcodeManifestTests(unittest.TestCase):
+    def test_tracked_manifest_freezes_execution_and_source_registry(self):
+        manifest = stateful.load_stateful_campaign_manifest(STATEFUL_MANIFEST)
+
+        self.assertEqual(
+            dict(manifest.execution),
+            {
+                "elf_path": "crates/guests/elf/sp1_revm_opcode_lab.elf",
+                "evm_spec": "osaka",
+                "mode": "execute",
+                "proof_type": "sp1",
+                "sp1_execution_engine": "gas-estimator",
+                "stage": "revm-opcode-lab",
+            },
+        )
+        self.assertEqual(
+            dict(manifest.reference_registry), stateful.REFERENCE_REGISTRY
+        )
+        rows = stateful.stateful_campaign_row_specs(manifest)
+        self.assertEqual(len(rows), 1_128)
+        self.assertEqual(len({row.logical_identity for row in rows}), len(rows))
+        self.assertEqual(
+            {row.repeat_index for row in rows},
+            {0, 1, 2},
+        )
+
     def test_manifest_freezes_inventory_counts_and_repeats(self):
         payload = stateful.canonical_stateful_manifest_payload()
         with tempfile.TemporaryDirectory() as directory:
@@ -103,6 +133,423 @@ class StatefulOpcodeManifestTests(unittest.TestCase):
                 ValueError, "canonical U256"
             ):
                 stateful.StatefulCampaignManifest.from_mapping(payload)
+
+    def test_manifest_rejects_execution_or_registry_drift(self):
+        mutations = (
+            ("stage", "opcode-lab"),
+            ("mode", "prove"),
+            ("sp1_execution_engine", "standard"),
+            ("evm_spec", "prague"),
+            ("elf_path", "crates/guests/elf/sp1_opcode_lab.elf"),
+        )
+        for field, value in mutations:
+            payload = stateful.canonical_stateful_manifest_payload()
+            payload["execution"][field] = value
+            with self.subTest(field=field), self.assertRaisesRegex(
+                ValueError, "frozen contract"
+            ):
+                stateful.StatefulCampaignManifest.from_mapping(payload)
+
+        payload = stateful.canonical_stateful_manifest_payload()
+        payload["reference_registry"]["artifact_sha256"] = "0" * 64
+        with self.assertRaisesRegex(ValueError, "frozen contract"):
+            stateful.StatefulCampaignManifest.from_mapping(payload)
+
+
+class StatefulCampaignRowIdentityTests(unittest.TestCase):
+    def test_row_identity_binds_every_execution_and_trace_input(self):
+        base = {
+            "scenario": "sload_warm_zero",
+            "lane": "target",
+            "relation_count": 4,
+            "repeat_index": 2,
+            "backend_input_sha256": "1" * 64,
+            "elf_sha256": "2" * 64,
+            "launcher_sha256": "3" * 64,
+            "trace_sha256": "4" * 64,
+        }
+        identity = stateful.stateful_execution_row_identity(**base)
+
+        mutations = {
+            "scenario": "sload_warm_nonzero",
+            "lane": "control",
+            "relation_count": 8,
+            "repeat_index": 1,
+            "backend_input_sha256": "5" * 64,
+            "elf_sha256": "6" * 64,
+            "launcher_sha256": "7" * 64,
+            "trace_sha256": "8" * 64,
+        }
+        for field, value in mutations.items():
+            changed = dict(base)
+            changed[field] = value
+            with self.subTest(field=field):
+                self.assertNotEqual(
+                    stateful.stateful_execution_row_identity(**changed), identity
+                )
+
+        for invalid in (-1, 3):
+            changed = dict(base)
+            changed["repeat_index"] = invalid
+            with self.assertRaisesRegex(ValueError, "repeat"):
+                stateful.stateful_execution_row_identity(**changed)
+
+    def _pair_specs(self, manifest):
+        return tuple(
+            row
+            for row in stateful.stateful_campaign_row_specs(manifest)
+            if row.scenario == "sload_warm_zero" and row.relation_count == 1
+        )
+
+    def _write_pair_fixtures(self, root, manifest):
+        paths = {}
+        fixtures = {}
+        for lane in ("control", "target"):
+            fixture = stateful.generate_stateful_fixture(
+                manifest, "sload_warm_zero", lane=lane, count=1
+            )
+            directory = root / "sload_warm_zero" / "1" / lane
+            directory.mkdir(parents=True)
+            (directory / "case.json").write_bytes(
+                opcode_gas.canonical_json(fixture["case_record"]) + b"\n"
+            )
+            input_path = directory / "guest-input.json"
+            input_path.write_bytes(
+                opcode_gas.canonical_json(fixture["guest_input"]) + b"\n"
+            )
+            paths[lane] = input_path
+            fixtures[lane] = fixture
+        return paths, fixtures
+
+    @staticmethod
+    def _formal_report(fixture, input_path, repeat_index, *, failed=False, semantic=True):
+        bundle = _synthetic_bundle(fixture)
+        report = copy.deepcopy(bundle["report"])
+        report.update(
+            {
+                "input": str(input_path),
+                "exit_code": 1 if failed else 0,
+                "gas": 10_000 + repeat_index,
+                "sp1_execution_engine": "gas-estimator",
+                "sp1_gas_trace_chunk_threshold": opcode_gas.SP1_GAS_TRACE_CHUNK_THRESHOLD,
+                "sp1_gas_trace_chunk_slots": opcode_gas.SP1_GAS_TRACE_CHUNK_SLOTS,
+            }
+        )
+        if not semantic:
+            report["controlled_trace"].pop("semantic_check")
+        return report
+
+    def test_row_runner_resumes_exact_rows_and_replays_identity_before_reading_reports(self):
+        manifest = stateful.StatefulCampaignManifest.from_mapping(
+            stateful.canonical_stateful_manifest_payload()
+        )
+        specs = self._pair_specs(manifest)
+        self.assertEqual(len(specs), 6)
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            fixture_paths, fixtures = self._write_pair_fixtures(
+                root / "fixtures", manifest
+            )
+            run = root / "run"
+            calls = []
+
+            def replay(_launcher, input_path, _cache):
+                calls.append(("replay", input_path))
+                lane = json.loads(input_path.read_text())["storage"]["lane"]
+                return _synthetic_bundle(fixtures[lane])
+
+            def execute(**kwargs):
+                calls.append(("execute", tuple(kwargs["input_paths"])))
+                counters = {}
+                with kwargs["reports_jsonl"].open("w") as output:
+                    for input_path in kwargs["input_paths"]:
+                        lane = json.loads(input_path.read_text())["storage"]["lane"]
+                        repeat = counters.get(lane, 0)
+                        counters[lane] = repeat + 1
+                        output.write(
+                            json.dumps(
+                                self._formal_report(
+                                    fixtures[lane], input_path, repeat
+                                ),
+                                sort_keys=True,
+                            )
+                            + "\n"
+                        )
+
+            first = stateful.run_stateful_campaign_rows(
+                manifest,
+                specs,
+                fixtures_root=root / "fixtures",
+                run=run,
+                guest_launcher=root / "guest-launcher",
+                elf=root / "guest.elf",
+                launcher_sha256="a" * 64,
+                elf_sha256="b" * 64,
+                batch_executor=execute,
+                identity_replayer=replay,
+            )
+            self.assertEqual(len(first), 6)
+            for row in first:
+                self.assertEqual(
+                    row["normalized_report"]["repeat_index"], row["repeat_index"]
+                )
+                self.assertEqual(len(row["normalized_report"]["execution_row_id"]), 64)
+            self.assertEqual([kind for kind, _ in calls[:2]], ["replay", "replay"])
+            self.assertEqual(calls[2][0], "execute")
+
+            calls.clear()
+            resumed = stateful.run_stateful_campaign_rows(
+                manifest,
+                specs,
+                fixtures_root=root / "fixtures",
+                run=run,
+                guest_launcher=root / "guest-launcher",
+                elf=root / "guest.elf",
+                launcher_sha256="a" * 64,
+                elf_sha256="b" * 64,
+                batch_executor=lambda **_kwargs: self.fail("exact resume re-executed a row"),
+                identity_replayer=replay,
+            )
+            self.assertEqual(resumed, first)
+            self.assertEqual([kind for kind, _ in calls], ["replay", "replay"])
+
+            removed = []
+            for candidate in (run / "rows").glob("*.json"):
+                payload = json.loads(candidate.read_text())
+                if payload["repeat_index"] == 2:
+                    candidate.unlink()
+                    removed.append(candidate)
+            self.assertEqual(len(removed), 2)
+            calls.clear()
+            partial = stateful.run_stateful_campaign_rows(
+                manifest,
+                specs,
+                fixtures_root=root / "fixtures",
+                run=run,
+                guest_launcher=root / "guest-launcher",
+                elf=root / "guest.elf",
+                launcher_sha256="a" * 64,
+                elf_sha256="b" * 64,
+                batch_executor=execute,
+                identity_replayer=replay,
+            )
+            self.assertEqual(len(partial), 6)
+            execution_calls = [value for kind, value in calls if kind == "execute"]
+            self.assertEqual(len(execution_calls), 1)
+            self.assertEqual(len(execution_calls[0]), 2)
+
+            extra = run / "rows" / "extra.json"
+            extra.write_text("{}\n")
+            with self.assertRaisesRegex(ValueError, "unexpected row"):
+                stateful.run_stateful_campaign_rows(
+                    manifest,
+                    specs,
+                    fixtures_root=root / "fixtures",
+                    run=run,
+                    guest_launcher=root / "guest-launcher",
+                    elf=root / "guest.elf",
+                    launcher_sha256="a" * 64,
+                    elf_sha256="b" * 64,
+                    batch_executor=lambda **_kwargs: None,
+                    identity_replayer=replay,
+                )
+            extra.unlink()
+
+            row_file = next((run / "rows").rglob("*.json"))
+            row_file.write_text("not-json\n")
+            calls.clear()
+
+            def blocked_replay(_launcher, _input_path, _cache):
+                raise ValueError("identity replay blocked before report read")
+
+            with self.assertRaisesRegex(ValueError, "identity replay blocked"):
+                stateful.run_stateful_campaign_rows(
+                    manifest,
+                    specs,
+                    fixtures_root=root / "fixtures",
+                    run=run,
+                    guest_launcher=root / "guest-launcher",
+                    elf=root / "guest.elf",
+                    launcher_sha256="a" * 64,
+                    elf_sha256="b" * 64,
+                    batch_executor=lambda **_kwargs: None,
+                    identity_replayer=blocked_replay,
+                )
+
+    def test_row_runner_fails_closed_on_repeat_duplicate_execution_and_semantic_errors(self):
+        manifest = stateful.StatefulCampaignManifest.from_mapping(
+            stateful.canonical_stateful_manifest_payload()
+        )
+        specs = self._pair_specs(manifest)
+        with self.assertRaisesRegex(ValueError, "three repeats"):
+            stateful.validate_stateful_row_specs(specs[:-1], repeats=3)
+        with self.assertRaisesRegex(ValueError, "duplicate"):
+            stateful.validate_stateful_row_specs((*specs, specs[0]), repeats=3)
+
+        for label, failed, semantic in (
+            ("execution", True, True),
+            ("semantic", False, False),
+        ):
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                root = pathlib.Path(directory)
+                _paths, fixtures = self._write_pair_fixtures(root / "fixtures", manifest)
+
+                def replay(_launcher, input_path, _cache):
+                    lane = json.loads(input_path.read_text())["storage"]["lane"]
+                    return _synthetic_bundle(fixtures[lane])
+
+                def execute(**kwargs):
+                    counters = {}
+                    with kwargs["reports_jsonl"].open("w") as output:
+                        for input_path in kwargs["input_paths"]:
+                            lane = json.loads(input_path.read_text())["storage"]["lane"]
+                            repeat = counters.get(lane, 0)
+                            counters[lane] = repeat + 1
+                            output.write(
+                                json.dumps(
+                                    self._formal_report(
+                                        fixtures[lane],
+                                        input_path,
+                                        repeat,
+                                        failed=failed,
+                                        semantic=semantic,
+                                    )
+                                )
+                                + "\n"
+                            )
+
+                with self.assertRaises(ValueError):
+                    stateful.run_stateful_campaign_rows(
+                        manifest,
+                        specs,
+                        fixtures_root=root / "fixtures",
+                        run=root / "run",
+                        guest_launcher=root / "guest-launcher",
+                        elf=root / "guest.elf",
+                        launcher_sha256="a" * 64,
+                        elf_sha256="b" * 64,
+                        batch_executor=execute,
+                        identity_replayer=replay,
+                    )
+
+    def test_campaign_wrapper_create_only_terminal_and_portable_verification(self):
+        manifest = stateful.load_stateful_campaign_manifest(STATEFUL_MANIFEST)
+        specs = self._pair_specs(manifest)
+        launcher = ROOT / "target" / "debug" / "guest-launcher"
+        elf = ROOT / stateful.EXECUTION_CONTRACT["elf_path"]
+        with tempfile.TemporaryDirectory(dir=ROOT / "target") as directory:
+            root = pathlib.Path(directory)
+            _paths, fixtures = self._write_pair_fixtures(root / "fixtures", manifest)
+            run = root / "run"
+
+            def replay(_launcher, input_path, _cache):
+                lane = json.loads(input_path.read_text())["storage"]["lane"]
+                return _synthetic_bundle(fixtures[lane])
+
+            def execute(**kwargs):
+                counters = {}
+                with kwargs["reports_jsonl"].open("w") as output:
+                    for input_path in kwargs["input_paths"]:
+                        lane = json.loads(input_path.read_text())["storage"]["lane"]
+                        repeat = counters.get(lane, 0)
+                        counters[lane] = repeat + 1
+                        output.write(
+                            json.dumps(
+                                self._formal_report(fixtures[lane], input_path, repeat)
+                            )
+                            + "\n"
+                        )
+
+            execution_identity = {
+                "implementation_revision": "9" * 40,
+                "guest_launcher_sha256": opcode_gas.sha256_file(launcher),
+                "guest_artifacts": {
+                    stateful.EXECUTION_CONTRACT["elf_path"]: opcode_gas.sha256_file(elf)
+                },
+            }
+            with mock.patch.object(
+                stateful, "stateful_campaign_row_specs", return_value=specs
+            ):
+                result = stateful.run_stateful_opcode_campaign(
+                    manifest_path=STATEFUL_MANIFEST,
+                    calibration_run=root / "calibration",
+                    fixtures_root=root / "fixtures",
+                    guest_launcher=launcher,
+                    elf=elf,
+                    run=run,
+                    batch_executor=execute,
+                    identity_replayer=replay,
+                    execution_identity_loader=lambda _run: execution_identity,
+                    launcher_validator=lambda _identity, _launcher: execution_identity[
+                        "guest_launcher_sha256"
+                    ],
+                )
+                verified = stateful.verify_stateful_opcode_campaign(
+                    manifest_path=STATEFUL_MANIFEST,
+                    calibration_run=root / "calibration",
+                    fixtures_root=root / "fixtures",
+                    guest_launcher=launcher,
+                    elf=elf,
+                    run=run,
+                    identity_replayer=replay,
+                    execution_identity_loader=lambda _run: execution_identity,
+                    launcher_validator=lambda _identity, _launcher: execution_identity[
+                        "guest_launcher_sha256"
+                    ],
+                )
+
+            self.assertEqual(result, verified)
+            self.assertEqual(result["status"], "complete")
+            self.assertEqual(result["row_count"], 6)
+            self.assertTrue((run / "rows.jsonl").is_file())
+            self.assertTrue((run / "decisions.json").is_file())
+            self.assertTrue((run / "decisions.sha256").is_file())
+
+            decisions = json.loads((run / "decisions.json").read_text())
+            decisions["row_count"] = 5
+            (run / "decisions.json").write_text(json.dumps(decisions) + "\n")
+            with mock.patch.object(
+                stateful, "stateful_campaign_row_specs", return_value=specs
+            ), self.assertRaises(ValueError):
+                stateful.verify_stateful_opcode_campaign(
+                    manifest_path=STATEFUL_MANIFEST,
+                    calibration_run=root / "calibration",
+                    fixtures_root=root / "fixtures",
+                    guest_launcher=launcher,
+                    elf=elf,
+                    run=run,
+                    identity_replayer=replay,
+                    execution_identity_loader=lambda _run: execution_identity,
+                    launcher_validator=lambda _identity, _launcher: execution_identity[
+                        "guest_launcher_sha256"
+                    ],
+                )
+
+    def test_campaign_rejects_symlinked_canonical_input(self):
+        manifest = stateful.StatefulCampaignManifest.from_mapping(
+            stateful.canonical_stateful_manifest_payload()
+        )
+        specs = self._pair_specs(manifest)
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            paths, _fixtures = self._write_pair_fixtures(root / "fixtures", manifest)
+            real_input = paths["target"]
+            moved = real_input.with_name("real-input.json")
+            real_input.rename(moved)
+            real_input.symlink_to(moved)
+            with self.assertRaisesRegex(ValueError, "non-symlink"):
+                stateful.run_stateful_campaign_rows(
+                    manifest,
+                    specs,
+                    fixtures_root=root / "fixtures",
+                    run=root / "run",
+                    guest_launcher=root / "launcher",
+                    elf=root / "elf",
+                    launcher_sha256="a" * 64,
+                    elf_sha256="b" * 64,
+                    batch_executor=lambda **_kwargs: None,
+                    identity_replayer=lambda *_args: {},
+                )
 
 
 class StatefulOpcodeGeneratorTests(unittest.TestCase):
@@ -499,27 +946,12 @@ class StatefulTraceAdmissionTests(unittest.TestCase):
             input_path.write_bytes(
                 opcode_gas.canonical_json(fixture["guest_input"]) + b"\n"
             )
-            subprocess.run(
-                [
-                    "cargo",
-                    "build",
-                    "--quiet",
-                    "--profile",
-                    "test",
-                    "-p",
-                    "guest-launcher",
-                    "--bin",
-                    "guest-launcher",
-                ],
-                cwd=ROOT,
-                check=True,
-                capture_output=True,
-                text=True,
-            )
+            launcher = ROOT / "target" / "debug" / "guest-launcher"
+            self.assertTrue(launcher.is_file(), "reviewed guest-launcher binary is missing")
             for output_path in (expected_bundle_path, formal_bundle_path):
                 subprocess.run(
                     [
-                        str(ROOT / "target" / "debug" / "guest-launcher"),
+                        str(launcher),
                         "--stage",
                         "revm-opcode-identity",
                         "--proof-type",

@@ -1,0 +1,661 @@
+{
+  "checkpoint_count": 64,
+  "execution": {
+    "elf_path": "crates/guests/elf/sp1_revm_opcode_lab.elf",
+    "evm_spec": "osaka",
+    "mode": "execute",
+    "proof_type": "sp1",
+    "sp1_execution_engine": "gas-estimator",
+    "stage": "revm-opcode-lab"
+  },
+  "fit_counts": [
+    1,
+    2,
+    4,
+    8,
+    16
+  ],
+  "holdout_count": 32,
+  "purpose": "stateful_opcode_calibration",
+  "reference_registry": {
+    "artifact_sha256": "b66d7951bfa416810f93319f99c30ce91969026ee9fa3a402a74cbc2214f7e8b",
+    "path": "experiments/opcode-gas/derivations/f945e67bb2c38c9c8ef50530/core-opcode-submodel.json"
+  },
+  "repeats": 3,
+  "scenarios": [
+    {
+      "access": "cold",
+      "diagnostic": false,
+      "low_variant": null,
+      "measurement_opcode": 84,
+      "name": "sload_cold_zero",
+      "operation": {
+        "expected_value": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "kind": "load"
+      },
+      "original_value": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "reference_opcode": 25,
+      "slot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "target_raw_gas": 2100
+    },
+    {
+      "access": "cold",
+      "diagnostic": false,
+      "low_variant": null,
+      "measurement_opcode": 84,
+      "name": "sload_cold_nonzero",
+      "operation": {
+        "expected_value": "0x0000000000000000000000000000000000000000000000000000000000000001",
+        "kind": "load"
+      },
+      "original_value": "0x0000000000000000000000000000000000000000000000000000000000000001",
+      "reference_opcode": 25,
+      "slot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "target_raw_gas": 2100
+    },
+    {
+      "access": "warm",
+      "diagnostic": false,
+      "low_variant": null,
+      "measurement_opcode": 84,
+      "name": "sload_warm_zero",
+      "operation": {
+        "expected_value": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "kind": "load"
+      },
+      "original_value": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "reference_opcode": 25,
+      "slot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "target_raw_gas": 100
+    },
+    {
+      "access": "warm",
+      "diagnostic": false,
+      "low_variant": null,
+      "measurement_opcode": 84,
+      "name": "sload_warm_nonzero",
+      "operation": {
+        "expected_value": "0x0000000000000000000000000000000000000000000000000000000000000001",
+        "kind": "load"
+      },
+      "original_value": "0x0000000000000000000000000000000000000000000000000000000000000001",
+      "reference_opcode": 25,
+      "slot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "target_raw_gas": 100
+    },
+    {
+      "access": "cold",
+      "diagnostic": false,
+      "low_variant": null,
+      "measurement_opcode": 85,
+      "name": "sstore_noop_zero_cold",
+      "operation": {
+        "current_value": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "kind": "store",
+        "new_value": "0x0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "original_value": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "reference_opcode": 80,
+      "slot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "target_raw_gas": 2200
+    },
+    {
+      "access": "warm",
+      "diagnostic": false,
+      "low_variant": null,
+      "measurement_opcode": 85,
+      "name": "sstore_noop_zero_warm",
+      "operation": {
+        "current_value": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "kind": "store",
+        "new_value": "0x0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "original_value": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "reference_opcode": 80,
+      "slot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "target_raw_gas": 100
+    },
+    {
+      "access": "cold",
+      "diagnostic": false,
+      "low_variant": null,
+      "measurement_opcode": 85,
+      "name": "sstore_noop_nonzero_cold",
+      "operation": {
+        "current_value": "0x0000000000000000000000000000000000000000000000000000000000000001",
+        "kind": "store",
+        "new_value": "0x0000000000000000000000000000000000000000000000000000000000000001"
+      },
+      "original_value": "0x0000000000000000000000000000000000000000000000000000000000000001",
+      "reference_opcode": 80,
+      "slot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "target_raw_gas": 2200
+    },
+    {
+      "access": "warm",
+      "diagnostic": false,
+      "low_variant": null,
+      "measurement_opcode": 85,
+      "name": "sstore_noop_nonzero_warm",
+      "operation": {
+        "current_value": "0x0000000000000000000000000000000000000000000000000000000000000001",
+        "kind": "store",
+        "new_value": "0x0000000000000000000000000000000000000000000000000000000000000001"
+      },
+      "original_value": "0x0000000000000000000000000000000000000000000000000000000000000001",
+      "reference_opcode": 80,
+      "slot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "target_raw_gas": 100
+    },
+    {
+      "access": "cold",
+      "diagnostic": false,
+      "low_variant": null,
+      "measurement_opcode": 85,
+      "name": "sstore_set_cold",
+      "operation": {
+        "current_value": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "kind": "store",
+        "new_value": "0x0000000000000000000000000000000000000000000000000000000000000001"
+      },
+      "original_value": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "reference_opcode": 80,
+      "slot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "target_raw_gas": 22100
+    },
+    {
+      "access": "warm",
+      "diagnostic": false,
+      "low_variant": null,
+      "measurement_opcode": 85,
+      "name": "sstore_set_warm",
+      "operation": {
+        "current_value": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "kind": "store",
+        "new_value": "0x0000000000000000000000000000000000000000000000000000000000000001"
+      },
+      "original_value": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "reference_opcode": 80,
+      "slot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "target_raw_gas": 20000
+    },
+    {
+      "access": "cold",
+      "diagnostic": false,
+      "low_variant": null,
+      "measurement_opcode": 85,
+      "name": "sstore_clear_cold",
+      "operation": {
+        "current_value": "0x0000000000000000000000000000000000000000000000000000000000000001",
+        "kind": "store",
+        "new_value": "0x0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "original_value": "0x0000000000000000000000000000000000000000000000000000000000000001",
+      "reference_opcode": 80,
+      "slot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "target_raw_gas": 5000
+    },
+    {
+      "access": "warm",
+      "diagnostic": false,
+      "low_variant": null,
+      "measurement_opcode": 85,
+      "name": "sstore_clear_warm",
+      "operation": {
+        "current_value": "0x0000000000000000000000000000000000000000000000000000000000000001",
+        "kind": "store",
+        "new_value": "0x0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "original_value": "0x0000000000000000000000000000000000000000000000000000000000000001",
+      "reference_opcode": 80,
+      "slot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "target_raw_gas": 2900
+    },
+    {
+      "access": "cold",
+      "diagnostic": false,
+      "low_variant": null,
+      "measurement_opcode": 85,
+      "name": "sstore_reset_nonzero_cold",
+      "operation": {
+        "current_value": "0x0000000000000000000000000000000000000000000000000000000000000001",
+        "kind": "store",
+        "new_value": "0x0000000000000000000000000000000000000000000000000000000000000002"
+      },
+      "original_value": "0x0000000000000000000000000000000000000000000000000000000000000001",
+      "reference_opcode": 80,
+      "slot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "target_raw_gas": 5000
+    },
+    {
+      "access": "warm",
+      "diagnostic": false,
+      "low_variant": null,
+      "measurement_opcode": 85,
+      "name": "sstore_reset_nonzero_warm",
+      "operation": {
+        "current_value": "0x0000000000000000000000000000000000000000000000000000000000000001",
+        "kind": "store",
+        "new_value": "0x0000000000000000000000000000000000000000000000000000000000000002"
+      },
+      "original_value": "0x0000000000000000000000000000000000000000000000000000000000000001",
+      "reference_opcode": 80,
+      "slot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "target_raw_gas": 2900
+    },
+    {
+      "access": "warm",
+      "diagnostic": false,
+      "low_variant": null,
+      "measurement_opcode": 85,
+      "name": "sstore_dirty_rewrite",
+      "operation": {
+        "current_value": "0x0000000000000000000000000000000000000000000000000000000000000001",
+        "kind": "store",
+        "new_value": "0x0000000000000000000000000000000000000000000000000000000000000002"
+      },
+      "original_value": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "reference_opcode": 80,
+      "slot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "target_raw_gas": 100
+    },
+    {
+      "access": "warm",
+      "diagnostic": false,
+      "low_variant": null,
+      "measurement_opcode": 85,
+      "name": "sstore_restore_zero",
+      "operation": {
+        "current_value": "0x0000000000000000000000000000000000000000000000000000000000000001",
+        "kind": "store",
+        "new_value": "0x0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "original_value": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "reference_opcode": 80,
+      "slot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "target_raw_gas": 100
+    },
+    {
+      "access": "warm",
+      "diagnostic": false,
+      "low_variant": null,
+      "measurement_opcode": 85,
+      "name": "sstore_dirty_rewrite_nonzero",
+      "operation": {
+        "current_value": "0x0000000000000000000000000000000000000000000000000000000000000002",
+        "kind": "store",
+        "new_value": "0x0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "original_value": "0x0000000000000000000000000000000000000000000000000000000000000001",
+      "reference_opcode": 80,
+      "slot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "target_raw_gas": 100
+    },
+    {
+      "access": "warm",
+      "diagnostic": false,
+      "low_variant": null,
+      "measurement_opcode": 85,
+      "name": "sstore_restore_nonzero",
+      "operation": {
+        "current_value": "0x0000000000000000000000000000000000000000000000000000000000000002",
+        "kind": "store",
+        "new_value": "0x0000000000000000000000000000000000000000000000000000000000000001"
+      },
+      "original_value": "0x0000000000000000000000000000000000000000000000000000000000000001",
+      "reference_opcode": 80,
+      "slot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "target_raw_gas": 100
+    },
+    {
+      "access": "cold",
+      "diagnostic": true,
+      "low_variant": "sload_cold_nonzero",
+      "measurement_opcode": 84,
+      "name": "sload_cold_high_value",
+      "operation": {
+        "expected_value": "0x8000000000000000000000000000000000000000000000000000000000000000",
+        "kind": "load"
+      },
+      "original_value": "0x8000000000000000000000000000000000000000000000000000000000000000",
+      "reference_opcode": 25,
+      "slot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "target_raw_gas": 2100
+    },
+    {
+      "access": "warm",
+      "diagnostic": true,
+      "low_variant": "sload_warm_nonzero",
+      "measurement_opcode": 84,
+      "name": "sload_warm_high_value",
+      "operation": {
+        "expected_value": "0x8000000000000000000000000000000000000000000000000000000000000000",
+        "kind": "load"
+      },
+      "original_value": "0x8000000000000000000000000000000000000000000000000000000000000000",
+      "reference_opcode": 25,
+      "slot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "target_raw_gas": 100
+    },
+    {
+      "access": "cold",
+      "diagnostic": true,
+      "low_variant": "sstore_noop_nonzero_cold",
+      "measurement_opcode": 85,
+      "name": "sstore_noop_high_value_cold",
+      "operation": {
+        "current_value": "0x8000000000000000000000000000000000000000000000000000000000000000",
+        "kind": "store",
+        "new_value": "0x8000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "original_value": "0x8000000000000000000000000000000000000000000000000000000000000000",
+      "reference_opcode": 80,
+      "slot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "target_raw_gas": 2200
+    },
+    {
+      "access": "warm",
+      "diagnostic": true,
+      "low_variant": "sstore_noop_nonzero_warm",
+      "measurement_opcode": 85,
+      "name": "sstore_noop_high_value_warm",
+      "operation": {
+        "current_value": "0x8000000000000000000000000000000000000000000000000000000000000000",
+        "kind": "store",
+        "new_value": "0x8000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "original_value": "0x8000000000000000000000000000000000000000000000000000000000000000",
+      "reference_opcode": 80,
+      "slot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "target_raw_gas": 100
+    },
+    {
+      "access": "cold",
+      "diagnostic": true,
+      "low_variant": "sstore_set_cold",
+      "measurement_opcode": 85,
+      "name": "sstore_set_high_value_cold",
+      "operation": {
+        "current_value": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "kind": "store",
+        "new_value": "0x8000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "original_value": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "reference_opcode": 80,
+      "slot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "target_raw_gas": 22100
+    },
+    {
+      "access": "warm",
+      "diagnostic": true,
+      "low_variant": "sstore_set_warm",
+      "measurement_opcode": 85,
+      "name": "sstore_set_high_value_warm",
+      "operation": {
+        "current_value": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "kind": "store",
+        "new_value": "0x8000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "original_value": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "reference_opcode": 80,
+      "slot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "target_raw_gas": 20000
+    },
+    {
+      "access": "cold",
+      "diagnostic": true,
+      "low_variant": "sstore_clear_cold",
+      "measurement_opcode": 85,
+      "name": "sstore_clear_high_value_cold",
+      "operation": {
+        "current_value": "0x8000000000000000000000000000000000000000000000000000000000000000",
+        "kind": "store",
+        "new_value": "0x0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "original_value": "0x8000000000000000000000000000000000000000000000000000000000000000",
+      "reference_opcode": 80,
+      "slot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "target_raw_gas": 5000
+    },
+    {
+      "access": "warm",
+      "diagnostic": true,
+      "low_variant": "sstore_clear_warm",
+      "measurement_opcode": 85,
+      "name": "sstore_clear_high_value_warm",
+      "operation": {
+        "current_value": "0x8000000000000000000000000000000000000000000000000000000000000000",
+        "kind": "store",
+        "new_value": "0x0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "original_value": "0x8000000000000000000000000000000000000000000000000000000000000000",
+      "reference_opcode": 80,
+      "slot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "target_raw_gas": 2900
+    },
+    {
+      "access": "cold",
+      "diagnostic": true,
+      "low_variant": "sstore_reset_nonzero_cold",
+      "measurement_opcode": 85,
+      "name": "sstore_reset_high_value_cold",
+      "operation": {
+        "current_value": "0x8000000000000000000000000000000000000000000000000000000000000000",
+        "kind": "store",
+        "new_value": "0x8000000000000000000000000000000000000000000000000000000000000001"
+      },
+      "original_value": "0x8000000000000000000000000000000000000000000000000000000000000000",
+      "reference_opcode": 80,
+      "slot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "target_raw_gas": 5000
+    },
+    {
+      "access": "warm",
+      "diagnostic": true,
+      "low_variant": "sstore_reset_nonzero_warm",
+      "measurement_opcode": 85,
+      "name": "sstore_reset_high_value_warm",
+      "operation": {
+        "current_value": "0x8000000000000000000000000000000000000000000000000000000000000000",
+        "kind": "store",
+        "new_value": "0x8000000000000000000000000000000000000000000000000000000000000001"
+      },
+      "original_value": "0x8000000000000000000000000000000000000000000000000000000000000000",
+      "reference_opcode": 80,
+      "slot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "target_raw_gas": 2900
+    },
+    {
+      "access": "warm",
+      "diagnostic": true,
+      "low_variant": "sstore_dirty_rewrite",
+      "measurement_opcode": 85,
+      "name": "sstore_dirty_rewrite_high_value",
+      "operation": {
+        "current_value": "0x8000000000000000000000000000000000000000000000000000000000000000",
+        "kind": "store",
+        "new_value": "0x8000000000000000000000000000000000000000000000000000000000000001"
+      },
+      "original_value": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "reference_opcode": 80,
+      "slot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "target_raw_gas": 100
+    },
+    {
+      "access": "warm",
+      "diagnostic": true,
+      "low_variant": "sstore_restore_nonzero",
+      "measurement_opcode": 85,
+      "name": "sstore_restore_high_value",
+      "operation": {
+        "current_value": "0x8000000000000000000000000000000000000000000000000000000000000001",
+        "kind": "store",
+        "new_value": "0x8000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "original_value": "0x8000000000000000000000000000000000000000000000000000000000000000",
+      "reference_opcode": 80,
+      "slot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "target_raw_gas": 100
+    },
+    {
+      "access": "cold",
+      "diagnostic": true,
+      "low_variant": "sload_cold_nonzero",
+      "measurement_opcode": 84,
+      "name": "sload_cold_nonzero_high_slot",
+      "operation": {
+        "expected_value": "0x0000000000000000000000000000000000000000000000000000000000000001",
+        "kind": "load"
+      },
+      "original_value": "0x0000000000000000000000000000000000000000000000000000000000000001",
+      "reference_opcode": 25,
+      "slot": "0x8000000000000000000000000000000000000000000000000000000000000000",
+      "target_raw_gas": 2100
+    },
+    {
+      "access": "warm",
+      "diagnostic": true,
+      "low_variant": "sload_warm_nonzero",
+      "measurement_opcode": 84,
+      "name": "sload_warm_nonzero_high_slot",
+      "operation": {
+        "expected_value": "0x0000000000000000000000000000000000000000000000000000000000000001",
+        "kind": "load"
+      },
+      "original_value": "0x0000000000000000000000000000000000000000000000000000000000000001",
+      "reference_opcode": 25,
+      "slot": "0x8000000000000000000000000000000000000000000000000000000000000000",
+      "target_raw_gas": 100
+    },
+    {
+      "access": "cold",
+      "diagnostic": true,
+      "low_variant": "sstore_noop_nonzero_cold",
+      "measurement_opcode": 85,
+      "name": "sstore_noop_nonzero_cold_high_slot",
+      "operation": {
+        "current_value": "0x0000000000000000000000000000000000000000000000000000000000000001",
+        "kind": "store",
+        "new_value": "0x0000000000000000000000000000000000000000000000000000000000000001"
+      },
+      "original_value": "0x0000000000000000000000000000000000000000000000000000000000000001",
+      "reference_opcode": 80,
+      "slot": "0x8000000000000000000000000000000000000000000000000000000000000000",
+      "target_raw_gas": 2200
+    },
+    {
+      "access": "warm",
+      "diagnostic": true,
+      "low_variant": "sstore_noop_nonzero_warm",
+      "measurement_opcode": 85,
+      "name": "sstore_noop_nonzero_warm_high_slot",
+      "operation": {
+        "current_value": "0x0000000000000000000000000000000000000000000000000000000000000001",
+        "kind": "store",
+        "new_value": "0x0000000000000000000000000000000000000000000000000000000000000001"
+      },
+      "original_value": "0x0000000000000000000000000000000000000000000000000000000000000001",
+      "reference_opcode": 80,
+      "slot": "0x8000000000000000000000000000000000000000000000000000000000000000",
+      "target_raw_gas": 100
+    },
+    {
+      "access": "cold",
+      "diagnostic": true,
+      "low_variant": "sstore_set_cold",
+      "measurement_opcode": 85,
+      "name": "sstore_set_cold_high_slot",
+      "operation": {
+        "current_value": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "kind": "store",
+        "new_value": "0x0000000000000000000000000000000000000000000000000000000000000001"
+      },
+      "original_value": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "reference_opcode": 80,
+      "slot": "0x8000000000000000000000000000000000000000000000000000000000000000",
+      "target_raw_gas": 22100
+    },
+    {
+      "access": "warm",
+      "diagnostic": true,
+      "low_variant": "sstore_set_warm",
+      "measurement_opcode": 85,
+      "name": "sstore_set_warm_high_slot",
+      "operation": {
+        "current_value": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "kind": "store",
+        "new_value": "0x0000000000000000000000000000000000000000000000000000000000000001"
+      },
+      "original_value": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "reference_opcode": 80,
+      "slot": "0x8000000000000000000000000000000000000000000000000000000000000000",
+      "target_raw_gas": 20000
+    },
+    {
+      "access": "cold",
+      "diagnostic": true,
+      "low_variant": "sstore_clear_cold",
+      "measurement_opcode": 85,
+      "name": "sstore_clear_cold_high_slot",
+      "operation": {
+        "current_value": "0x0000000000000000000000000000000000000000000000000000000000000001",
+        "kind": "store",
+        "new_value": "0x0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "original_value": "0x0000000000000000000000000000000000000000000000000000000000000001",
+      "reference_opcode": 80,
+      "slot": "0x8000000000000000000000000000000000000000000000000000000000000000",
+      "target_raw_gas": 5000
+    },
+    {
+      "access": "warm",
+      "diagnostic": true,
+      "low_variant": "sstore_clear_warm",
+      "measurement_opcode": 85,
+      "name": "sstore_clear_warm_high_slot",
+      "operation": {
+        "current_value": "0x0000000000000000000000000000000000000000000000000000000000000001",
+        "kind": "store",
+        "new_value": "0x0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "original_value": "0x0000000000000000000000000000000000000000000000000000000000000001",
+      "reference_opcode": 80,
+      "slot": "0x8000000000000000000000000000000000000000000000000000000000000000",
+      "target_raw_gas": 2900
+    },
+    {
+      "access": "cold",
+      "diagnostic": true,
+      "low_variant": "sstore_reset_nonzero_cold",
+      "measurement_opcode": 85,
+      "name": "sstore_reset_nonzero_cold_high_slot",
+      "operation": {
+        "current_value": "0x0000000000000000000000000000000000000000000000000000000000000001",
+        "kind": "store",
+        "new_value": "0x0000000000000000000000000000000000000000000000000000000000000002"
+      },
+      "original_value": "0x0000000000000000000000000000000000000000000000000000000000000001",
+      "reference_opcode": 80,
+      "slot": "0x8000000000000000000000000000000000000000000000000000000000000000",
+      "target_raw_gas": 5000
+    },
+    {
+      "access": "warm",
+      "diagnostic": true,
+      "low_variant": "sstore_reset_nonzero_warm",
+      "measurement_opcode": 85,
+      "name": "sstore_reset_nonzero_warm_high_slot",
+      "operation": {
+        "current_value": "0x0000000000000000000000000000000000000000000000000000000000000001",
+        "kind": "store",
+        "new_value": "0x0000000000000000000000000000000000000000000000000000000000000002"
+      },
+      "original_value": "0x0000000000000000000000000000000000000000000000000000000000000001",
+      "reference_opcode": 80,
+      "slot": "0x8000000000000000000000000000000000000000000000000000000000000000",
+      "target_raw_gas": 2900
+    }
+  ],
+  "schema_version": 1,
+  "structural_zero_count": 0
+}

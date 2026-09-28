@@ -1,3 +1,4 @@
+import argparse
 import contextlib
 import io
 import pathlib
@@ -90,6 +91,71 @@ def write_execution_identity(root):
 
 
 class RunnerTests(unittest.TestCase):
+    def test_stateful_campaign_cli_is_thin_and_freezes_execution_flags(self):
+        parser = opcode_gas.build_parser()
+        run = parser.parse_args(
+            [
+                "run-stateful-opcode-campaign",
+                "--manifest",
+                "experiments/opcode-gas/manifests/sp1-stateful-opcode-v1.json",
+                "--calibration-run",
+                "target/stateful-calibration/runs/example",
+                "--fixtures",
+                "target/stateful-calibration/fixtures",
+                "--guest-launcher",
+                "target/debug/guest-launcher",
+                "--elf",
+                "crates/guests/elf/sp1_revm_opcode_lab.elf",
+                "--out",
+                "target/stateful-calibration/run",
+            ]
+        )
+        verify = parser.parse_args(
+            [
+                "verify-stateful-opcode-campaign",
+                "--manifest",
+                "experiments/opcode-gas/manifests/sp1-stateful-opcode-v1.json",
+                "--calibration-run",
+                "target/stateful-calibration/runs/example",
+                "--fixtures",
+                "target/stateful-calibration/fixtures",
+                "--guest-launcher",
+                "target/debug/guest-launcher",
+                "--elf",
+                "crates/guests/elf/sp1_revm_opcode_lab.elf",
+                "--run",
+                "target/stateful-calibration/run",
+            ]
+        )
+
+        self.assertIs(run.func, opcode_gas.cmd_run_stateful_opcode_campaign)
+        self.assertIs(verify.func, opcode_gas.cmd_verify_stateful_opcode_campaign)
+        self.assertEqual(run.elf, pathlib.Path("crates/guests/elf/sp1_revm_opcode_lab.elf"))
+        self.assertEqual(verify.elf, run.elf)
+
+    def test_stateful_campaign_cli_rejects_symlinked_or_escaping_paths(self):
+        with tempfile.TemporaryDirectory(dir=ROOT / "target") as directory:
+            root = pathlib.Path(directory)
+            manifest_link = root / "manifest.json"
+            manifest_link.symlink_to(
+                ROOT
+                / "experiments/opcode-gas/manifests/sp1-stateful-opcode-v1.json"
+            )
+            args = argparse.Namespace(
+                manifest=manifest_link,
+                calibration_run=ROOT / "target/calibration",
+                fixtures=ROOT / "target/fixtures",
+                guest_launcher=ROOT / "target/debug/guest-launcher",
+                elf=pathlib.Path("crates/guests/elf/sp1_revm_opcode_lab.elf"),
+                out=ROOT / "target/stateful-run",
+            )
+            with self.assertRaisesRegex(ValueError, "symlink"):
+                opcode_gas.cmd_run_stateful_opcode_campaign(args)
+
+            args.manifest = pathlib.Path("../../outside-stateful-manifest.json")
+            with self.assertRaisesRegex(ValueError, "within the repository"):
+                opcode_gas.cmd_run_stateful_opcode_campaign(args)
+
     def test_formal_relation_round_order_includes_tail_sample_identity(self):
         manifest = opcode_gas.load_manifest(
             ROOT / "experiments/opcode-gas/manifests/sp1-calibration-v1.toml"

@@ -4444,6 +4444,43 @@ def run_guest_inputs(
     return input_list_path
 
 
+def replay_revm_opcode_identity(
+    guest_launcher: pathlib.Path,
+    input_path: pathlib.Path,
+    cache: dict[tuple[str, str], Mapping[str, Any]],
+) -> Mapping[str, Any]:
+    """Regenerate trusted host-native identity evidence for one canonical input."""
+    launcher_sha256 = sha256_file(guest_launcher)
+    input_sha256 = sha256_file(input_path)
+    cache_key = (input_sha256, launcher_sha256)
+    if cache_key in cache:
+        return cache[cache_key]
+    with tempfile.TemporaryDirectory(prefix="revm-opcode-identity-") as temporary:
+        output = pathlib.Path(temporary) / "bundle.json"
+        subprocess.run(
+            [
+                str(guest_launcher),
+                "--stage",
+                "revm-opcode-identity",
+                "--proof-type",
+                "native",
+                "--input",
+                str(input_path),
+                "--json-out",
+                str(output),
+            ],
+            check=True,
+        )
+        try:
+            bundle = json.loads(output.read_bytes())
+        except (OSError, json.JSONDecodeError) as error:
+            raise ValueError("revm-opcode-identity helper returned invalid JSON") from error
+    if not isinstance(bundle, Mapping):
+        raise ValueError("revm-opcode-identity helper returned a non-object bundle")
+    cache[cache_key] = bundle
+    return bundle
+
+
 def run_proposal_guest_input(
     *,
     guest_launcher: pathlib.Path,
@@ -12154,6 +12191,27 @@ def _resolve_repo_path(value: pathlib.Path | str, *, field_name: str) -> pathlib
     return resolved
 
 
+def _resolve_repo_path_without_symlinks(
+    value: pathlib.Path | str, *, field_name: str
+) -> pathlib.Path:
+    """Resolve one repository path while rejecting every symlink component."""
+    path = pathlib.Path(value)
+    root = REPO_ROOT.absolute()
+    candidate = pathlib.Path(
+        os.path.abspath(path if path.is_absolute() else root / path)
+    )
+    try:
+        relative = candidate.relative_to(root)
+    except ValueError as error:
+        raise ValueError(f"{field_name} must stay within the repository") from error
+    cursor = root
+    for part in relative.parts:
+        cursor = cursor / part
+        if cursor.is_symlink():
+            raise ValueError(f"{field_name} must not contain symlinks")
+    return _resolve_repo_path(candidate, field_name=field_name)
+
+
 def _unzen_activation_from_chain_spec(
     chain_spec_path: pathlib.Path, network: str
 ) -> tuple[str, int]:
@@ -14117,6 +14175,34 @@ def cmd_generate_stateful(args: argparse.Namespace) -> None:
             out=_resolve_repo_path(args.out, field_name="stateful_generated_fixtures"),
         )
     )
+
+
+def cmd_run_stateful_opcode_campaign(args: argparse.Namespace) -> None:
+    from stateful_opcode_campaign import run_stateful_opcode_campaign
+
+    result = run_stateful_opcode_campaign(
+        manifest_path=_resolve_repo_path_without_symlinks(args.manifest, field_name="stateful campaign manifest"),
+        calibration_run=_resolve_repo_path_without_symlinks(args.calibration_run, field_name="calibration run"),
+        fixtures_root=_resolve_repo_path_without_symlinks(args.fixtures, field_name="stateful fixtures"),
+        guest_launcher=_resolve_repo_path_without_symlinks(args.guest_launcher, field_name="guest launcher"),
+        elf=_resolve_repo_path_without_symlinks(args.elf, field_name="stateful guest ELF"),
+        run=_resolve_repo_path_without_symlinks(args.out, field_name="stateful campaign run"),
+    )
+    print(f"stateful campaign {result['status']}: {result['row_count']} row(s)")
+
+
+def cmd_verify_stateful_opcode_campaign(args: argparse.Namespace) -> None:
+    from stateful_opcode_campaign import verify_stateful_opcode_campaign
+
+    result = verify_stateful_opcode_campaign(
+        manifest_path=_resolve_repo_path_without_symlinks(args.manifest, field_name="stateful campaign manifest"),
+        calibration_run=_resolve_repo_path_without_symlinks(args.calibration_run, field_name="calibration run"),
+        fixtures_root=_resolve_repo_path_without_symlinks(args.fixtures, field_name="stateful fixtures"),
+        guest_launcher=_resolve_repo_path_without_symlinks(args.guest_launcher, field_name="guest launcher"),
+        elf=_resolve_repo_path_without_symlinks(args.elf, field_name="stateful guest ELF"),
+        run=_resolve_repo_path_without_symlinks(args.run, field_name="stateful campaign run"),
+    )
+    print(f"verified stateful campaign {result['status']}: {result['row_count']} row(s)")
 
 
 def cmd_generate_relations(args: argparse.Namespace) -> None:
@@ -24725,6 +24811,40 @@ def build_parser() -> argparse.ArgumentParser:
     stateful_generate.add_argument("--manifest", type=pathlib.Path, required=True)
     stateful_generate.add_argument("--out", type=pathlib.Path, required=True)
     stateful_generate.set_defaults(func=cmd_generate_stateful)
+
+    stateful_run = subcommands.add_parser(
+        "run-stateful-opcode-campaign",
+        help="run or exactly resume the frozen stateful opcode campaign",
+    )
+    stateful_run.add_argument("--manifest", type=pathlib.Path, required=True)
+    stateful_run.add_argument("--calibration-run", type=pathlib.Path, required=True)
+    stateful_run.add_argument("--fixtures", type=pathlib.Path, required=True)
+    stateful_run.add_argument("--guest-launcher", type=pathlib.Path, required=True)
+    stateful_run.add_argument(
+        "--elf",
+        type=pathlib.Path,
+        choices=(pathlib.Path("crates/guests/elf/sp1_revm_opcode_lab.elf"),),
+        required=True,
+    )
+    stateful_run.add_argument("--out", type=pathlib.Path, required=True)
+    stateful_run.set_defaults(func=cmd_run_stateful_opcode_campaign)
+
+    stateful_verify = subcommands.add_parser(
+        "verify-stateful-opcode-campaign",
+        help="replay a stateful campaign without executing the SP1 guest",
+    )
+    stateful_verify.add_argument("--manifest", type=pathlib.Path, required=True)
+    stateful_verify.add_argument("--calibration-run", type=pathlib.Path, required=True)
+    stateful_verify.add_argument("--fixtures", type=pathlib.Path, required=True)
+    stateful_verify.add_argument("--guest-launcher", type=pathlib.Path, required=True)
+    stateful_verify.add_argument(
+        "--elf",
+        type=pathlib.Path,
+        choices=(pathlib.Path("crates/guests/elf/sp1_revm_opcode_lab.elf"),),
+        required=True,
+    )
+    stateful_verify.add_argument("--run", type=pathlib.Path, required=True)
+    stateful_verify.set_defaults(func=cmd_verify_stateful_opcode_campaign)
 
     matched_generate = subcommands.add_parser(
         "generate-matched-control",

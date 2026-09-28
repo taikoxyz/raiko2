@@ -813,9 +813,15 @@ def admit_stateful_fixture_trace(
     fixture: Mapping[str, Any],
     report_matches: Sequence[Mapping[str, Any]],
     *,
+    expected_identity: Mapping[str, Any],
     repeat_index: int,
 ) -> dict[str, Any]:
-    """Admits one generated lane only after an exact host trace and semantic check."""
+    """Admits one lane against replayed Rust identity evidence and an exact host trace.
+
+    The caller must regenerate ``expected_identity`` from the explicitly supplied canonical
+    guest-input with the reviewed host helper before reading run reports. Evidence copied from a
+    run directory or derived from ``report_matches`` is not an independent identity source.
+    """
 
     if type(repeat_index) is not int or not 0 <= repeat_index < manifest.repeats:
         raise ValueError("repeat index differs from the frozen campaign")
@@ -837,6 +843,38 @@ def admit_stateful_fixture_trace(
     if json.loads(canonical_json(fixture)) != expected_fixture:
         raise ValueError("stateful fixture differs from canonical generated layout")
 
+    identity_fields = {
+        "schema_version",
+        "input",
+        "backend_input_sha256",
+        "backend_input_len",
+        "workload_id",
+        "transaction_envelope_sha256",
+        "access_list_sha256",
+        "prestate_sha256",
+    }
+    if not isinstance(expected_identity, Mapping) or set(expected_identity) != identity_fields:
+        raise ValueError("canonical Rust identity evidence has an invalid shape")
+    if expected_identity.get("schema_version") != 1:
+        raise ValueError("canonical Rust identity evidence schema differs")
+    if expected_identity.get("input") != guest_input:
+        raise ValueError("canonical Rust identity input differs from generated guest input")
+    expected_backend_sha256 = _require_sha256(
+        expected_identity.get("backend_input_sha256"),
+        "canonical Rust backend_input_sha256",
+    )
+    expected_backend_len = expected_identity.get("backend_input_len")
+    if type(expected_backend_len) is not int or expected_backend_len <= 0:
+        raise ValueError("canonical Rust backend-input length is invalid")
+    for field in (
+        "workload_id",
+        "transaction_envelope_sha256",
+        "access_list_sha256",
+        "prestate_sha256",
+    ):
+        _require_sha256(expected_identity.get(field), f"canonical Rust {field}")
+    identity_evidence_sha256 = sha256_bytes(canonical_json(expected_identity))
+
     report = report_matches[0]
     if not isinstance(report, Mapping):
         raise ValueError("host trace report must be an object")
@@ -846,10 +884,16 @@ def admit_stateful_fixture_trace(
     backend_input_sha256 = _require_sha256(
         trace.get("backend_input_sha256"), "trace backend_input_sha256"
     )
-    if report.get("guest_input_sha256") != f"0x{backend_input_sha256}":
-        raise ValueError("trace/report backend-input identity differs")
-    if report.get("guest_input_bincode_length") != trace.get("backend_input_len"):
-        raise ValueError("trace/report backend-input length differs")
+    if (
+        backend_input_sha256 != expected_backend_sha256
+        or report.get("guest_input_sha256") != f"0x{expected_backend_sha256}"
+    ):
+        raise ValueError("canonical/report/trace backend-input identity differs")
+    if (
+        trace.get("backend_input_len") != expected_backend_len
+        or report.get("guest_input_bincode_length") != expected_backend_len
+    ):
+        raise ValueError("canonical/report/trace backend-input length differs")
     if trace.get("storage") != guest_input["storage"]:
         raise ValueError("backend-input identity storage/lane differs from fixture")
     if trace.get("schema_version") != 2:
@@ -865,9 +909,10 @@ def admit_stateful_fixture_trace(
         "transaction_envelope_sha256",
         "access_list_sha256",
         "prestate_sha256",
-        "bytecode_sha256",
     ):
-        _require_sha256(trace.get(field), field)
+        if trace.get(field) != expected_identity[field]:
+            raise ValueError(f"trace {field} differs from canonical Rust identity")
+    _require_sha256(trace.get("bytecode_sha256"), "bytecode_sha256")
 
     bytecode = bytes.fromhex(guest_input["bytecode"][2:])
     programs = decode_fixed_microprograms(bytecode)
@@ -903,6 +948,26 @@ def admit_stateful_fixture_trace(
     if trace.get("total_raw_gas") != sum(raw_gas.values()):
         raise ValueError("trace total raw gas differs from exact ledger")
 
+    target_key = f"opcode:0x{guest_input['opcode']:02x}"
+    target_ledger_raw_gas = raw_gas.get(target_key, 0)
+    if target_ledger_raw_gas < trace["executed_target_raw_gas"]:
+        raise ValueError("trace target raw gas is inconsistent with exact ledger")
+    expected_non_target_counts = dict(expected_counts)
+    remaining_target_count = (
+        expected_non_target_counts.get(target_key, 0) - trace["executed_target_count"]
+    )
+    if remaining_target_count:
+        expected_non_target_counts[target_key] = remaining_target_count
+    else:
+        expected_non_target_counts.pop(target_key, None)
+    if trace.get("non_target_counts") != expected_non_target_counts:
+        raise ValueError("trace non-target count ledger differs from exact ledger")
+    expected_non_target_raw_gas = (
+        trace["total_raw_gas"] - trace["executed_target_raw_gas"]
+    )
+    if trace.get("non_target_raw_gas") != expected_non_target_raw_gas:
+        raise ValueError("trace non-target raw gas differs from exact ledger")
+
     expected_measurement_count = relation_count if lane == "target" else 0
     expected_measurement_raw_gas = (
         relation_count * scenario.target_raw_gas if lane == "target" else 0
@@ -920,6 +985,13 @@ def admit_stateful_fixture_trace(
     )
     if trace.get("executed_prefix_count") != expected_prefix_count:
         raise ValueError("trace dirty-prefix execution differs from scenario")
+    measurement_key = f"opcode:0x{scenario.measurement_opcode:02x}"
+    if expected_counts.get(measurement_key, 0) != (
+        expected_measurement_count + expected_prefix_count
+    ):
+        raise ValueError("trace measurement/prefix count differs from exact ledger")
+    if raw_gas.get(measurement_key, 0) < expected_measurement_raw_gas:
+        raise ValueError("trace measurement raw gas differs from exact ledger")
     if trace.get("result_statuses") != {"success": GENERATOR_MAX_COUNT}:
         raise ValueError("trace result status differs from successful frozen execution")
 
@@ -936,6 +1008,7 @@ def admit_stateful_fixture_trace(
                 "relation_count": relation_count,
                 "repeat_index": repeat_index,
                 "backend_input_sha256": backend_input_sha256,
+                "identity_evidence_sha256": identity_evidence_sha256,
                 "trace_sha256": trace_sha256,
                 "semantic_check_sha256": semantic_check_sha256,
             }
@@ -952,6 +1025,7 @@ def admit_stateful_fixture_trace(
         "backend_input_sha256": backend_input_sha256,
         "trace_sha256": trace_sha256,
         "semantic_check_sha256": semantic_check_sha256,
+        "identity_evidence_sha256": identity_evidence_sha256,
         "row_identity": row_identity,
         "transaction_envelope_sha256": trace["transaction_envelope_sha256"],
         "access_list_sha256": trace["access_list_sha256"],
@@ -1001,6 +1075,8 @@ def admit_stateful_pair(
     control_fixture: Mapping[str, Any],
     control_reports: Sequence[Mapping[str, Any]],
     *,
+    target_identity: Mapping[str, Any],
+    control_identity: Mapping[str, Any],
     repeat_index: int,
 ) -> dict[str, Any]:
     """Admits an ordered target/control relation and rejects every pair confound."""
@@ -1018,10 +1094,18 @@ def admit_stateful_pair(
     ):
         raise ValueError("stateful target and control do not belong to the same pair")
     target = admit_stateful_fixture_trace(
-        manifest, target_fixture, target_reports, repeat_index=repeat_index
+        manifest,
+        target_fixture,
+        target_reports,
+        expected_identity=target_identity,
+        repeat_index=repeat_index,
     )
     control = admit_stateful_fixture_trace(
-        manifest, control_fixture, control_reports, repeat_index=repeat_index
+        manifest,
+        control_fixture,
+        control_reports,
+        expected_identity=control_identity,
+        repeat_index=repeat_index,
     )
     if target["backend_input_sha256"] == control["backend_input_sha256"]:
         raise ValueError("stateful target/control require distinct backend-input hashes")

@@ -13,11 +13,12 @@ use controlled_workload::{
     build_controlled_block_fixture_with_extra_prestate_account_for_test,
     build_controlled_state_holdout_fixtures, build_required_overhead_fixtures,
     check_revm_opcode_semantics, controlled_block_row_id, controlled_execution_row_id,
-    controlled_opcode_workload_spec, controlled_overhead_workload_id,
-    controlled_precompile_workload_spec, controlled_workload_id, observe_controlled_block_fixture,
-    operation_units_delta, trace_precompile_workload, trace_revm_opcode_workload,
-    validate_controlled_block_fixture, validate_controlled_state_holdout_fixtures,
-    validate_fixed_footprint, validate_precompile_pair, validate_required_overhead_fixtures,
+    controlled_opcode_identity, controlled_opcode_identity_bundle, controlled_opcode_workload_spec,
+    controlled_overhead_workload_id, controlled_precompile_workload_spec, controlled_workload_id,
+    observe_controlled_block_fixture, operation_units_delta, trace_precompile_workload,
+    trace_revm_opcode_workload, validate_controlled_block_fixture,
+    validate_controlled_state_holdout_fixtures, validate_fixed_footprint, validate_precompile_pair,
+    validate_required_overhead_fixtures,
 };
 use raiko2_primitives::{
     OpcodeLabInput, OpcodeLabStorageAccess, OpcodeLabStorageInput, OpcodeLabStorageLane,
@@ -835,6 +836,75 @@ fn revm_trace_executes_and_binds_the_exact_sp1_input() {
         ControlledTrace::RevmOpcode(Box::new(trace)),
         ControlledTrace::RevmOpcode(_)
     ));
+}
+
+#[test]
+fn opcode_identity_evidence_binds_the_deserialized_input_and_trace_identities() {
+    let input = OpcodeLabInput {
+        case: "add".into(),
+        scenario: "arithmetic".into(),
+        opcode: 0x01,
+        target_count: 1,
+        target_raw_gas: 3,
+        tx_gas_limit: Some(1_000_024),
+        bytecode: vec![0x60, 0x01, 0x60, 0x02, 0x01, 0x00],
+        generator_max_count: Some(8),
+        fixed_bytecode_len: Some(6),
+        storage: None,
+    };
+
+    let identity = controlled_opcode_identity(&input).unwrap();
+    let trace = trace_revm_opcode_workload(&input).unwrap();
+
+    assert_eq!(identity.schema_version, 1);
+    assert_eq!(identity.input, input);
+    assert_eq!(identity.backend_input_sha256, trace.backend_input_sha256);
+    assert_eq!(identity.backend_input_len, trace.backend_input_len);
+    assert_eq!(identity.workload_id, trace.workload_id);
+    assert_eq!(
+        identity.transaction_envelope_sha256,
+        trace.transaction_envelope_sha256
+    );
+    assert_eq!(identity.access_list_sha256, trace.access_list_sha256);
+    assert_eq!(identity.prestate_sha256, trace.prestate_sha256);
+}
+
+#[test]
+fn opcode_identity_bundle_is_deterministic_and_contains_a_separate_real_report() {
+    let input = OpcodeLabInput {
+        case: "add".into(),
+        scenario: "arithmetic".into(),
+        opcode: 0x01,
+        target_count: 1,
+        target_raw_gas: 3,
+        tx_gas_limit: Some(1_000_024),
+        bytecode: vec![0x60, 0x01, 0x60, 0x02, 0x01, 0x00],
+        generator_max_count: Some(8),
+        fixed_bytecode_len: Some(6),
+        storage: None,
+    };
+
+    let first = controlled_opcode_identity_bundle(&input).unwrap();
+    let second = controlled_opcode_identity_bundle(&input).unwrap();
+
+    assert_eq!(first, second);
+    assert_eq!(first.schema_version, 1);
+    assert_eq!(first.identity.input, input);
+    assert_eq!(
+        first.report.guest_input_sha256,
+        format!("0x{}", first.identity.backend_input_sha256)
+    );
+    assert_eq!(
+        first.report.guest_input_bincode_length,
+        first.identity.backend_input_len
+    );
+    let ControlledTrace::RevmOpcode(trace) = &first.report.controlled_trace else {
+        panic!("identity bundle must contain a REVM opcode report")
+    };
+    assert_eq!(
+        trace.backend_input_sha256,
+        first.identity.backend_input_sha256
+    );
 }
 
 #[test]

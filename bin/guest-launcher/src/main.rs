@@ -126,6 +126,8 @@ enum Stage {
     OpcodeLab,
     #[value(name = "revm-opcode-lab")]
     RevmOpcodeLab,
+    #[value(name = "revm-opcode-identity")]
+    RevmOpcodeIdentity,
     #[value(name = "precompile-lab")]
     PrecompileLab,
     #[value(name = "controlled-overhead")]
@@ -403,6 +405,7 @@ impl Stage {
             Stage::ProposalTrace => "proposal-trace",
             Stage::OpcodeLab => "opcode-lab",
             Stage::RevmOpcodeLab => "revm-opcode-lab",
+            Stage::RevmOpcodeIdentity => "revm-opcode-identity",
             Stage::PrecompileLab => "precompile-lab",
             Stage::ControlledOverhead => "controlled-overhead",
             Stage::ControlledBlock => "controlled-block",
@@ -538,6 +541,37 @@ impl Args {
         Ok(())
     }
 
+    fn validate_revm_opcode_identity(&self) -> Result<()> {
+        if self.stage != Stage::RevmOpcodeIdentity {
+            bail!("REVM opcode identity validation requires its dedicated stage");
+        }
+        if self.proof_type != ProofType::Native
+            || self.mode != Mode::Execute
+            || self.sp1_execution_engine != Sp1ExecutionEngine::Standard
+        {
+            bail!("revm-opcode-identity supports only native execute semantics");
+        }
+        if self.input.is_none() || self.json_out.is_none() {
+            bail!("revm-opcode-identity requires --input and --json-out");
+        }
+        if self.input_list.is_some()
+            || self.elf.is_some()
+            || !self.aggregate.is_empty()
+            || self.output.is_some()
+            || self.jsonl_out.is_some()
+            || self.proof_mode.is_some()
+            || self.sp1_prover.is_some()
+            || self.sp1_network_mode != CliSp1NetworkMode::Reserved
+            || self.sp1_fulfillment_strategy != CliSp1FulfillmentStrategy::Reserved
+            || self.sp1_cycle_limit != 1_000_000_000_000
+            || self.sp1_timeout_secs != 3_600
+            || self.risc0_execution_po2 != 20
+        {
+            bail!("revm-opcode-identity rejects guest, prover, and alternate-input flags");
+        }
+        Ok(())
+    }
+
     fn validate_sp1_execution_engine(&self) -> Result<()> {
         if self.stage == Stage::ControlledStateHoldout
             && self.sp1_execution_engine != Sp1ExecutionEngine::GasEstimator
@@ -661,6 +695,7 @@ fn opcode_lab_memory_labels(stage: Stage) -> OpcodeLabMemoryLabels {
         },
         Stage::Proposal
         | Stage::ProposalTrace
+        | Stage::RevmOpcodeIdentity
         | Stage::PrecompileLab
         | Stage::ControlledOverhead
         | Stage::ControlledBlock
@@ -765,6 +800,9 @@ async fn main() -> Result<()> {
     if args.stage == Stage::ProposalTrace {
         return run_proposal_trace(args);
     }
+    if args.stage == Stage::RevmOpcodeIdentity {
+        return run_revm_opcode_identity(args);
+    }
     if args.stage == Stage::ControlledOverhead {
         return run_controlled_overhead(args).await;
     }
@@ -787,6 +825,18 @@ async fn main() -> Result<()> {
         return run_aggregation(args).await;
     }
     run_proposal(args).await
+}
+
+fn run_revm_opcode_identity(args: Args) -> Result<()> {
+    args.validate_revm_opcode_identity()?;
+    let input_path = args.input.as_ref().context("missing --input")?;
+    let output_path = args.json_out.as_ref().context("missing --json-out")?;
+    let input = read_opcode_lab_input(input_path)?;
+    let bundle = controlled_workload::controlled_opcode_identity_bundle(&input)?;
+    let mut contents = serde_json::to_vec(&bundle).context("serialize opcode identity bundle")?;
+    contents.push(b'\n');
+    fs::write(output_path, contents).with_context(|| format!("write {}", output_path.display()))?;
+    Ok(())
 }
 
 fn run_proposal_trace(args: Args) -> Result<()> {
@@ -2316,7 +2366,8 @@ mod tests {
         guest_launcher_executable_path, install_controlled_trace,
         install_opcode_lab_input_identity, new_controlled_overhead_report, parse_sp1_program,
         read_input, read_opcode_lab_input, read_opcode_lab_input_list, risc0_padded_cycles,
-        run_controlled_state_holdout_trace, validate_proposal_gas_estimator_guest_elf_override,
+        run_controlled_state_holdout_trace, run_revm_opcode_identity,
+        validate_proposal_gas_estimator_guest_elf_override,
     };
     use alloy_primitives::{Address, B256, hex};
     use clap::Parser as _;
@@ -3029,6 +3080,80 @@ mod tests {
             args.elf.expect("elf path").display().to_string(),
             "crates/guests/elf/sp1_revm_opcode_lab.elf"
         );
+    }
+
+    #[test]
+    fn parses_host_only_revm_opcode_identity_stage() {
+        let args = Args::try_parse_from([
+            "guest-launcher",
+            "--stage",
+            "revm-opcode-identity",
+            "--proof-type",
+            "native",
+            "--mode",
+            "execute",
+            "--input",
+            "revm-opcode-lab.json",
+            "--json-out",
+            "revm-opcode-identity.json",
+        ])
+        .expect("parse host-only identity args");
+
+        assert_eq!(args.stage, Stage::RevmOpcodeIdentity);
+        args.validate_revm_opcode_identity()
+            .expect("identity stage rejects no canonical flags");
+    }
+
+    #[test]
+    fn host_only_revm_opcode_identity_writes_a_replayable_bundle() {
+        let input_path = temp_input_path("revm-opcode-identity-input");
+        let output_path = temp_input_path("revm-opcode-identity-output");
+        let input = OpcodeLabInput {
+            case: "add".into(),
+            scenario: "arithmetic".into(),
+            opcode: 0x01,
+            target_count: 1,
+            target_raw_gas: 3,
+            tx_gas_limit: Some(1_000_024),
+            bytecode: vec![0x60, 0x01, 0x60, 0x02, 0x01, 0x00],
+            generator_max_count: Some(8),
+            fixed_bytecode_len: Some(6),
+            storage: None,
+        };
+        fs::write(&input_path, serde_json::to_vec(&input).unwrap()).unwrap();
+        let args = Args::try_parse_from([
+            "guest-launcher",
+            "--stage",
+            "revm-opcode-identity",
+            "--proof-type",
+            "native",
+            "--input",
+            input_path.to_str().unwrap(),
+            "--json-out",
+            output_path.to_str().unwrap(),
+        ])
+        .unwrap();
+
+        run_revm_opcode_identity(args).unwrap();
+
+        let bundle: serde_json::Value =
+            serde_json::from_slice(&fs::read(&output_path).unwrap()).unwrap();
+        assert_eq!(bundle["schema_version"], 1);
+        assert_eq!(
+            bundle["identity"]["input"],
+            serde_json::to_value(input).unwrap()
+        );
+        assert_eq!(
+            bundle["report"]["guest_input_sha256"],
+            format!(
+                "0x{}",
+                bundle["identity"]["backend_input_sha256"].as_str().unwrap()
+            )
+        );
+        assert_eq!(bundle["report"]["controlled_trace"]["kind"], "revm_opcode");
+
+        fs::remove_file(input_path).ok();
+        fs::remove_file(output_path).ok();
     }
 
     #[test]

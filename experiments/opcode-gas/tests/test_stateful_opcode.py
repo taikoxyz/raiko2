@@ -2,6 +2,7 @@ import copy
 import hashlib
 import json
 import pathlib
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -303,6 +304,13 @@ def _synthetic_report(fixture, marker):
     raw_gas = {key: count * 3 for key, count in counts.items()}
     if target_key in raw_gas:
         raw_gas[target_key] = record["target_count"] * record["target_raw_gas"]
+    non_target_counts = dict(counts)
+    remaining_target_count = non_target_counts.get(target_key, 0) - record["target_count"]
+    if remaining_target_count:
+        non_target_counts[target_key] = remaining_target_count
+    else:
+        non_target_counts.pop(target_key, None)
+    executed_target_raw_gas = record["target_count"] * record["target_raw_gas"]
     storage = record["storage"]
     operation = storage["operation"]
     dirty = (
@@ -357,9 +365,9 @@ def _synthetic_report(fixture, marker):
         "declared_target_raw_gas": record["target_raw_gas"],
         "tx_gas_limit": record["tx_gas_limit"],
         "executed_target_count": record["target_count"],
-        "executed_target_raw_gas": record["target_count"] * record["target_raw_gas"],
-        "non_target_counts": {},
-        "non_target_raw_gas": 0,
+        "executed_target_raw_gas": executed_target_raw_gas,
+        "non_target_counts": non_target_counts,
+        "non_target_raw_gas": sum(raw_gas.values()) - executed_target_raw_gas,
         "total_raw_gas": sum(raw_gas.values()),
         "bytecode_len": len(bytecode),
         "evm_spec": "osaka",
@@ -400,6 +408,20 @@ def _synthetic_report(fixture, marker):
     }
 
 
+def _synthetic_identity(fixture, report):
+    trace = report["controlled_trace"]
+    return {
+        "schema_version": 1,
+        "input": copy.deepcopy(fixture["guest_input"]),
+        "backend_input_sha256": trace["backend_input_sha256"],
+        "backend_input_len": trace["backend_input_len"],
+        "workload_id": trace["workload_id"],
+        "transaction_envelope_sha256": trace["transaction_envelope_sha256"],
+        "access_list_sha256": trace["access_list_sha256"],
+        "prestate_sha256": trace["prestate_sha256"],
+    }
+
+
 class StatefulTraceAdmissionTests(unittest.TestCase):
     def setUp(self):
         self.manifest = stateful.StatefulCampaignManifest.from_mapping(
@@ -411,13 +433,45 @@ class StatefulTraceAdmissionTests(unittest.TestCase):
             self.manifest, scenario, lane=lane, count=count
         )
 
+    def identity(self, fixture):
+        lane = fixture["case_record"]["lane"]
+        report = _synthetic_report(fixture, lane)
+        return _synthetic_identity(fixture, report)
+
+    def admit_fixture(self, fixture, reports, *, repeat_index):
+        return stateful.admit_stateful_fixture_trace(
+            self.manifest,
+            fixture,
+            reports,
+            expected_identity=self.identity(fixture),
+            repeat_index=repeat_index,
+        )
+
+    def admit_pair(
+        self,
+        target_fixture,
+        target_reports,
+        control_fixture,
+        control_reports,
+        *,
+        repeat_index,
+    ):
+        return stateful.admit_stateful_pair(
+            self.manifest,
+            target_fixture,
+            target_reports,
+            control_fixture,
+            control_reports,
+            target_identity=self.identity(target_fixture),
+            control_identity=self.identity(control_fixture),
+            repeat_index=repeat_index,
+        )
+
     def test_exact_trace_and_semantic_check_make_one_lane_runnable(self):
         fixture = self.fixture()
         report = _synthetic_report(fixture, "target")
 
-        admission = stateful.admit_stateful_fixture_trace(
-            self.manifest, fixture, [report], repeat_index=2
-        )
+        admission = self.admit_fixture(fixture, [report], repeat_index=2)
 
         self.assertEqual(admission["scenario"], "sstore_dirty_rewrite")
         self.assertEqual(admission["lane"], "target")
@@ -428,24 +482,81 @@ class StatefulTraceAdmissionTests(unittest.TestCase):
         self.assertEqual(len(admission["semantic_check_sha256"]), 64)
         self.assertEqual(len(admission["row_identity"]), 64)
 
+    def test_real_rust_identity_and_report_round_trip_into_python_admission(self):
+        fixture = self.fixture(scenario="sload_warm_nonzero", count=1)
+        with tempfile.TemporaryDirectory() as directory:
+            input_path = pathlib.Path(directory) / "guest-input.json"
+            bundle_path = pathlib.Path(directory) / "identity-bundle.json"
+            input_path.write_bytes(
+                opcode_gas.canonical_json(fixture["guest_input"]) + b"\n"
+            )
+            subprocess.run(
+                [
+                    "cargo",
+                    "build",
+                    "--quiet",
+                    "--profile",
+                    "test",
+                    "-p",
+                    "guest-launcher",
+                    "--bin",
+                    "guest-launcher",
+                ],
+                cwd=ROOT,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            subprocess.run(
+                [
+                    str(ROOT / "target" / "debug" / "guest-launcher"),
+                    "--stage",
+                    "revm-opcode-identity",
+                    "--proof-type",
+                    "native",
+                    "--input",
+                    str(input_path),
+                    "--json-out",
+                    str(bundle_path),
+                ],
+                cwd=ROOT,
+                check=True,
+            )
+            bundle = json.loads(bundle_path.read_text())
+
+        admission = stateful.admit_stateful_fixture_trace(
+            self.manifest,
+            fixture,
+            [bundle["report"]],
+            expected_identity=bundle["identity"],
+            repeat_index=0,
+        )
+
+        self.assertEqual(
+            admission["backend_input_sha256"],
+            bundle["identity"]["backend_input_sha256"],
+        )
+        self.assertEqual(
+            admission["identity_evidence_sha256"],
+            hashlib.sha256(
+                opcode_gas.canonical_json(bundle["identity"])
+            ).hexdigest(),
+        )
+
     def test_lane_admission_rejects_zero_duplicate_and_wrong_report_identity(self):
         fixture = self.fixture()
         report = _synthetic_report(fixture, "target")
         with self.assertRaisesRegex(ValueError, "exactly one host trace report"):
-            stateful.admit_stateful_fixture_trace(
-                self.manifest, fixture, [], repeat_index=0
-            )
+            self.admit_fixture(fixture, [], repeat_index=0)
         with self.assertRaisesRegex(ValueError, "exactly one host trace report"):
-            stateful.admit_stateful_fixture_trace(
-                self.manifest, fixture, [report, copy.deepcopy(report)], repeat_index=0
+            self.admit_fixture(
+                fixture, [report, copy.deepcopy(report)], repeat_index=0
             )
 
         wrong = copy.deepcopy(report)
         wrong["guest_input_sha256"] = "0x" + "00" * 32
         with self.assertRaisesRegex(ValueError, "backend-input identity"):
-            stateful.admit_stateful_fixture_trace(
-                self.manifest, fixture, [wrong], repeat_index=0
-            )
+            self.admit_fixture(fixture, [wrong], repeat_index=0)
 
     def test_lane_admission_rejects_fixture_trace_and_semantic_drift(self):
         fixture = self.fixture()
@@ -458,15 +569,27 @@ class StatefulTraceAdmissionTests(unittest.TestCase):
             ("semantic check", lambda f, r: r["controlled_trace"]["semantic_check"].__setitem__("passed", False)),
             ("result status", lambda f, r: r["controlled_trace"].__setitem__("result_statuses", {"halt": 64})),
             ("exact opcode ledger", lambda f, r: r["controlled_trace"]["executed_opcode_counts"].__setitem__("opcode:0x55", 1)),
+            ("non-target count ledger", lambda f, r: r["controlled_trace"].__setitem__("non_target_counts", {"forged": 1})),
+            ("non-target raw gas", lambda f, r: r["controlled_trace"].__setitem__("non_target_raw_gas", 1)),
+            (
+                "target raw-gas ledger consistency",
+                lambda f, r: (
+                    r["controlled_trace"]["executed_opcode_raw_gas"].__setitem__(
+                        "opcode:0x55",
+                        r["controlled_trace"]["executed_opcode_raw_gas"]["opcode:0x55"] + 1,
+                    ),
+                    r["controlled_trace"].__setitem__(
+                        "total_raw_gas", r["controlled_trace"]["total_raw_gas"] + 1
+                    ),
+                ),
+            ),
         )
         for label, mutate in mutations:
             changed_fixture = copy.deepcopy(fixture)
             changed_report = copy.deepcopy(report)
             mutate(changed_fixture, changed_report)
             with self.subTest(label=label), self.assertRaises(ValueError):
-                stateful.admit_stateful_fixture_trace(
-                    self.manifest, changed_fixture, [changed_report], repeat_index=0
-                )
+                self.admit_fixture(changed_fixture, [changed_report], repeat_index=0)
 
     def test_lane_admission_rejects_matching_but_wrong_semantic_values(self):
         fixture = self.fixture()
@@ -476,9 +599,7 @@ class StatefulTraceAdmissionTests(unittest.TestCase):
         program["observed_final_storage"] = stateful.ZERO
 
         with self.assertRaisesRegex(ValueError, "semantic SSTORE"):
-            stateful.admit_stateful_fixture_trace(
-                self.manifest, fixture, [report], repeat_index=0
-            )
+            self.admit_fixture(fixture, [report], repeat_index=0)
 
     def test_pair_admission_binds_order_and_rejects_all_confounds(self):
         target = self.fixture(lane="target")
@@ -486,8 +607,7 @@ class StatefulTraceAdmissionTests(unittest.TestCase):
         target_report = _synthetic_report(target, "target")
         control_report = _synthetic_report(control, "control")
 
-        pair = stateful.admit_stateful_pair(
-            self.manifest,
+        pair = self.admit_pair(
             target,
             [target_report],
             control,
@@ -505,27 +625,26 @@ class StatefulTraceAdmissionTests(unittest.TestCase):
         self.assertEqual(pair["ordered_pair_identity"], expected)
         self.assertEqual(pair["signed_execution_ledger"], target["case_record"]["reference_ledger"])
 
-        for label, field in (
-            ("transaction envelope", "transaction_envelope_sha256"),
-            ("access list", "access_list_sha256"),
-            ("prestate", "prestate_sha256"),
+        for label, field, error in (
+            ("transaction envelope", "transaction_envelope_sha256", "transaction_envelope"),
+            ("access list", "access_list_sha256", "access_list"),
+            ("prestate", "prestate_sha256", "prestate"),
         ):
             changed = copy.deepcopy(control_report)
             changed["controlled_trace"][field] = "00" * 32
-            with self.subTest(label=label), self.assertRaisesRegex(ValueError, label):
-                stateful.admit_stateful_pair(
-                    self.manifest, target, [target_report], control, [changed], repeat_index=1
+            with self.subTest(label=label), self.assertRaisesRegex(ValueError, error):
+                self.admit_pair(
+                    target, [target_report], control, [changed], repeat_index=1
                 )
 
         with self.assertRaisesRegex(ValueError, "target lane"):
-            stateful.admit_stateful_pair(
-                self.manifest, control, [control_report], target, [target_report], repeat_index=1
+            self.admit_pair(
+                control, [control_report], target, [target_report], repeat_index=1
             )
 
         other_control = self.fixture(scenario="sstore_restore_zero", lane="control")
         with self.assertRaisesRegex(ValueError, "same pair"):
-            stateful.admit_stateful_pair(
-                self.manifest,
+            self.admit_pair(
                 target,
                 [target_report],
                 other_control,
@@ -534,8 +653,7 @@ class StatefulTraceAdmissionTests(unittest.TestCase):
             )
 
         with self.assertRaisesRegex(ValueError, "backend-input identity"):
-            stateful.admit_stateful_pair(
-                self.manifest,
+            self.admit_pair(
                 target,
                 [control_report],
                 control,
@@ -550,14 +668,42 @@ class StatefulTraceAdmissionTests(unittest.TestCase):
         same_hash_control["controlled_trace"]["semantic_check"][
             "backend_input_sha256"
         ] = target_hash
-        with self.assertRaisesRegex(ValueError, "distinct backend-input hashes"):
-            stateful.admit_stateful_pair(
-                self.manifest,
+        with self.assertRaisesRegex(ValueError, "backend-input identity"):
+            self.admit_pair(
                 target,
                 [target_report],
                 control,
                 [same_hash_control],
                 repeat_index=1,
+            )
+
+    def test_pair_admission_rejects_consistently_forged_duplicate_identities(self):
+        target = self.fixture(lane="target")
+        control = self.fixture(lane="control")
+        target_report = _synthetic_report(target, "target")
+        control_report = _synthetic_report(control, "control")
+        for report, backend in (
+            (target_report, "aa" * 32),
+            (control_report, "bb" * 32),
+        ):
+            trace = report["controlled_trace"]
+            report["guest_input_sha256"] = f"0x{backend}"
+            trace["backend_input_sha256"] = backend
+            trace["semantic_check"]["backend_input_sha256"] = backend
+            trace["workload_id"] = "cc" * 32
+            trace["transaction_envelope_sha256"] = "dd" * 32
+            trace["access_list_sha256"] = "ee" * 32
+            trace["prestate_sha256"] = "ff" * 32
+            trace["non_target_counts"] = {"forged": 123}
+            trace["non_target_raw_gas"] = 456
+
+        with self.assertRaisesRegex(ValueError, "identity"):
+            self.admit_pair(
+                target,
+                [target_report],
+                control,
+                [control_report],
+                repeat_index=0,
             )
 
     def test_pair_admission_rejects_layout_reference_and_signed_ledger_drift(self):
@@ -573,8 +719,7 @@ class StatefulTraceAdmissionTests(unittest.TestCase):
             changed = copy.deepcopy(control)
             mutate(changed)
             with self.subTest(label=label), self.assertRaises(ValueError):
-                stateful.admit_stateful_pair(
-                    self.manifest,
+                self.admit_pair(
                     target,
                     [target_report],
                     changed,
@@ -585,8 +730,7 @@ class StatefulTraceAdmissionTests(unittest.TestCase):
         changed_report = copy.deepcopy(target_report)
         changed_report["controlled_trace"]["executed_opcode_counts"]["opcode:0x55"] += 1
         with self.assertRaisesRegex(ValueError, "opcode ledger"):
-            stateful.admit_stateful_pair(
-                self.manifest,
+            self.admit_pair(
                 target,
                 [changed_report],
                 control,
@@ -600,8 +744,7 @@ class StatefulTraceAdmissionTests(unittest.TestCase):
             for count in scenario.counts:
                 target = self.fixture(scenario=scenario.name, lane="target", count=count)
                 control = self.fixture(scenario=scenario.name, lane="control", count=count)
-                pair = stateful.admit_stateful_pair(
-                    self.manifest,
+                pair = self.admit_pair(
                     target,
                     [_synthetic_report(target, "target")],
                     control,

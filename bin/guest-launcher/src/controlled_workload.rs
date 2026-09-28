@@ -155,6 +155,32 @@ pub struct ControlledOpcodeTrace {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ControlledOpcodeIdentityEvidence {
+    pub schema_version: u32,
+    pub input: OpcodeLabInput,
+    pub backend_input_sha256: String,
+    pub backend_input_len: usize,
+    pub workload_id: String,
+    pub transaction_envelope_sha256: String,
+    pub access_list_sha256: String,
+    pub prestate_sha256: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ControlledOpcodeIdentityReport {
+    pub guest_input_sha256: String,
+    pub guest_input_bincode_length: usize,
+    pub controlled_trace: ControlledTrace,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ControlledOpcodeIdentityBundle {
+    pub schema_version: u32,
+    pub identity: ControlledOpcodeIdentityEvidence,
+    pub report: ControlledOpcodeIdentityReport,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ControlledOpcodeProgramSemantic {
     pub program_index: usize,
     pub result_status: String,
@@ -2708,6 +2734,32 @@ fn transaction_identities(tx: &TxEnv) -> Result<(String, String)> {
     Ok((transaction_envelope_sha256, access_list_sha256))
 }
 
+pub fn controlled_opcode_identity(
+    input: &OpcodeLabInput,
+) -> Result<ControlledOpcodeIdentityEvidence> {
+    input
+        .validate_controlled_contract()
+        .map_err(anyhow::Error::msg)?;
+    let backend_input = bincode::serialize(input)?;
+    let canonical_tx = build_benchmark_tx(
+        input
+            .execution_gas_limit()
+            .max(OpcodeLabInput::MIN_EXECUTION_GAS_LIMIT),
+        input.storage.as_ref(),
+    )?;
+    let (transaction_envelope_sha256, access_list_sha256) = transaction_identities(&canonical_tx)?;
+    Ok(ControlledOpcodeIdentityEvidence {
+        schema_version: 1,
+        input: input.clone(),
+        backend_input_sha256: alloy_primitives::hex::encode(Sha256::digest(&backend_input)),
+        backend_input_len: backend_input.len(),
+        workload_id: controlled_workload_id(&controlled_opcode_workload_spec(input))?,
+        transaction_envelope_sha256,
+        access_list_sha256,
+        prestate_sha256: storage_prestate_sha256(input.storage.as_ref())?,
+    })
+}
+
 fn exact_opcode_ledger(
     counts: &BTreeMap<u8, u64>,
     raw_gas: &BTreeMap<u8, u64>,
@@ -2896,12 +2948,7 @@ pub fn check_revm_opcode_semantics(
 }
 
 pub fn trace_revm_opcode_workload(input: &OpcodeLabInput) -> Result<ControlledOpcodeTrace> {
-    input
-        .validate_controlled_contract()
-        .map_err(anyhow::Error::msg)?;
-    let backend_input = bincode::serialize(input)?;
-    let backend_input_len = backend_input.len();
-    let backend_input_sha256 = alloy_primitives::hex::encode(Sha256::digest(&backend_input));
+    let identity = controlled_opcode_identity(input)?;
     let programs = input.execution_programs().map_err(anyhow::Error::msg)?;
     let program_sha256 = programs
         .iter()
@@ -2913,7 +2960,6 @@ pub fn trace_revm_opcode_workload(input: &OpcodeLabInput) -> Result<ControlledOp
             .max(OpcodeLabInput::MIN_EXECUTION_GAS_LIMIT),
         input.storage.as_ref(),
     )?;
-    let (transaction_envelope_sha256, access_list_sha256) = transaction_identities(&canonical_tx)?;
     let mut inspector = OpcodeFootprintInspector::default();
     let mut program_events = Vec::with_capacity(programs.len());
     let mut result_statuses = BTreeMap::new();
@@ -2990,9 +3036,9 @@ pub fn trace_revm_opcode_workload(input: &OpcodeLabInput) -> Result<ControlledOp
     let semantic_check = check_revm_opcode_semantics(input)?;
     Ok(ControlledOpcodeTrace {
         schema_version: u32::from(input.storage.is_some()) + 1,
-        workload_id: controlled_workload_id(&controlled_opcode_workload_spec(input))?,
-        backend_input_sha256,
-        backend_input_len,
+        workload_id: identity.workload_id,
+        backend_input_sha256: identity.backend_input_sha256,
+        backend_input_len: identity.backend_input_len,
         target_opcode: input.opcode,
         declared_target_count: input.target_count,
         declared_target_raw_gas: input.target_raw_gas,
@@ -3006,9 +3052,9 @@ pub fn trace_revm_opcode_workload(input: &OpcodeLabInput) -> Result<ControlledOp
         evm_spec: "osaka",
         revm_version: "41.0.0",
         shared_constructor: "raiko2-opcode-lab",
-        transaction_envelope_sha256,
-        access_list_sha256,
-        prestate_sha256: storage_prestate_sha256(input.storage.as_ref())?,
+        transaction_envelope_sha256: identity.transaction_envelope_sha256,
+        access_list_sha256: identity.access_list_sha256,
+        prestate_sha256: identity.prestate_sha256,
         bytecode_sha256: alloy_primitives::hex::encode(Sha256::digest(&input.bytecode)),
         program_sha256,
         executed_opcode_counts,
@@ -3019,6 +3065,22 @@ pub fn trace_revm_opcode_workload(input: &OpcodeLabInput) -> Result<ControlledOp
         result_statuses,
         storage: input.storage.clone(),
         semantic_check,
+    })
+}
+
+pub fn controlled_opcode_identity_bundle(
+    input: &OpcodeLabInput,
+) -> Result<ControlledOpcodeIdentityBundle> {
+    let identity = controlled_opcode_identity(input)?;
+    let trace = trace_revm_opcode_workload(input)?;
+    Ok(ControlledOpcodeIdentityBundle {
+        schema_version: 1,
+        report: ControlledOpcodeIdentityReport {
+            guest_input_sha256: format!("0x{}", identity.backend_input_sha256),
+            guest_input_bincode_length: identity.backend_input_len,
+            controlled_trace: ControlledTrace::RevmOpcode(Box::new(trace)),
+        },
+        identity,
     })
 }
 

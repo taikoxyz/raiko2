@@ -18,6 +18,7 @@ from hierarchical_model import (
 
 
 ESTIMATOR_SCHEMA_VERSION = 2
+CONTEXT_ESTIMATOR_SCHEMA_VERSION = 3
 ESTIMATOR_PURPOSE = "sp1_composite_block_estimator"
 TRACE_SCHEMA_VERSION = 3
 SP1_GAS_TRACE_CHUNK_THRESHOLD = 134_217_728
@@ -71,6 +72,13 @@ SOURCE_CODE_PATHS = frozenset(
         "docs/plans/2026-09-29-zkgas-typed-storage-promotion-design.md",
     }
 )
+CONTEXT_SOURCE_CODE_PATHS = SOURCE_CODE_PATHS | frozenset(
+    {
+        "experiments/opcode-gas/context_opcode_campaign.py",
+        "docs/plans/2026-09-29-zkgas-context-operation-implementation-plan.md",
+    }
+)
+_CONTEXT_OPCODES = frozenset({0x30, 0x33, 0x34, 0x35, 0x36, 0x42})
 
 _DECIMAL_CONTEXT = Context(prec=80, rounding=ROUND_HALF_EVEN, traps=[])
 _FIXED_COST_KEYS = frozenset(FIXED_COST_STATUSES)
@@ -392,6 +400,34 @@ def _validate_coverage(
         )
         reference = row.get("artifact_ref")
         source = artifact["source_artifacts"]["augmented_core"]
+        if artifact.get("schema_version") == CONTEXT_ESTIMATOR_SCHEMA_VERSION and opcode in _CONTEXT_OPCODES:
+            context_source = artifact["source_artifacts"]["context_operations"]
+            if (
+                model.kind is not ModelKind.STATIC_RAW_GAS
+                or row.get("classification") != "static_raw_gas"
+                or row.get("model_status") != "measured"
+                or not isinstance(reference, Mapping)
+                or set(reference)
+                != {
+                    "result_id",
+                    "result_identity_sha256",
+                    "artifact_sha256",
+                    "model_id",
+                    "model_kind",
+                }
+                or reference.get("result_id") != context_source.get("result_id")
+                or reference.get("result_identity_sha256")
+                != context_source.get("result_identity_sha256")
+                or reference.get("artifact_sha256")
+                != context_source.get("artifact_sha256")
+                or reference.get("model_id") != key
+                or reference.get("model_kind") != "static_raw_gas"
+                or "reason" in row
+            ):
+                raise ValueError(
+                    f"composite estimator context opcode coverage differs: {key}"
+                )
+            continue
         if (
             row.get("classification") != expected_classification
             or row.get("model_status") != "measured"
@@ -426,14 +462,17 @@ def _validate_coverage(
     return by_key
 
 
-def _validate_sources(sources: Any) -> None:
-    if not isinstance(sources, Mapping) or set(sources) != {
+def _validate_sources(sources: Any, *, schema_version: int) -> None:
+    expected_sources = {
         "augmented_core",
         "operation_coverage",
         "corrected_higher_layer",
         "stateful_storage",
         "source_code_sha256s",
-    }:
+    }
+    if schema_version == CONTEXT_ESTIMATOR_SCHEMA_VERSION:
+        expected_sources.add("context_operations")
+    if not isinstance(sources, Mapping) or set(sources) != expected_sources:
         raise ValueError("composite estimator source artifacts differ")
     for label in ("augmented_core", "operation_coverage"):
         source = sources[label]
@@ -517,10 +556,66 @@ def _validate_sources(sources: Any) -> None:
         or any(not _is_sha256(value) for value in stateful["file_sha256s"].values())
     ):
         raise ValueError("composite estimator stateful-storage source differs")
+    if schema_version == CONTEXT_ESTIMATOR_SCHEMA_VERSION:
+        context = sources["context_operations"]
+        context_path = context.get("path") if isinstance(context, Mapping) else None
+        context_pure = PurePosixPath(context_path) if isinstance(context_path, str) else None
+        if (
+            not isinstance(context, Mapping)
+            or set(context)
+            != {
+                "path",
+                "result_id",
+                "result_identity_sha256",
+                "artifact_sha256",
+                "file_sha256s",
+                "models_sha256",
+                "promoted_model_keys",
+                "execution_revision",
+                "analysis_revision",
+            }
+            or context_pure is None
+            or context_pure.is_absolute()
+            or ".." in context_pure.parts
+            or str(context_pure) != context_path
+            or not isinstance(context.get("result_id"), str)
+            or len(context["result_id"]) != 24
+            or not _is_sha256(context.get("result_identity_sha256"))
+            or context["result_identity_sha256"][:24] != context["result_id"]
+            or not _is_sha256(context.get("artifact_sha256"))
+            or not _is_sha256(context.get("models_sha256"))
+            or not isinstance(context.get("promoted_model_keys"), list)
+            or context["promoted_model_keys"] != sorted(context["promoted_model_keys"])
+            or len(set(context["promoted_model_keys"]))
+            != len(context["promoted_model_keys"])
+            or not set(context["promoted_model_keys"]).issubset(
+                {f"opcode:0x{opcode:02x}" for opcode in _CONTEXT_OPCODES}
+            )
+            or not _is_git_revision(context.get("execution_revision"))
+            or context.get("analysis_revision") != context.get("execution_revision")
+            or not isinstance(context.get("file_sha256s"), Mapping)
+            or set(context["file_sha256s"])
+            != {
+                "result.json",
+                "campaign-manifest.json",
+                "rows.jsonl",
+                "source-registry.json",
+                "compatibility-canary.json",
+                "source-identity.json",
+                "adaptive-evidence.json",
+            }
+            or any(not _is_sha256(value) for value in context["file_sha256s"].values())
+        ):
+            raise ValueError("composite estimator context-operation source differs")
     source_code = sources["source_code_sha256s"]
     if (
         not isinstance(source_code, Mapping)
-        or set(source_code) != SOURCE_CODE_PATHS
+        or set(source_code)
+        != (
+            CONTEXT_SOURCE_CODE_PATHS
+            if schema_version == CONTEXT_ESTIMATOR_SCHEMA_VERSION
+            else SOURCE_CODE_PATHS
+        )
         or any(not _is_sha256(value) for value in source_code.values())
     ):
         raise ValueError("composite estimator source-code identities differ")
@@ -702,7 +797,8 @@ def validate_estimator_artifact(artifact: Mapping[str, Any]) -> OpcodeRegistry:
     if set(artifact) != _EXPECTED_ESTIMATOR_FIELDS:
         raise ValueError("composite estimator schema differs")
     if (
-        artifact.get("schema_version") != ESTIMATOR_SCHEMA_VERSION
+        artifact.get("schema_version")
+        not in {ESTIMATOR_SCHEMA_VERSION, CONTEXT_ESTIMATOR_SCHEMA_VERSION}
         or artifact.get("purpose") != ESTIMATOR_PURPOSE
         or artifact.get("status") != "sealed_coverage_qualified_estimator"
         or artifact.get("review_only") is not True
@@ -736,7 +832,8 @@ def validate_estimator_artifact(artifact: Mapping[str, Any]) -> OpcodeRegistry:
         raise ValueError("composite estimator coarse state/trie status differs")
     if artifact.get("coverage_policy") != COVERAGE_POLICY:
         raise ValueError("composite estimator coverage policy differs")
-    _validate_sources(artifact.get("source_artifacts"))
+    schema_version = artifact["schema_version"]
+    _validate_sources(artifact.get("source_artifacts"), schema_version=schema_version)
     _validate_ownership_policy(artifact.get("ownership_policy"))
     registry = load_registry_payload(artifact.get("registry"))
     _validate_storage_model(artifact.get("storage_model"))
@@ -745,6 +842,20 @@ def validate_estimator_artifact(artifact: Mapping[str, Any]) -> OpcodeRegistry:
     ]["stateful_storage"]["model_sha256"]:
         raise ValueError("composite estimator storage model source digest differs")
     _validate_coverage(artifact, registry)
+    if schema_version == CONTEXT_ESTIMATOR_SCHEMA_VERSION:
+        promoted = artifact["source_artifacts"]["context_operations"][
+            "promoted_model_keys"
+        ]
+        context_models = {
+            key: artifact["registry"]["models"].get(key)
+            for key in promoted
+        }
+        if (
+            any(model is None for model in context_models.values())
+            or _sha256(_canonical_json(context_models))
+            != artifact["source_artifacts"]["context_operations"]["models_sha256"]
+        ):
+            raise ValueError("composite estimator context model source digest differs")
     if trace_schema["source_sha256"] != artifact["source_artifacts"][
         "source_code_sha256s"
     ][trace_schema["source_path"]]:

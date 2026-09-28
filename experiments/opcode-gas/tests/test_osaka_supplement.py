@@ -533,6 +533,41 @@ def minimal_augmentation_sources(*, iszero_slope="30", clz_slope="65"):
 
 
 class AugmentedCoreTests(unittest.TestCase):
+    def test_builds_corrected_successor_from_immutable_legacy_package(self):
+        legacy = ROOT / "experiments" / "opcode-gas" / "derivations" / "f945e67bb2c38c9c8ef50530"
+        envelope = json.loads((legacy / "augmentation.json").read_text())
+        canary = json.loads((legacy / "compatibility-canary.json").read_text())
+        supplement = json.loads((legacy / "opcode-supplement.json").read_text())
+        legacy_core = json.loads((legacy / "core-opcode-submodel.json").read_text())
+
+        successor_envelope, corrected_core = (
+            opcode_gas.build_corrected_osaka_augmentation_successor(
+                envelope, legacy_core, canary, supplement
+            )
+        )
+
+        self.assertNotEqual(successor_envelope["augmentation_id"], envelope["augmentation_id"])
+        self.assertEqual(
+            successor_envelope["augmentation_identity"]["analysis_schema_version"],
+            opcode_gas.OSAKA_AUGMENTATION_ANALYSIS_SCHEMA_VERSION,
+        )
+        self.assertEqual(
+            successor_envelope["augmentation_identity"]["recovery_formula"],
+            opcode_gas.OSAKA_RECOVERY_FORMULA,
+        )
+        self.assertEqual(
+            corrected_core["registry"]["models"]["opcode:0x15"]["parameters"]["body_per_raw_gas"],
+            "8.5522130597052856748166153991501006514725859932557162966215147005349215656510073",
+        )
+        self.assertEqual(
+            corrected_core["registry"]["models"]["opcode:0x1e"]["parameters"]["body_per_raw_gas"],
+            "14.042917344604667734091737851524231802545087365319455755021222255471935718915789",
+        )
+        self.assertEqual(
+            legacy_core["artifact_sha256"],
+            "b66d7951bfa416810f93319f99c30ce91969026ee9fa3a402a74cbc2214f7e8b",
+        )
+
     def test_solves_only_iszero_and_clz_and_preserves_baseline_registry(self):
         baseline, canary, supplement = minimal_augmentation_sources()
         original_registry = copy.deepcopy(baseline["registry"])
@@ -544,8 +579,11 @@ class AugmentedCoreTests(unittest.TestCase):
         )
 
         models = artifact["registry"]["models"]
-        self.assertEqual(models["opcode:0x15"]["parameters"]["body_per_raw_gas"], "30")
-        self.assertEqual(models["opcode:0x1e"]["parameters"]["body_per_raw_gas"], "25")
+        # Relation slopes are measured in the synthetic lab-body basis, while
+        # registry bodies are production-scaled.  The fixture deliberately
+        # uses body_scale != 1 so omitting that conversion cannot pass.
+        self.assertEqual(models["opcode:0x15"]["parameters"]["body_per_raw_gas"], "32.5")
+        self.assertEqual(models["opcode:0x1e"]["parameters"]["body_per_raw_gas"], "28.25")
         self.assertEqual(
             {key: value for key, value in models.items() if key not in {"opcode:0x15", "opcode:0x1e"}},
             original_registry["models"],
@@ -556,8 +594,27 @@ class AugmentedCoreTests(unittest.TestCase):
         self.assertEqual(artifact["modeled_named_opcode_count"], 103)
         self.assertEqual(artifact["unsupported_named_opcode_count"], 47)
         self.assertEqual(artifact["candidate_eligible"], False)
+        self.assertEqual(
+            artifact["osaka_augmentation"]["recovery_formula"],
+            opcode_gas.OSAKA_RECOVERY_FORMULA,
+        )
         self.assertEqual(artifact["replayed_equations"][0]["signed_residual_p"], "0")
         self.assertEqual(artifact["replayed_equations"][1]["signed_residual_p"], "0")
+
+    def test_legacy_formula_remains_replayable_without_mutating_old_artifacts(self):
+        baseline, canary, supplement = minimal_augmentation_sources()
+        artifact = opcode_gas.build_osaka_augmented_core_artifact(
+            baseline,
+            canary,
+            supplement,
+            augmentation_provenance={"implementation_revision": "a" * 40},
+            recovery_formula_version=1,
+        )
+
+        models = artifact["registry"]["models"]
+        self.assertEqual(models["opcode:0x15"]["parameters"]["body_per_raw_gas"], "30")
+        self.assertEqual(models["opcode:0x1e"]["parameters"]["body_per_raw_gas"], "25")
+        self.assertNotIn("recovery_formula", artifact["osaka_augmentation"])
 
     def test_rejects_invalid_solved_bodies_and_relation_identity(self):
         for iszero_slope, clz_slope in (("-61", "65"), ("30", "-101"), ("NaN", "65")):
@@ -583,7 +640,7 @@ class AugmentedCoreTests(unittest.TestCase):
             augmentation_provenance={"implementation_revision": "a" * 40},
         )
         exact = artifact["osaka_augmentation"]["exact_solved_bodies"]
-        self.assertEqual(exact["opcode:0x15"]["denominator"], "3")
+        self.assertEqual(exact["opcode:0x15"]["denominator"], "12")
         self.assertEqual(
             artifact["replayed_equations"][0]["exact_signed_residual_fraction"],
             "0",
@@ -653,6 +710,15 @@ class OsakaCliContractTests(unittest.TestCase):
                 "--historical-manifest", "historical.toml",
             ]
         )
+        seal_corrected = parser.parse_args(
+            [
+                "seal-corrected-osaka-opcode-augmentation",
+                "--predecessor-augmentation", "derivations/legacy",
+                "--historical-manifest", "historical.toml",
+                "--out-root", "derivations",
+                "--augmentation-path-file", "/tmp/corrected-augmentation-path",
+            ]
+        )
 
         self.assertIs(run.func, opcode_gas.cmd_run_osaka_opcode_supplement)
         self.assertEqual(
@@ -676,6 +742,19 @@ class OsakaCliContractTests(unittest.TestCase):
         self.assertEqual(
             set(vars(verify_augmentation)) - {"command", "func"},
             {"augmentation_path_file", "historical_manifest"},
+        )
+        self.assertIs(
+            seal_corrected.func,
+            opcode_gas.cmd_seal_corrected_osaka_opcode_augmentation,
+        )
+        self.assertEqual(
+            set(vars(seal_corrected)) - {"command", "func"},
+            {
+                "predecessor_augmentation",
+                "historical_manifest",
+                "out_root",
+                "augmentation_path_file",
+            },
         )
 
     def test_seal_rejects_conflicting_pointer_before_publication(self):

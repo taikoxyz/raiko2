@@ -14,8 +14,18 @@ from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "experiments" / "opcode-gas"))
+sys.path.insert(0, str(ROOT / "experiments" / "opcode-gas" / "tests"))
 
 import opcode_gas
+import context_opcode_campaign as context_opcode
+from test_context_opcode import (
+    HISTORICAL_CONTROL_ELF_SHA256,
+    HISTORICAL_LAUNCHER_SHA256,
+    TEST_CALIBRATION_IDENTITY,
+    passing_production_adaptive_evidence,
+    passing_production_canary,
+    production_campaign_source,
+)
 
 
 HIGHER_LAYER_SOURCE = (
@@ -558,6 +568,151 @@ class CompositeEstimatorTests(unittest.TestCase):
             {"count": 12, "prover_gas": opcode_gas._decimal_text(expected)},
         )
         self.assertEqual(report["coverage"]["typed_feature"]["numerator"], 12)
+
+    def test_schema3_layers_corrected_core_context_v6_and_typed_storage_once(self):
+        manifest = context_opcode.load_context_manifest(
+            ROOT / "experiments/opcode-gas/manifests/sp1-context-opcode-v1.json"
+        )
+        corrected_path = ROOT / "experiments/opcode-gas/derivations/3fc67063a921182e971e7882/core-opcode-submodel.json"
+        corrected = json.loads(corrected_path.read_text())
+        package = json.loads(
+            (corrected_path.parent / "augmentation.json").read_text()
+        )
+        v4 = json.loads(COVERAGE_SOURCE.read_text())
+        v5 = context_opcode.build_operation_coverage_v5(v4, corrected, package)
+        source_identity = {
+            "elf_sha256": TEST_CALIBRATION_IDENTITY["guest_artifacts"][
+                "crates/guests/elf/sp1_revm_opcode_lab.elf"
+            ],
+            "elf_path": "crates/guests/elf/sp1_revm_opcode_lab.elf",
+            "control_opcode_lab_elf_sha256": HISTORICAL_CONTROL_ELF_SHA256,
+            "control_opcode_lab_elf_path": "crates/guests/elf/sp1_opcode_lab.elf",
+            "launcher_sha256": HISTORICAL_LAUNCHER_SHA256,
+            "launcher_path": "target/release/guest-launcher",
+            "corrected_osaka_core_artifact_sha256": corrected["artifact_sha256"],
+            "corrected_osaka_core_file_sha256": opcode_gas.sha256_file(corrected_path),
+            "corrected_osaka_core_path": "experiments/opcode-gas/derivations/3fc67063a921182e971e7882/core-opcode-submodel.json",
+            "operation_coverage_v5_artifact_sha256": v5["artifact_sha256"],
+            "operation_coverage_v5_file_sha256": opcode_gas.sha256_bytes(
+                (json.dumps(v5, indent=2, sort_keys=True) + "\n").encode()
+            ),
+            "operation_coverage_v5_path": "experiments/opcode-gas/manifests/operation-coverage-v5.json",
+        }
+        campaign_source = production_campaign_source(source_identity)
+        source_identity.update(
+            {
+                "calibration_id": campaign_source["calibration_id"],
+                "calibration_identity_sha256": campaign_source[
+                    "calibration_identity_sha256"
+                ],
+                "execution_revision": campaign_source[
+                    "implementation_revision"
+                ],
+            }
+        )
+        observations = [
+            {
+                "relation_id": relation_id,
+                "status": "accepted",
+                "slope_p": "100",
+                "signed_raw_gas_by_key": {"opcode:0x5f": "1"},
+                "target_raw_gas_by_key": {"opcode:0x5f": "1"},
+                "control_raw_gas_by_key": {},
+                "program_sha256": f"{index + 10:064x}",
+                "raw_rows_sha256": f"{index + 100:064x}",
+                "repeat_count": 3,
+                "generator_max_count": 8,
+            }
+            for index, relation_id in enumerate(
+                context_opcode.OSAKA_CANARY_RELATION_IDS
+            )
+        ]
+        legacy_canary = opcode_gas.build_osaka_compatibility_canary(
+            observations,
+            observations,
+            baseline_artifact_sha256="a" * 64,
+            expected_baseline_artifact_sha256="a" * 64,
+        )
+        legacy_canary["provenance"] = {
+            "calibration_id": "b" * 24,
+            "calibration_identity_sha256": "c" * 64,
+            "implementation_revision": "d" * 40,
+            "controlled_manifest_sha256": "e" * 64,
+            "controlled_manifest_rows_sha256": "f" * 64,
+            "complete_schedule_sha256": "0" * 64,
+            "guest_elf_sha256": "1" * 64,
+            "version_identity": {"sp1_sdk_version": "test"},
+        }
+        legacy_canary["artifact_sha256"] = opcode_gas.sha256_bytes(
+            opcode_gas.canonical_json(
+                {
+                    key: value
+                    for key, value in legacy_canary.items()
+                    if key != "artifact_sha256"
+                }
+            )
+        )
+        context_rows = context_opcode.synthetic_passing_production_rows(manifest)
+        result = context_opcode._build_context_result(
+            manifest=manifest,
+            rows=context_rows,
+            source_registry=corrected,
+            compatibility_canary=passing_production_canary(
+                source_identity=source_identity
+            ),
+            source_identity=source_identity,
+            adaptive_evidence=passing_production_adaptive_evidence(
+                manifest, context_rows, source_identity
+            ),
+        )
+        v6 = context_opcode.promote_operation_coverage_v6(v5, result)
+        with mock.patch.object(
+            opcode_gas, "git_head", return_value="e" * 40
+        ), mock.patch.object(opcode_gas, "git_worktree_status", return_value=""):
+            with self.assertRaisesRegex(ValueError, "analysis revision"):
+                context_opcode.build_context_composite_estimator(
+                    base_estimator=self.estimator,
+                    corrected_core=corrected,
+                    coverage_v6=v6,
+                    result=result,
+                    context_source_path=(
+                        f"experiments/opcode-gas/derivations/{result['result_id']}"
+                    ),
+                )
+        with mock.patch.object(
+            opcode_gas, "git_head", return_value=source_identity["execution_revision"]
+        ), mock.patch.object(opcode_gas, "git_worktree_status", return_value=""):
+            estimator = context_opcode.build_context_composite_estimator(
+                base_estimator=self.estimator,
+                corrected_core=corrected,
+                coverage_v6=v6,
+                result=result,
+                context_source_path=f"experiments/opcode-gas/derivations/{result['result_id']}",
+            )
+        report = opcode_gas.estimate_composite_trace(
+            estimator,
+            _complete_trace(
+                _opcode(0, 0x30, {"kind": "static_raw_gas", "raw_gas": 2}),
+                _opcode(1, 0x54, {"kind": "storage_load", "access": "warm"}),
+            ),
+        )
+        model = result["models"]["opcode:0x30"]
+        with localcontext(opcode_gas._OPCODE_DECIMAL_CONTEXT):
+            expected_context = Decimal(corrected["registry"]["common_dispatch"]) + Decimal(2) * Decimal(
+                model["body_per_raw_gas_exact"]["decimal"]
+            )
+            expected = expected_context + Decimal(
+                estimator["storage_model"]["parameters"]["sload_warm_body"]
+            )
+        self.assertEqual(report["gaps"], [])
+        self.assertEqual(
+            Decimal(report["layer_contributions"]["operations"]["prover_gas"]),
+            expected,
+        )
+        self.assertEqual(
+            estimator["source_artifacts"]["corrected_higher_layer"],
+            self.estimator["source_artifacts"]["corrected_higher_layer"],
+        )
 
     def test_stateful_source_binds_every_terminal_file(self):
         read_regular_file_bytes_once = opcode_gas._read_regular_file_bytes_once

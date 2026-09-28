@@ -446,6 +446,8 @@ OSAKA_SUPPLEMENT_RELATION_IDS = (
     "opcode:0x15:canonical",
     "opcode:0x1e:canonical",
 )
+OSAKA_AUGMENTATION_ANALYSIS_SCHEMA_VERSION = 2
+OSAKA_RECOVERY_FORMULA = "lab_slope_times_body_scale_to_production_body_v2"
 HISTORICAL_CORE_MANIFEST_SHA256 = (
     "4140fe1a0ccc533dbee8940a63da6db41be8a26955cc0022ccae5e1aedc3e01e"
 )
@@ -13301,43 +13303,33 @@ def _validated_anchor_probe_fixture_manifest(
     return manifest, fixtures
 
 
-def run_anchor_probe_fixtures(
+def _anchor_probe_rows_from_reports(
     *,
-    guest_launcher: pathlib.Path,
-    elf_path: pathlib.Path,
-    fixtures_dir: pathlib.Path,
-    out_path: pathlib.Path,
+    manifest: Mapping[str, Any],
+    fixture_inventory: Mapping[tuple[str, int, str], Mapping[str, Any]],
+    input_paths: list[pathlib.Path],
+    reports: list[Mapping[str, Any]],
+    launcher_sha256: str,
 ) -> list[dict[str, Any]]:
-    manifest, fixture_inventory = _validated_anchor_probe_fixture_manifest(
-        fixtures_dir, expected_elf_sha256=sha256_file(elf_path)
-    )
-    launcher_sha256 = sha256_file(guest_launcher)
-    if manifest.get("guest_launcher_sha256") not in {None, launcher_sha256}:
-        raise ValueError("anchor probe guest-launcher digest mismatch")
-    if sha256_file(elf_path) != manifest["elf_sha256"]:
-        raise ValueError("anchor probe ELF digest mismatch")
-    fixture_rows = list(fixture_inventory.values())
-    input_paths: list[pathlib.Path] = []
-    by_input: dict[str, Mapping[str, Any]] = {}
-    for fixture in fixture_rows:
-        relative = pathlib.Path(str(fixture["guest_input_path"]))
-        input_path = fixtures_dir / relative
-        by_input[str(input_path)] = fixture
-        input_paths.extend([input_path] * ANCHOR_PROBE_REPEATS)
-    reports_path = out_path.with_name(f"{out_path.stem}.guest-launcher.jsonl")
-    run_guest_inputs(
-        guest_launcher=guest_launcher,
-        elf_path=elf_path,
-        input_paths=input_paths,
-        reports_jsonl=reports_path,
-        stage="opcode-lab",
-    )
-    reports = list(iter_jsonl(reports_path))
+    """Purely admit persisted launcher reports and reconstruct canonical probe rows."""
     if len(reports) != len(input_paths):
         raise ValueError("anchor probe report count mismatch")
     rows: list[dict[str, Any]] = []
     repeat_by_input: dict[str, int] = {}
+    fixture_sequence = [
+        fixture
+        for fixture in fixture_inventory.values()
+        for _repeat_index in range(ANCHOR_PROBE_REPEATS)
+    ]
+    if len(fixture_sequence) != len(input_paths):
+        raise ValueError("anchor probe fixture/report inventory differs")
+    by_input = {
+        str(input_path): fixture
+        for input_path, fixture in zip(input_paths, fixture_sequence)
+    }
     for expected_input, report in zip(input_paths, reports):
+        if not isinstance(report, Mapping):
+            raise ValueError("anchor probe report is not an object")
         if report.get("input") != str(expected_input):
             raise ValueError("anchor probe raw ordering mismatch")
         input_key = str(expected_input)
@@ -13394,6 +13386,44 @@ def run_anchor_probe_fixtures(
         row["anchor_execution_row_id"] = _anchor_probe_execution_row_id(row)
         rows.append(row)
     fit_anchor_probe_rows(rows)
+    return rows
+
+
+def run_anchor_probe_fixtures(
+    *,
+    guest_launcher: pathlib.Path,
+    elf_path: pathlib.Path,
+    fixtures_dir: pathlib.Path,
+    out_path: pathlib.Path,
+) -> list[dict[str, Any]]:
+    manifest, fixture_inventory = _validated_anchor_probe_fixture_manifest(
+        fixtures_dir, expected_elf_sha256=sha256_file(elf_path)
+    )
+    launcher_sha256 = sha256_file(guest_launcher)
+    if manifest.get("guest_launcher_sha256") not in {None, launcher_sha256}:
+        raise ValueError("anchor probe guest-launcher digest mismatch")
+    if sha256_file(elf_path) != manifest["elf_sha256"]:
+        raise ValueError("anchor probe ELF digest mismatch")
+    input_paths = [
+        fixtures_dir / pathlib.Path(str(fixture["guest_input_path"]))
+        for fixture in fixture_inventory.values()
+        for _repeat_index in range(ANCHOR_PROBE_REPEATS)
+    ]
+    reports_path = out_path.with_name(f"{out_path.stem}.guest-launcher.jsonl")
+    run_guest_inputs(
+        guest_launcher=guest_launcher,
+        elf_path=elf_path,
+        input_paths=input_paths,
+        reports_jsonl=reports_path,
+        stage="opcode-lab",
+    )
+    rows = _anchor_probe_rows_from_reports(
+        manifest=manifest,
+        fixture_inventory=fixture_inventory,
+        input_paths=input_paths,
+        reports=list(iter_jsonl(reports_path)),
+        launcher_sha256=launcher_sha256,
+    )
     _atomic_write_bytes(
         out_path,
         b"".join(canonical_json(row) + b"\n" for row in rows),
@@ -17764,9 +17794,12 @@ def _validate_osaka_compatibility_canary_artifact(value: Mapping[str, Any]) -> N
 
 @_isolated_decimal_context
 def _solve_osaka_augmented_bodies(
-    swap_parameters: Mapping[str, Any], relations: Sequence[Mapping[str, Any]]
+    swap_parameters: Mapping[str, Any],
+    relations: Sequence[Mapping[str, Any]],
+    *,
+    body_scale: Decimal,
 ) -> dict[str, Any]:
-    """Solve the two supplemental bodies exactly, then project to Decimal(80)."""
+    """Solve lab-basis relations into production-scaled registry bodies."""
     if len(relations) != 2:
         raise ValueError("Osaka supplement relation count is invalid")
     swap_body = _canonical_artifact_decimal(
@@ -17787,16 +17820,26 @@ def _solve_osaka_augmented_bodies(
         return result
 
     swap_fraction = Fraction(_decimal_text(swap_body))
+    body_scale_fraction = Fraction(_decimal_text(body_scale))
     d_iszero_fraction = Fraction(_decimal_text(d_iszero))
     d_clz_fraction = Fraction(_decimal_text(d_clz))
-    iszero_fraction = swap_fraction + d_iszero_fraction / 3
-    clz_fraction = (d_clz_fraction + 3 * swap_fraction) / 5
-    iszero_exact_residual = 3 * iszero_fraction - 3 * swap_fraction - d_iszero_fraction
-    clz_exact_residual = 5 * clz_fraction - 3 * swap_fraction - d_clz_fraction
+    iszero_fraction = swap_fraction + body_scale_fraction * d_iszero_fraction / 3
+    clz_fraction = (
+        body_scale_fraction * d_clz_fraction + 3 * swap_fraction
+    ) / 5
+    iszero_exact_residual = (
+        (3 * iszero_fraction - 3 * swap_fraction) / body_scale_fraction
+        - d_iszero_fraction
+    )
+    clz_exact_residual = (
+        (5 * clz_fraction - 3 * swap_fraction) / body_scale_fraction
+        - d_clz_fraction
+    )
     if iszero_exact_residual != 0 or clz_exact_residual != 0:
         raise AssertionError("exact Osaka supplemental solution must have zero residual")
     return {
         "swap_body": swap_body,
+        "body_scale": body_scale,
         "d_iszero": d_iszero,
         "d_clz": d_clz,
         "iszero_fraction": iszero_fraction,
@@ -17815,6 +17858,7 @@ def build_osaka_augmented_core_artifact(
     opcode_supplement: Mapping[str, Any],
     *,
     augmentation_provenance: Mapping[str, Any],
+    recovery_formula_version: int = OSAKA_AUGMENTATION_ANALYSIS_SCHEMA_VERSION,
 ) -> dict[str, Any]:
     """Add only the two Osaka bodies to an already validated historical core."""
     _validate_content_addressed_artifact(
@@ -17878,7 +17922,15 @@ def build_osaka_augmented_core_artifact(
     swap_parameters = swap.get("parameters") if isinstance(swap, Mapping) else None
     if not isinstance(swap_parameters, Mapping):
         raise ValueError("historical baseline has no SWAP1 model")
-    solved = _solve_osaka_augmented_bodies(swap_parameters, relations)
+    body_scale = _canonical_artifact_decimal(
+        baseline_core.get("body_scale"), label="historical baseline body scale", positive=True
+    )
+    if recovery_formula_version not in (1, OSAKA_AUGMENTATION_ANALYSIS_SCHEMA_VERSION):
+        raise ValueError("Osaka recovery formula version is invalid")
+    relation_body_scale = Decimal(1) if recovery_formula_version == 1 else body_scale
+    solved = _solve_osaka_augmented_bodies(
+        swap_parameters, relations, body_scale=relation_body_scale
+    )
     swap_body = solved["swap_body"]
     d_iszero = solved["d_iszero"]
     d_clz = solved["d_clz"]
@@ -17932,10 +17984,13 @@ def build_osaka_augmented_core_artifact(
             "relation_id": "opcode:0x15:canonical",
             "observed_slope_p": _decimal_text(d_iszero),
             "predicted_slope_p": _decimal_text(
-                Decimal(3) * iszero_body - Decimal(3) * swap_body
+                (Decimal(3) * iszero_body - Decimal(3) * swap_body)
+                / relation_body_scale
             ),
             "signed_residual_p": _decimal_text(
-                Decimal(3) * iszero_body - Decimal(3) * swap_body - d_iszero
+                (Decimal(3) * iszero_body - Decimal(3) * swap_body)
+                / relation_body_scale
+                - d_iszero
             ),
             "exact_signed_residual_fraction": _fraction_text(iszero_exact_residual),
         },
@@ -17943,10 +17998,13 @@ def build_osaka_augmented_core_artifact(
             "relation_id": "opcode:0x1e:canonical",
             "observed_slope_p": _decimal_text(d_clz),
             "predicted_slope_p": _decimal_text(
-                Decimal(5) * clz_body - Decimal(3) * swap_body
+                (Decimal(5) * clz_body - Decimal(3) * swap_body)
+                / relation_body_scale
             ),
             "signed_residual_p": _decimal_text(
-                Decimal(5) * clz_body - Decimal(3) * swap_body - d_clz
+                (Decimal(5) * clz_body - Decimal(3) * swap_body)
+                / relation_body_scale
+                - d_clz
             ),
             "exact_signed_residual_fraction": _fraction_text(clz_exact_residual),
         },
@@ -17980,8 +18038,154 @@ def build_osaka_augmented_core_artifact(
         ],
         "provenance": json.loads(json.dumps(augmentation_provenance)),
     }
+    if recovery_formula_version == OSAKA_AUGMENTATION_ANALYSIS_SCHEMA_VERSION:
+        artifact["osaka_augmentation"]["recovery_formula"] = OSAKA_RECOVERY_FORMULA
     artifact["artifact_sha256"] = sha256_bytes(canonical_json(artifact))
     return artifact
+
+
+def build_corrected_osaka_augmentation_successor(
+    predecessor_envelope: Mapping[str, Any],
+    predecessor_core: Mapping[str, Any],
+    compatibility_canary: Mapping[str, Any],
+    opcode_supplement: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Re-derive the corrected formula from one immutable schema-1 package."""
+    for label, payload in (
+        ("predecessor augmentation", predecessor_envelope),
+        ("predecessor augmented core", predecessor_core),
+        ("predecessor compatibility canary", compatibility_canary),
+        ("predecessor opcode supplement", opcode_supplement),
+    ):
+        _validate_content_addressed_artifact(payload, label=label)
+    identity = predecessor_envelope.get("augmentation_identity")
+    replay_inputs = predecessor_envelope.get("replay_inputs")
+    output_hashes = predecessor_envelope.get("output_hashes")
+    if (
+        predecessor_envelope.get("schema_version") != 1
+        or predecessor_envelope.get("purpose") != "osaka_opcode_augmentation"
+        or predecessor_envelope.get("status") != "sealed"
+        or predecessor_envelope.get("candidate_eligible") is not False
+        or not isinstance(identity, Mapping)
+        or identity.get("analysis_schema_version") != 1
+        or "recovery_formula" in identity
+        or "predecessor" in identity
+        or not isinstance(replay_inputs, Mapping)
+        or not isinstance(output_hashes, Mapping)
+    ):
+        raise ValueError("corrected Osaka predecessor package schema differs")
+    baseline_core = replay_inputs.get("baseline_core")
+    if not isinstance(baseline_core, Mapping):
+        raise ValueError("corrected Osaka predecessor baseline core is missing")
+    provenance = identity.get("osaka_calibration")
+    if not isinstance(provenance, Mapping):
+        raise ValueError("corrected Osaka predecessor provenance is missing")
+    replayed_legacy_core = build_osaka_augmented_core_artifact(
+        baseline_core,
+        compatibility_canary,
+        opcode_supplement,
+        augmentation_provenance=provenance,
+        recovery_formula_version=1,
+    )
+    expected_legacy_output_hashes = {
+        "core_artifact_sha256": replayed_legacy_core["artifact_sha256"],
+        "core_file_sha256": sha256_bytes(
+            _canonical_json_file_bytes(replayed_legacy_core)
+        ),
+    }
+    if (
+        not _exact_json_equal(predecessor_core, replayed_legacy_core)
+        or not _exact_json_equal(output_hashes, expected_legacy_output_hashes)
+        or predecessor_envelope.get("augmentation_identity_sha256")
+        != sha256_bytes(canonical_json(identity))
+        or predecessor_envelope.get("augmentation_id")
+        != predecessor_envelope["augmentation_identity_sha256"][:24]
+    ):
+        raise ValueError("corrected Osaka predecessor does not replay exactly")
+
+    predecessor_ref = {
+        "augmentation_id": predecessor_envelope["augmentation_id"],
+        "augmentation_artifact_sha256": predecessor_envelope["artifact_sha256"],
+        "augmentation_identity_sha256": predecessor_envelope[
+            "augmentation_identity_sha256"
+        ],
+        "core_artifact_sha256": predecessor_core["artifact_sha256"],
+        "core_file_sha256": expected_legacy_output_hashes["core_file_sha256"],
+    }
+    successor_identity = json.loads(json.dumps(identity))
+    successor_identity["analysis_schema_version"] = (
+        OSAKA_AUGMENTATION_ANALYSIS_SCHEMA_VERSION
+    )
+    successor_identity["recovery_formula"] = OSAKA_RECOVERY_FORMULA
+    successor_identity["predecessor"] = predecessor_ref
+    successor_identity_sha256 = sha256_bytes(canonical_json(successor_identity))
+    successor_id = successor_identity_sha256[:24]
+    corrected_core = build_osaka_augmented_core_artifact(
+        baseline_core,
+        compatibility_canary,
+        opcode_supplement,
+        augmentation_provenance=provenance,
+    )
+    successor_output_hashes = {
+        "core_artifact_sha256": corrected_core["artifact_sha256"],
+        "core_file_sha256": sha256_bytes(_canonical_json_file_bytes(corrected_core)),
+    }
+    successor_envelope = json.loads(json.dumps(predecessor_envelope))
+    successor_envelope.pop("artifact_sha256", None)
+    successor_envelope["augmentation_id"] = successor_id
+    successor_envelope["augmentation_identity_sha256"] = (
+        successor_identity_sha256
+    )
+    successor_envelope["augmentation_identity"] = successor_identity
+    successor_envelope["output_hashes"] = successor_output_hashes
+    successor_envelope["artifact_sha256"] = sha256_bytes(
+        canonical_json(successor_envelope)
+    )
+    return successor_envelope, corrected_core
+
+
+def _expected_legacy_osaka_predecessor_reference(
+    successor_envelope: Mapping[str, Any],
+    successor_identity: Mapping[str, Any],
+    baseline_core: Mapping[str, Any],
+    compatibility_canary: Mapping[str, Any],
+    opcode_supplement: Mapping[str, Any],
+) -> dict[str, str]:
+    """Reconstruct the exact schema-1 package named by a schema-2 successor."""
+    legacy_identity = json.loads(json.dumps(successor_identity))
+    legacy_identity["analysis_schema_version"] = 1
+    legacy_identity.pop("recovery_formula", None)
+    legacy_identity.pop("predecessor", None)
+    legacy_identity_sha256 = sha256_bytes(canonical_json(legacy_identity))
+    legacy_id = legacy_identity_sha256[:24]
+    provenance = legacy_identity.get("osaka_calibration")
+    if not isinstance(provenance, Mapping):
+        raise ValueError("corrected Osaka successor provenance is missing")
+    legacy_core = build_osaka_augmented_core_artifact(
+        baseline_core,
+        compatibility_canary,
+        opcode_supplement,
+        augmentation_provenance=provenance,
+        recovery_formula_version=1,
+    )
+    legacy_output_hashes = {
+        "core_artifact_sha256": legacy_core["artifact_sha256"],
+        "core_file_sha256": sha256_bytes(_canonical_json_file_bytes(legacy_core)),
+    }
+    legacy_envelope = json.loads(json.dumps(successor_envelope))
+    legacy_envelope.pop("artifact_sha256", None)
+    legacy_envelope["augmentation_id"] = legacy_id
+    legacy_envelope["augmentation_identity_sha256"] = legacy_identity_sha256
+    legacy_envelope["augmentation_identity"] = legacy_identity
+    legacy_envelope["output_hashes"] = legacy_output_hashes
+    legacy_envelope["artifact_sha256"] = sha256_bytes(canonical_json(legacy_envelope))
+    return {
+        "augmentation_id": legacy_id,
+        "augmentation_artifact_sha256": legacy_envelope["artifact_sha256"],
+        "augmentation_identity_sha256": legacy_identity_sha256,
+        "core_artifact_sha256": legacy_core["artifact_sha256"],
+        "core_file_sha256": legacy_output_hashes["core_file_sha256"],
+    }
 
 
 def _canonical_json_file_bytes(value: Mapping[str, Any]) -> bytes:
@@ -17993,6 +18197,8 @@ def _validate_osaka_augmented_core_equations(
     core: Mapping[str, Any],
     baseline_core: Mapping[str, Any],
     opcode_supplement: Mapping[str, Any],
+    *,
+    recovery_formula_version: int,
 ) -> None:
     """Independently replay exact and Decimal Osaka solution fields in an artifact."""
     registry = baseline_core.get("registry")
@@ -18002,12 +18208,26 @@ def _validate_osaka_augmented_core_equations(
     relations = opcode_supplement.get("relations")
     if not isinstance(swap_parameters, Mapping) or not isinstance(relations, list):
         raise ValueError("Osaka augmented core replay inputs are invalid")
-    solved = _solve_osaka_augmented_bodies(swap_parameters, relations)
+    body_scale = _canonical_artifact_decimal(
+        baseline_core.get("body_scale"), label="historical baseline body scale", positive=True
+    )
+    if recovery_formula_version not in (1, OSAKA_AUGMENTATION_ANALYSIS_SCHEMA_VERSION):
+        raise ValueError("Osaka recovery formula version is invalid")
+    relation_body_scale = Decimal(1) if recovery_formula_version == 1 else body_scale
+    solved = _solve_osaka_augmented_bodies(
+        swap_parameters, relations, body_scale=relation_body_scale
+    )
     augmentation = core.get("osaka_augmentation")
     core_registry = core.get("registry")
     core_models = core_registry.get("models") if isinstance(core_registry, Mapping) else None
     if not isinstance(augmentation, Mapping) or not isinstance(core_models, Mapping):
         raise ValueError("Osaka augmented core equation evidence is missing")
+    recovery_formula = augmentation.get("recovery_formula")
+    if recovery_formula_version == 1:
+        if recovery_formula is not None:
+            raise ValueError("legacy Osaka augmented core formula marker differs")
+    elif recovery_formula != OSAKA_RECOVERY_FORMULA:
+        raise ValueError("Osaka augmented core formula marker differs")
     expected_fractions = {
         "opcode:0x15": solved["iszero_fraction"],
         "opcode:0x1e": solved["clz_fraction"],
@@ -18036,7 +18256,9 @@ def _validate_osaka_augmented_core_equations(
     for row, (relation_id, target_raw_gas, body, slope, exact_residual) in zip(replayed_rows, expected_rows):
         if not isinstance(row, Mapping):
             raise ValueError("Osaka augmented core replay row is invalid")
-        predicted = target_raw_gas * body - Decimal(3) * solved["swap_body"]
+        predicted = (
+            target_raw_gas * body - Decimal(3) * solved["swap_body"]
+        ) / relation_body_scale
         residual = predicted - slope
         if (
             row.get("relation_id") != relation_id
@@ -18510,7 +18732,8 @@ def seal_osaka_augmentation_directory(
         }
     )
     identity = {
-        "analysis_schema_version": 1,
+        "analysis_schema_version": OSAKA_AUGMENTATION_ANALYSIS_SCHEMA_VERSION,
+        "recovery_formula": OSAKA_RECOVERY_FORMULA,
         "analysis_implementation_revision": osaka_calibration[
             "implementation_revision"
         ],
@@ -18548,6 +18771,18 @@ def seal_osaka_augmentation_directory(
         },
         "output_hashes": output_hashes,
     }
+    identity["predecessor"] = _expected_legacy_osaka_predecessor_reference(
+        envelope,
+        identity,
+        sources["core"],
+        sources["canary"],
+        sources["supplement"],
+    )
+    identity_sha256 = sha256_bytes(canonical_json(identity))
+    augmentation_id = identity_sha256[:24]
+    envelope["augmentation_id"] = augmentation_id
+    envelope["augmentation_identity_sha256"] = identity_sha256
+    envelope["augmentation_identity"] = identity
     envelope["artifact_sha256"] = sha256_bytes(canonical_json(envelope))
     directory = _publish_osaka_augmentation(
         out_root,
@@ -18627,9 +18862,17 @@ def verify_osaka_augmentation_directory(
         envelope.get("augmentation_identity_sha256") != identity_sha256
         or envelope.get("augmentation_id") != augmentation_id
         or directory.name != augmentation_id
-        or identity.get("analysis_schema_version") != 1
     ):
         raise ValueError("Osaka augmentation identity differs")
+    recovery_formula_version = identity.get("analysis_schema_version")
+    if recovery_formula_version == 1:
+        if "recovery_formula" in identity:
+            raise ValueError("legacy Osaka augmentation identity differs")
+    elif recovery_formula_version == OSAKA_AUGMENTATION_ANALYSIS_SCHEMA_VERSION:
+        if identity.get("recovery_formula") != OSAKA_RECOVERY_FORMULA:
+            raise ValueError("Osaka augmentation recovery formula differs")
+    else:
+        raise ValueError("Osaka augmentation analysis schema differs")
     osaka_calibration = identity.get("osaka_calibration")
     if not isinstance(osaka_calibration, Mapping):
         raise ValueError("Osaka augmentation calibration provenance is missing")
@@ -18721,12 +18964,28 @@ def verify_osaka_augmentation_directory(
     source_row_hashes = _osaka_augmentation_source_hashes(canary, supplement)
     if not _exact_json_equal(identity.get("source_row_hashes"), source_row_hashes):
         raise ValueError("Osaka augmentation source-row hashes differ")
-    _validate_osaka_augmented_core_equations(core, baseline_sources["core"], supplement)
+    if recovery_formula_version == OSAKA_AUGMENTATION_ANALYSIS_SCHEMA_VERSION:
+        expected_predecessor = _expected_legacy_osaka_predecessor_reference(
+            envelope,
+            identity,
+            baseline_sources["core"],
+            canary,
+            supplement,
+        )
+        if not _exact_json_equal(identity.get("predecessor"), expected_predecessor):
+            raise ValueError("corrected Osaka predecessor reference differs")
+    _validate_osaka_augmented_core_equations(
+        core,
+        baseline_sources["core"],
+        supplement,
+        recovery_formula_version=recovery_formula_version,
+    )
     replayed = build_osaka_augmented_core_artifact(
         baseline_sources["core"],
         canary,
         supplement,
         augmentation_provenance=expected_calibration,
+        recovery_formula_version=recovery_formula_version,
     )
     if not _exact_json_equal(core, replayed):
         raise ValueError("Osaka augmented core differs from exact equation replay")
@@ -18737,6 +18996,53 @@ def verify_osaka_augmentation_directory(
     if not _exact_json_equal(envelope.get("output_hashes"), expected_output_hashes):
         raise ValueError("Osaka augmentation output hashes differ")
     return {"augmentation_id": augmentation_id, "directory": str(directory)}
+
+
+def seal_corrected_osaka_augmentation_successor(
+    predecessor_directory: pathlib.Path,
+    out_root: pathlib.Path,
+    *,
+    historical_manifest: pathlib.Path,
+    expected_historical_manifest_sha256: str,
+) -> dict[str, Any]:
+    """Publish a formula-only schema-2 successor without rerunning SP1."""
+    verify_osaka_augmentation_directory(
+        predecessor_directory,
+        historical_manifest=historical_manifest,
+        expected_historical_manifest_sha256=expected_historical_manifest_sha256,
+    )
+    paths = {
+        "envelope": predecessor_directory / "augmentation.json",
+        "core": predecessor_directory / "core-opcode-submodel.json",
+        "canary": predecessor_directory / "compatibility-canary.json",
+        "supplement": predecessor_directory / "opcode-supplement.json",
+    }
+    payloads = {name: json.loads(path.read_text()) for name, path in paths.items()}
+    if any(
+        path.read_bytes() != _canonical_json_file_bytes(payloads[name])
+        for name, path in paths.items()
+    ):
+        raise ValueError("corrected Osaka predecessor contains noncanonical JSON")
+    successor, corrected_core = build_corrected_osaka_augmentation_successor(
+        payloads["envelope"],
+        payloads["core"],
+        payloads["canary"],
+        payloads["supplement"],
+    )
+    directory = _publish_osaka_augmentation(
+        out_root,
+        successor["augmentation_id"],
+        successor,
+        payloads["canary"],
+        payloads["supplement"],
+        corrected_core,
+    )
+    verify_osaka_augmentation_directory(
+        directory,
+        historical_manifest=historical_manifest,
+        expected_historical_manifest_sha256=expected_historical_manifest_sha256,
+    )
+    return {"augmentation_id": successor["augmentation_id"], "directory": str(directory)}
 
 
 def _validated_historical_calibration_source(
@@ -21939,6 +22245,36 @@ def cmd_verify_osaka_opcode_augmentation(args: argparse.Namespace) -> None:
         ),
     )
     print(verified["augmentation_id"])
+
+
+def cmd_seal_corrected_osaka_opcode_augmentation(args: argparse.Namespace) -> None:
+    predecessor = _resolve_repo_path(
+        args.predecessor_augmentation,
+        field_name="predecessor_augmentation",
+    )
+    historical_manifest = _resolve_repo_path(
+        args.historical_manifest, field_name="historical_manifest"
+    )
+    output_root = _resolve_repo_path(
+        args.out_root, field_name="augmentation_out_root"
+    )
+    path_file = args.augmentation_path_file
+    if path_file.exists() or path_file.is_symlink():
+        raise ValueError("augmentation path file already exists")
+    if path_file.parent.exists() and (
+        not path_file.parent.is_dir() or path_file.parent.is_symlink()
+    ):
+        raise ValueError("augmentation path file parent is invalid")
+    sealed = seal_corrected_osaka_augmentation_successor(
+        predecessor,
+        output_root,
+        historical_manifest=historical_manifest,
+        expected_historical_manifest_sha256=_verify_repo_relative_checksum(
+            historical_manifest
+        ),
+    )
+    _atomic_write_bytes(path_file, (sealed["directory"] + "\n").encode())
+    print(f"sealed corrected Osaka opcode augmentation {sealed['augmentation_id']}")
 
 
 _HIGHER_LAYER_MANIFEST_PATH = pathlib.Path(
@@ -25548,6 +25884,26 @@ def build_parser() -> argparse.ArgumentParser:
     osaka_seal.add_argument("--out-root", type=pathlib.Path, required=True)
     osaka_seal.add_argument("--augmentation-path-file", type=pathlib.Path, required=True)
     osaka_seal.set_defaults(func=cmd_seal_osaka_opcode_augmentation)
+
+    osaka_corrected_seal = subcommands.add_parser(
+        "seal-corrected-osaka-opcode-augmentation",
+        help="seal a formula-only corrected successor from an immutable Osaka package",
+    )
+    osaka_corrected_seal.add_argument(
+        "--predecessor-augmentation", type=pathlib.Path, required=True
+    )
+    osaka_corrected_seal.add_argument(
+        "--historical-manifest", type=pathlib.Path, required=True
+    )
+    osaka_corrected_seal.add_argument(
+        "--out-root", type=pathlib.Path, required=True
+    )
+    osaka_corrected_seal.add_argument(
+        "--augmentation-path-file", type=pathlib.Path, required=True
+    )
+    osaka_corrected_seal.set_defaults(
+        func=cmd_seal_corrected_osaka_opcode_augmentation
+    )
 
     osaka_augmentation_verify = subcommands.add_parser(
         "verify-osaka-opcode-augmentation",

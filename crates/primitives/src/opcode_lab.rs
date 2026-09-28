@@ -154,6 +154,13 @@ pub struct OpcodeLabInput {
     pub generator_max_count: Option<u64>,
     pub fixed_bytecode_len: Option<u64>,
     pub storage: Option<OpcodeLabStorageInput>,
+    pub tx_value: [u8; 32],
+    pub calldata: Vec<u8>,
+    pub block_timestamp: Option<u64>,
+}
+
+fn word_is_zero(value: &[u8; 32]) -> bool {
+    *value == [0; 32]
 }
 
 #[derive(Serialize)]
@@ -173,6 +180,12 @@ struct ReadableOpcodeLabInputRef<'a> {
     fixed_bytecode_len: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     storage: Option<&'a OpcodeLabStorageInput>,
+    #[serde(with = "hex_word", skip_serializing_if = "word_is_zero")]
+    tx_value: &'a [u8; 32],
+    #[serde(with = "hex_bytes", skip_serializing_if = "<[u8]>::is_empty")]
+    calldata: &'a [u8],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    block_timestamp: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -192,6 +205,12 @@ struct ReadableOpcodeLabInput {
     fixed_bytecode_len: Option<u64>,
     #[serde(default)]
     storage: Option<OpcodeLabStorageInput>,
+    #[serde(default, with = "hex_word")]
+    tx_value: [u8; 32],
+    #[serde(default, with = "hex_bytes")]
+    calldata: Vec<u8>,
+    #[serde(default)]
+    block_timestamp: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -206,6 +225,9 @@ struct BinaryOpcodeLabInputRef<'a> {
     generator_max_count: Option<u64>,
     fixed_bytecode_len: Option<u64>,
     storage: Option<&'a OpcodeLabStorageInput>,
+    tx_value: &'a [u8; 32],
+    calldata: &'a [u8],
+    block_timestamp: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -220,6 +242,9 @@ struct BinaryOpcodeLabInput {
     generator_max_count: Option<u64>,
     fixed_bytecode_len: Option<u64>,
     storage: Option<OpcodeLabStorageInput>,
+    tx_value: [u8; 32],
+    calldata: Vec<u8>,
+    block_timestamp: Option<u64>,
 }
 
 impl Serialize for OpcodeLabInput {
@@ -239,6 +264,9 @@ impl Serialize for OpcodeLabInput {
                 generator_max_count: self.generator_max_count,
                 fixed_bytecode_len: self.fixed_bytecode_len,
                 storage: self.storage.as_ref(),
+                tx_value: &self.tx_value,
+                calldata: &self.calldata,
+                block_timestamp: self.block_timestamp,
             }
             .serialize(serializer)
         } else {
@@ -253,6 +281,9 @@ impl Serialize for OpcodeLabInput {
                 generator_max_count: self.generator_max_count,
                 fixed_bytecode_len: self.fixed_bytecode_len,
                 storage: self.storage.as_ref(),
+                tx_value: &self.tx_value,
+                calldata: &self.calldata,
+                block_timestamp: self.block_timestamp,
             }
             .serialize(serializer)
         }
@@ -277,6 +308,9 @@ impl<'de> Deserialize<'de> for OpcodeLabInput {
                 generator_max_count: input.generator_max_count,
                 fixed_bytecode_len: input.fixed_bytecode_len,
                 storage: input.storage,
+                tx_value: input.tx_value,
+                calldata: input.calldata,
+                block_timestamp: input.block_timestamp,
             })
         } else {
             let input = BinaryOpcodeLabInput::deserialize(deserializer)?;
@@ -291,15 +325,27 @@ impl<'de> Deserialize<'de> for OpcodeLabInput {
                 generator_max_count: input.generator_max_count,
                 fixed_bytecode_len: input.fixed_bytecode_len,
                 storage: input.storage,
+                tx_value: input.tx_value,
+                calldata: input.calldata,
+                block_timestamp: input.block_timestamp,
             })
         }
     }
 }
 
 impl OpcodeLabInput {
+    pub const DEFAULT_BLOCK_TIMESTAMP: u64 = 1;
     pub const GAS_LIMIT_OVERHEAD: u64 = 1_000_000;
     pub const MIN_EXECUTION_GAS_LIMIT: u64 = 100_000;
     pub const FIXED_MICROPROGRAM_MAGIC: [u8; 4] = [0xef, 0x4d, 0x50, 0x01];
+
+    #[must_use]
+    pub const fn effective_block_timestamp(&self) -> u64 {
+        match self.block_timestamp {
+            Some(timestamp) => timestamp,
+            None => Self::DEFAULT_BLOCK_TIMESTAMP,
+        }
+    }
 
     #[must_use]
     pub const fn execution_gas_limit(&self) -> u64 {
@@ -711,6 +757,80 @@ mod hex_word {
 #[cfg(test)]
 mod tests {
     use super::OpcodeLabInput;
+
+    #[test]
+    fn opcode_lab_context_defaults_preserve_readable_fixture_shape() {
+        let input: OpcodeLabInput = serde_json::from_str(
+            r#"{
+              "case": "address",
+              "scenario": "canonical",
+              "opcode": 48,
+              "target_count": 1,
+              "target_raw_gas": 2,
+              "bytecode": "0x3000"
+            }"#,
+        )
+        .expect("parse legacy-shaped lab input");
+
+        assert_eq!(input.tx_value, [0; 32]);
+        assert!(input.calldata.is_empty());
+        assert_eq!(input.block_timestamp, None);
+        assert_eq!(input.effective_block_timestamp(), 1);
+        let serialized = serde_json::to_value(&input).expect("serialize default context");
+        assert!(serialized.get("tx_value").is_none());
+        assert!(serialized.get("calldata").is_none());
+        assert!(serialized.get("block_timestamp").is_none());
+    }
+
+    #[test]
+    fn opcode_lab_context_is_canonical_json_and_bincode_identity_input() {
+        let input: OpcodeLabInput = serde_json::from_str(
+            r#"{
+              "case": "calldataload",
+              "scenario": "partial",
+              "opcode": 53,
+              "target_count": 1,
+              "target_raw_gas": 3,
+              "bytecode": "0x5f3500",
+              "tx_value": "0x0000000000000000000000000000000000000000000000000000000000000007",
+              "calldata": "0x010203",
+              "block_timestamp": 17
+            }"#,
+        )
+        .expect("parse explicit context");
+
+        assert_eq!(input.tx_value[31], 7);
+        assert_eq!(input.calldata, vec![1, 2, 3]);
+        assert_eq!(input.block_timestamp, Some(17));
+        let serialized = serde_json::to_value(&input).expect("serialize explicit context");
+        assert_eq!(
+            serialized["tx_value"],
+            "0x0000000000000000000000000000000000000000000000000000000000000007"
+        );
+        assert_eq!(serialized["calldata"], "0x010203");
+        assert_eq!(serialized["block_timestamp"], 17);
+
+        let encoded = bincode::serialize(&input).expect("serialize binary context");
+        let decoded: OpcodeLabInput =
+            bincode::deserialize(&encoded).expect("deserialize binary context");
+        assert_eq!(decoded, input);
+        for alternate in [
+            OpcodeLabInput {
+                tx_value: [0; 32],
+                ..input.clone()
+            },
+            OpcodeLabInput {
+                calldata: Vec::new(),
+                ..input.clone()
+            },
+            OpcodeLabInput {
+                block_timestamp: Some(18),
+                ..input.clone()
+            },
+        ] {
+            assert_ne!(bincode::serialize(&alternate).unwrap(), encoded);
+        }
+    }
 
     #[test]
     fn opcode_lab_input_deserializes_hex_bytecode() {

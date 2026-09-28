@@ -1,0 +1,97 @@
+{
+  "adaptive_round_contract": {
+    "checkpoints": [8, 32, 128, 512, 2048],
+    "generator_rounds": [8, 32, 128, 512, 2048],
+    "prefixes": [
+      [0, 1, 2, 4],
+      [0, 1, 2, 4, 8, 16],
+      [0, 1, 2, 4, 8, 16, 32, 64],
+      [0, 1, 2, 4, 8, 16, 32, 64, 128, 256],
+      [0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
+    ],
+    "selection": "advance_only_failed_scenarios_freeze_passed_scenarios"
+  },
+  "consistency_ape_max": "0.05",
+  "controlled_run_noise_floor": {
+    "provenance_contract_id": "sp1-controlled-block-fixed-envelope-cross-input-v1",
+    "prover_gas": 143,
+    "scope": "signal_gate_only"
+  },
+  "compatibility_canary": {
+    "control_anchor_opcodes": [95, 144],
+    "control_opcode_lab_elf_path": "crates/guests/elf/sp1_opcode_lab.elf",
+    "control_relation_drift_mape_max": "0.05",
+    "historical_anchor_calibration_id": "09ebb08d76d3f461086b0cf4",
+    "legacy_relation_drift_mape_max": "0.05",
+    "legacy_relation_ids": [
+      "opcode:0x01:canonical",
+      "opcode:0x02:canonical",
+      "opcode:0x10:canonical",
+      "opcode:0x1b:canonical",
+      "opcode:0x57:canonical",
+      "opcode:0x19:canonical",
+      "opcode:0x5b:canonical",
+      "opcode:0x0a:exp-bytes-1",
+      "opcode:0x20:input-32",
+      "opcode:0x51:offset-0x00",
+      "opcode:0x5e:copy-32"
+    ],
+    "per_relation_drift_ape_max": "0.10",
+    "revm_opcode_lab_elf_path": "crates/guests/elf/sp1_revm_opcode_lab.elf",
+    "reuse_only_no_refit": true
+  },
+  "quality_gates": {
+    "activation_gap_signal_ratio_trigger_gt": "0.02",
+    "checkpoint_ape_max": "0.10",
+    "r2_min": "0.995",
+    "relative_slope_stderr_max": "0.05",
+    "residual_signal_max": "0.02",
+    "signal_min_baseline_fraction": "0.01",
+    "signal_min_repeat_noise_multiple": "20",
+    "tail_holdout_ape_max": "0.10"
+  },
+  "execution": {
+    "elf_path": "crates/guests/elf/sp1_revm_opcode_lab.elf",
+    "evm_spec": "osaka",
+    "mode": "execute",
+    "proof_type": "sp1",
+    "sp1_execution_engine": "gas-estimator",
+    "stage": "revm-opcode-lab"
+  },
+  "purpose": "context_opcode_calibration",
+  "operation_coverage_v5": {
+    "artifact_sha256": "5e3f9aae0d3d9ae10a9b05bfbe877b2f9c4ab146bd7d6df66f915211c4a9108d",
+    "file_sha256": "4c67852165636d1991e5dd21716dc225e8df8bbf79245763e5c6bca2ce505b89",
+    "path": "experiments/opcode-gas/manifests/operation-coverage-v5.json"
+  },
+  "reference_registry": {
+    "artifact_sha256": "1c05166e674a66ed51e3b1991c597ede479657e3195774a2960b1ff1cdd5ba4a",
+    "file_sha256": "0a85afe5f21af2599823cb0031087f4701e598acc3f7ca48896769b32b518234",
+    "parameter_basis": "production_scaled",
+    "path": "experiments/opcode-gas/derivations/3fc67063a921182e971e7882/core-opcode-submodel.json",
+    "predecessor_artifact_sha256": "b66d7951bfa416810f93319f99c30ce91969026ee9fa3a402a74cbc2214f7e8b",
+    "required_correction": "osaka_0x15_0x1e_body_scale_v1",
+    "required_purpose": "osaka_augmented_core_opcode_submodel",
+    "required_recovery_formula": "lab_slope_times_body_scale_to_production_body_v2",
+    "required_schema_version": 4
+  },
+  "repeats": 3,
+  "scenarios": [
+    {"calldata": "0x", "name": "address_canonical", "opcode": 48, "reference_opcode": 95, "timestamp": 1, "tx_value": "0x0000000000000000000000000000000000000000000000000000000000000000"},
+    {"calldata": "0x", "name": "caller_canonical", "opcode": 51, "reference_opcode": 95, "timestamp": 1, "tx_value": "0x0000000000000000000000000000000000000000000000000000000000000000"},
+    {"calldata": "0x", "name": "callvalue_zero", "opcode": 52, "reference_opcode": 95, "timestamp": 1, "tx_value": "0x0000000000000000000000000000000000000000000000000000000000000000"},
+    {"calldata": "0x", "name": "callvalue_nonzero", "opcode": 52, "reference_opcode": 95, "timestamp": 1, "tx_value": "0x0000000000000000000000000000000000000000000000000000000000000007"},
+    {"calldata": "0x", "name": "calldataload_empty", "offset": 0, "opcode": 53, "reference_opcode": 144, "timestamp": 1, "tx_value": "0x0000000000000000000000000000000000000000000000000000000000000000"},
+    {"calldata": "0x000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f", "name": "calldataload_in_range", "offset": 0, "opcode": 53, "reference_opcode": 144, "timestamp": 1, "tx_value": "0x0000000000000000000000000000000000000000000000000000000000000000"},
+    {"calldata": "0x000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20", "name": "calldataload_partial", "offset": 17, "opcode": 53, "reference_opcode": 144, "timestamp": 1, "tx_value": "0x0000000000000000000000000000000000000000000000000000000000000000"},
+    {"calldata": "0x00010203", "name": "calldataload_out_of_range", "offset": 64, "opcode": 53, "reference_opcode": 144, "timestamp": 1, "tx_value": "0x0000000000000000000000000000000000000000000000000000000000000000"},
+    {"calldata": "0x", "name": "calldatasize_0", "opcode": 54, "reference_opcode": 95, "timestamp": 1, "tx_value": "0x0000000000000000000000000000000000000000000000000000000000000000"},
+    {"calldata": "0x00", "name": "calldatasize_1", "opcode": 54, "reference_opcode": 95, "timestamp": 1, "tx_value": "0x0000000000000000000000000000000000000000000000000000000000000000"},
+    {"calldata": "0x00000000000000000000000000000000000000000000000000000000000000", "name": "calldatasize_31", "opcode": 54, "reference_opcode": 95, "timestamp": 1, "tx_value": "0x0000000000000000000000000000000000000000000000000000000000000000"},
+    {"calldata": "0x0000000000000000000000000000000000000000000000000000000000000000", "name": "calldatasize_32", "opcode": 54, "reference_opcode": 95, "timestamp": 1, "tx_value": "0x0000000000000000000000000000000000000000000000000000000000000000"},
+    {"calldata": "0x000000000000000000000000000000000000000000000000000000000000000000", "name": "calldatasize_33", "opcode": 54, "reference_opcode": 95, "timestamp": 1, "tx_value": "0x0000000000000000000000000000000000000000000000000000000000000000"},
+    {"calldata": "0x", "name": "timestamp_zero", "opcode": 66, "reference_opcode": 95, "timestamp": 0, "tx_value": "0x0000000000000000000000000000000000000000000000000000000000000000"},
+    {"calldata": "0x", "name": "timestamp_nonzero", "opcode": 66, "reference_opcode": 95, "timestamp": 17, "tx_value": "0x0000000000000000000000000000000000000000000000000000000000000000"}
+  ],
+  "tx_gas_limit": 2500000
+}

@@ -937,7 +937,8 @@ def _admit_expected_identity_bundle(
         "report",
     }:
         raise ValueError("canonical Rust identity bundle has an invalid shape")
-    if expected_bundle.get("schema_version") != 1:
+    bundle_schema = expected_bundle.get("schema_version")
+    if bundle_schema not in (1, 2):
         raise ValueError("canonical Rust identity bundle schema differs")
     expected_public_values = expected_bundle.get("expected_public_values")
     if (
@@ -956,9 +957,11 @@ def _admit_expected_identity_bundle(
         "access_list_sha256",
         "prestate_sha256",
     }
+    if bundle_schema == 2:
+        identity_fields.add("block_environment_sha256")
     if not isinstance(expected_identity, Mapping) or set(expected_identity) != identity_fields:
         raise ValueError("canonical Rust identity evidence has an invalid shape")
-    if expected_identity.get("schema_version") != 1:
+    if expected_identity.get("schema_version") != bundle_schema:
         raise ValueError("canonical Rust identity evidence schema differs")
     if expected_identity.get("input") != guest_input:
         raise ValueError("canonical Rust identity input differs from generated guest input")
@@ -976,6 +979,11 @@ def _admit_expected_identity_bundle(
         "prestate_sha256",
     ):
         _require_sha256(expected_identity.get(field), f"canonical Rust {field}")
+    if bundle_schema == 2:
+        _require_sha256(
+            expected_identity.get("block_environment_sha256"),
+            "canonical Rust block_environment_sha256",
+        )
     identity_evidence_sha256 = sha256_bytes(canonical_json(expected_identity))
 
     expected_native_report = expected_bundle.get("report")
@@ -1014,6 +1022,68 @@ def _admit_expected_identity_bundle(
         "identity_evidence_sha256": identity_evidence_sha256,
         "native_trace": expected_native_trace,
     }
+
+
+def _project_legacy_stateful_identity_bundle(
+    bundle: Mapping[str, Any], persisted_report: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Project current native semantics onto the frozen schema-1/trace-2 wire identities.
+
+    The old sealed result predates the context-input bincode suffix and explicit block digest.
+    Replay still executes the canonical input natively; only the historical wire/public identity
+    fields are taken from the already content-addressed row so exact old evidence remains replayable.
+    """
+    projected = json.loads(canonical_json(bundle))
+    identity = projected.get("identity")
+    native_report = projected.get("report")
+    native_trace = (
+        native_report.get("controlled_trace")
+        if isinstance(native_report, Mapping)
+        else None
+    )
+    persisted_trace = persisted_report.get("controlled_trace")
+    if (
+        projected.get("schema_version") != 2
+        or not isinstance(identity, dict)
+        or identity.get("schema_version") != 2
+        or not isinstance(native_trace, dict)
+        or native_trace.get("schema_version") != 3
+        or not isinstance(persisted_trace, Mapping)
+        or persisted_trace.get("schema_version") != 2
+    ):
+        return projected
+    historical_fields = (
+        "backend_input_sha256",
+        "backend_input_len",
+        "workload_id",
+        "transaction_envelope_sha256",
+        "access_list_sha256",
+        "prestate_sha256",
+    )
+    for field in historical_fields:
+        if field not in persisted_trace:
+            raise ValueError("legacy stateful trace identity field is missing")
+        identity[field] = persisted_trace[field]
+        native_trace[field] = persisted_trace[field]
+    identity.pop("block_environment_sha256", None)
+    identity["schema_version"] = 1
+    native_trace.pop("block_environment_sha256", None)
+    native_trace["schema_version"] = 2
+    semantic = native_trace.get("semantic_check")
+    if isinstance(semantic, dict):
+        semantic["backend_input_sha256"] = persisted_trace["backend_input_sha256"]
+    projected["schema_version"] = 1
+    public_values = persisted_report.get("public_values")
+    if not isinstance(public_values, str):
+        raise ValueError("legacy stateful public output is missing")
+    projected["expected_public_values"] = public_values
+    native_report["guest_input_sha256"] = (
+        f"0x{persisted_trace['backend_input_sha256']}"
+    )
+    native_report["guest_input_bincode_length"] = persisted_trace[
+        "backend_input_len"
+    ]
+    return projected
 
 
 def admit_stateful_fixture_trace(
@@ -1079,8 +1149,11 @@ def admit_stateful_fixture_trace(
         raise ValueError("canonical/report/trace backend-input length differs")
     if trace.get("storage") != guest_input["storage"]:
         raise ValueError("backend-input identity storage/lane differs from fixture")
-    if trace.get("schema_version") != 2:
+    trace_schema = trace.get("schema_version")
+    if trace_schema not in (2, 3):
         raise ValueError("stateful trace schema differs")
+    if (expected_identity.get("schema_version"), trace_schema) not in ((1, 2), (2, 3)):
+        raise ValueError("stateful trace and identity schema migration differs")
     if (
         trace.get("evm_spec") != "osaka"
         or trace.get("revm_version") != "41.0.0"
@@ -1095,6 +1168,11 @@ def admit_stateful_fixture_trace(
     ):
         if trace.get(field) != expected_identity[field]:
             raise ValueError(f"trace {field} differs from canonical Rust identity")
+    if trace_schema == 3 and (
+        trace.get("block_environment_sha256")
+        != expected_identity["block_environment_sha256"]
+    ):
+        raise ValueError("trace block environment differs from canonical Rust identity")
     _require_sha256(trace.get("bytecode_sha256"), "bytecode_sha256")
 
     bytecode = bytes.fromhex(guest_input["bytecode"][2:])
@@ -1758,6 +1836,23 @@ def run_stateful_campaign_rows(
             if not isinstance(report, Mapping):
                 raise ValueError("stateful row ledger entry is missing its formal report")
             existing_reports[key] = report
+
+    if verification_only:
+        for key, report in existing_reports.items():
+            scenario, count, lane, _repeat_index = key
+            fixture, input_path = fixtures[(scenario, count, lane)]
+            portable = _portable_formal_report(
+                report,
+                input_path=input_path,
+                fixtures_root=fixtures_root,
+            )
+            projected = _project_legacy_stateful_identity_bundle(
+                bundles[(scenario, count, lane)], portable
+            )
+            bundles[(scenario, count, lane)] = projected
+            bundle_evidence[(scenario, count, lane)] = (
+                _admit_expected_identity_bundle(fixture, projected)
+            )
 
     pair_groups: dict[tuple[str, int, int], dict[str, StatefulCampaignRowSpec]] = {}
     for spec in specs:

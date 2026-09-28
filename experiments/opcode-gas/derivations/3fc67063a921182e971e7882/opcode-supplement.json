@@ -1,0 +1,68 @@
+{
+  "artifact_sha256": "b599f46db3d3aa6203f2a8149177013b0863756a22d02c2f510988dc203223c7",
+  "candidate_eligible": false,
+  "decisions_sha256": "52e1974c5d0781acbf7ec7bf2c8a86c8ddbdfa0987424e3aebaf75daf64312bc",
+  "provenance": {
+    "calibration_id": "51f71fde68f378842f872fc1",
+    "calibration_identity_sha256": "51f71fde68f378842f872fc1f3ecb8493fa83e8102af1761f7da21d5086ce338",
+    "complete_schedule_sha256": "b27c29fb5fe482de4b3e22784de0cc6c49a5f1f0160ec8a6eaa6997869864927",
+    "controlled_manifest_rows_sha256": "5fab06ba8196410d2743251410bd7747eed447c5e0de3bd633005a854ca3ca4e",
+    "controlled_manifest_sha256": "ec1d21273e746bd03873b8c7a5b71df514b58ba3f5983f6b474177a9f63a43bd",
+    "guest_elf_sha256": "a4d340812a54a36ce57cdd0f197843f43f67fd9ac7450acee2ec1f6e58eb9a56",
+    "implementation_revision": "571dd487ffef8c3e158a376e13c9e159da7c936c",
+    "version_identity": {
+      "ethereum_upgrade": "Fusaka",
+      "primary_metric": "proverGas",
+      "production_schedule": "UNZEN_ZK_GAS_SCHEDULE",
+      "proving_backend": "sp1",
+      "revm_spec_id": "OSAKA",
+      "taiko_fork": "Unzen"
+    }
+  },
+  "purpose": "osaka_opcode_supplement",
+  "raw_rows_sha256": "e2555b75ed38cccc3dfaf9fd4206603450e8016ec3a13acf6173d63a2d34bf56",
+  "relation_ids": [
+    "opcode:0x15:canonical",
+    "opcode:0x1e:canonical"
+  ],
+  "relations": [
+    {
+      "control_opcode_key": "opcode:0x90",
+      "control_raw_gas_by_key": {
+        "opcode:0x90": "3"
+      },
+      "generator_max_count": 32,
+      "program_sha256": "93acaeb45e5bc1307af7a862931c87f0978966b7fcf382b19cbbfd5e9c6a6152",
+      "raw_rows_sha256": "b9748f10f08c34efe11213f6d44915ad3ddb0ee412acf3242ae8d39afe4f42ee",
+      "relation_id": "opcode:0x15:canonical",
+      "signed_raw_gas_by_key": {
+        "opcode:0x15": "3",
+        "opcode:0x90": "-3"
+      },
+      "slope_p": "-107.33870967741935483870967741935483870967741935483870967741935483870967741935484",
+      "target_raw_gas_by_key": {
+        "opcode:0x15": "3"
+      }
+    },
+    {
+      "control_opcode_key": "opcode:0x90",
+      "control_raw_gas_by_key": {
+        "opcode:0x90": "3"
+      },
+      "generator_max_count": 32,
+      "program_sha256": "dbcfb4e435c785125685ec2fb04a790735755cf4abaec0a152e2922dabc2f158",
+      "raw_rows_sha256": "164f392890d61edc41187938e74cce6860fb53567a651cd0a28b8d29d8f23f83",
+      "relation_id": "opcode:0x1e:canonical",
+      "signed_raw_gas_by_key": {
+        "opcode:0x1e": "5",
+        "opcode:0x90": "-3"
+      },
+      "slope_p": "-68",
+      "target_raw_gas_by_key": {
+        "opcode:0x1e": "5"
+      }
+    }
+  ],
+  "schema_version": 1,
+  "status": "accepted"
+}

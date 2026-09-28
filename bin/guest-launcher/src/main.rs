@@ -11,6 +11,7 @@ use alloy_primitives::hex;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 use flate2::{Compression, write::GzEncoder};
+use raiko2_opcode_lab::opcode_anchor_public_values;
 use raiko2_pipeline::forks::shasta::{load_risc0_shasta_backend, load_sp1_shasta_backend};
 use raiko2_pipeline::{NativeBackend, ProofStage, ProverBackend};
 use raiko2_primitives::{
@@ -128,6 +129,8 @@ enum Stage {
     RevmOpcodeLab,
     #[value(name = "revm-opcode-identity")]
     RevmOpcodeIdentity,
+    #[value(name = "opcode-anchor-identity")]
+    OpcodeAnchorIdentity,
     #[value(name = "precompile-lab")]
     PrecompileLab,
     #[value(name = "controlled-overhead")]
@@ -406,6 +409,7 @@ impl Stage {
             Stage::OpcodeLab => "opcode-lab",
             Stage::RevmOpcodeLab => "revm-opcode-lab",
             Stage::RevmOpcodeIdentity => "revm-opcode-identity",
+            Stage::OpcodeAnchorIdentity => "opcode-anchor-identity",
             Stage::PrecompileLab => "precompile-lab",
             Stage::ControlledOverhead => "controlled-overhead",
             Stage::ControlledBlock => "controlled-block",
@@ -572,6 +576,37 @@ impl Args {
         Ok(())
     }
 
+    fn validate_opcode_anchor_identity(&self) -> Result<()> {
+        if self.stage != Stage::OpcodeAnchorIdentity {
+            bail!("opcode anchor identity validation requires its dedicated stage");
+        }
+        if self.proof_type != ProofType::Native
+            || self.mode != Mode::Execute
+            || self.sp1_execution_engine != Sp1ExecutionEngine::Standard
+        {
+            bail!("opcode-anchor-identity supports only native execute semantics");
+        }
+        if self.input.is_none() || self.json_out.is_none() {
+            bail!("opcode-anchor-identity requires --input and --json-out");
+        }
+        if self.input_list.is_some()
+            || self.elf.is_some()
+            || !self.aggregate.is_empty()
+            || self.output.is_some()
+            || self.jsonl_out.is_some()
+            || self.proof_mode.is_some()
+            || self.sp1_prover.is_some()
+            || self.sp1_network_mode != CliSp1NetworkMode::Reserved
+            || self.sp1_fulfillment_strategy != CliSp1FulfillmentStrategy::Reserved
+            || self.sp1_cycle_limit != 1_000_000_000_000
+            || self.sp1_timeout_secs != 3_600
+            || self.risc0_execution_po2 != 20
+        {
+            bail!("opcode-anchor-identity rejects guest, prover, and alternate-input flags");
+        }
+        Ok(())
+    }
+
     fn validate_sp1_execution_engine(&self) -> Result<()> {
         if self.stage == Stage::ControlledStateHoldout
             && self.sp1_execution_engine != Sp1ExecutionEngine::GasEstimator
@@ -696,6 +731,7 @@ fn opcode_lab_memory_labels(stage: Stage) -> OpcodeLabMemoryLabels {
         Stage::Proposal
         | Stage::ProposalTrace
         | Stage::RevmOpcodeIdentity
+        | Stage::OpcodeAnchorIdentity
         | Stage::PrecompileLab
         | Stage::ControlledOverhead
         | Stage::ControlledBlock
@@ -803,6 +839,9 @@ async fn main() -> Result<()> {
     if args.stage == Stage::RevmOpcodeIdentity {
         return run_revm_opcode_identity(args);
     }
+    if args.stage == Stage::OpcodeAnchorIdentity {
+        return run_opcode_anchor_identity(args);
+    }
     if args.stage == Stage::ControlledOverhead {
         return run_controlled_overhead(args).await;
     }
@@ -834,6 +873,26 @@ fn run_revm_opcode_identity(args: Args) -> Result<()> {
     let input = read_opcode_lab_input(input_path)?;
     let bundle = controlled_workload::controlled_opcode_identity_bundle(&input)?;
     let mut contents = serde_json::to_vec(&bundle).context("serialize opcode identity bundle")?;
+    contents.push(b'\n');
+    fs::write(output_path, contents).with_context(|| format!("write {}", output_path.display()))?;
+    Ok(())
+}
+
+fn run_opcode_anchor_identity(args: Args) -> Result<()> {
+    args.validate_opcode_anchor_identity()?;
+    let input_path = args.input.as_ref().context("missing --input")?;
+    let output_path = args.json_out.as_ref().context("missing --json-out")?;
+    let input = read_opcode_lab_input(input_path)?;
+    let (guest_input_sha256, guest_input_bincode_length) = opcode_lab_input_identity(&input)?;
+    let expected_public_values = opcode_anchor_public_values(&input)
+        .context("input is not a canonical opcode anchor probe")?;
+    let payload = serde_json::json!({
+        "schema_version": 1,
+        "guest_input_sha256": guest_input_sha256,
+        "guest_input_bincode_length": guest_input_bincode_length,
+        "expected_public_values": format!("{expected_public_values:#x}"),
+    });
+    let mut contents = serde_json::to_vec(&payload).context("serialize opcode anchor identity")?;
     contents.push(b'\n');
     fs::write(output_path, contents).with_context(|| format!("write {}", output_path.display()))?;
     Ok(())
@@ -2366,17 +2425,19 @@ mod tests {
         guest_launcher_executable_path, install_controlled_trace,
         install_opcode_lab_input_identity, new_controlled_overhead_report, parse_sp1_program,
         read_input, read_opcode_lab_input, read_opcode_lab_input_list, risc0_padded_cycles,
-        run_controlled_state_holdout_trace, run_revm_opcode_identity,
+        run_controlled_state_holdout_trace, run_opcode_anchor_identity, run_revm_opcode_identity,
         validate_proposal_gas_estimator_guest_elf_override,
     };
     use alloy_primitives::{Address, B256, hex};
     use clap::Parser as _;
+    use raiko2_opcode_lab::opcode_anchor_public_values;
     use raiko2_primitives::{
         OpcodeLabInput, PrecompileLabInput, PrecompileLabLane, ProofType as RaikoProofType,
         SupportedChainSpecs,
     };
     use raiko2_primitives_shasta::{GuestInput, build_proof_carry_data_from_witness_spec};
     use raiko2_prover::sp1::Sp1ExecutionMetadata;
+    use sha2::{Digest as _, Sha256};
     use sp1_sdk::ExecutionReport;
     use std::{ffi::OsStr, fs};
 
@@ -2914,6 +2975,7 @@ mod tests {
             generator_max_count: Some(131_072),
             fixed_bytecode_len: Some(1),
             storage: None,
+            ..Default::default()
         };
         let encoded = bincode::serialize(&input).unwrap();
         let expected_hash = format!("0x{}", hex::encode(Sha256::digest(&encoded)));
@@ -2978,6 +3040,11 @@ mod tests {
         let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let elf = std::fs::read(repo.join("crates/guests/elf/sp1_revm_opcode_lab.elf"))
             .expect("read checked-in revm opcode lab ELF");
+        assert_eq!(
+            hex::encode(Sha256::digest(&elf)),
+            "ad3a9b2d3a9089b456983b5d4d51173d42aee321793be26a82ce05d783ca593a",
+            "refresh the ADD/count-32 execution surface together with the checked-in ELF",
+        );
         let input_path = repo.join("bin/guest-launcher/tests/fixtures/revm-opcode-lab-add-32.json");
         let input = read_opcode_lab_input(&input_path).expect("read checked-in add/count-32 input");
         (
@@ -2993,10 +3060,10 @@ mod tests {
     ) {
         assert_eq!(
             public_values.raw(),
-            "0x9318bc580c9b2aa315a8649bd205867ef84a5d28fecdb187ec57ba86f409ec16"
+            "0xff91cb3a401b4a14b5714892ed3550857d5e65cd9546263565607cf7f95029fe"
         );
         assert_eq!(report.gas(), Some(expected_gas));
-        assert_eq!(report.total_instruction_count(), 1_597_491);
+        assert_eq!(report.total_instruction_count(), 1_823_576);
         assert_eq!(report.total_syscall_count(), 35);
         assert_eq!(report.exit_code, 0);
     }
@@ -3009,7 +3076,7 @@ mod tests {
                 .expect("execute canonical gas estimator");
 
         // Hand-checked against the standard SP1 6.3 execution baseline for this tracked fixture.
-        assert_add_32_execution_surface(&public_values, &report, 1_443_869);
+        assert_add_32_execution_surface(&public_values, &report, 1_629_105);
     }
 
     #[test]
@@ -3021,7 +3088,7 @@ mod tests {
             execute_opcode_lab_gas_estimator_with_opts(program, &input, opts)
                 .expect("execute forced multi-chunk gas estimator");
 
-        assert_add_32_execution_surface(&public_values, &report, 1_595_314);
+        assert_add_32_execution_surface(&public_values, &report, 1_813_351);
     }
 
     #[test]
@@ -3119,6 +3186,7 @@ mod tests {
             generator_max_count: Some(8),
             fixed_bytecode_len: Some(6),
             storage: None,
+            ..Default::default()
         };
         fs::write(&input_path, serde_json::to_vec(&input).unwrap()).unwrap();
         let args = Args::try_parse_from([
@@ -3138,7 +3206,7 @@ mod tests {
 
         let bundle: serde_json::Value =
             serde_json::from_slice(&fs::read(&output_path).unwrap()).unwrap();
-        assert_eq!(bundle["schema_version"], 1);
+        assert_eq!(bundle["schema_version"], 2);
         assert_eq!(bundle["expected_public_values"].as_str().unwrap().len(), 66);
         assert_eq!(
             bundle["identity"]["input"],
@@ -3152,6 +3220,50 @@ mod tests {
             )
         );
         assert_eq!(bundle["report"]["controlled_trace"]["kind"], "revm_opcode");
+
+        fs::remove_file(input_path).ok();
+        fs::remove_file(output_path).ok();
+    }
+
+    #[test]
+    fn host_only_opcode_anchor_identity_matches_the_shared_guest_commitment() {
+        let input_path = temp_input_path("opcode-anchor-identity-input");
+        let output_path = temp_input_path("opcode-anchor-identity-output");
+        let input = OpcodeLabInput {
+            case: "synthetic_anchor_probe_push0".into(),
+            scenario: "anchor_target_".into(),
+            opcode: 0x5f,
+            target_count: 8,
+            target_raw_gas: 2,
+            tx_gas_limit: Some(100_000),
+            bytecode: vec![0x00],
+            generator_max_count: Some(131_072),
+            fixed_bytecode_len: Some(1),
+            ..Default::default()
+        };
+        fs::write(&input_path, serde_json::to_vec(&input).unwrap()).unwrap();
+        let args = Args::try_parse_from([
+            "guest-launcher",
+            "--stage",
+            "opcode-anchor-identity",
+            "--proof-type",
+            "native",
+            "--input",
+            input_path.to_str().unwrap(),
+            "--json-out",
+            output_path.to_str().unwrap(),
+        ])
+        .unwrap();
+
+        run_opcode_anchor_identity(args).unwrap();
+
+        let bundle: serde_json::Value =
+            serde_json::from_slice(&fs::read(&output_path).unwrap()).unwrap();
+        let expected = opcode_anchor_public_values(&input).unwrap();
+        assert_eq!(bundle["schema_version"], 1);
+        assert_eq!(bundle["expected_public_values"], format!("{expected:#x}"));
+        assert_eq!(bundle["guest_input_sha256"].as_str().unwrap().len(), 66);
+        assert!(bundle["guest_input_bincode_length"].as_u64().unwrap() > 0);
 
         fs::remove_file(input_path).ok();
         fs::remove_file(output_path).ok();
@@ -3361,6 +3473,7 @@ mod tests {
             generator_max_count: Some(8),
             fixed_bytecode_len: Some(6),
             storage: None,
+            ..Default::default()
         };
         let mut report =
             BenchReport::new("revm-opcode-lab", "execute", "core", "input.json".into());
@@ -3396,6 +3509,7 @@ mod tests {
             generator_max_count: Some(8),
             fixed_bytecode_len: Some(6),
             storage: None,
+            ..Default::default()
         };
         let mut report =
             BenchReport::new("revm-opcode-lab", "execute", "core", "input.json".into());
@@ -3421,6 +3535,7 @@ mod tests {
             generator_max_count: Some(8),
             fixed_bytecode_len: Some(6),
             storage: None,
+            ..Default::default()
         };
         let mut trace = super::controlled_workload::trace_revm_opcode_workload(&input).unwrap();
         trace.semantic_check.backend_input_sha256 = "00".repeat(32);

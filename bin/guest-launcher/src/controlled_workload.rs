@@ -12,8 +12,8 @@ use alloy_sol_types::{SolCall, sol};
 use alloy_trie::EMPTY_ROOT_HASH;
 use anyhow::{Result, bail};
 use raiko2_opcode_lab::{
-    OPCODE_LAB_SPEC_ID, build_benchmark_db, build_benchmark_tx, fold_revm_opcode_execution_result,
-    fold_revm_opcode_program, revm_opcode_public_values,
+    OPCODE_LAB_SPEC_ID, build_benchmark_block_env, build_benchmark_db, build_benchmark_tx,
+    fold_revm_opcode_execution_result, fold_revm_opcode_program, revm_opcode_public_values,
 };
 use raiko2_primitives::{
     ExecutionWitness, OpcodeLabInput, OpcodeLabStorageInput, OpcodeLabStorageLane,
@@ -42,7 +42,7 @@ use reth_ethereum_primitives::TransactionSigned;
 use revm::{
     Context, ExecuteEvm, InspectEvm, Inspector, MainBuilder, MainContext,
     bytecode::Bytecode,
-    context::TxEnv,
+    context::{BlockEnv, TxEnv},
     context_interface::result::ExecutionResult,
     database::BENCH_TARGET,
     interpreter::{Interpreter, interpreter::EthInterpreter, interpreter_types::Jumps},
@@ -142,6 +142,7 @@ pub struct ControlledOpcodeTrace {
     pub revm_version: &'static str,
     pub shared_constructor: &'static str,
     pub transaction_envelope_sha256: String,
+    pub block_environment_sha256: String,
     pub access_list_sha256: String,
     pub prestate_sha256: String,
     pub bytecode_sha256: String,
@@ -165,6 +166,7 @@ pub struct ControlledOpcodeIdentityEvidence {
     pub backend_input_len: usize,
     pub workload_id: String,
     pub transaction_envelope_sha256: String,
+    pub block_environment_sha256: String,
     pub access_list_sha256: String,
     pub prestate_sha256: String,
 }
@@ -2549,7 +2551,7 @@ fn sha256_json(value: &BTreeMap<&str, Value>) -> Result<String> {
 }
 
 pub fn controlled_workload_id(spec: &ControlledWorkloadSpec) -> Result<String> {
-    if spec.schema_version != 1 || spec.key_id.is_empty() || spec.case_id.is_empty() {
+    if !matches!(spec.schema_version, 1 | 2) || spec.key_id.is_empty() || spec.case_id.is_empty() {
         bail!("invalid controlled workload specification");
     }
     let value = BTreeMap::from([
@@ -2598,13 +2600,17 @@ pub fn controlled_opcode_workload_spec(input: &OpcodeLabInput) -> ControlledWork
         })
         .unwrap_or_default();
     ControlledWorkloadSpec {
-        schema_version: 1,
+        schema_version: 2,
         key_id: key_id.clone(),
         case_id: input.case.clone(),
         target_count: input.target_count,
         lane,
         state,
         environment: BTreeMap::from([
+            (
+                "block_timestamp".into(),
+                Value::from(input.effective_block_timestamp()),
+            ),
             ("evm_spec".into(), Value::String("osaka".into())),
             ("revm_version".into(), Value::String("41.0.0".into())),
             (
@@ -2617,8 +2623,16 @@ pub fn controlled_opcode_workload_spec(input: &OpcodeLabInput) -> ControlledWork
                 "bytecode".into(),
                 Value::String(alloy_primitives::hex::encode_prefixed(&input.bytecode)),
             ),
+            (
+                "calldata".into(),
+                Value::String(alloy_primitives::hex::encode_prefixed(&input.calldata)),
+            ),
             ("opcode".into(), Value::from(input.opcode)),
             ("target_raw_gas".into(), Value::from(input.target_raw_gas)),
+            (
+                "tx_value".into(),
+                Value::String(alloy_primitives::hex::encode_prefixed(input.tx_value)),
+            ),
             (
                 "tx_gas_limit".into(),
                 Value::from(input.execution_gas_limit()),
@@ -2738,6 +2752,41 @@ fn transaction_identities(tx: &TxEnv) -> Result<(String, String)> {
     Ok((transaction_envelope_sha256, access_list_sha256))
 }
 
+pub fn block_environment_sha256(block: &BlockEnv) -> Result<String> {
+    let blob_excess_gas_and_price = block
+        .blob_excess_gas_and_price
+        .map(|blob| {
+            serde_json::json!({
+                "blob_gasprice": blob.blob_gasprice.to_string(),
+                "excess_blob_gas": blob.excess_blob_gas,
+            })
+        })
+        .unwrap_or(Value::Null);
+    let environment = BTreeMap::from([
+        ("basefee", Value::from(block.basefee)),
+        ("blob_excess_gas_and_price", blob_excess_gas_and_price),
+        (
+            "beneficiary",
+            Value::String(alloy_primitives::hex::encode_prefixed(block.beneficiary)),
+        ),
+        ("difficulty", Value::String(word_hex(block.difficulty))),
+        ("gas_limit", Value::from(block.gas_limit)),
+        ("number", Value::String(word_hex(block.number))),
+        (
+            "prevrandao",
+            block
+                .prevrandao
+                .map(|value| Value::String(alloy_primitives::hex::encode_prefixed(value)))
+                .unwrap_or(Value::Null),
+        ),
+        ("slot_num", Value::from(block.slot_num)),
+        ("timestamp", Value::String(word_hex(block.timestamp))),
+    ]);
+    Ok(alloy_primitives::hex::encode(Sha256::digest(
+        serde_json::to_vec(&environment)?,
+    )))
+}
+
 pub fn controlled_opcode_identity(
     input: &OpcodeLabInput,
 ) -> Result<ControlledOpcodeIdentityEvidence> {
@@ -2745,20 +2794,17 @@ pub fn controlled_opcode_identity(
         .validate_controlled_contract()
         .map_err(anyhow::Error::msg)?;
     let backend_input = bincode::serialize(input)?;
-    let canonical_tx = build_benchmark_tx(
-        input
-            .execution_gas_limit()
-            .max(OpcodeLabInput::MIN_EXECUTION_GAS_LIMIT),
-        input.storage.as_ref(),
-    )?;
+    let canonical_tx = build_benchmark_tx(input)?;
+    let canonical_block = build_benchmark_block_env(input);
     let (transaction_envelope_sha256, access_list_sha256) = transaction_identities(&canonical_tx)?;
     Ok(ControlledOpcodeIdentityEvidence {
-        schema_version: 1,
+        schema_version: 2,
         input: input.clone(),
         backend_input_sha256: alloy_primitives::hex::encode(Sha256::digest(&backend_input)),
         backend_input_len: backend_input.len(),
         workload_id: controlled_workload_id(&controlled_opcode_workload_spec(input))?,
         transaction_envelope_sha256,
+        block_environment_sha256: block_environment_sha256(&canonical_block)?,
         access_list_sha256,
         prestate_sha256: storage_prestate_sha256(input.storage.as_ref())?,
     })
@@ -2834,14 +2880,10 @@ pub fn check_revm_opcode_semantics(
         let bytecode = Bytecode::new_legacy(program.to_vec().into());
         let context = Context::mainnet()
             .modify_cfg_chained(|cfg| cfg.set_spec_and_mainnet_gas_params(OPCODE_LAB_SPEC_ID))
+            .modify_block_chained(|block| *block = build_benchmark_block_env(input))
             .with_db(build_benchmark_db(bytecode, input.storage.as_ref()));
         let mut evm = context.build_mainnet_with_inspector(StorageSemanticInspector::default());
-        let execution = evm.inspect_tx(build_benchmark_tx(
-            input
-                .execution_gas_limit()
-                .max(OpcodeLabInput::MIN_EXECUTION_GAS_LIMIT),
-            input.storage.as_ref(),
-        )?)?;
+        let execution = evm.inspect_tx(build_benchmark_tx(input)?)?;
         let status = result_status(&execution.result).to_string();
         if status != "success" {
             bail!("opcode-lab semantic program {program_index} did not succeed: {status}");
@@ -2958,12 +3000,7 @@ pub fn trace_revm_opcode_workload(input: &OpcodeLabInput) -> Result<ControlledOp
         .iter()
         .map(|program| alloy_primitives::hex::encode(Sha256::digest(program)))
         .collect::<Vec<_>>();
-    let canonical_tx = build_benchmark_tx(
-        input
-            .execution_gas_limit()
-            .max(OpcodeLabInput::MIN_EXECUTION_GAS_LIMIT),
-        input.storage.as_ref(),
-    )?;
+    let canonical_tx = build_benchmark_tx(input)?;
     let mut inspector = OpcodeFootprintInspector::default();
     let mut program_events = Vec::with_capacity(programs.len());
     let mut result_statuses = BTreeMap::new();
@@ -2971,6 +3008,7 @@ pub fn trace_revm_opcode_workload(input: &OpcodeLabInput) -> Result<ControlledOp
         let bytecode = Bytecode::new_legacy(program.to_vec().into());
         let context = Context::mainnet()
             .modify_cfg_chained(|cfg| cfg.set_spec_and_mainnet_gas_params(OPCODE_LAB_SPEC_ID))
+            .modify_block_chained(|block| *block = build_benchmark_block_env(input))
             .with_db(build_benchmark_db(bytecode, input.storage.as_ref()));
         let mut evm = context.build_mainnet_with_inspector(OpcodeFootprintInspector::default());
         let execution = evm.inspect_one_tx(canonical_tx.clone())?;
@@ -3039,7 +3077,7 @@ pub fn trace_revm_opcode_workload(input: &OpcodeLabInput) -> Result<ControlledOp
         .collect();
     let semantic_check = check_revm_opcode_semantics(input)?;
     Ok(ControlledOpcodeTrace {
-        schema_version: u32::from(input.storage.is_some()) + 1,
+        schema_version: 3,
         workload_id: identity.workload_id,
         backend_input_sha256: identity.backend_input_sha256,
         backend_input_len: identity.backend_input_len,
@@ -3057,6 +3095,7 @@ pub fn trace_revm_opcode_workload(input: &OpcodeLabInput) -> Result<ControlledOp
         revm_version: "41.0.0",
         shared_constructor: "raiko2-opcode-lab",
         transaction_envelope_sha256: identity.transaction_envelope_sha256,
+        block_environment_sha256: identity.block_environment_sha256,
         access_list_sha256: identity.access_list_sha256,
         prestate_sha256: identity.prestate_sha256,
         bytecode_sha256: alloy_primitives::hex::encode(Sha256::digest(&input.bytecode)),
@@ -3079,7 +3118,7 @@ pub fn controlled_opcode_identity_bundle(
     let trace = trace_revm_opcode_workload(input)?;
     let expected_public_values = expected_revm_opcode_public_values(input)?;
     Ok(ControlledOpcodeIdentityBundle {
-        schema_version: 1,
+        schema_version: 2,
         expected_public_values,
         report: ControlledOpcodeIdentityReport {
             guest_input_sha256: format!("0x{}", identity.backend_input_sha256),
@@ -3094,18 +3133,16 @@ fn expected_revm_opcode_public_values(input: &OpcodeLabInput) -> Result<String> 
     input
         .validate_controlled_contract()
         .map_err(anyhow::Error::msg)?;
-    let gas_limit = input
-        .execution_gas_limit()
-        .max(OpcodeLabInput::MIN_EXECUTION_GAS_LIMIT);
     let mut accumulator = 0u64;
     for program in input.execution_programs().map_err(anyhow::Error::msg)? {
         let bytecode = Bytecode::new_legacy(program.to_vec().into());
         let context = Context::mainnet()
             .modify_cfg_chained(|cfg| cfg.set_spec_and_mainnet_gas_params(OPCODE_LAB_SPEC_ID))
+            .modify_block_chained(|block| *block = build_benchmark_block_env(input))
             .with_db(build_benchmark_db(bytecode, input.storage.as_ref()));
         let execution = context
             .build_mainnet()
-            .transact(build_benchmark_tx(gas_limit, input.storage.as_ref())?)?;
+            .transact(build_benchmark_tx(input)?)?;
         accumulator = fold_revm_opcode_program(
             accumulator,
             fold_revm_opcode_execution_result(&execution.result),

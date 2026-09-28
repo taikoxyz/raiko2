@@ -3,7 +3,7 @@
 #![allow(missing_docs)]
 sp1_zkvm::entrypoint!(main);
 
-use raiko2_guest_sp1::revm_opcode_lab_impl::execute_revm_bytecode_with_storage;
+use raiko2_guest_sp1::revm_opcode_lab_impl::execute_revm_bytecode_with_input;
 use raiko2_opcode_lab::{fold_revm_opcode_program, revm_opcode_public_values};
 use raiko2_primitives::OpcodeLabInput;
 use sp1_zkvm::io;
@@ -13,8 +13,6 @@ pub fn main() {
     input
         .validate_controlled_contract()
         .expect("valid revm opcode controlled-workload contract");
-    let gas_limit = input.execution_gas_limit();
-
     #[cfg(feature = "bench")]
     println!("cycle-tracker-report-start: revm_opcode_lab_execute");
     let mut accumulator = 0u64;
@@ -24,7 +22,7 @@ pub fn main() {
     {
         accumulator = fold_revm_opcode_program(
             accumulator,
-            execute_revm_bytecode_with_storage(program, gas_limit, input.storage.as_ref()),
+            execute_revm_bytecode_with_input(program, &input),
         );
     }
     #[cfg(feature = "bench")]

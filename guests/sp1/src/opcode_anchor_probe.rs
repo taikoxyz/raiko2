@@ -1,3 +1,4 @@
+use raiko2_opcode_lab::opcode_anchor_public_input;
 use raiko2_primitives::OpcodeLabInput;
 use revm::{interpreter::Stack, primitives::U256};
 
@@ -102,9 +103,7 @@ fn anchor_swap1_step(stack: &mut Stack) -> Result<(), &'static str> {
         .ok_or("anchor probe stack operation failed")
 }
 
-fn select_anchor_stack_step(
-    input: &OpcodeLabInput,
-) -> Result<AnchorStackStep, &'static str> {
+fn select_anchor_stack_step(input: &OpcodeLabInput) -> Result<AnchorStackStep, &'static str> {
     if validate_anchor_probe(input)? == AnchorProbeLane::Control {
         return Ok(anchor_control_step);
     }
@@ -142,26 +141,17 @@ pub fn prepare_anchor_probe_public_input(
     input: &OpcodeLabInput,
     accumulator: u64,
 ) -> Result<[u8; PUBLIC_INPUT_LEN], &'static str> {
-    let lane = match validate_anchor_probe(input)? {
-        AnchorProbeLane::Target => 0,
-        AnchorProbeLane::Control => 1,
-    };
-    let mut output = [0u8; PUBLIC_INPUT_LEN];
-    output[0] = 1;
-    output[1] = input.opcode;
-    output[2] = lane;
-    output[4..12].copy_from_slice(&input.target_count.to_le_bytes());
-    output[12..20].copy_from_slice(&input.target_raw_gas.to_le_bytes());
-    output[20..28].copy_from_slice(&accumulator.to_le_bytes());
-    Ok(output)
+    validate_anchor_probe(input)?;
+    opcode_anchor_public_input(input, accumulator).ok_or("invalid anchor probe public input")
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        AnchorProbeLane, CONTROL_SCENARIO, TARGET_SCENARIO, anchor_probe_lane,
-        execute_anchor_probe, prepare_anchor_probe_public_input,
+        anchor_probe_lane, execute_anchor_probe, prepare_anchor_probe_public_input,
+        AnchorProbeLane, CONTROL_SCENARIO, TARGET_SCENARIO,
     };
+    use raiko2_opcode_lab::opcode_anchor_public_values;
     use raiko2_primitives::OpcodeLabInput;
 
     fn input(opcode: u8, lane: AnchorProbeLane, count: u64) -> OpcodeLabInput {
@@ -187,6 +177,7 @@ mod tests {
             generator_max_count: Some(131_072),
             fixed_bytecode_len: Some(1),
             storage: None,
+            ..Default::default()
         }
     }
 
@@ -228,6 +219,12 @@ mod tests {
                 prepare_anchor_probe_public_input(&target, target_result).unwrap(),
                 prepare_anchor_probe_public_input(&control, control_result).unwrap(),
                 "opcode 0x{opcode:02x}",
+            );
+            assert_eq!(
+                alloy_primitives::keccak256(
+                    prepare_anchor_probe_public_input(&target, target_result).unwrap()
+                ),
+                opcode_anchor_public_values(&target).unwrap(),
             );
         }
     }

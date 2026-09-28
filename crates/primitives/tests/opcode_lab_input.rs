@@ -83,6 +83,7 @@ fn opcode_lab_stateless_input_round_trips_through_bincode_without_storage() {
         generator_max_count: Some(8),
         fixed_bytecode_len: Some(6),
         storage: None,
+        ..Default::default()
     };
 
     let encoded = bincode::serialize(&input).expect("serialize stateless opcode input");

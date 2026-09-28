@@ -1061,6 +1061,72 @@ directory contains exactly four portable files and can be replayed at the frozen
 without the live run directories. Proposal validation and production promotion remain out of scope
 for this campaign.
 
+### Context-operation augmentation
+
+The context campaign is a separate adaptive controlled run for `ADDRESS`, `CALLER`, `CALLVALUE`,
+`CALLDATALOAD`, `CALLDATASIZE`, and `TIMESTAMP`. It does not modify the historical core or the
+production table. It uses generator bounds `8, 32, 128, 512, 2048`; count zero, the fit prefix, and
+the checkpoint are fixed before execution, accepted scenarios freeze, and only failed scenarios
+advance. Every required sibling must pass before its opcode can enter operation coverage V6.
+
+Use the repository's existing experiment Python environment and run the two-part compatibility
+canary before the campaign. The
+legacy 11 relations execute only on `sp1_revm_opcode_lab.elf`; the historical PUSH0/SWAP1 absolute
+anchor probe executes only on `sp1_opcode_lab.elf`. Both guests and the release launcher must belong
+to the same calibration identity.
+
+```bash
+CONTEXT_RUN="$CALIBRATION_RUN/context-campaign"
+CONTEXT_FIXTURES="$CALIBRATION_RUN/context-fixtures"
+CONTEXT_CANARY="$CALIBRATION_RUN/context-compatibility"
+
+~/.venv/bin/python experiments/opcode-gas/context_opcode_campaign.py run-compatibility-canary \
+  --calibration-run "$CALIBRATION_RUN" \
+  --controlled-manifest experiments/opcode-gas/manifests/sp1-calibration-v1.toml \
+  --baseline-derivation experiments/opcode-gas/derivations/3e1d97c461cd2ef9a40e6a02 \
+  --historical-manifest experiments/opcode-gas/tests/fixtures/historical-core-102/controlled-manifest.toml \
+  --historical-anchor-run experiments/opcode-gas/runs/09ebb08d76d3f461086b0cf4 \
+  --guest-launcher target/release/guest-launcher \
+  --revm-elf crates/guests/elf/sp1_revm_opcode_lab.elf \
+  --control-opcode-lab-elf crates/guests/elf/sp1_opcode_lab.elf \
+  --out "$CONTEXT_CANARY"
+
+~/.venv/bin/python experiments/opcode-gas/context_opcode_campaign.py run-campaign \
+  --manifest experiments/opcode-gas/manifests/sp1-context-opcode-v1.json \
+  --calibration-run "$CALIBRATION_RUN" \
+  --run "$CONTEXT_RUN" --fixtures "$CONTEXT_FIXTURES" \
+  --guest-launcher target/release/guest-launcher \
+  --revm-elf crates/guests/elf/sp1_revm_opcode_lab.elf \
+  --control-opcode-lab-elf crates/guests/elf/sp1_opcode_lab.elf
+
+~/.venv/bin/python experiments/opcode-gas/context_opcode_campaign.py seal-result \
+  --manifest experiments/opcode-gas/manifests/sp1-context-opcode-v1.json \
+  --calibration-run "$CALIBRATION_RUN" \
+  --run "$CONTEXT_RUN" \
+  --corrected-core experiments/opcode-gas/derivations/3fc67063a921182e971e7882/core-opcode-submodel.json \
+  --coverage-v5 experiments/opcode-gas/manifests/operation-coverage-v5.json \
+  --compatibility-canary "$CONTEXT_CANARY/compatibility-canary.json" \
+  --out-root experiments/opcode-gas/derivations
+```
+
+The seal command consumes only the canonical create-only adaptive run beneath the named calibration,
+live-validates that calibration and its release launcher/guest artifacts, and requires the canonical
+`$CALIBRATION_RUN/context-compatibility/compatibility-canary.json`; injected test executors are
+stamped synthetic and cannot be sealed. The result stores every round,
+failed-only decision, terminal selection, fit, formal report, and canonical fixture identity in
+`adaptive-evidence.json`; directory replay refits and re-admits all of it without SP1 execution.
+Portable replay proves the sealed bytes, identities, and exact fit graph are self-consistent; it does
+not independently reauthenticate the origin of recorded `prover_gas`. That authority comes from the
+create-only production runner plus live calibration validation at seal time.
+Parameter recovery is exact:
+`stored_b_t = (body_scale * delta_lab + r_control * stored_b_control) / r_target`.
+Common dispatch and identical setup/cleanup cancel in `delta_lab`; the composite prediction adds
+common dispatch exactly once. Operation coverage V5 is the corrected Osaka successor; V6 changes
+only the subset of these six keys whose complete sibling family passed, leaving failed keys
+unsupported. Schema-3 composite artifacts layer V6 after the corrected core and before
+the already sealed typed-storage model. Until a formal result is sampled and independently reviewed,
+do not publish V6, reseal production estimators, or run proposal validation.
+
 ## Coverage-Qualified Composite Estimator
 
 Seal the review-only SP1 composite estimator only from a clean committed checkout. The artifact

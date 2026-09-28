@@ -10,7 +10,7 @@ use raiko2_primitives::{OpcodeLabInput, OpcodeLabStorageAccess, OpcodeLabStorage
 use revm::{
     bytecode::Bytecode,
     context::{
-        TxEnv,
+        BlockEnv, TxEnv,
         transaction::{AccessList, AccessListItem},
         tx::TxEnvBuildError,
     },
@@ -18,12 +18,89 @@ use revm::{
     database::{
         BENCH_CALLER, BENCH_CALLER_BALANCE, BENCH_TARGET, BENCH_TARGET_BALANCE, InMemoryDB,
     },
-    primitives::{B256, KECCAK_EMPTY, U256, hardfork::SpecId},
+    primitives::{B256, Bytes, KECCAK_EMPTY, U256, hardfork::SpecId},
     state::AccountInfo,
 };
 
 /// Hardfork used by every stateful opcode-laboratory execution.
 pub const OPCODE_LAB_SPEC_ID: SpecId = SpecId::OSAKA;
+
+const ANCHOR_TARGET_SCENARIO: &str = "anchor_target_";
+const ANCHOR_CONTROL_SCENARIO: &str = "anchor_control";
+const ANCHOR_MAX_COUNT: u64 = 131_072;
+
+fn opcode_anchor_lane(input: &OpcodeLabInput) -> Option<u8> {
+    let expected_case = match input.opcode {
+        0x50 => "synthetic_anchor_probe_pop",
+        0x5f => "synthetic_anchor_probe_push0",
+        0x80 => "synthetic_anchor_probe_dup1",
+        0x90 => "synthetic_anchor_probe_swap1",
+        _ => return None,
+    };
+    if input.case != expected_case {
+        return None;
+    }
+    let lane = match input.scenario.as_str() {
+        ANCHOR_TARGET_SCENARIO => 0,
+        ANCHOR_CONTROL_SCENARIO => 1,
+        _ => return None,
+    };
+    let expected_raw_gas = match input.opcode {
+        0x50 | 0x5f => 2,
+        0x80 | 0x90 => 3,
+        _ => return None,
+    };
+    if input.target_raw_gas != expected_raw_gas
+        || input.target_count > ANCHOR_MAX_COUNT
+        || input.tx_gas_limit != Some(100_000)
+        || input.generator_max_count != Some(ANCHOR_MAX_COUNT)
+        || input.fixed_bytecode_len != Some(1)
+        || input.bytecode != [0x00]
+    {
+        return None;
+    }
+    Some(lane)
+}
+
+const fn mix_opcode_anchor(accumulator: u64, value: u64) -> u64 {
+    accumulator
+        .rotate_left(13)
+        .wrapping_mul(0x9e37_79b1_85eb_ca87)
+        .wrapping_add(value)
+}
+
+/// Computes the deterministic accumulator used by the synthetic anchor guest.
+#[must_use]
+pub fn opcode_anchor_accumulator(input: &OpcodeLabInput) -> Option<u64> {
+    opcode_anchor_lane(input)?;
+    let mut accumulator = 0x243f_6a88_85a3_08d3 ^ u64::from(input.opcode);
+    for iteration in 0..input.target_count {
+        accumulator = mix_opcode_anchor(accumulator, iteration);
+        accumulator = mix_opcode_anchor(accumulator, iteration.rotate_left(17));
+    }
+    Some(accumulator)
+}
+
+/// Builds the exact preimage committed by the synthetic anchor guest.
+#[must_use]
+pub fn opcode_anchor_public_input(input: &OpcodeLabInput, accumulator: u64) -> Option<[u8; 28]> {
+    let lane = opcode_anchor_lane(input)?;
+    let mut output = [0u8; 28];
+    output[0] = 1;
+    output[1] = input.opcode;
+    output[2] = lane;
+    output[4..12].copy_from_slice(&input.target_count.to_le_bytes());
+    output[12..20].copy_from_slice(&input.target_raw_gas.to_le_bytes());
+    output[20..28].copy_from_slice(&accumulator.to_le_bytes());
+    Some(output)
+}
+
+/// Computes the exact 32-byte public output committed by `sp1-opcode-lab` for an anchor input.
+#[must_use]
+pub fn opcode_anchor_public_values(input: &OpcodeLabInput) -> Option<B256> {
+    let accumulator = opcode_anchor_accumulator(input)?;
+    opcode_anchor_public_input(input, accumulator).map(keccak256)
+}
 
 /// Folds one canonical REVM execution result into the value committed by the opcode-lab guest.
 #[must_use]
@@ -58,6 +135,10 @@ pub fn revm_opcode_public_values(input: &OpcodeLabInput, accumulator: u64) -> B2
     output.extend_from_slice(&input.opcode.to_le_bytes());
     output.extend_from_slice(&input.target_count.to_le_bytes());
     output.extend_from_slice(&input.target_raw_gas.to_le_bytes());
+    output.extend_from_slice(&input.tx_value);
+    output.extend_from_slice(&(input.calldata.len() as u64).to_le_bytes());
+    output.extend_from_slice(&input.calldata);
+    output.extend_from_slice(&input.effective_block_timestamp().to_le_bytes());
     output.extend_from_slice(&accumulator.to_le_bytes());
     keccak256(output)
 }
@@ -107,12 +188,16 @@ pub fn build_benchmark_db(
 /// # Errors
 ///
 /// Returns [`TxEnvBuildError`] if REVM rejects the benchmark transaction envelope.
-pub fn build_benchmark_tx(
-    gas_limit: u64,
-    storage: Option<&OpcodeLabStorageInput>,
-) -> Result<TxEnv, TxEnvBuildError> {
-    let mut builder = TxEnv::builder_for_bench().gas_limit(gas_limit);
-    if let Some(storage) = storage
+pub fn build_benchmark_tx(input: &OpcodeLabInput) -> Result<TxEnv, TxEnvBuildError> {
+    let mut builder = TxEnv::builder_for_bench()
+        .gas_limit(
+            input
+                .execution_gas_limit()
+                .max(OpcodeLabInput::MIN_EXECUTION_GAS_LIMIT),
+        )
+        .value(U256::from_be_bytes(input.tx_value))
+        .data(Bytes::copy_from_slice(&input.calldata));
+    if let Some(storage) = input.storage.as_ref()
         && storage.access == OpcodeLabStorageAccess::Warm
     {
         builder = builder
@@ -125,14 +210,23 @@ pub fn build_benchmark_tx(
     builder.build()
 }
 
+/// Builds the canonical benchmark block environment from the normalized lab input.
+#[must_use]
+pub fn build_benchmark_block_env(input: &OpcodeLabInput) -> BlockEnv {
+    BlockEnv {
+        timestamp: U256::from(input.effective_block_timestamp()),
+        ..BlockEnv::default()
+    }
+}
+
 #[cfg(test)]
 extern crate std;
 
 #[cfg(test)]
 mod tests {
     use super::{
-        OPCODE_LAB_SPEC_ID, build_benchmark_db, build_benchmark_tx, fold_revm_opcode_program,
-        revm_opcode_public_values,
+        OPCODE_LAB_SPEC_ID, build_benchmark_block_env, build_benchmark_db, build_benchmark_tx,
+        fold_revm_opcode_program, opcode_anchor_public_values, revm_opcode_public_values,
     };
     use raiko2_primitives::{
         OpcodeLabStorageAccess, OpcodeLabStorageInput, OpcodeLabStorageLane,
@@ -165,6 +259,17 @@ mod tests {
         }
     }
 
+    fn tx_input(
+        gas_limit: u64,
+        storage: Option<&OpcodeLabStorageInput>,
+    ) -> raiko2_primitives::OpcodeLabInput {
+        raiko2_primitives::OpcodeLabInput {
+            tx_gas_limit: Some(gas_limit),
+            storage: storage.cloned(),
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn opcode_lab_uses_osaka() {
         assert_eq!(OPCODE_LAB_SPEC_ID, SpecId::OSAKA);
@@ -186,11 +291,80 @@ mod tests {
             revm_opcode_public_values(&input, 4),
             B256::from_slice(
                 &alloy_primitives::hex::decode(
-                    "97fadfb98a033ca1f2c4a5fc10e77a2e2fee83ebcff769c6a1af05d943f4345d",
+                    "eae827c206c2bdc7b97283dc8f4e06f8e4659da1701dda862eb65574468f0299",
                 )
                 .unwrap(),
             )
         );
+    }
+
+    #[test]
+    fn anchor_public_values_bind_the_exact_lane_and_envelope() {
+        let target = raiko2_primitives::OpcodeLabInput {
+            case: "synthetic_anchor_probe_push0".into(),
+            scenario: "anchor_target_".into(),
+            opcode: 0x5f,
+            target_count: 8,
+            target_raw_gas: 2,
+            tx_gas_limit: Some(100_000),
+            bytecode: vec![0x00],
+            generator_max_count: Some(131_072),
+            fixed_bytecode_len: Some(1),
+            ..Default::default()
+        };
+        let mut control = target.clone();
+        control.scenario = "anchor_control".into();
+        assert_ne!(
+            opcode_anchor_public_values(&target),
+            opcode_anchor_public_values(&control)
+        );
+        control.tx_gas_limit = None;
+        assert_eq!(opcode_anchor_public_values(&control), None);
+    }
+
+    #[test]
+    fn benchmark_environment_uses_the_explicit_context_input() {
+        let mut value = [0u8; 32];
+        value[31] = 7;
+        let input = raiko2_primitives::OpcodeLabInput {
+            tx_gas_limit: Some(123_456),
+            tx_value: value,
+            calldata: vec![1, 2, 3],
+            block_timestamp: Some(17),
+            ..Default::default()
+        };
+
+        let tx = build_benchmark_tx(&input).expect("valid benchmark transaction");
+        let block = build_benchmark_block_env(&input);
+
+        assert_eq!(tx.gas_limit, 123_456);
+        assert_eq!(tx.value, U256::from(7));
+        assert_eq!(tx.data.as_ref(), &[1, 2, 3]);
+        assert_eq!(block.timestamp, U256::from(17));
+    }
+
+    #[test]
+    fn public_commitment_binds_each_resolved_context_field() {
+        let baseline = raiko2_primitives::OpcodeLabInput::default();
+        let baseline_digest = revm_opcode_public_values(&baseline, 4);
+        let mut value = [0u8; 32];
+        value[31] = 1;
+        for alternate in [
+            raiko2_primitives::OpcodeLabInput {
+                tx_value: value,
+                ..baseline.clone()
+            },
+            raiko2_primitives::OpcodeLabInput {
+                calldata: vec![1],
+                ..baseline.clone()
+            },
+            raiko2_primitives::OpcodeLabInput {
+                block_timestamp: Some(0),
+                ..baseline.clone()
+            },
+        ] {
+            assert_ne!(revm_opcode_public_values(&alternate, 4), baseline_digest);
+        }
     }
 
     #[test]
@@ -237,7 +411,8 @@ mod tests {
         let cold = storage([0x22; 32], OpcodeLabStorageAccess::Cold);
 
         for storage in [None, Some(&cold)] {
-            let tx = build_benchmark_tx(123_456, storage).expect("valid benchmark transaction");
+            let tx = build_benchmark_tx(&tx_input(123_456, storage))
+                .expect("valid benchmark transaction");
             assert_eq!(tx.gas_limit, 123_456);
             assert!(tx.access_list.0.is_empty());
         }
@@ -247,7 +422,8 @@ mod tests {
     fn warm_transaction_has_exact_target_slot_access_list() {
         let warm = storage([0x22; 32], OpcodeLabStorageAccess::Warm);
 
-        let tx = build_benchmark_tx(123_456, Some(&warm)).expect("valid benchmark transaction");
+        let tx = build_benchmark_tx(&tx_input(123_456, Some(&warm)))
+            .expect("valid benchmark transaction");
 
         assert_eq!(
             tx.access_list,
@@ -275,7 +451,7 @@ mod tests {
                 .modify_cfg_chained(|cfg| cfg.set_spec_and_mainnet_gas_params(OPCODE_LAB_SPEC_ID))
                 .with_db(build_benchmark_db(bytecode.clone(), Some(storage)));
             ctx.build_mainnet()
-                .transact(build_benchmark_tx(100_000, Some(storage)).expect("valid tx"))
+                .transact(build_benchmark_tx(&tx_input(100_000, Some(storage))).expect("valid tx"))
                 .expect("SLOAD execution")
                 .result
                 .tx_gas_used()
@@ -290,7 +466,8 @@ mod tests {
 
     #[test]
     fn stateless_transaction_preserves_benchmark_envelope() {
-        let actual = build_benchmark_tx(123_456, None).expect("valid benchmark transaction");
+        let actual =
+            build_benchmark_tx(&tx_input(123_456, None)).expect("valid benchmark transaction");
         let expected = TxEnv::builder_for_bench()
             .gas_limit(123_456)
             .build()

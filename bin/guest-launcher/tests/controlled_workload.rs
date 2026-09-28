@@ -9,7 +9,8 @@ use controlled_workload::{
     ControlledBlockRowSpec, ControlledBlockSplit, ControlledExecutionIdentity, ControlledFootprint,
     ControlledLane, ControlledOperationUnits, ControlledOverheadLane, ControlledProgram,
     ControlledStateHoldoutLane, ControlledStateHoldoutPairSpec, ControlledTrace,
-    ControlledWorkloadSpec, PairedPrecompileShape, build_controlled_block_fixture,
+    ControlledWorkloadSpec, PairedPrecompileShape, block_environment_sha256,
+    build_controlled_block_fixture,
     build_controlled_block_fixture_with_extra_prestate_account_for_test,
     build_controlled_state_holdout_fixtures, build_required_overhead_fixtures,
     check_revm_opcode_semantics, controlled_block_row_id, controlled_execution_row_id,
@@ -27,6 +28,7 @@ use raiko2_primitives::{
 };
 use raiko2_protocol_shasta::libhash::hash_proposal;
 use raiko2_zkgas_trace::{PricingBasis, ProposalTraceStatus};
+use revm::context::BlockEnv;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
@@ -96,6 +98,7 @@ fn stateful_input(
             access,
             operation,
         }),
+        ..Default::default()
     }
 }
 
@@ -797,6 +800,7 @@ fn revm_trace_executes_and_binds_the_exact_sp1_input() {
         generator_max_count: Some(8),
         fixed_bytecode_len: Some(6),
         storage: None,
+        ..Default::default()
     };
     let encoded = bincode::serialize(&input).unwrap();
     let expected_input_sha256 = alloy_primitives::hex::encode(Sha256::digest(encoded));
@@ -808,10 +812,7 @@ fn revm_trace_executes_and_binds_the_exact_sp1_input() {
     };
     let alternate_trace = trace_revm_opcode_workload(&alternate_backend_encoding).unwrap();
 
-    assert_eq!(
-        trace.schema_version, 1,
-        "stateless trace schema stays compatible"
-    );
+    assert_eq!(trace.schema_version, 3);
     assert_eq!(trace.backend_input_sha256, expected_input_sha256);
     assert_eq!(
         trace.backend_input_len,
@@ -851,12 +852,13 @@ fn opcode_identity_evidence_binds_the_deserialized_input_and_trace_identities() 
         generator_max_count: Some(8),
         fixed_bytecode_len: Some(6),
         storage: None,
+        ..Default::default()
     };
 
     let identity = controlled_opcode_identity(&input).unwrap();
     let trace = trace_revm_opcode_workload(&input).unwrap();
 
-    assert_eq!(identity.schema_version, 1);
+    assert_eq!(identity.schema_version, 2);
     assert_eq!(identity.input, input);
     assert_eq!(identity.backend_input_sha256, trace.backend_input_sha256);
     assert_eq!(identity.backend_input_len, trace.backend_input_len);
@@ -867,6 +869,99 @@ fn opcode_identity_evidence_binds_the_deserialized_input_and_trace_identities() 
     );
     assert_eq!(identity.access_list_sha256, trace.access_list_sha256);
     assert_eq!(identity.prestate_sha256, trace.prestate_sha256);
+    assert_eq!(
+        identity.block_environment_sha256,
+        trace.block_environment_sha256
+    );
+}
+
+#[test]
+fn block_environment_identity_binds_blob_option_and_fields() {
+    let baseline = BlockEnv::default();
+    let baseline_digest = block_environment_sha256(&baseline).unwrap();
+
+    let mut no_blob = baseline.clone();
+    no_blob.blob_excess_gas_and_price = None;
+    assert_ne!(block_environment_sha256(&no_blob).unwrap(), baseline_digest);
+
+    let mut changed_excess = baseline.clone();
+    changed_excess
+        .blob_excess_gas_and_price
+        .as_mut()
+        .unwrap()
+        .excess_blob_gas = 1;
+    assert_ne!(
+        block_environment_sha256(&changed_excess).unwrap(),
+        baseline_digest
+    );
+
+    let mut changed_price = baseline;
+    changed_price
+        .blob_excess_gas_and_price
+        .as_mut()
+        .unwrap()
+        .blob_gasprice += 1;
+    assert_ne!(
+        block_environment_sha256(&changed_price).unwrap(),
+        baseline_digest
+    );
+}
+
+#[test]
+fn opcode_identity_and_workload_bind_resolved_context_environment() {
+    let baseline = OpcodeLabInput {
+        case: "address".into(),
+        scenario: "canonical".into(),
+        opcode: 0x30,
+        target_count: 1,
+        target_raw_gas: 2,
+        tx_gas_limit: Some(100_000),
+        bytecode: vec![0x30, 0x00],
+        fixed_bytecode_len: Some(2),
+        ..Default::default()
+    };
+    let mut value = [0u8; 32];
+    value[31] = 7;
+    let explicit = OpcodeLabInput {
+        tx_value: value,
+        calldata: vec![1, 2, 3],
+        block_timestamp: Some(17),
+        ..baseline.clone()
+    };
+
+    let baseline_identity = controlled_opcode_identity(&baseline).unwrap();
+    let explicit_zero_timestamp = OpcodeLabInput {
+        block_timestamp: Some(0),
+        ..baseline.clone()
+    };
+    let zero_identity = controlled_opcode_identity(&explicit_zero_timestamp).unwrap();
+    let identity = controlled_opcode_identity(&explicit).unwrap();
+    assert_ne!(
+        zero_identity.block_environment_sha256,
+        baseline_identity.block_environment_sha256
+    );
+    assert_ne!(zero_identity.workload_id, baseline_identity.workload_id);
+    assert_ne!(
+        identity.backend_input_sha256,
+        baseline_identity.backend_input_sha256
+    );
+    assert_ne!(identity.workload_id, baseline_identity.workload_id);
+    assert_ne!(
+        identity.transaction_envelope_sha256,
+        baseline_identity.transaction_envelope_sha256
+    );
+    assert_ne!(
+        identity.block_environment_sha256,
+        baseline_identity.block_environment_sha256
+    );
+
+    let spec = controlled_opcode_workload_spec(&explicit);
+    assert_eq!(spec.environment["block_timestamp"], 17);
+    assert_eq!(
+        spec.input["tx_value"],
+        "0x0000000000000000000000000000000000000000000000000000000000000007"
+    );
+    assert_eq!(spec.input["calldata"], "0x010203");
 }
 
 #[test]
@@ -882,13 +977,14 @@ fn opcode_identity_bundle_is_deterministic_and_contains_a_separate_real_report()
         generator_max_count: Some(8),
         fixed_bytecode_len: Some(6),
         storage: None,
+        ..Default::default()
     };
 
     let first = controlled_opcode_identity_bundle(&input).unwrap();
     let second = controlled_opcode_identity_bundle(&input).unwrap();
 
     assert_eq!(first, second);
-    assert_eq!(first.schema_version, 1);
+    assert_eq!(first.schema_version, 2);
     assert!(first.expected_public_values.starts_with("0x"));
     assert_eq!(first.expected_public_values.len(), 66);
     assert_eq!(first.identity.input, input);
@@ -919,7 +1015,7 @@ fn native_identity_public_values_match_the_frozen_guest_baseline() {
 
     assert_eq!(
         bundle.expected_public_values,
-        "0x9318bc580c9b2aa315a8649bd205867ef84a5d28fecdb187ec57ba86f409ec16"
+        "0xff91cb3a401b4a14b5714892ed3550857d5e65cd9546263565607cf7f95029fe"
     );
 }
 
@@ -952,7 +1048,7 @@ fn stateful_sload_trace_uses_osaka_and_records_exact_warm_and_cold_ledgers() {
 
     for (input, trace) in &traces {
         let workload = controlled_opcode_workload_spec(input);
-        assert_eq!(trace.schema_version, 2);
+        assert_eq!(trace.schema_version, 3);
         assert_eq!(trace.evm_spec, "osaka");
         assert_eq!(trace.revm_version, "41.0.0");
         assert_eq!(trace.shared_constructor, "raiko2-opcode-lab");
@@ -1204,6 +1300,7 @@ fn revm_trace_executes_the_osaka_clz_canary() {
         generator_max_count: None,
         fixed_bytecode_len: Some(4),
         storage: None,
+        ..Default::default()
     };
 
     let trace = trace_revm_opcode_workload(&input).unwrap();
@@ -1270,6 +1367,7 @@ fn revm_trace_rejects_declared_count_or_raw_gas_that_execution_does_not_match() 
         generator_max_count: Some(8),
         fixed_bytecode_len: Some(6),
         storage: None,
+        ..Default::default()
     };
     assert!(
         trace_revm_opcode_workload(&input)
@@ -1326,6 +1424,7 @@ fn fixed_footprint_add_sweep_has_constant_real_non_target_execution() {
             generator_max_count: Some(max_count),
             bytecode,
             storage: None,
+            ..Default::default()
         }
     }
 

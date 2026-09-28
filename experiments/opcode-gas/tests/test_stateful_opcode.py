@@ -422,6 +422,16 @@ def _synthetic_identity(fixture, report):
     }
 
 
+def _synthetic_bundle(fixture):
+    lane = fixture["case_record"]["lane"]
+    native_report = _synthetic_report(fixture, lane)
+    return {
+        "schema_version": 1,
+        "identity": _synthetic_identity(fixture, native_report),
+        "report": native_report,
+    }
+
+
 class StatefulTraceAdmissionTests(unittest.TestCase):
     def setUp(self):
         self.manifest = stateful.StatefulCampaignManifest.from_mapping(
@@ -433,17 +443,15 @@ class StatefulTraceAdmissionTests(unittest.TestCase):
             self.manifest, scenario, lane=lane, count=count
         )
 
-    def identity(self, fixture):
-        lane = fixture["case_record"]["lane"]
-        report = _synthetic_report(fixture, lane)
-        return _synthetic_identity(fixture, report)
+    def bundle(self, fixture):
+        return _synthetic_bundle(fixture)
 
     def admit_fixture(self, fixture, reports, *, repeat_index):
         return stateful.admit_stateful_fixture_trace(
             self.manifest,
             fixture,
             reports,
-            expected_identity=self.identity(fixture),
+            expected_bundle=self.bundle(fixture),
             repeat_index=repeat_index,
         )
 
@@ -462,8 +470,8 @@ class StatefulTraceAdmissionTests(unittest.TestCase):
             target_reports,
             control_fixture,
             control_reports,
-            target_identity=self.identity(target_fixture),
-            control_identity=self.identity(control_fixture),
+            target_bundle=self.bundle(target_fixture),
+            control_bundle=self.bundle(control_fixture),
             repeat_index=repeat_index,
         )
 
@@ -486,7 +494,8 @@ class StatefulTraceAdmissionTests(unittest.TestCase):
         fixture = self.fixture(scenario="sload_warm_nonzero", count=1)
         with tempfile.TemporaryDirectory() as directory:
             input_path = pathlib.Path(directory) / "guest-input.json"
-            bundle_path = pathlib.Path(directory) / "identity-bundle.json"
+            expected_bundle_path = pathlib.Path(directory) / "expected-bundle.json"
+            formal_bundle_path = pathlib.Path(directory) / "formal-bundle.json"
             input_path.write_bytes(
                 opcode_gas.canonical_json(fixture["guest_input"]) + b"\n"
             )
@@ -507,39 +516,43 @@ class StatefulTraceAdmissionTests(unittest.TestCase):
                 capture_output=True,
                 text=True,
             )
-            subprocess.run(
-                [
-                    str(ROOT / "target" / "debug" / "guest-launcher"),
-                    "--stage",
-                    "revm-opcode-identity",
-                    "--proof-type",
-                    "native",
-                    "--input",
-                    str(input_path),
-                    "--json-out",
-                    str(bundle_path),
-                ],
-                cwd=ROOT,
-                check=True,
-            )
-            bundle = json.loads(bundle_path.read_text())
+            for output_path in (expected_bundle_path, formal_bundle_path):
+                subprocess.run(
+                    [
+                        str(ROOT / "target" / "debug" / "guest-launcher"),
+                        "--stage",
+                        "revm-opcode-identity",
+                        "--proof-type",
+                        "native",
+                        "--input",
+                        str(input_path),
+                        "--json-out",
+                        str(output_path),
+                    ],
+                    cwd=ROOT,
+                    check=True,
+                )
+            expected_bundle = json.loads(expected_bundle_path.read_text())
+            formal_bundle = json.loads(formal_bundle_path.read_text())
+
+        self.assertEqual(expected_bundle, formal_bundle)
 
         admission = stateful.admit_stateful_fixture_trace(
             self.manifest,
             fixture,
-            [bundle["report"]],
-            expected_identity=bundle["identity"],
+            [formal_bundle["report"]],
+            expected_bundle=expected_bundle,
             repeat_index=0,
         )
 
         self.assertEqual(
             admission["backend_input_sha256"],
-            bundle["identity"]["backend_input_sha256"],
+            expected_bundle["identity"]["backend_input_sha256"],
         )
         self.assertEqual(
             admission["identity_evidence_sha256"],
             hashlib.sha256(
-                opcode_gas.canonical_json(bundle["identity"])
+                opcode_gas.canonical_json(expected_bundle["identity"])
             ).hexdigest(),
         )
 
@@ -599,6 +612,17 @@ class StatefulTraceAdmissionTests(unittest.TestCase):
         program["observed_final_storage"] = stateful.ZERO
 
         with self.assertRaisesRegex(ValueError, "semantic SSTORE"):
+            self.admit_fixture(fixture, [report], repeat_index=0)
+
+    def test_lane_admission_rejects_fully_consistent_raw_gas_mutation(self):
+        fixture = self.fixture()
+        report = _synthetic_report(fixture, "target")
+        trace = report["controlled_trace"]
+        trace["executed_opcode_raw_gas"]["opcode:0x55"] += 777
+        trace["total_raw_gas"] += 777
+        trace["non_target_raw_gas"] += 777
+
+        with self.assertRaisesRegex(ValueError, "native trace"):
             self.admit_fixture(fixture, [report], repeat_index=0)
 
     def test_pair_admission_binds_order_and_rejects_all_confounds(self):

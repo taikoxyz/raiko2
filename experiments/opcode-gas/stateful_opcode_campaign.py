@@ -813,14 +813,14 @@ def admit_stateful_fixture_trace(
     fixture: Mapping[str, Any],
     report_matches: Sequence[Mapping[str, Any]],
     *,
-    expected_identity: Mapping[str, Any],
+    expected_bundle: Mapping[str, Any],
     repeat_index: int,
 ) -> dict[str, Any]:
-    """Admits one lane against replayed Rust identity evidence and an exact host trace.
+    """Admits one lane against a replayed Rust identity/native-trace bundle.
 
-    The caller must regenerate ``expected_identity`` from the explicitly supplied canonical
-    guest-input with the reviewed host helper before reading run reports. Evidence copied from a
-    run directory or derived from ``report_matches`` is not an independent identity source.
+    The caller must regenerate ``expected_bundle`` from the explicitly supplied canonical
+    guest-input with the reviewed host helper before reading formal run reports. A bundle copied
+    from a run directory or derived from ``report_matches`` is not an independent evidence source.
     """
 
     if type(repeat_index) is not int or not 0 <= repeat_index < manifest.repeats:
@@ -843,6 +843,15 @@ def admit_stateful_fixture_trace(
     if json.loads(canonical_json(fixture)) != expected_fixture:
         raise ValueError("stateful fixture differs from canonical generated layout")
 
+    if not isinstance(expected_bundle, Mapping) or set(expected_bundle) != {
+        "schema_version",
+        "identity",
+        "report",
+    }:
+        raise ValueError("canonical Rust identity bundle has an invalid shape")
+    if expected_bundle.get("schema_version") != 1:
+        raise ValueError("canonical Rust identity bundle schema differs")
+    expected_identity = expected_bundle.get("identity")
     identity_fields = {
         "schema_version",
         "input",
@@ -874,6 +883,35 @@ def admit_stateful_fixture_trace(
     ):
         _require_sha256(expected_identity.get(field), f"canonical Rust {field}")
     identity_evidence_sha256 = sha256_bytes(canonical_json(expected_identity))
+
+    expected_native_report = expected_bundle.get("report")
+    if not isinstance(expected_native_report, Mapping) or set(expected_native_report) != {
+        "guest_input_sha256",
+        "guest_input_bincode_length",
+        "controlled_trace",
+    }:
+        raise ValueError("canonical Rust native report has an invalid shape")
+    expected_native_trace = expected_native_report.get("controlled_trace")
+    expected_native_semantic = (
+        expected_native_trace.get("semantic_check")
+        if isinstance(expected_native_trace, Mapping)
+        else None
+    )
+    if (
+        expected_native_report.get("guest_input_sha256")
+        != f"0x{expected_backend_sha256}"
+        or expected_native_report.get("guest_input_bincode_length")
+        != expected_backend_len
+        or not isinstance(expected_native_trace, Mapping)
+        or expected_native_trace.get("kind") != "revm_opcode"
+        or expected_native_trace.get("backend_input_sha256")
+        != expected_backend_sha256
+        or expected_native_trace.get("backend_input_len") != expected_backend_len
+        or not isinstance(expected_native_semantic, Mapping)
+        or expected_native_semantic.get("backend_input_sha256")
+        != expected_backend_sha256
+    ):
+        raise ValueError("canonical Rust native report differs from its identity evidence")
 
     report = report_matches[0]
     if not isinstance(report, Mapping):
@@ -998,6 +1036,8 @@ def admit_stateful_fixture_trace(
     semantic_check_sha256 = _validate_semantic_check(
         case_record, trace.get("semantic_check"), backend_input_sha256
     )
+    if canonical_json(trace) != canonical_json(expected_native_trace):
+        raise ValueError("formal trace differs from independently replayed native trace")
     trace_sha256 = sha256_bytes(canonical_json(trace))
     row_identity = sha256_bytes(
         canonical_json(
@@ -1075,8 +1115,8 @@ def admit_stateful_pair(
     control_fixture: Mapping[str, Any],
     control_reports: Sequence[Mapping[str, Any]],
     *,
-    target_identity: Mapping[str, Any],
-    control_identity: Mapping[str, Any],
+    target_bundle: Mapping[str, Any],
+    control_bundle: Mapping[str, Any],
     repeat_index: int,
 ) -> dict[str, Any]:
     """Admits an ordered target/control relation and rejects every pair confound."""
@@ -1097,14 +1137,14 @@ def admit_stateful_pair(
         manifest,
         target_fixture,
         target_reports,
-        expected_identity=target_identity,
+        expected_bundle=target_bundle,
         repeat_index=repeat_index,
     )
     control = admit_stateful_fixture_trace(
         manifest,
         control_fixture,
         control_reports,
-        expected_identity=control_identity,
+        expected_bundle=control_bundle,
         repeat_index=repeat_index,
     )
     if target["backend_input_sha256"] == control["backend_input_sha256"]:

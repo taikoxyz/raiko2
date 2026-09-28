@@ -2855,6 +2855,7 @@ mod tests {
             bytecode: vec![0x00],
             generator_max_count: Some(131_072),
             fixed_bytecode_len: Some(1),
+            storage: None,
         };
         let encoded = bincode::serialize(&input).unwrap();
         let expected_hash = format!("0x{}", hex::encode(Sha256::digest(&encoded)));
@@ -3226,6 +3227,7 @@ mod tests {
             bytecode: vec![0x60, 0x01, 0x60, 0x02, 0x01, 0x00],
             generator_max_count: Some(8),
             fixed_bytecode_len: Some(6),
+            storage: None,
         };
         let mut report =
             BenchReport::new("revm-opcode-lab", "execute", "core", "input.json".into());
@@ -3260,6 +3262,7 @@ mod tests {
             bytecode: vec![0x60, 0x01, 0x60, 0x02, 0x01, 0x00],
             generator_max_count: Some(8),
             fixed_bytecode_len: Some(6),
+            storage: None,
         };
         let mut report =
             BenchReport::new("revm-opcode-lab", "execute", "core", "input.json".into());

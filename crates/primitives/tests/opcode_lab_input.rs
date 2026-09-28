@@ -71,6 +71,27 @@ fn opcode_lab_input_is_public_and_deserializes_hex_bytecode() {
 }
 
 #[test]
+fn opcode_lab_stateless_input_round_trips_through_bincode_without_storage() {
+    let input = OpcodeLabInput {
+        case: "add".into(),
+        scenario: "arithmetic".into(),
+        opcode: 0x01,
+        target_count: 4,
+        target_raw_gas: 3,
+        tx_gas_limit: Some(100_000),
+        bytecode: vec![0x60, 0x01, 0x60, 0x02, 0x01, 0x00],
+        generator_max_count: Some(8),
+        fixed_bytecode_len: Some(6),
+        storage: None,
+    };
+
+    let encoded = bincode::serialize(&input).expect("serialize stateless opcode input");
+    let decoded: OpcodeLabInput =
+        bincode::deserialize(&encoded).expect("deserialize stateless opcode input");
+    assert_eq!(decoded, input);
+}
+
+#[test]
 fn opcode_lab_storage_words_round_trip_at_full_width_in_json_and_bincode() {
     let input = storage_input(&format!(
         r#"{{
@@ -138,7 +159,8 @@ fn opcode_lab_storage_contract_rejects_invalid_lane_and_target_opcode_mismatch()
 fn opcode_lab_control_lane_uses_reference_opcode_and_rejects_an_extra_storage_site() {
     let valid = OpcodeLabInput {
         opcode: 0x50,
-        target_count: 1,
+        target_count: 2,
+        target_raw_gas: 2,
         bytecode: store_program(false, false),
         storage: Some(OpcodeLabStorageInput {
             measurement_opcode: 0x55,
@@ -160,6 +182,30 @@ fn opcode_lab_control_lane_uses_reference_opcode_and_rejects_an_extra_storage_si
     valid
         .validate_storage_contract()
         .expect("control reference opcode is lane-correct");
+    assert_eq!(
+        OpcodeLabInput {
+            opcode: 0x01,
+            ..valid.clone()
+        }
+        .validate_storage_contract(),
+        Err("SSTORE control opcode must declare POP")
+    );
+    assert_eq!(
+        OpcodeLabInput {
+            target_count: 1,
+            ..valid.clone()
+        }
+        .validate_storage_contract(),
+        Err("control opcode count differs from target_count")
+    );
+    assert_eq!(
+        OpcodeLabInput {
+            target_raw_gas: 3,
+            ..valid.clone()
+        }
+        .validate_storage_contract(),
+        Err("SSTORE control target_raw_gas must equal POP raw gas")
+    );
 
     let invalid = OpcodeLabInput {
         bytecode: store_program(false, true),
@@ -271,6 +317,8 @@ fn opcode_lab_dirty_store_requires_warm_access_and_identical_declared_prefixes()
 
     let control = OpcodeLabInput {
         opcode: 0x50,
+        target_count: 2,
+        target_raw_gas: 2,
         bytecode: framed(std::slice::from_ref(&control_program)),
         storage: Some(OpcodeLabStorageInput {
             lane: OpcodeLabStorageLane::Control,
@@ -332,5 +380,56 @@ fn opcode_lab_rejects_multiple_measured_storage_sites_in_one_microprogram() {
     assert_eq!(
         input.validate_storage_contract(),
         Err("microprogram contains multiple measured storage opcodes")
+    );
+}
+
+#[test]
+fn opcode_lab_control_binds_declared_reference_opcode_count_and_raw_gas() {
+    let mut reference = push32(0);
+    reference.extend([0x19, 0x50, 0x00]);
+    let input = OpcodeLabInput {
+        opcode: 0x19,
+        target_count: 2,
+        target_raw_gas: 3,
+        bytecode: framed(&[reference.clone(), reference]),
+        storage: Some(OpcodeLabStorageInput {
+            measurement_opcode: 0x54,
+            lane: OpcodeLabStorageLane::Control,
+            slot: [0; 32],
+            original_value: [0; 32],
+            access: OpcodeLabStorageAccess::Warm,
+            operation: OpcodeLabStorageOperation::Load {
+                expected_value: [0; 32],
+            },
+        }),
+        ..OpcodeLabInput::default()
+    };
+    input
+        .validate_storage_contract()
+        .expect("valid concrete SLOAD reference declaration");
+
+    assert_eq!(
+        OpcodeLabInput {
+            opcode: 0x01,
+            ..input.clone()
+        }
+        .validate_storage_contract(),
+        Err("SLOAD control opcode must declare NOT")
+    );
+    assert_eq!(
+        OpcodeLabInput {
+            target_count: 1,
+            ..input.clone()
+        }
+        .validate_storage_contract(),
+        Err("control opcode count differs from target_count")
+    );
+    assert_eq!(
+        OpcodeLabInput {
+            target_raw_gas: 4,
+            ..input
+        }
+        .validate_storage_contract(),
+        Err("SLOAD control target_raw_gas must equal NOT raw gas")
     );
 }

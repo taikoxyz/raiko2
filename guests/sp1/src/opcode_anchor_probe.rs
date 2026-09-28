@@ -186,6 +186,7 @@ mod tests {
             bytecode: vec![0x00],
             generator_max_count: Some(131_072),
             fixed_bytecode_len: Some(1),
+            storage: None,
         }
     }
 

@@ -396,9 +396,7 @@ class StatefulCampaignManifest:
                 )
             )
 
-        if json.loads(canonical_json(value)) != expected:
-            raise ValueError("stateful campaign manifest differs from the frozen contract")
-        return cls(
+        manifest = cls(
             schema_version=SCHEMA_VERSION,
             purpose=PURPOSE,
             fit_counts=FIT_COUNTS,
@@ -409,6 +407,10 @@ class StatefulCampaignManifest:
             reference_registry=MappingProxyType(dict(REFERENCE_REGISTRY)),
             scenarios=tuple(scenarios),
         )
+        validate_stateful_manifest_program_shapes(manifest)
+        if json.loads(canonical_json(value)) != expected:
+            raise ValueError("stateful campaign manifest differs from the frozen contract")
+        return manifest
 
 
 def load_stateful_campaign_manifest(path: pathlib.Path) -> StatefulCampaignManifest:
@@ -438,6 +440,7 @@ class StatefulProgram:
     bytecode: bytes
     operand_immediate_spans: tuple[OperandImmediateSpan, ...]
     program_shape_sha256: str
+    opcode_counts: Mapping[int, int]
 
 
 def _push32(program: bytearray, spans: list[OperandImmediateSpan], role: str, value: int) -> None:
@@ -463,6 +466,20 @@ def _mask_immediates(bytecode: bytes, spans: Sequence[OperandImmediateSpan]) -> 
         masked[span.start : span.end] = bytes(32)
         previous_end = span.end
     return bytes(masked)
+
+
+def _program_opcode_counts(bytecode: bytes) -> Mapping[int, int]:
+    counts: dict[int, int] = {}
+    cursor = 0
+    while cursor < len(bytecode):
+        opcode = bytecode[cursor]
+        counts[opcode] = counts.get(opcode, 0) + 1
+        cursor += 1
+        if 0x60 <= opcode <= 0x7F:
+            cursor += opcode - 0x5F
+            if cursor > len(bytecode):
+                raise ValueError("truncated PUSH immediate in stateful program")
+    return MappingProxyType(dict(sorted(counts.items())))
 
 
 def build_stateful_program(
@@ -499,6 +516,7 @@ def build_stateful_program(
         bytecode=bytecode,
         operand_immediate_spans=tuple(spans),
         program_shape_sha256=shape_hash,
+        opcode_counts=_program_opcode_counts(bytecode),
     )
 
 
@@ -511,6 +529,8 @@ def validate_program_shape_pair(low: StatefulProgram, high: StatefulProgram) -> 
     high_masked = _mask_immediates(high.bytecode, high.operand_immediate_spans)
     if low_masked != high_masked:
         raise ValueError("low/high program shape differs outside operand spans")
+    if dict(low.opcode_counts) != dict(high.opcode_counts):
+        raise ValueError("low/high reference execution ledger differs")
     low_hash = sha256_bytes(low_masked)
     high_hash = sha256_bytes(high_masked)
     if (
@@ -521,6 +541,42 @@ def validate_program_shape_pair(low: StatefulProgram, high: StatefulProgram) -> 
         raise ValueError("low/high program shape hash differs")
 
 
+def _reference_ledger(scenario: StatefulScenario) -> dict[str, int]:
+    target = build_stateful_program(scenario, lane="target", measured=True)
+    control = build_stateful_program(scenario, lane="control", measured=True)
+    opcodes = sorted(set(target.opcode_counts) | set(control.opcode_counts))
+    ledger = {
+        f"opcode:0x{opcode:02x}": target.opcode_counts.get(opcode, 0)
+        - control.opcode_counts.get(opcode, 0)
+        for opcode in opcodes
+    }
+    ledger = {key: value for key, value in ledger.items() if value}
+    if ledger.get(f"opcode:0x{scenario.measurement_opcode:02x}") != 1:
+        raise ValueError("stateful reference ledger does not contain one measurement opcode")
+    if sum(ledger.values()) != 0:
+        raise ValueError("stateful reference execution ledger is not zero sum")
+    return ledger
+
+
+def validate_stateful_manifest_program_shapes(
+    manifest: StatefulCampaignManifest,
+) -> None:
+    for high in manifest.scenarios:
+        if not high.diagnostic:
+            continue
+        if high.low_variant is None:
+            raise ValueError("diagnostic scenario is missing its low variant")
+        low = manifest.scenario(high.low_variant)
+        for lane in ("target", "control"):
+            for measured in (False, True):
+                validate_program_shape_pair(
+                    build_stateful_program(low, lane=lane, measured=measured),
+                    build_stateful_program(high, lane=lane, measured=measured),
+                )
+        if _reference_ledger(low) != _reference_ledger(high):
+            raise ValueError("low/high reference execution ledger differs")
+
+
 def _program_contract(program: StatefulProgram) -> dict[str, Any]:
     return {
         "lane": program.lane,
@@ -529,6 +585,9 @@ def _program_contract(program: StatefulProgram) -> dict[str, Any]:
             span.as_payload() for span in program.operand_immediate_spans
         ],
         "program_shape_sha256": program.program_shape_sha256,
+        "opcode_counts": {
+            f"0x{opcode:02x}": count for opcode, count in program.opcode_counts.items()
+        },
     }
 
 
@@ -542,6 +601,24 @@ def stateful_case_id(scenario: StatefulScenario, *, lane: str, count: int) -> st
                 "lane": lane,
                 "count": count,
                 "storage": scenario.storage_payload(lane),
+            }
+        )
+    )
+
+
+def stateful_pair_id(scenario: StatefulScenario, *, count: int) -> str:
+    return sha256_bytes(
+        canonical_json(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "purpose": PURPOSE,
+                "scenario": scenario.name,
+                "relation_count": count,
+                "storage": {
+                    key: value
+                    for key, value in scenario.storage_payload("target").items()
+                    if key != "lane"
+                },
             }
         )
     )
@@ -571,14 +648,24 @@ def generate_stateful_fixture(
     encoded = encode_fixed_microprograms(programs)
     storage = scenario.storage_payload(lane)
     case_id = stateful_case_id(scenario, lane=lane, count=count)
+    pair_id = stateful_pair_id(scenario, count=count)
     opcode = scenario.measurement_opcode if lane == "target" else scenario.reference_opcode
+    if lane == "target":
+        concrete_count = count
+        concrete_raw_gas = scenario.target_raw_gas
+    elif scenario.measurement_opcode == SLOAD:
+        concrete_count = GENERATOR_MAX_COUNT
+        concrete_raw_gas = 3
+    else:
+        concrete_count = GENERATOR_MAX_COUNT * 2
+        concrete_raw_gas = 2
     tx_gas_limit = max(100_000, 1_000_000 + GENERATOR_MAX_COUNT * scenario.target_raw_gas)
     guest_input = {
         "case": case_id,
         "scenario": scenario.name,
         "opcode": opcode,
-        "target_count": count,
-        "target_raw_gas": scenario.target_raw_gas,
+        "target_count": concrete_count,
+        "target_raw_gas": concrete_raw_gas,
         "tx_gas_limit": tx_gas_limit,
         "bytecode": "0x" + encoded.hex(),
         "generator_max_count": GENERATOR_MAX_COUNT,
@@ -590,13 +677,14 @@ def generate_stateful_fixture(
         "purpose": PURPOSE,
         "kind": "opcode",
         "case_id": case_id,
+        "pair_id": pair_id,
         "case": case_id,
         "scenario": scenario.name,
         "lane": lane,
-        "count": count,
+        "relation_count": count,
         "opcode": opcode,
-        "target_count": count,
-        "target_raw_gas": scenario.target_raw_gas,
+        "target_count": concrete_count,
+        "target_raw_gas": concrete_raw_gas,
         "tx_gas_limit": tx_gas_limit,
         "bytecode": guest_input["bytecode"],
         "generator_max_count": GENERATOR_MAX_COUNT,
@@ -607,7 +695,9 @@ def generate_stateful_fixture(
         "storage": storage,
         "active_program": _program_contract(active),
         "inactive_program": _program_contract(inactive),
-        "guest_input_sha256": sha256_bytes(canonical_json(guest_input)),
+        "reference_ledger": _reference_ledger(scenario),
+        "guest_input_json_payload_sha256": sha256_bytes(canonical_json(guest_input)),
+        "guest_input_json_file_sha256": sha256_bytes(canonical_json(guest_input) + b"\n"),
     }
     return {"case_record": case_record, "guest_input": guest_input}
 

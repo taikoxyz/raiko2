@@ -140,17 +140,83 @@ class StatefulOpcodeGeneratorTests(unittest.TestCase):
         self.assertEqual(sum(program[-3] == 0x55 for program in programs), 4)
 
     def test_control_keeps_storage_scenario_but_declares_reference_opcode(self):
-        fixture = stateful.generate_stateful_fixture(
+        load = stateful.generate_stateful_fixture(
             self.manifest, "sload_cold_nonzero", lane="control", count=8
         )
+        store = stateful.generate_stateful_fixture(
+            self.manifest, "sstore_set_warm", lane="control", count=8
+        )
 
-        self.assertEqual(fixture["guest_input"]["opcode"], 0x19)
-        self.assertEqual(fixture["guest_input"]["storage"]["measurement_opcode"], 0x54)
-        self.assertEqual(fixture["guest_input"]["storage"]["lane"], "control")
+        self.assertEqual(load["case_record"]["relation_count"], 8)
+        self.assertEqual(load["guest_input"]["opcode"], 0x19)
+        self.assertEqual(load["guest_input"]["target_count"], 64)
+        self.assertEqual(load["guest_input"]["target_raw_gas"], 3)
+        self.assertEqual(load["guest_input"]["storage"]["measurement_opcode"], 0x54)
+        self.assertEqual(load["guest_input"]["storage"]["lane"], "control")
+        self.assertEqual(store["guest_input"]["opcode"], 0x50)
+        self.assertEqual(store["guest_input"]["target_count"], 128)
+        self.assertEqual(store["guest_input"]["target_raw_gas"], 2)
         programs = opcode_gas.decode_fixed_microprograms(
-            bytes.fromhex(fixture["guest_input"]["bytecode"][2:])
+            bytes.fromhex(load["guest_input"]["bytecode"][2:])
         )
         self.assertFalse(any(0x54 in program or 0x55 in program for program in programs))
+
+    def test_fixture_hashes_name_their_json_representations(self):
+        fixture = stateful.generate_stateful_fixture(
+            self.manifest, "sload_warm_zero", lane="target", count=4
+        )
+        record = fixture["case_record"]
+        payload = opcode_gas.canonical_json(fixture["guest_input"])
+
+        self.assertNotIn("guest_input_sha256", record)
+        self.assertEqual(
+            record["guest_input_json_payload_sha256"],
+            opcode_gas.sha256_bytes(payload),
+        )
+        self.assertEqual(
+            record["guest_input_json_file_sha256"],
+            opcode_gas.sha256_bytes(payload + b"\n"),
+        )
+
+    def test_reference_ledgers_are_zero_sum_and_stable_for_high_variants(self):
+        expected = {
+            "sload_warm_nonzero": {"opcode:0x19": -1, "opcode:0x54": 1},
+            "sstore_set_warm": {
+                "opcode:0x50": -2,
+                "opcode:0x55": 1,
+                "opcode:0x5b": 1,
+            },
+        }
+        for scenario_name, ledger in expected.items():
+            with self.subTest(scenario=scenario_name):
+                fixture = stateful.generate_stateful_fixture(
+                    self.manifest, scenario_name, lane="target", count=1
+                )
+                self.assertEqual(fixture["case_record"]["reference_ledger"], ledger)
+                self.assertEqual(sum(ledger.values()), 0)
+
+        low = stateful.generate_stateful_fixture(
+            self.manifest, "sstore_reset_nonzero_warm", lane="target", count=1
+        )
+        high = stateful.generate_stateful_fixture(
+            self.manifest, "sstore_reset_high_value_warm", lane="target", count=64
+        )
+        self.assertEqual(
+            low["case_record"]["reference_ledger"],
+            high["case_record"]["reference_ledger"],
+        )
+
+    def test_manifest_admission_checks_every_high_variant_program_shape(self):
+        payload = stateful.canonical_stateful_manifest_payload()
+        row = next(
+            row
+            for row in payload["scenarios"]
+            if row["name"] == "sload_warm_high_value"
+        )
+        row["reference_opcode"] = 0x18
+
+        with self.assertRaisesRegex(ValueError, "program shape"):
+            stateful.StatefulCampaignManifest.from_mapping(payload)
 
     def test_dirty_prefix_is_byte_identical_in_target_and_control(self):
         scenario = self.manifest.scenario("sstore_dirty_rewrite")

@@ -142,23 +142,158 @@ pub struct OpcodeLabStorageInput {
     pub operation: OpcodeLabStorageOperation,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct OpcodeLabInput {
     pub case: String,
     pub scenario: String,
     pub opcode: u8,
     pub target_count: u64,
     pub target_raw_gas: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tx_gas_limit: Option<u64>,
-    #[serde(with = "hex_bytes")]
     pub bytecode: Vec<u8>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generator_max_count: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fixed_bytecode_len: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage: Option<OpcodeLabStorageInput>,
+}
+
+#[derive(Serialize)]
+struct ReadableOpcodeLabInputRef<'a> {
+    case: &'a str,
+    scenario: &'a str,
+    opcode: u8,
+    target_count: u64,
+    target_raw_gas: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tx_gas_limit: Option<u64>,
+    #[serde(with = "hex_bytes")]
+    bytecode: &'a [u8],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    generator_max_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fixed_bytecode_len: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    storage: Option<&'a OpcodeLabStorageInput>,
+}
+
+#[derive(Deserialize)]
+struct ReadableOpcodeLabInput {
+    case: String,
+    scenario: String,
+    opcode: u8,
+    target_count: u64,
+    target_raw_gas: u64,
+    #[serde(default)]
+    tx_gas_limit: Option<u64>,
+    #[serde(with = "hex_bytes")]
+    bytecode: Vec<u8>,
+    #[serde(default)]
+    generator_max_count: Option<u64>,
+    #[serde(default)]
+    fixed_bytecode_len: Option<u64>,
+    #[serde(default)]
+    storage: Option<OpcodeLabStorageInput>,
+}
+
+#[derive(Serialize)]
+struct BinaryOpcodeLabInputRef<'a> {
+    case: &'a str,
+    scenario: &'a str,
+    opcode: u8,
+    target_count: u64,
+    target_raw_gas: u64,
+    tx_gas_limit: Option<u64>,
+    bytecode: &'a [u8],
+    generator_max_count: Option<u64>,
+    fixed_bytecode_len: Option<u64>,
+    storage: Option<&'a OpcodeLabStorageInput>,
+}
+
+#[derive(Deserialize)]
+struct BinaryOpcodeLabInput {
+    case: String,
+    scenario: String,
+    opcode: u8,
+    target_count: u64,
+    target_raw_gas: u64,
+    tx_gas_limit: Option<u64>,
+    bytecode: Vec<u8>,
+    generator_max_count: Option<u64>,
+    fixed_bytecode_len: Option<u64>,
+    storage: Option<OpcodeLabStorageInput>,
+}
+
+impl Serialize for OpcodeLabInput {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        if serializer.is_human_readable() {
+            ReadableOpcodeLabInputRef {
+                case: &self.case,
+                scenario: &self.scenario,
+                opcode: self.opcode,
+                target_count: self.target_count,
+                target_raw_gas: self.target_raw_gas,
+                tx_gas_limit: self.tx_gas_limit,
+                bytecode: &self.bytecode,
+                generator_max_count: self.generator_max_count,
+                fixed_bytecode_len: self.fixed_bytecode_len,
+                storage: self.storage.as_ref(),
+            }
+            .serialize(serializer)
+        } else {
+            BinaryOpcodeLabInputRef {
+                case: &self.case,
+                scenario: &self.scenario,
+                opcode: self.opcode,
+                target_count: self.target_count,
+                target_raw_gas: self.target_raw_gas,
+                tx_gas_limit: self.tx_gas_limit,
+                bytecode: &self.bytecode,
+                generator_max_count: self.generator_max_count,
+                fixed_bytecode_len: self.fixed_bytecode_len,
+                storage: self.storage.as_ref(),
+            }
+            .serialize(serializer)
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for OpcodeLabInput {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        if deserializer.is_human_readable() {
+            let input = ReadableOpcodeLabInput::deserialize(deserializer)?;
+            Ok(Self {
+                case: input.case,
+                scenario: input.scenario,
+                opcode: input.opcode,
+                target_count: input.target_count,
+                target_raw_gas: input.target_raw_gas,
+                tx_gas_limit: input.tx_gas_limit,
+                bytecode: input.bytecode,
+                generator_max_count: input.generator_max_count,
+                fixed_bytecode_len: input.fixed_bytecode_len,
+                storage: input.storage,
+            })
+        } else {
+            let input = BinaryOpcodeLabInput::deserialize(deserializer)?;
+            Ok(Self {
+                case: input.case,
+                scenario: input.scenario,
+                opcode: input.opcode,
+                target_count: input.target_count,
+                target_raw_gas: input.target_raw_gas,
+                tx_gas_limit: input.tx_gas_limit,
+                bytecode: input.bytecode,
+                generator_max_count: input.generator_max_count,
+                fixed_bytecode_len: input.fixed_bytecode_len,
+                storage: input.storage,
+            })
+        }
+    }
 }
 
 impl OpcodeLabInput {
@@ -184,10 +319,18 @@ impl OpcodeLabInput {
     /// Returns an error when the selected count exceeds the declared generator bound or the
     /// serialized bytecode length differs from the frozen layout length.
     pub fn validate_controlled_contract(&self) -> Result<(), &'static str> {
-        if let Some(max_count) = self.generator_max_count
-            && self.target_count > max_count
-        {
-            return Err("target_count exceeds declared generator_max_count");
+        if let Some(max_count) = self.generator_max_count {
+            let max_declared_opcode_count = match self.storage.as_ref() {
+                Some(OpcodeLabStorageInput {
+                    measurement_opcode: 0x55,
+                    lane: OpcodeLabStorageLane::Control,
+                    ..
+                }) => max_count.saturating_mul(2),
+                _ => max_count,
+            };
+            if self.target_count > max_declared_opcode_count {
+                return Err("target_count exceeds declared generator_max_count");
+            }
         }
         if self.generator_max_count.is_some() && self.tx_gas_limit.is_none() {
             return Err("controlled input is missing tx_gas_limit");
@@ -279,12 +422,24 @@ impl OpcodeLabInput {
                     .ok_or("storage opcode count overflow")?;
             }
         }
+        if storage.lane == OpcodeLabStorageLane::Control && measured_count != 0 {
+            return Err("control lane contains an undeclared storage opcode");
+        }
+        if storage.lane == OpcodeLabStorageLane::Control {
+            if self.opcode != 0x19 {
+                return Err("SLOAD control opcode must declare NOT");
+            }
+            if self.target_raw_gas != 3 {
+                return Err("SLOAD control target_raw_gas must equal NOT raw gas");
+            }
+            let reference_count = decoded_opcode_count(programs, self.opcode)?;
+            if reference_count != self.target_count {
+                return Err("control opcode count differs from target_count");
+            }
+        }
         match storage.lane {
             OpcodeLabStorageLane::Target if measured_count != self.target_count => {
                 Err("target SLOAD count differs from target_count")
-            }
-            OpcodeLabStorageLane::Control if measured_count != 0 => {
-                Err("control lane contains an undeclared storage opcode")
             }
             _ => Ok(()),
         }
@@ -328,12 +483,24 @@ impl OpcodeLabInput {
                     .ok_or("storage opcode count overflow")?;
             }
         }
+        if storage.lane == OpcodeLabStorageLane::Control && measured_count != 0 {
+            return Err("control lane contains an undeclared storage opcode");
+        }
+        if storage.lane == OpcodeLabStorageLane::Control {
+            if self.opcode != 0x50 {
+                return Err("SSTORE control opcode must declare POP");
+            }
+            if self.target_raw_gas != 2 {
+                return Err("SSTORE control target_raw_gas must equal POP raw gas");
+            }
+            let reference_count = decoded_opcode_count(programs, self.opcode)?;
+            if reference_count != self.target_count {
+                return Err("control opcode count differs from target_count");
+            }
+        }
         match storage.lane {
             OpcodeLabStorageLane::Target if measured_count != self.target_count => {
                 Err("target SSTORE count differs from target_count")
-            }
-            OpcodeLabStorageLane::Control if measured_count != 0 => {
-                Err("control lane contains an undeclared storage opcode")
             }
             _ => Ok(()),
         }
@@ -404,35 +571,7 @@ struct StorageSite {
 }
 
 fn storage_sites(program: &[u8]) -> Result<Vec<StorageSite>, &'static str> {
-    let mut instructions: Vec<(u8, Option<[u8; 32]>)> = Vec::new();
-    let mut cursor = 0usize;
-    while cursor < program.len() {
-        let opcode = program[cursor];
-        cursor += 1;
-        if (0x60..=0x7f).contains(&opcode) {
-            let immediate_len = usize::from(opcode - 0x5f);
-            let end = cursor
-                .checked_add(immediate_len)
-                .ok_or("PUSH immediate length overflow")?;
-            if end > program.len() {
-                return Err("truncated PUSH immediate in storage bytecode");
-            }
-            let immediate = if opcode == 0x7f {
-                Some(
-                    program[cursor..end]
-                        .try_into()
-                        .map_err(|_| "invalid PUSH32 immediate")?,
-                )
-            } else {
-                None
-            };
-            instructions.push((opcode, immediate));
-            cursor = end;
-        } else {
-            instructions.push((opcode, None));
-        }
-    }
-
+    let instructions = decoded_instructions(program)?;
     let mut sites = Vec::new();
     for (index, (opcode, _)) in instructions.iter().enumerate() {
         match *opcode {
@@ -466,6 +605,55 @@ fn storage_sites(program: &[u8]) -> Result<Vec<StorageSite>, &'static str> {
         }
     }
     Ok(sites)
+}
+
+fn decoded_opcode_count(programs: &[&[u8]], opcode: u8) -> Result<u64, &'static str> {
+    let mut count = 0u64;
+    for program in programs {
+        for (actual, _) in decoded_instructions(program)? {
+            if actual == opcode {
+                count = count
+                    .checked_add(1)
+                    .ok_or("control opcode count overflow")?;
+            }
+        }
+    }
+    Ok(count)
+}
+
+type DecodedInstruction = (u8, Option<[u8; 32]>);
+
+fn decoded_instructions(program: &[u8]) -> Result<Vec<DecodedInstruction>, &'static str> {
+    let mut instructions: Vec<DecodedInstruction> = Vec::new();
+    let mut cursor = 0usize;
+    while cursor < program.len() {
+        let opcode = program[cursor];
+        cursor += 1;
+        if (0x60..=0x7f).contains(&opcode) {
+            let immediate_len = usize::from(opcode - 0x5f);
+            let end = cursor
+                .checked_add(immediate_len)
+                .ok_or("PUSH immediate length overflow")?;
+            if end > program.len() {
+                return Err("truncated PUSH immediate in storage bytecode");
+            }
+            let immediate = if opcode == 0x7f {
+                Some(
+                    program[cursor..end]
+                        .try_into()
+                        .map_err(|_| "invalid PUSH32 immediate")?,
+                )
+            } else {
+                None
+            };
+            instructions.push((opcode, immediate));
+            cursor = end;
+        } else {
+            instructions.push((opcode, None));
+        }
+    }
+
+    Ok(instructions)
 }
 
 mod hex_bytes {

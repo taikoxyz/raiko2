@@ -739,6 +739,7 @@ fn revm_trace_executes_and_binds_the_exact_sp1_input() {
         bytecode: vec![0x60, 0x01, 0x60, 0x02, 0x01, 0x00],
         generator_max_count: Some(8),
         fixed_bytecode_len: Some(6),
+        storage: None,
     };
     let encoded = bincode::serialize(&input).unwrap();
     let expected_input_sha256 = alloy_primitives::hex::encode(Sha256::digest(encoded));
@@ -833,6 +834,7 @@ fn revm_trace_rejects_declared_count_or_raw_gas_that_execution_does_not_match() 
         bytecode: vec![0x60, 0x01, 0x60, 0x02, 0x01, 0x00],
         generator_max_count: Some(8),
         fixed_bytecode_len: Some(6),
+        storage: None,
     };
     assert!(
         trace_revm_opcode_workload(&input)
@@ -888,6 +890,7 @@ fn fixed_footprint_add_sweep_has_constant_real_non_target_execution() {
             fixed_bytecode_len: Some(bytecode.len() as u64),
             generator_max_count: Some(max_count),
             bytecode,
+            storage: None,
         }
     }
 

@@ -63,7 +63,7 @@ Osaka execution semantics while continuing to bind the actual exported Unzen sch
 | Experiment framework | Core scope complete | Preserve its identity and replay invariants |
 | Opcode core | Complete at partial coverage | Preserve sealed 101-plus-2 augmentation |
 | Remaining operations | Complete at frozen classification | Preserve the sealed coverage and ownership ledgers |
-| Stateful storage execution | Controlled model selected | Add typed trace fields before estimator promotion |
+| Stateful storage execution | Promoted and replayed on two ad-hoc proposals | Preserve sealed typed features while closing the remaining operation families |
 | State/trie | Coarse model accepted | Preserve the sealed holdout evidence; split only after a new predeclared experiment |
 | Transaction | Declared approximation accepted and sealed | Preserve `5017` and its `0.002` materiality budget |
 | Block | Fixed base accepted and sealed | Preserve the selected round-128 fixed-cost artifact |
@@ -510,7 +510,7 @@ finding. Independent behavioral verification recomputed all nine typed parameter
 intercepts using exact rational arithmetic, checked all 564 pair joins, observed 376 host-native
 identity replays and zero SP1 executions, and confirmed that sealed-file hashes did not change.
 
-## Completed Milestone: Typed Storage Promotion Implementation
+## Completed Milestone: Typed Storage Promotion And Ad-Hoc Replay
 
 The schema-3 operation trace now classifies completed storage execution from REVM journal state:
 
@@ -540,21 +540,44 @@ Pre-seal verification passed:
 - independent behavioral recomputation of all nine parameters, all 12 valid typed predictions,
   both invalid-input gaps, the exact coverage delta, and V2/V3/V4 provenance.
 
-No new estimator artifact has been sealed at this checkpoint. The production zkGas registry,
-runtime configuration, block limit, Boundless configuration, and final proposal-validation corpus
-remain untouched.
+Implementation commit `e59ed1f6` was independently reviewed, committed, and pushed before sealing.
+Clean-tree sealing produced review-only composite estimator
+`43cdd0adc466743bbb4a2e3bea3e9b7e46618fb36ca948f0d52a090f804d60b8`; its canonical
+`estimator.json` SHA256 is
+`30f906ccf0b423c22ae0cb9710f6459821c1fdba2a568c931b99014d2c294c2a`. Exact directory replay
+passed at the sealed implementation revision.
+
+The two existing Mainnet fixtures were then rerun once through the schema-3 trace and the sealed
+estimator. Proposal `23077` used the repository fixture; proposal `7857` used byte-identical local
+fixture copies with raw JSON SHA256
+`1471402130b15a0c15ab6f60fdf88efc702529666ef710d82928aace6686f607`. Neither result changed a
+coefficient or entered the frozen integration-smoke or final-validation corpora.
+
+| Proposal | Actual proverGas | Modeled subtotal | Modeled / actual | Operation-count coverage | Raw-gas coverage | Typed-feature coverage | Storage events / contribution | Result |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `23077` | `2047758068` | `652536157.63976242073999746184419183860460314671167493544607810593120040856920075` | `31.8659%` | `97.9558%` | `65.5683%` | `100%` | `380` / `1421504.654275319286147236795` | `insufficient_coverage` |
+| `7857` | `1492798702` | `647928684.87258107245161331278214983980544996787489959294938700912729756684222137` | `43.4036%` | `97.3061%` | `74.8810%` | `100%` | `349` / `1246420.785664922200397531019` | `insufficient_coverage` |
+
+Both schema-3 parity gates and exact SP1 report joins passed. The typed storage layer closed every
+observed SLOAD/SSTORE feature: no storage feature gap remained. The remaining gaps were 1844 ordinary
+opcode, 132 confirmed spawn-wrapper, and 33 direct-precompile events for `23077`; for `7857` they
+were 911, 52, and 28 respectively. The dominant ordinary gaps were `CALLDATALOAD`, `CALLDATASIZE`,
+`CALLER`, `CALLVALUE`, `CALLDATACOPY`, `RETURNDATASIZE`, `RETURNDATACOPY`, and `RETURN`, followed by
+LOG/environment/account-access entries. This observed ordering is diagnostic only; it may select the
+next predeclared family but cannot repair the sealed storage coefficients.
+
+The production zkGas registry, runtime configuration, block limit, Boundless configuration, frozen
+integration smokes, and final proposal-validation corpus remain untouched.
 
 ## Next Gate
 
-Commit the independently reviewed implementation, then seal and exact-replay a new non-production
-composite estimator from a clean checkout. After that, recreate schema-3 traces for the two existing
-ad-hoc proposal fixtures and apply the sealed estimator exactly once without tuning from their
-results. If their immutable GuestInputs are unavailable, record that acquisition blocker and do not
-substitute a final-validation proposal.
-
-After that storage checkpoint, close LOG/EXTCODE, CALL-family wrappers, and direct precompiles in
-descending observed impact. Re-seal and replay the same diagnostics after each independently reviewed
-family milestone; do not use those proposal results to repair a coefficient.
+Close the remaining ordinary operation families before CALL wrappers and direct precompiles. Begin
+with the highest-impact calldata/returndata/environment/copy keys observed independently in both
+ad-hoc fixtures. Reuse sealed controlled evidence where its execution semantics and model inputs are
+already sufficient; otherwise predeclare the smallest additional controlled campaign. Then close
+LOG/EXTCODE, CALL-family wrappers, and direct precompiles in descending observed impact. Re-seal and
+replay the same diagnostics after each independently reviewed family milestone; do not use those
+proposal results to repair a coefficient.
 
 The frozen Hoodi `79852` and Mainnet `38261` integration smokes remain required once a
 witness-capable RPC or immutable GuestInputs are available. Record their exact trace/report joins,

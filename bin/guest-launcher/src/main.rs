@@ -15,7 +15,8 @@ use raiko2_opcode_lab::opcode_anchor_public_values;
 use raiko2_pipeline::forks::shasta::{load_risc0_shasta_backend, load_sp1_shasta_backend};
 use raiko2_pipeline::{NativeBackend, ProofStage, ProverBackend};
 use raiko2_primitives::{
-    AggregationGuestInput, OpcodeLabInput, PrecompileLabInput, Proof, ProofType as RaikoProofType,
+    AggregationGuestInput, ContextOpcodeLabInputV1, OpcodeLabInput, PrecompileLabInput, Proof,
+    ProofType as RaikoProofType,
 };
 use raiko2_primitives_shasta::GuestInput;
 use raiko2_primitives_shasta::build_proof_carry_data_from_witness_spec;
@@ -129,6 +130,10 @@ enum Stage {
     RevmOpcodeLab,
     #[value(name = "revm-opcode-identity")]
     RevmOpcodeIdentity,
+    #[value(name = "context-opcode-lab")]
+    ContextOpcodeLab,
+    #[value(name = "context-opcode-identity")]
+    ContextOpcodeIdentity,
     #[value(name = "opcode-anchor-identity")]
     OpcodeAnchorIdentity,
     #[value(name = "precompile-lab")]
@@ -409,6 +414,8 @@ impl Stage {
             Stage::OpcodeLab => "opcode-lab",
             Stage::RevmOpcodeLab => "revm-opcode-lab",
             Stage::RevmOpcodeIdentity => "revm-opcode-identity",
+            Stage::ContextOpcodeLab => "context-opcode-lab",
+            Stage::ContextOpcodeIdentity => "context-opcode-identity",
             Stage::OpcodeAnchorIdentity => "opcode-anchor-identity",
             Stage::PrecompileLab => "precompile-lab",
             Stage::ControlledOverhead => "controlled-overhead",
@@ -576,6 +583,61 @@ impl Args {
         Ok(())
     }
 
+    fn validate_context_opcode_identity(&self) -> Result<()> {
+        if self.stage != Stage::ContextOpcodeIdentity {
+            bail!("context opcode identity validation requires its dedicated stage");
+        }
+        if self.proof_type != ProofType::Native
+            || self.mode != Mode::Execute
+            || self.sp1_execution_engine != Sp1ExecutionEngine::Standard
+        {
+            bail!("context-opcode-identity supports only native execute semantics");
+        }
+        if self.input.is_none() || self.json_out.is_none() {
+            bail!("context-opcode-identity requires --input and --json-out");
+        }
+        if self.input_list.is_some()
+            || self.elf.is_some()
+            || !self.aggregate.is_empty()
+            || self.output.is_some()
+            || self.jsonl_out.is_some()
+            || self.proof_mode.is_some()
+            || self.sp1_prover.is_some()
+            || self.sp1_network_mode != CliSp1NetworkMode::Reserved
+            || self.sp1_fulfillment_strategy != CliSp1FulfillmentStrategy::Reserved
+            || self.sp1_cycle_limit != 1_000_000_000_000
+            || self.sp1_timeout_secs != 3_600
+            || self.risc0_execution_po2 != 20
+        {
+            bail!("context-opcode-identity rejects guest, prover, and alternate-input flags");
+        }
+        Ok(())
+    }
+
+    fn validate_context_opcode_lab(&self) -> Result<()> {
+        if self.stage != Stage::ContextOpcodeLab {
+            bail!("context opcode lab validation requires its dedicated stage");
+        }
+        if self.proof_type != ProofType::Sp1
+            || self.mode != Mode::Execute
+            || !self.aggregate.is_empty()
+        {
+            bail!("context-opcode-lab supports only SP1 execute without aggregation");
+        }
+        if self.effective_sp1_prover_mode() != Sp1ProverMode::Local {
+            bail!("context-opcode-lab requires local SP1 execution");
+        }
+        if self.elf.is_none()
+            || (self.input.is_some() == self.input_list.is_some())
+            || (self.input_list.is_some() != self.jsonl_out.is_some())
+        {
+            bail!(
+                "context-opcode-lab requires --elf and exactly one of --input or --input-list; batch mode also requires --jsonl-out"
+            );
+        }
+        Ok(())
+    }
+
     fn validate_opcode_anchor_identity(&self) -> Result<()> {
         if self.stage != Stage::OpcodeAnchorIdentity {
             bail!("opcode anchor identity validation requires its dedicated stage");
@@ -621,6 +683,7 @@ impl Args {
             Stage::Proposal
                 | Stage::OpcodeLab
                 | Stage::RevmOpcodeLab
+                | Stage::ContextOpcodeLab
                 | Stage::ControlledOverhead
                 | Stage::ControlledBlock
                 | Stage::ControlledStateHoldout
@@ -728,9 +791,19 @@ fn opcode_lab_memory_labels(stage: Stage) -> OpcodeLabMemoryLabels {
             after_execute_run: "revm-opcode-lab:after_execute_run",
             after_apply_execution_metadata: "revm-opcode-lab:after_apply_execution_metadata",
         },
+        Stage::ContextOpcodeLab => OpcodeLabMemoryLabels {
+            start: "context-opcode-lab:start",
+            after_read_input: "context-opcode-lab:after_read_input",
+            after_stdin_write: "context-opcode-lab:after_stdin_write",
+            after_load_elf: "context-opcode-lab:after_load_elf",
+            before_execute_run: "context-opcode-lab:before_execute_run",
+            after_execute_run: "context-opcode-lab:after_execute_run",
+            after_apply_execution_metadata: "context-opcode-lab:after_apply_execution_metadata",
+        },
         Stage::Proposal
         | Stage::ProposalTrace
         | Stage::RevmOpcodeIdentity
+        | Stage::ContextOpcodeIdentity
         | Stage::OpcodeAnchorIdentity
         | Stage::PrecompileLab
         | Stage::ControlledOverhead
@@ -839,6 +912,9 @@ async fn main() -> Result<()> {
     if args.stage == Stage::RevmOpcodeIdentity {
         return run_revm_opcode_identity(args);
     }
+    if args.stage == Stage::ContextOpcodeIdentity {
+        return run_context_opcode_identity(args);
+    }
     if args.stage == Stage::OpcodeAnchorIdentity {
         return run_opcode_anchor_identity(args);
     }
@@ -857,6 +933,9 @@ async fn main() -> Result<()> {
     if matches!(args.stage, Stage::OpcodeLab | Stage::RevmOpcodeLab) {
         return run_opcode_lab(args).await;
     }
+    if args.stage == Stage::ContextOpcodeLab {
+        return run_context_opcode_lab(args).await;
+    }
     if args.stage == Stage::PrecompileLab {
         return run_precompile_lab(args).await;
     }
@@ -873,6 +952,18 @@ fn run_revm_opcode_identity(args: Args) -> Result<()> {
     let input = read_opcode_lab_input(input_path)?;
     let bundle = controlled_workload::controlled_opcode_identity_bundle(&input)?;
     let mut contents = serde_json::to_vec(&bundle).context("serialize opcode identity bundle")?;
+    contents.push(b'\n');
+    fs::write(output_path, contents).with_context(|| format!("write {}", output_path.display()))?;
+    Ok(())
+}
+
+fn run_context_opcode_identity(args: Args) -> Result<()> {
+    args.validate_context_opcode_identity()?;
+    let input_path = args.input.as_ref().context("missing --input")?;
+    let output_path = args.json_out.as_ref().context("missing --json-out")?;
+    let input = read_context_opcode_lab_input(input_path)?;
+    let bundle = controlled_workload::controlled_context_opcode_identity_bundle(&input)?;
+    let mut contents = serde_json::to_vec(&bundle).context("serialize context opcode identity")?;
     contents.push(b'\n');
     fs::write(output_path, contents).with_context(|| format!("write {}", output_path.display()))?;
     Ok(())
@@ -987,6 +1078,11 @@ fn read_input(path: &PathBuf, proof_type: ProofType) -> Result<GuestInput> {
 fn read_opcode_lab_input(path: &PathBuf) -> Result<OpcodeLabInput> {
     let contents = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     serde_json::from_str(&contents).context("parse opcode-lab input JSON")
+}
+
+fn read_context_opcode_lab_input(path: &PathBuf) -> Result<ContextOpcodeLabInputV1> {
+    let contents = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    serde_json::from_str(&contents).context("parse context opcode-lab input JSON")
 }
 
 fn read_precompile_lab_input(path: &PathBuf) -> Result<PrecompileLabInput> {
@@ -1146,6 +1242,131 @@ async fn run_opcode_lab_batch(args: Args) -> Result<()> {
 
     fs::write(&jsonl_out_path, output)
         .with_context(|| format!("write {}", jsonl_out_path.display()))?;
+    Ok(())
+}
+
+async fn run_context_opcode_lab(args: Args) -> Result<()> {
+    args.validate_context_opcode_lab()?;
+    if args.input_list.is_some() {
+        return run_context_opcode_lab_batch(args).await;
+    }
+    let input_path = args.input.clone().context("missing --input")?;
+    let elf_path = args
+        .elf
+        .clone()
+        .context("missing --elf for context-opcode-lab")?;
+    let input = read_context_opcode_lab_input(&input_path)?;
+    let bundle = controlled_workload::controlled_context_opcode_identity_bundle(&input)?;
+    let mut report = BenchReport::new(
+        args.stage.as_str(),
+        args.mode.as_str(),
+        args.effective_proof_mode().as_str(),
+        input_path.display().to_string(),
+    );
+    apply_sp1_execution_engine_metadata(&mut report, args.sp1_execution_engine);
+    report.guest_input_sha256 = Some(format!("0x{}", bundle.identity.backend_input_sha256));
+    report.guest_input_bincode_length = Some(bundle.identity.backend_input_len);
+    install_controlled_trace(&mut report, bundle.report.controlled_trace)?;
+    let elf = fs::read(&elf_path).with_context(|| format!("read {}", elf_path.display()))?;
+    let start = Instant::now();
+    let (public_values, execution_report) = match args.sp1_execution_engine {
+        Sp1ExecutionEngine::Standard => {
+            let mut stdin = SP1Stdin::new();
+            stdin.write(&input);
+            execute_sp1_blocking(args.sp1_config()?.prover, elf, stdin).await?
+        }
+        Sp1ExecutionEngine::GasEstimator => {
+            execute_context_opcode_lab_gas_estimator_blocking(elf, input).await?
+        }
+    };
+    report.wall_time_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+    report.public_values = public_values.raw();
+    finalize_opcode_lab_execution_report(&mut report, &execution_report)?;
+    if let Some(path) = &args.json_out {
+        fs::write(path, serde_json::to_vec_pretty(&report)?)
+            .with_context(|| format!("write {}", path.display()))?;
+    }
+    println!("public_values: {}", report.public_values);
+    Ok(())
+}
+
+async fn run_context_opcode_lab_batch(args: Args) -> Result<()> {
+    let input_list_path = args.input_list.clone().context("missing --input-list")?;
+    let output_path = args.jsonl_out.clone().context("missing --jsonl-out")?;
+    let elf_path = args
+        .elf
+        .clone()
+        .context("missing --elf for context-opcode-lab")?;
+    let mut inputs = Vec::new();
+    for path in read_opcode_lab_input_list(&input_list_path)? {
+        inputs.push((path.clone(), read_context_opcode_lab_input(&path)?));
+    }
+    let elf = fs::read(&elf_path).with_context(|| format!("read {}", elf_path.display()))?;
+    let prover = args.sp1_config()?.prover;
+    let engine = args.sp1_execution_engine;
+    let runs = tokio::task::spawn_blocking(move || -> Result<Vec<ContextOpcodeLabExecution>> {
+        let program = if engine == Sp1ExecutionEngine::GasEstimator {
+            Some(parse_sp1_program(&elf)?)
+        } else {
+            None
+        };
+        let local = (engine == Sp1ExecutionEngine::Standard)
+            .then(|| BlockingProverClient::builder().cpu().build());
+        let mut outputs = Vec::new();
+        for (input_path, input) in inputs {
+            let bundle = controlled_workload::controlled_context_opcode_identity_bundle(&input)?;
+            let start = Instant::now();
+            let (public_values, execution_report) = match engine {
+                Sp1ExecutionEngine::Standard => {
+                    if prover != Sp1ProverMode::Local {
+                        bail!("context-opcode-lab batch requires local SP1 execution");
+                    }
+                    let mut stdin = SP1Stdin::new();
+                    stdin.write(&input);
+                    execute_sp1_local(
+                        local
+                            .as_ref()
+                            .expect("standard engine initializes local prover"),
+                        &elf,
+                        stdin,
+                    )?
+                }
+                Sp1ExecutionEngine::GasEstimator => execute_context_opcode_lab_gas_estimator(
+                    program.as_ref().expect("gas estimator program").clone(),
+                    &input,
+                )?,
+            };
+            outputs.push(ContextOpcodeLabExecution {
+                input_path,
+                public_values: public_values.raw(),
+                wall_time_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
+                execution_report,
+                bundle,
+            });
+        }
+        Ok(outputs)
+    })
+    .await
+    .context("join context opcode-lab batch task")??;
+    let mut output = String::new();
+    for run in runs {
+        let mut report = BenchReport::new(
+            args.stage.as_str(),
+            args.mode.as_str(),
+            args.effective_proof_mode().as_str(),
+            run.input_path.display().to_string(),
+        );
+        apply_sp1_execution_engine_metadata(&mut report, engine);
+        report.public_values = run.public_values;
+        report.wall_time_ms = run.wall_time_ms;
+        report.guest_input_sha256 = Some(format!("0x{}", run.bundle.identity.backend_input_sha256));
+        report.guest_input_bincode_length = Some(run.bundle.identity.backend_input_len);
+        install_controlled_trace(&mut report, run.bundle.report.controlled_trace)?;
+        finalize_opcode_lab_execution_report(&mut report, &run.execution_report)?;
+        output.push_str(&serde_json::to_string(&report)?);
+        output.push('\n');
+    }
+    fs::write(&output_path, output).with_context(|| format!("write {}", output_path.display()))?;
     Ok(())
 }
 
@@ -1753,6 +1974,14 @@ struct OpcodeLabExecution {
     controlled_trace: Option<controlled_workload::ControlledTrace>,
 }
 
+struct ContextOpcodeLabExecution {
+    input_path: PathBuf,
+    public_values: String,
+    wall_time_ms: u64,
+    execution_report: ExecutionReport,
+    bundle: controlled_workload::ControlledContextOpcodeIdentityBundle,
+}
+
 fn opcode_lab_input_identity(input: &OpcodeLabInput) -> Result<(String, usize)> {
     let encoded = bincode::serialize(input).context("serialize canonical opcode-lab input")?;
     Ok((
@@ -1958,6 +2187,18 @@ async fn execute_opcode_lab_gas_estimator_blocking(
     .context("join SP1 gas-estimator opcode-lab task")?
 }
 
+async fn execute_context_opcode_lab_gas_estimator_blocking(
+    elf: Vec<u8>,
+    input: ContextOpcodeLabInputV1,
+) -> Result<(sp1_sdk::SP1PublicValues, ExecutionReport)> {
+    tokio::task::spawn_blocking(move || {
+        let program = parse_sp1_program(&elf)?;
+        execute_context_opcode_lab_gas_estimator(program, &input)
+    })
+    .await
+    .context("join SP1 gas-estimator context opcode-lab task")?
+}
+
 fn parse_sp1_program(elf: &[u8]) -> Result<Arc<Program>> {
     Program::from(elf)
         .map(Arc::new)
@@ -1969,6 +2210,15 @@ fn execute_opcode_lab_gas_estimator(
     input: &OpcodeLabInput,
 ) -> Result<(sp1_sdk::SP1PublicValues, ExecutionReport)> {
     execute_opcode_lab_gas_estimator_with_opts(program, input, canonical_sp1_core_opts())
+}
+
+fn execute_context_opcode_lab_gas_estimator(
+    program: Arc<Program>,
+    input: &ContextOpcodeLabInputV1,
+) -> Result<(sp1_sdk::SP1PublicValues, ExecutionReport)> {
+    let mut stdin = SP1Stdin::new();
+    stdin.write(input);
+    execute_sp1_gas_estimator(program, stdin)
 }
 
 async fn execute_sp1_guest_gas_estimator_blocking(
@@ -2425,15 +2675,16 @@ mod tests {
         guest_launcher_executable_path, install_controlled_trace,
         install_opcode_lab_input_identity, new_controlled_overhead_report, parse_sp1_program,
         read_input, read_opcode_lab_input, read_opcode_lab_input_list, risc0_padded_cycles,
-        run_controlled_state_holdout_trace, run_opcode_anchor_identity, run_revm_opcode_identity,
+        run_context_opcode_identity, run_controlled_state_holdout_trace,
+        run_opcode_anchor_identity, run_revm_opcode_identity,
         validate_proposal_gas_estimator_guest_elf_override,
     };
     use alloy_primitives::{Address, B256, hex};
     use clap::Parser as _;
     use raiko2_opcode_lab::opcode_anchor_public_values;
     use raiko2_primitives::{
-        OpcodeLabInput, PrecompileLabInput, PrecompileLabLane, ProofType as RaikoProofType,
-        SupportedChainSpecs,
+        ContextOpcodeLabInputV1, OpcodeLabInput, PrecompileLabInput, PrecompileLabLane,
+        ProofType as RaikoProofType, SupportedChainSpecs,
     };
     use raiko2_primitives_shasta::{GuestInput, build_proof_carry_data_from_witness_spec};
     use raiko2_prover::sp1::Sp1ExecutionMetadata;
@@ -3042,7 +3293,7 @@ mod tests {
             .expect("read checked-in revm opcode lab ELF");
         assert_eq!(
             hex::encode(Sha256::digest(&elf)),
-            "ad3a9b2d3a9089b456983b5d4d51173d42aee321793be26a82ce05d783ca593a",
+            "d276558b9093dca31b170d6c0a0ff27f0e0f02badde7b7c31332766e0cfaa72b",
             "refresh the ADD/count-32 execution surface together with the checked-in ELF",
         );
         let input_path = repo.join("bin/guest-launcher/tests/fixtures/revm-opcode-lab-add-32.json");
@@ -3060,10 +3311,10 @@ mod tests {
     ) {
         assert_eq!(
             public_values.raw(),
-            "0xff91cb3a401b4a14b5714892ed3550857d5e65cd9546263565607cf7f95029fe"
+            "0x9318bc580c9b2aa315a8649bd205867ef84a5d28fecdb187ec57ba86f409ec16"
         );
         assert_eq!(report.gas(), Some(expected_gas));
-        assert_eq!(report.total_instruction_count(), 1_823_576);
+        assert_eq!(report.total_instruction_count(), 1_798_500);
         assert_eq!(report.total_syscall_count(), 35);
         assert_eq!(report.exit_code, 0);
     }
@@ -3076,7 +3327,7 @@ mod tests {
                 .expect("execute canonical gas estimator");
 
         // Hand-checked against the standard SP1 6.3 execution baseline for this tracked fixture.
-        assert_add_32_execution_surface(&public_values, &report, 1_629_105);
+        assert_add_32_execution_surface(&public_values, &report, 1_613_195);
     }
 
     #[test]
@@ -3088,7 +3339,7 @@ mod tests {
             execute_opcode_lab_gas_estimator_with_opts(program, &input, opts)
                 .expect("execute forced multi-chunk gas estimator");
 
-        assert_add_32_execution_surface(&public_values, &report, 1_813_351);
+        assert_add_32_execution_surface(&public_values, &report, 1_787_812);
     }
 
     #[test]
@@ -3169,6 +3420,133 @@ mod tests {
         assert_eq!(args.stage, Stage::RevmOpcodeIdentity);
         args.validate_revm_opcode_identity()
             .expect("identity stage rejects no canonical flags");
+    }
+
+    #[test]
+    fn parses_context_opcode_lab_and_identity_stages() {
+        let lab = Args::try_parse_from([
+            "guest-launcher",
+            "--stage",
+            "context-opcode-lab",
+            "--proof-type",
+            "sp1",
+            "--mode",
+            "execute",
+            "--sp1-prover",
+            "local",
+            "--sp1-execution-engine",
+            "gas-estimator",
+            "--elf",
+            "crates/guests/elf/sp1_context_opcode_lab.elf",
+            "--input",
+            "context.json",
+        ])
+        .unwrap();
+        assert_eq!(lab.stage, Stage::ContextOpcodeLab);
+        lab.validate_context_opcode_lab().unwrap();
+        lab.validate_sp1_execution_engine().unwrap();
+
+        let identity = Args::try_parse_from([
+            "guest-launcher",
+            "--stage",
+            "context-opcode-identity",
+            "--proof-type",
+            "native",
+            "--mode",
+            "execute",
+            "--input",
+            "context.json",
+            "--json-out",
+            "identity.json",
+        ])
+        .unwrap();
+        assert_eq!(identity.stage, Stage::ContextOpcodeIdentity);
+        identity.validate_context_opcode_identity().unwrap();
+    }
+
+    #[test]
+    fn context_opcode_lab_rejects_nonlocal_single_and_batch_before_execution() {
+        for args in [
+            vec![
+                "guest-launcher",
+                "--stage",
+                "context-opcode-lab",
+                "--proof-type",
+                "sp1",
+                "--mode",
+                "execute",
+                "--sp1-prover",
+                "mock",
+                "--elf",
+                "context.elf",
+                "--input",
+                "context.json",
+            ],
+            vec![
+                "guest-launcher",
+                "--stage",
+                "context-opcode-lab",
+                "--proof-type",
+                "sp1",
+                "--mode",
+                "execute",
+                "--sp1-prover",
+                "network",
+                "--elf",
+                "context.elf",
+                "--input-list",
+                "inputs.json",
+                "--jsonl-out",
+                "reports.jsonl",
+            ],
+        ] {
+            let parsed = Args::try_parse_from(args).unwrap();
+            let error = parsed.validate_context_opcode_lab().unwrap_err();
+            assert!(error.to_string().contains("local SP1 execution"));
+        }
+    }
+
+    #[test]
+    fn host_only_context_opcode_identity_binds_explicit_environment() {
+        let input_path = temp_input_path("context-opcode-identity-input");
+        let output_path = temp_input_path("context-opcode-identity-output");
+        let input = ContextOpcodeLabInputV1 {
+            case: "calldatasize".into(),
+            scenario: "len_3".into(),
+            opcode: 0x36,
+            target_count: 1,
+            target_raw_gas: 2,
+            tx_gas_limit: Some(100_000),
+            bytecode: vec![0x36, 0x50, 0x00],
+            fixed_bytecode_len: Some(3),
+            calldata: vec![1, 2, 3],
+            block_timestamp: Some(17),
+            ..Default::default()
+        };
+        fs::write(&input_path, serde_json::to_vec(&input).unwrap()).unwrap();
+        let args = Args::try_parse_from([
+            "guest-launcher",
+            "--stage",
+            "context-opcode-identity",
+            "--proof-type",
+            "native",
+            "--input",
+            input_path.to_str().unwrap(),
+            "--json-out",
+            output_path.to_str().unwrap(),
+        ])
+        .unwrap();
+
+        run_context_opcode_identity(args).unwrap();
+
+        let bundle: serde_json::Value =
+            serde_json::from_slice(&fs::read(&output_path).unwrap()).unwrap();
+        assert_eq!(bundle["schema_version"], 2);
+        assert_eq!(bundle["identity"]["input"]["calldata"], "0x010203");
+        assert_eq!(bundle["identity"]["input"]["block_timestamp"], 17);
+        assert_eq!(bundle["report"]["controlled_trace"]["kind"], "revm_opcode");
+        let _ = fs::remove_file(input_path);
+        let _ = fs::remove_file(output_path);
     }
 
     #[test]

@@ -1,6 +1,8 @@
 #![allow(missing_docs)]
 
 pub mod crypto;
+#[cfg(test)]
+mod context_opcode_lab_impl;
 pub mod opcode_lab_impl;
 pub mod precompile_lab_impl;
 pub mod revm_opcode_lab_impl;

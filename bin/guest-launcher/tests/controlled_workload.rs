@@ -13,17 +13,19 @@ use controlled_workload::{
     build_controlled_block_fixture,
     build_controlled_block_fixture_with_extra_prestate_account_for_test,
     build_controlled_state_holdout_fixtures, build_required_overhead_fixtures,
-    check_revm_opcode_semantics, controlled_block_row_id, controlled_execution_row_id,
-    controlled_opcode_identity, controlled_opcode_identity_bundle, controlled_opcode_workload_spec,
-    controlled_overhead_workload_id, controlled_precompile_workload_spec, controlled_workload_id,
-    observe_controlled_block_fixture, operation_units_delta, trace_precompile_workload,
-    trace_revm_opcode_workload, validate_controlled_block_fixture,
-    validate_controlled_state_holdout_fixtures, validate_fixed_footprint, validate_precompile_pair,
-    validate_required_overhead_fixtures,
+    check_revm_opcode_semantics, controlled_block_row_id,
+    controlled_context_opcode_identity_bundle, controlled_context_opcode_workload_spec,
+    controlled_execution_row_id, controlled_opcode_identity, controlled_opcode_identity_bundle,
+    controlled_opcode_workload_spec, controlled_overhead_workload_id,
+    controlled_precompile_workload_spec, controlled_workload_id, observe_controlled_block_fixture,
+    operation_units_delta, trace_precompile_workload, trace_revm_opcode_workload,
+    validate_controlled_block_fixture, validate_controlled_state_holdout_fixtures,
+    validate_fixed_footprint, validate_precompile_pair, validate_required_overhead_fixtures,
 };
 use raiko2_primitives::{
-    OpcodeLabInput, OpcodeLabStorageAccess, OpcodeLabStorageInput, OpcodeLabStorageLane,
-    OpcodeLabStorageOperation, PrecompileLabInput, PrecompileLabLane, SupportedChainSpecs,
+    ContextOpcodeLabInputV1, OpcodeLabInput, OpcodeLabStorageAccess, OpcodeLabStorageInput,
+    OpcodeLabStorageLane, OpcodeLabStorageOperation, PrecompileLabInput, PrecompileLabLane,
+    SupportedChainSpecs,
     chain_spec::{ForkCondition, ForkId, TaikoFork},
 };
 use raiko2_protocol_shasta::libhash::hash_proposal;
@@ -909,7 +911,7 @@ fn block_environment_identity_binds_blob_option_and_fields() {
 
 #[test]
 fn opcode_identity_and_workload_bind_resolved_context_environment() {
-    let baseline = OpcodeLabInput {
+    let baseline = ContextOpcodeLabInputV1 {
         case: "address".into(),
         scenario: "canonical".into(),
         opcode: 0x30,
@@ -922,20 +924,23 @@ fn opcode_identity_and_workload_bind_resolved_context_environment() {
     };
     let mut value = [0u8; 32];
     value[31] = 7;
-    let explicit = OpcodeLabInput {
+    let explicit = ContextOpcodeLabInputV1 {
         tx_value: value,
         calldata: vec![1, 2, 3],
         block_timestamp: Some(17),
         ..baseline.clone()
     };
 
-    let baseline_identity = controlled_opcode_identity(&baseline).unwrap();
-    let explicit_zero_timestamp = OpcodeLabInput {
+    let baseline_bundle = controlled_context_opcode_identity_bundle(&baseline).unwrap();
+    let explicit_zero_timestamp = ContextOpcodeLabInputV1 {
         block_timestamp: Some(0),
         ..baseline.clone()
     };
-    let zero_identity = controlled_opcode_identity(&explicit_zero_timestamp).unwrap();
-    let identity = controlled_opcode_identity(&explicit).unwrap();
+    let zero_bundle = controlled_context_opcode_identity_bundle(&explicit_zero_timestamp).unwrap();
+    let bundle = controlled_context_opcode_identity_bundle(&explicit).unwrap();
+    let baseline_identity = &baseline_bundle.identity;
+    let zero_identity = &zero_bundle.identity;
+    let identity = &bundle.identity;
     assert_ne!(
         zero_identity.block_environment_sha256,
         baseline_identity.block_environment_sha256
@@ -954,9 +959,21 @@ fn opcode_identity_and_workload_bind_resolved_context_environment() {
         identity.block_environment_sha256,
         baseline_identity.block_environment_sha256
     );
+    assert_ne!(
+        bundle.expected_public_values,
+        baseline_bundle.expected_public_values
+    );
+    assert_ne!(
+        zero_bundle.expected_public_values,
+        baseline_bundle.expected_public_values
+    );
 
-    let spec = controlled_opcode_workload_spec(&explicit);
+    let spec = controlled_context_opcode_workload_spec(&explicit);
     assert_eq!(spec.environment["block_timestamp"], 17);
+    assert_eq!(
+        spec.environment["shared_constructor"],
+        "raiko2-context-opcode-lab"
+    );
     assert_eq!(
         spec.input["tx_value"],
         "0x0000000000000000000000000000000000000000000000000000000000000007"
@@ -1020,7 +1037,7 @@ fn native_identity_public_values_match_the_frozen_guest_baseline() {
 
     assert_eq!(
         bundle.expected_public_values,
-        "0xff91cb3a401b4a14b5714892ed3550857d5e65cd9546263565607cf7f95029fe"
+        "0x9318bc580c9b2aa315a8649bd205867ef84a5d28fecdb187ec57ba86f409ec16"
     );
 }
 

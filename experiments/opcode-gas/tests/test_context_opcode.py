@@ -25,9 +25,13 @@ TEST_CALIBRATION_IDENTITY = json.loads(
 HISTORICAL_CONTROL_ELF_SHA256 = TEST_CALIBRATION_IDENTITY["guest_artifacts"][
     "crates/guests/elf/sp1_opcode_lab.elf"
 ]
+HISTORICAL_LEGACY_ELF_SHA256 = TEST_CALIBRATION_IDENTITY["guest_artifacts"][
+    "crates/guests/elf/sp1_revm_opcode_lab.elf"
+]
 HISTORICAL_LAUNCHER_SHA256 = TEST_CALIBRATION_IDENTITY[
     "guest_launcher_sha256"
 ]
+TEST_CONTEXT_ELF_SHA256 = "c" * 64
 sys.path.insert(0, str(ROOT / "experiments/opcode-gas"))
 import opcode_gas
 
@@ -48,9 +52,8 @@ REAL_CONTEXT_IDENTITY_REPLAY = context._replay_context_result_identity
 def current_anchor_replay_fixture():
     source = production_campaign_source(
         {
-            "elf_sha256": TEST_CALIBRATION_IDENTITY["guest_artifacts"][
-                "crates/guests/elf/sp1_revm_opcode_lab.elf"
-            ],
+            "legacy_revm_elf_sha256": HISTORICAL_LEGACY_ELF_SHA256,
+            "context_elf_sha256": TEST_CONTEXT_ELF_SHA256,
             "control_opcode_lab_elf_sha256": HISTORICAL_CONTROL_ELF_SHA256,
             "launcher_sha256": HISTORICAL_LAUNCHER_SHA256,
         }
@@ -126,9 +129,9 @@ def current_anchor_replay_fixture():
         context.canonical_json(manifest)
     )
     return {
-        "calibration_identity": copy.deepcopy(TEST_CALIBRATION_IDENTITY),
+        "calibration_identity": copy.deepcopy(source["calibration_identity"]),
         "calibration_identity_sha256": context.sha256_bytes(
-            context.canonical_json(TEST_CALIBRATION_IDENTITY)
+            context.canonical_json(source["calibration_identity"])
         ),
         "fixture_manifest": manifest,
         "fixture_inputs": inputs,
@@ -137,6 +140,14 @@ def current_anchor_replay_fixture():
 
 
 def passing_production_canary(*, source_identity=None):
+    if source_identity is None:
+        source_identity = {
+            "legacy_revm_elf_sha256": HISTORICAL_LEGACY_ELF_SHA256,
+            "context_elf_sha256": TEST_CONTEXT_ELF_SHA256,
+            "control_opcode_lab_elf_sha256": HISTORICAL_CONTROL_ELF_SHA256,
+            "launcher_sha256": HISTORICAL_LAUNCHER_SHA256,
+        }
+    campaign_source = production_campaign_source(source_identity)
     legacy_root = TEST_CALIBRATION_RUN / "osaka-opcode-supplement"
     legacy = json.loads((legacy_root / "compatibility-canary.json").read_text())
     baseline = opcode_gas.validate_historical_core_opcode_baseline(
@@ -153,8 +164,29 @@ def passing_production_canary(*, source_identity=None):
         historical_observations=historical_observations,
         workload_identity_schema_version=1,
     )
-    legacy_replay = rebind_legacy_replay_to_current_identity(legacy_replay)
-    legacy_provenance = copy.deepcopy(legacy["provenance"])
+    legacy_provenance = {
+        "calibration_id": campaign_source["calibration_id"],
+        "calibration_identity_sha256": campaign_source[
+            "calibration_identity_sha256"
+        ],
+        "implementation_revision": campaign_source["implementation_revision"],
+        "controlled_manifest_sha256": campaign_source["calibration_identity"][
+            "controlled_manifest_sha256"
+        ],
+        "controlled_manifest_rows_sha256": campaign_source[
+            "calibration_identity"
+        ]["controlled_manifest_rows_sha256"],
+        "complete_schedule_sha256": campaign_source["calibration_identity"][
+            "complete_schedule_sha256"
+        ],
+        "guest_elf_sha256": campaign_source["legacy_revm_elf_sha256"],
+        "version_identity": opcode_gas.validate_calibration_version_identity(
+            campaign_source["calibration_identity"]
+        ),
+    }
+    legacy_replay = rebind_legacy_replay_to_current_identity(
+        legacy_replay, legacy_provenance
+    )
     replay_historical, replay_current = context._replay_legacy_osaka_evidence(
         legacy_replay, legacy_provenance
     )
@@ -185,13 +217,6 @@ def passing_production_canary(*, source_identity=None):
         for line in (anchor_root / "raw/anchor-probe.jsonl").read_text().splitlines()
     ]
     current_rows = copy.deepcopy(historical_rows)
-    if source_identity is None:
-        source_identity = {
-            "elf_sha256": legacy["provenance"]["guest_elf_sha256"],
-            "control_opcode_lab_elf_sha256": HISTORICAL_CONTROL_ELF_SHA256,
-            "launcher_sha256": HISTORICAL_LAUNCHER_SHA256,
-        }
-    campaign_source = production_campaign_source(source_identity)
     run_provenance = {
         "calibration_id": campaign_source["calibration_id"],
         "calibration_identity_sha256": campaign_source[
@@ -236,6 +261,7 @@ def passing_production_canary(*, source_identity=None):
     replay = current_anchor_replay_fixture()
     return context._build_context_compatibility_canary(
         legacy_osaka_canary=legacy,
+        context_elf_sha256=source_identity["context_elf_sha256"],
         historical_anchor_fit=historical,
         current_anchor_fit=current,
         historical_raw_sha256=context.HISTORICAL_ANCHOR_RAW_FILE_SHA256,
@@ -257,37 +283,66 @@ def passing_production_canary(*, source_identity=None):
     )
 
 
-def rebind_legacy_replay_to_current_identity(replay):
+def rebind_legacy_replay_to_current_identity(replay, provenance):
     replay = copy.deepcopy(replay)
     replay["workload_identity_schema_version"] = 2
-    for embedded, source in zip(
-        replay["rounds"], replay["decisions"]["rounds"]
-    ):
-        for row in embedded["rows"]:
-            guest_input = opcode_gas._formal_opcode_guest_input(row)
-            workload_id = opcode_gas.controlled_workload_id(
-                opcode_gas._formal_opcode_workload_spec(guest_input)
+    replay["decisions"]["calibration_identity_sha256"] = provenance[
+        "calibration_identity_sha256"
+    ]
+    replay["decisions"]["version_identity"] = copy.deepcopy(
+        provenance["version_identity"]
+    )
+    with tempfile.TemporaryDirectory() as directory:
+        manifest_path = pathlib.Path(directory) / "controlled-manifest.toml"
+        manifest_path.write_text(replay["controlled_manifest_utf8"])
+        manifest = opcode_gas.load_manifest(manifest_path)
+        cases = {case.name: case for case in manifest.cases}
+        relations = {
+            relation.id: relation for relation in manifest.opcode_relations
+        }
+        formal_provenance = {
+            field: provenance[field]
+            for field in opcode_gas.FORMAL_RELATION_PROVENANCE_FIELDS
+        }
+        for embedded, source in zip(
+            replay["rounds"], replay["decisions"]["rounds"]
+        ):
+            for row in embedded["rows"]:
+                relation = relations[row["relation_id"]]
+                canonical = opcode_gas._canonical_formal_relation_fixture_pair(
+                    manifest,
+                    cases[relation.case_id],
+                    relation,
+                    provenance=formal_provenance,
+                    generator_max_count=row["generator_max_count"],
+                    count=row["diagnostic_count"],
+                    placement=row["relation_placement"],
+                )[row["lane"]][0]
+                row.update(canonical)
+                guest_input = opcode_gas._formal_opcode_guest_input(row)
+                workload_id = opcode_gas.controlled_workload_id(
+                    opcode_gas._formal_opcode_workload_spec(guest_input)
+                )
+                row["workload_id"] = workload_id
+                row["controlled_trace"]["schema_version"] = 3
+                row["controlled_trace"]["workload_id"] = workload_id
+                row["execution_row_id"] = opcode_gas.controlled_execution_row_id(
+                    workload_id,
+                    backend="sp1",
+                    execution_engine=row["sp1_execution_engine"],
+                    run_id=row["calibration_id"],
+                    repeat_index=row["repeat_index"],
+                    backend_input_sha256=row["backend_input_sha256"],
+                )
+            embedded["rows_sha256"] = context.sha256_bytes(
+                context.canonical_json(embedded["rows"])
             )
-            row["workload_id"] = workload_id
-            row["controlled_trace"]["schema_version"] = 3
-            row["controlled_trace"]["workload_id"] = workload_id
-            row["execution_row_id"] = opcode_gas.controlled_execution_row_id(
-                workload_id,
-                backend="sp1",
-                execution_engine=row["sp1_execution_engine"],
-                run_id=row["calibration_id"],
-                repeat_index=row["repeat_index"],
-                backend_input_sha256=row["backend_input_sha256"],
+            raw_bytes = b"".join(
+                context.canonical_json(row) + b"\n" for row in embedded["rows"]
             )
-        embedded["rows_sha256"] = context.sha256_bytes(
-            context.canonical_json(embedded["rows"])
-        )
-        raw_bytes = b"".join(
-            context.canonical_json(row) + b"\n" for row in embedded["rows"]
-        )
-        raw_sha256 = context.sha256_bytes(raw_bytes)
-        embedded["source_raw_file_sha256"] = raw_sha256
-        source["raw_runs_sha256"] = raw_sha256
+            raw_sha256 = context.sha256_bytes(raw_bytes)
+            embedded["source_raw_file_sha256"] = raw_sha256
+            source["raw_runs_sha256"] = raw_sha256
     replay["decisions_sha256"] = context.sha256_bytes(
         context.canonical_json(replay["decisions"])
     )
@@ -482,8 +537,21 @@ def passing_production_adaptive_evidence(manifest, rows, source_identity):
 def production_campaign_source(source_identity):
     calibration_identity = copy.deepcopy(TEST_CALIBRATION_IDENTITY)
     guest_artifacts = calibration_identity["guest_artifacts"]
+    context_elf_sha256 = source_identity["context_elf_sha256"]
+    legacy_revm_elf_sha256 = source_identity["legacy_revm_elf_sha256"]
+    guest_artifacts["crates/guests/elf/sp1_context_opcode_lab.elf"] = (
+        context_elf_sha256
+    )
+    guest_artifacts["crates/guests/elf/sp1_context_opcode_lab.vk.bin"] = (
+        guest_artifacts["crates/guests/elf/sp1_revm_opcode_lab.vk.bin"]
+    )
+    calibration_identity["guest_artifacts_sha256"] = context.sha256_bytes(
+        context.canonical_json(guest_artifacts)
+    )
     if (
-        source_identity["elf_sha256"]
+        context_elf_sha256
+        != guest_artifacts["crates/guests/elf/sp1_context_opcode_lab.elf"]
+        or legacy_revm_elf_sha256
         != guest_artifacts["crates/guests/elf/sp1_revm_opcode_lab.elf"]
         or source_identity["control_opcode_lab_elf_sha256"]
         != guest_artifacts["crates/guests/elf/sp1_opcode_lab.elf"]
@@ -501,7 +569,8 @@ def production_campaign_source(source_identity):
         "calibration_identity": calibration_identity,
         "implementation_revision": calibration_identity["implementation_revision"],
         "launcher_sha256": source_identity["launcher_sha256"],
-        "revm_elf_sha256": source_identity["elf_sha256"],
+        "legacy_revm_elf_sha256": legacy_revm_elf_sha256,
+        "context_elf_sha256": context_elf_sha256,
         "control_opcode_lab_elf_sha256": source_identity[
             "control_opcode_lab_elf_sha256"
         ],
@@ -547,8 +616,24 @@ class ContextFixtureTests(unittest.TestCase):
         canary = self.manifest["compatibility_canary"]
         self.assertEqual(canary["control_anchor_opcodes"], [0x5F, 0x90])
         self.assertNotEqual(
-            canary["revm_opcode_lab_elf_path"],
+            canary["legacy_revm_opcode_lab_elf_path"],
             canary["control_opcode_lab_elf_path"],
+        )
+        self.assertNotEqual(
+            canary["legacy_revm_opcode_lab_elf_path"],
+            canary["context_opcode_lab_elf_path"],
+        )
+        self.assertEqual(canary["context_transport"], context.CONTEXT_TRANSPORT_STATUS)
+        self.assertEqual(
+            self.manifest["execution"],
+            {
+                "elf_path": "crates/guests/elf/sp1_context_opcode_lab.elf",
+                "evm_spec": "osaka",
+                "mode": "execute",
+                "proof_type": "sp1",
+                "sp1_execution_engine": "gas-estimator",
+                "stage": "context-opcode-lab",
+            },
         )
 
     def test_manifest_rejects_every_frozen_gate_and_scenario_mutation(self):
@@ -614,6 +699,35 @@ class ContextFixtureTests(unittest.TestCase):
         self.assertEqual(zero["block_timestamp"], 0)
         self.assertEqual(nonzero["block_timestamp"], 17)
         self.assertNotEqual(zero["environment_sha256"], nonzero["environment_sha256"])
+
+    def test_production_executor_and_identity_use_dedicated_context_stages(self):
+        calls = []
+
+        def fake_run(command, *, check):
+            self.assertTrue(check)
+            calls.append(command)
+            if "context-opcode-identity" in command:
+                output = pathlib.Path(command[command.index("--json-out") + 1])
+                output.write_text("{}\n")
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            context.subprocess, "run", side_effect=fake_run
+        ):
+            root = pathlib.Path(directory)
+            fixture = root / "fixture.json"
+            fixture.write_text("{}\n")
+            context._default_context_executor(
+                fixtures=[fixture],
+                reports_jsonl=root / "reports.jsonl",
+                guest_launcher=root / "guest-launcher",
+                elf=root / "sp1_context_opcode_lab.elf",
+            )
+            context._default_identity_replayer(root / "guest-launcher", fixture)
+
+        self.assertEqual(calls[0][calls[0].index("--stage") + 1], "context-opcode-lab")
+        self.assertEqual(
+            calls[1][calls[1].index("--stage") + 1], "context-opcode-identity"
+        )
 
 
 class ContextFitTests(unittest.TestCase):
@@ -991,7 +1105,8 @@ class ContextFitTests(unittest.TestCase):
                     historical_manifest=pathlib.Path("unused"),
                     historical_anchor_run=pathlib.Path("unused"),
                     guest_launcher=pathlib.Path("unused"),
-                    revm_elf=pathlib.Path("unused"),
+                    legacy_revm_elf=pathlib.Path("unused"),
+                    context_elf=pathlib.Path("unused"),
                     control_opcode_lab_elf=pathlib.Path("unused"),
                     output_root=output,
                 )
@@ -1004,6 +1119,32 @@ class ContextFitTests(unittest.TestCase):
         del canary["control_relations"]["opcode:0x90"]
         with self.assertRaisesRegex(ValueError, "control relation"):
             context.validate_context_compatibility_canary(canary)
+
+    def test_production_source_requires_legacy_elf_and_vk_in_calibration(self):
+        source = production_campaign_source(
+            {
+                "legacy_revm_elf_sha256": HISTORICAL_LEGACY_ELF_SHA256,
+                "context_elf_sha256": TEST_CONTEXT_ELF_SHA256,
+                "control_opcode_lab_elf_sha256": (
+                    HISTORICAL_CONTROL_ELF_SHA256
+                ),
+                "launcher_sha256": HISTORICAL_LAUNCHER_SHA256,
+            }
+        )
+        context._validate_production_campaign_source(source)
+        forged = copy.deepcopy(source)
+        artifacts = forged["calibration_identity"]["guest_artifacts"]
+        del artifacts["crates/guests/elf/sp1_revm_opcode_lab.vk.bin"]
+        forged["calibration_identity"]["guest_artifacts_sha256"] = (
+            context.sha256_bytes(context.canonical_json(artifacts))
+        )
+        calibration_hash = context.sha256_bytes(
+            context.canonical_json(forged["calibration_identity"])
+        )
+        forged["calibration_identity_sha256"] = calibration_hash
+        forged["calibration_id"] = calibration_hash[:24]
+        with self.assertRaisesRegex(ValueError, "calibration identity"):
+            context._validate_production_campaign_source(forged)
 
     def test_production_canary_rejects_legacy_workload_identity_replay(self):
         canary = passing_production_canary()
@@ -1023,13 +1164,62 @@ class ContextFitTests(unittest.TestCase):
 
     def test_compatibility_canary_uses_exact_ape_and_distinct_guest_artifacts(self):
         canary = passing_production_canary()
+        self.assertEqual(
+            canary["purpose"],
+            "legacy_opcode_reuse_canary_with_context_binding",
+        )
         row = canary["control_relations"]["opcode:0x5f"]
         self.assertEqual(
             set(row["drift_ape_exact"]), {"numerator", "denominator", "decimal"}
         )
         self.assertNotEqual(
-            canary["revm_elf_sha256"], canary["control_opcode_lab_elf_sha256"]
+            canary["legacy_revm_elf_sha256"],
+            canary["control_opcode_lab_elf_sha256"],
         )
+        self.assertNotEqual(
+            canary["context_elf_sha256"], canary["legacy_revm_elf_sha256"]
+        )
+        self.assertNotEqual(
+            canary["context_elf_sha256"],
+            canary["control_opcode_lab_elf_sha256"],
+        )
+        self.assertRegex(canary["context_elf_sha256"], r"^[0-9a-f]{64}$")
+        self.assertEqual(
+            canary["context_transport"],
+            {
+                "status": "not_evaluated",
+                "scope": "cross_elf_context_to_legacy_cost_transport",
+                "required_before_candidate_promotion": True,
+            },
+        )
+        transport_forgery = copy.deepcopy(canary)
+        transport_forgery["context_transport"]["status"] = "supported"
+        transport_forgery["artifact_sha256"] = context.sha256_bytes(
+            context.canonical_json(
+                {
+                    key: value
+                    for key, value in transport_forgery.items()
+                    if key != "artifact_sha256"
+                }
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "transport"):
+            context.validate_context_compatibility_canary(transport_forgery)
+        aliased_context = copy.deepcopy(canary)
+        aliased_context["context_elf_sha256"] = aliased_context[
+            "legacy_revm_elf_sha256"
+        ]
+        aliased_context["artifact_sha256"] = context.sha256_bytes(
+            context.canonical_json(
+                {
+                    key: value
+                    for key, value in aliased_context.items()
+                    if key != "artifact_sha256"
+                }
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "distinct"):
+            context.validate_context_compatibility_canary(aliased_context)
         broken = copy.deepcopy(canary)
         broken["control_relations"]["opcode:0x5f"]["drift_ape_exact"] = (
             context.fraction_payload(Fraction(1, 11))
@@ -1128,10 +1318,10 @@ class ContextSealAndPromotionTests(unittest.TestCase):
     @classmethod
     def source_identity_payload(cls):
         payload = {
-            "elf_sha256": TEST_CALIBRATION_IDENTITY["guest_artifacts"][
-                "crates/guests/elf/sp1_revm_opcode_lab.elf"
-            ],
-            "elf_path": "crates/guests/elf/sp1_revm_opcode_lab.elf",
+            "legacy_revm_elf_sha256": HISTORICAL_LEGACY_ELF_SHA256,
+            "legacy_revm_elf_path": "crates/guests/elf/sp1_revm_opcode_lab.elf",
+            "context_elf_sha256": TEST_CONTEXT_ELF_SHA256,
+            "context_elf_path": "crates/guests/elf/sp1_context_opcode_lab.elf",
             "control_opcode_lab_elf_sha256": HISTORICAL_CONTROL_ELF_SHA256,
             "control_opcode_lab_elf_path": "crates/guests/elf/sp1_opcode_lab.elf",
             "launcher_sha256": HISTORICAL_LAUNCHER_SHA256,
@@ -1395,6 +1585,11 @@ class ContextSealAndPromotionTests(unittest.TestCase):
 
     def test_sealed_directory_replays_without_guest_execution_and_rejects_tamper(self):
         payload = self.result_payload()
+        self.assertEqual(
+            payload["context_transport"],
+            payload["compatibility_canary"]["context_transport"],
+        )
+        self.assertFalse(payload["candidate_eligible"])
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             sealed = self.seal(payload, root)
@@ -1412,7 +1607,7 @@ class ContextSealAndPromotionTests(unittest.TestCase):
         foreign_canary = passing_production_canary(
             source_identity=self.source_identity_payload()
         )
-        foreign_canary["revm_elf_sha256"] = "9" * 64
+        foreign_canary["context_elf_sha256"] = "9" * 64
         foreign_canary["artifact_sha256"] = context.sha256_bytes(
             context.canonical_json(
                 {
@@ -1463,6 +1658,106 @@ class ContextSealAndPromotionTests(unittest.TestCase):
                 compatibility_canary=control_mismatch,
                 source_identity=self.result_payload()["source_identity"],
                 adaptive_evidence=self.result_payload()["adaptive_evidence"],
+            )
+
+    def test_result_rejects_legacy_elf_forged_outside_calibration_identity(self):
+        payload = self.result_payload()
+        source_identity = copy.deepcopy(payload["source_identity"])
+        source_identity["legacy_revm_elf_sha256"] = "9" * 64
+        canary = copy.deepcopy(payload["compatibility_canary"])
+        canary["legacy_revm_elf_sha256"] = "9" * 64
+        canary["legacy_osaka_canary"]["provenance"][
+            "guest_elf_sha256"
+        ] = "9" * 64
+        canary["legacy_osaka_canary"]["artifact_sha256"] = (
+            context.sha256_bytes(
+                context.canonical_json(
+                    {
+                        key: value
+                        for key, value in canary["legacy_osaka_canary"].items()
+                        if key != "artifact_sha256"
+                    }
+                )
+            )
+        )
+        canary["artifact_sha256"] = context.sha256_bytes(
+            context.canonical_json(
+                {
+                    key: value
+                    for key, value in canary.items()
+                    if key != "artifact_sha256"
+                }
+            )
+        )
+        context.validate_context_compatibility_canary(canary)
+        with self.assertRaisesRegex(ValueError, "adaptive evidence source"):
+            context._build_context_result(
+                manifest=self.manifest,
+                rows=payload["rows"],
+                source_registry=self.registry,
+                compatibility_canary=canary,
+                source_identity=source_identity,
+                adaptive_evidence=payload["adaptive_evidence"],
+            )
+
+    def test_result_rejects_legacy_canary_from_another_calibration(self):
+        payload = self.result_payload()
+        canary = copy.deepcopy(payload["compatibility_canary"])
+        provenance = copy.deepcopy(
+            canary["legacy_osaka_canary"]["provenance"]
+        )
+        provenance["calibration_identity_sha256"] = "8" * 64
+        provenance["calibration_id"] = provenance[
+            "calibration_identity_sha256"
+        ][:24]
+        replay = rebind_legacy_replay_to_current_identity(
+            canary["legacy_osaka_replay"], provenance
+        )
+        historical, current = context._replay_legacy_osaka_evidence(
+            replay, provenance
+        )
+        legacy = opcode_gas.build_osaka_compatibility_canary(
+            historical,
+            current,
+            baseline_artifact_sha256=(
+                context.HISTORICAL_OSAKA_RELATION_ARTIFACT_SHA256
+            ),
+            expected_baseline_artifact_sha256=(
+                context.HISTORICAL_OSAKA_RELATION_ARTIFACT_SHA256
+            ),
+        )
+        legacy["provenance"] = provenance
+        legacy["artifact_sha256"] = context.sha256_bytes(
+            context.canonical_json(
+                {
+                    key: value
+                    for key, value in legacy.items()
+                    if key != "artifact_sha256"
+                }
+            )
+        )
+        canary["legacy_osaka_canary"] = legacy
+        canary["legacy_osaka_replay"] = replay
+        canary["artifact_sha256"] = context.sha256_bytes(
+            context.canonical_json(
+                {
+                    key: value
+                    for key, value in canary.items()
+                    if key != "artifact_sha256"
+                }
+            )
+        )
+        context.validate_context_compatibility_canary(canary)
+        with self.assertRaisesRegex(
+            ValueError, "legacy compatibility canary calibration"
+        ):
+            context._build_context_result(
+                manifest=self.manifest,
+                rows=payload["rows"],
+                source_registry=self.registry,
+                compatibility_canary=canary,
+                source_identity=payload["source_identity"],
+                adaptive_evidence=payload["adaptive_evidence"],
             )
 
     def test_result_replay_rejects_extra_missing_and_symlink_inventory(self):
@@ -1588,53 +1883,69 @@ class ContextSealAndPromotionTests(unittest.TestCase):
             self.assertFalse(output.exists())
             self.assertEqual(context.sha256_bytes(marker.read_bytes()), before)
 
-    def test_v6_changes_exactly_six_v5_rows_and_overlay_counts_dispatch_once(self):
+    def test_non_candidate_context_result_cannot_promote_or_overlay(self):
         payload = self.result_payload()
         v4 = json.loads(COVERAGE_V4_PATH.read_text())
         v5 = copy.deepcopy(self.v5)
-        v6 = context.promote_operation_coverage_v6(v5, payload)
-        before = {row["key"]: row for row in v5["execution_coverage"]}
-        after = {row["key"]: row for row in v6["execution_coverage"]}
-        changed = {key for key in before if before[key] != after[key]}
-        self.assertEqual(
-            changed,
-            {"opcode:0x30", "opcode:0x33", "opcode:0x34", "opcode:0x35", "opcode:0x36", "opcode:0x42"},
-        )
+        with self.assertRaisesRegex(ValueError, "transport"):
+            context.promote_operation_coverage_v6(v5, payload)
         self.assertEqual(json.loads(COVERAGE_V4_PATH.read_text()), v4)
         corrected_registry = copy.deepcopy(self.registry["registry"])
         corrected_registry["models"]["opcode:0x15"] = {"kind": "static_raw_gas", "parameters": {"body_per_raw_gas": "123"}}
-        overlaid = context.overlay_context_models(corrected_registry, payload)
-        self.assertEqual(overlaid["models"]["opcode:0x15"], corrected_registry["models"]["opcode:0x15"])
+        with self.assertRaisesRegex(ValueError, "transport"):
+            context.overlay_context_models(corrected_registry, payload)
         model = payload["models"]["opcode:0x30"]
-        predicted = context.predict_context_overlay_event(
-            common_dispatch=Fraction(13), raw_gas=2, model=model
+        self.assertEqual(
+            model["parameter_basis"],
+            "provisional_legacy_projection_unvalidated_cross_elf_transport",
         )
-        body = context.fraction_from_payload(model["body_per_raw_gas_exact"])
-        self.assertEqual(predicted, Fraction(13) + 2 * body)
+        with self.assertRaisesRegex(ValueError, "basis"):
+            context.predict_context_overlay_event(
+                common_dispatch=Fraction(13), raw_gas=2, model=model
+            )
 
-    def test_v6_promotes_passed_keys_when_one_sibling_family_fails(self):
+        forged = copy.deepcopy(payload)
+        forged.pop("artifact_sha256")
+        forged.pop("result_id")
+        forged.pop("result_identity_sha256")
+        forged["candidate_eligible"] = True
+        forged["context_transport"] = {
+            "status": "supported",
+            "scope": "self_declared_forgery",
+            "required_before_candidate_promotion": False,
+        }
+        for forged_model in forged["models"].values():
+            forged_model["parameter_basis"] = (
+                "production_scaled_body_excluding_common_dispatch"
+            )
+        identity = context.sha256_bytes(context.canonical_json(forged))
+        forged["result_identity_sha256"] = identity
+        forged["result_id"] = identity[:24]
+        forged["artifact_sha256"] = context.sha256_bytes(
+            context.canonical_json(forged)
+        )
+        with self.assertRaisesRegex(ValueError, "transport contract"):
+            context.promote_operation_coverage_v6(v5, forged)
+        with self.assertRaisesRegex(ValueError, "transport contract"):
+            context.overlay_context_models(corrected_registry, forged)
+
+    def test_partial_non_candidate_result_still_cannot_promote(self):
         payload = copy.deepcopy(self.result_payload())
         payload.pop("artifact_sha256")
         payload.pop("result_id")
         payload.pop("result_identity_sha256")
         payload["models"].pop("opcode:0x34")
-        payload["promoted_model_keys"] = sorted(payload["models"])
+        payload["measured_model_keys"] = sorted(payload["models"])
         identity = context.sha256_bytes(context.canonical_json(payload))
         payload["result_identity_sha256"] = identity
         payload["result_id"] = identity[:24]
         payload["artifact_sha256"] = context.sha256_bytes(
             context.canonical_json(payload)
         )
-        v6 = context.promote_operation_coverage_v6(self.v5, payload)
-        before = {row["key"]: row for row in self.v5["execution_coverage"]}
-        after = {row["key"]: row for row in v6["execution_coverage"]}
-        changed = {key for key in before if before[key] != after[key]}
-        self.assertEqual(changed, set(payload["promoted_model_keys"]))
-        self.assertEqual(after["opcode:0x34"], before["opcode:0x34"])
-        overlaid = context.overlay_context_models(
-            self.registry["registry"], payload
-        )
-        self.assertIsNone(overlaid["opcode_model_ids"][0x34])
+        with self.assertRaisesRegex(ValueError, "transport"):
+            context.promote_operation_coverage_v6(self.v5, payload)
+        with self.assertRaisesRegex(ValueError, "transport"):
+            context.overlay_context_models(self.registry["registry"], payload)
 
     def test_v5_rebinds_corrected_core_provenance_then_v6_changes_only_six_rows(self):
         v4 = json.loads(COVERAGE_V4_PATH.read_text())
@@ -1649,16 +1960,8 @@ class ContextSealAndPromotionTests(unittest.TestCase):
             for evidence in row.get("source_evidence", []):
                 if evidence.get("kind") in {"sealed_registry_model", "sealed_registry_unsupported"}:
                     self.assertEqual(evidence["artifact_sha256"], corrected["artifact_sha256"])
-        v6 = context.promote_operation_coverage_v6(v5, self.result_payload())
-        changed = {
-            before["key"]
-            for before, after in zip(v5["execution_coverage"], v6["execution_coverage"])
-            if before != after
-        }
-        self.assertEqual(
-            changed,
-            {"opcode:0x30", "opcode:0x33", "opcode:0x34", "opcode:0x35", "opcode:0x36", "opcode:0x42"},
-        )
+        with self.assertRaisesRegex(ValueError, "transport"):
+            context.promote_operation_coverage_v6(v5, self.result_payload())
 
 
 if __name__ == "__main__":

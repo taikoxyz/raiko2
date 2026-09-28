@@ -31,8 +31,8 @@ pub use context::{
 pub use error::{RaikoError, RaikoResult};
 pub use input::{AggregationGuestInput, RawAggregationGuestInput, RawProof, StatelessInput};
 pub use opcode_lab::{
-    OpcodeLabInput, OpcodeLabStorageAccess, OpcodeLabStorageInput, OpcodeLabStorageLane,
-    OpcodeLabStorageOperation,
+    ContextOpcodeLabInputV1, OpcodeLabInput, OpcodeLabStorageAccess, OpcodeLabStorageInput,
+    OpcodeLabStorageLane, OpcodeLabStorageOperation,
 };
 pub use output::{AggregationGuestOutput, GuestOutput, GuestProposalOutput};
 pub use precompile_lab::{PrecompileLabInput, PrecompileLabLane};

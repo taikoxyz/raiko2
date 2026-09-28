@@ -12,13 +12,14 @@ use alloy_sol_types::{SolCall, sol};
 use alloy_trie::EMPTY_ROOT_HASH;
 use anyhow::{Result, bail};
 use raiko2_opcode_lab::{
-    OPCODE_LAB_SPEC_ID, build_benchmark_block_env, build_benchmark_db, build_benchmark_tx,
-    fold_revm_opcode_execution_result, fold_revm_opcode_program, revm_opcode_public_values,
+    OPCODE_LAB_SPEC_ID, build_benchmark_db, build_benchmark_tx, build_context_benchmark_block_env,
+    build_context_benchmark_tx, context_opcode_public_values, fold_revm_opcode_execution_result,
+    fold_revm_opcode_program, revm_opcode_public_values,
 };
 use raiko2_primitives::{
-    ExecutionWitness, OpcodeLabInput, OpcodeLabStorageInput, OpcodeLabStorageLane,
-    OpcodeLabStorageOperation, PrecompileLabInput, PrecompileLabLane, ProofType, StatelessInput,
-    SupportedChainSpecs, WitnessHeader, WitnessStateNode,
+    ContextOpcodeLabInputV1, ExecutionWitness, OpcodeLabInput, OpcodeLabStorageInput,
+    OpcodeLabStorageLane, OpcodeLabStorageOperation, PrecompileLabInput, PrecompileLabLane,
+    ProofType, StatelessInput, SupportedChainSpecs, WitnessHeader, WitnessStateNode,
     blob::util::{blob_to_commitment, blob_to_proof_of_equivalence, commitment_to_version_hash},
     builtin_taiko_chain_spec,
     chain_spec::{ForkCondition, ForkId, TaikoFork},
@@ -183,6 +184,27 @@ pub struct ControlledOpcodeIdentityBundle {
     pub schema_version: u32,
     pub expected_public_values: String,
     pub identity: ControlledOpcodeIdentityEvidence,
+    pub report: ControlledOpcodeIdentityReport,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ControlledContextOpcodeIdentityEvidence {
+    pub schema_version: u32,
+    pub input: ContextOpcodeLabInputV1,
+    pub backend_input_sha256: String,
+    pub backend_input_len: usize,
+    pub workload_id: String,
+    pub transaction_envelope_sha256: String,
+    pub block_environment_sha256: String,
+    pub access_list_sha256: String,
+    pub prestate_sha256: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ControlledContextOpcodeIdentityBundle {
+    pub schema_version: u32,
+    pub expected_public_values: String,
+    pub identity: ControlledContextOpcodeIdentityEvidence,
     pub report: ControlledOpcodeIdentityReport,
 }
 
@@ -2607,10 +2629,7 @@ pub fn controlled_opcode_workload_spec(input: &OpcodeLabInput) -> ControlledWork
         lane,
         state,
         environment: BTreeMap::from([
-            (
-                "block_timestamp".into(),
-                Value::from(input.effective_block_timestamp()),
-            ),
+            ("block_timestamp".into(), Value::from(1)),
             ("evm_spec".into(), Value::String("osaka".into())),
             ("revm_version".into(), Value::String("41.0.0".into())),
             (
@@ -2623,15 +2642,12 @@ pub fn controlled_opcode_workload_spec(input: &OpcodeLabInput) -> ControlledWork
                 "bytecode".into(),
                 Value::String(alloy_primitives::hex::encode_prefixed(&input.bytecode)),
             ),
-            (
-                "calldata".into(),
-                Value::String(alloy_primitives::hex::encode_prefixed(&input.calldata)),
-            ),
+            ("calldata".into(), Value::String("0x".into())),
             ("opcode".into(), Value::from(input.opcode)),
             ("target_raw_gas".into(), Value::from(input.target_raw_gas)),
             (
                 "tx_value".into(),
-                Value::String(alloy_primitives::hex::encode_prefixed(input.tx_value)),
+                Value::String(alloy_primitives::hex::encode_prefixed([0u8; 32])),
             ),
             (
                 "tx_gas_limit".into(),
@@ -2651,6 +2667,29 @@ pub fn controlled_opcode_workload_spec(input: &OpcodeLabInput) -> ControlledWork
         )]),
         expected_feature_deltas: BTreeMap::new(),
     }
+}
+
+pub fn controlled_context_opcode_workload_spec(
+    input: &ContextOpcodeLabInputV1,
+) -> ControlledWorkloadSpec {
+    let mut spec = controlled_opcode_workload_spec(&input.legacy_input());
+    spec.environment.insert(
+        "block_timestamp".into(),
+        Value::from(input.effective_block_timestamp()),
+    );
+    spec.environment.insert(
+        "shared_constructor".into(),
+        Value::String("raiko2-context-opcode-lab".into()),
+    );
+    spec.input.insert(
+        "calldata".into(),
+        Value::String(alloy_primitives::hex::encode_prefixed(&input.calldata)),
+    );
+    spec.input.insert(
+        "tx_value".into(),
+        Value::String(alloy_primitives::hex::encode_prefixed(input.tx_value)),
+    );
+    spec
 }
 
 fn result_status(result: &ExecutionResult) -> &'static str {
@@ -2794,8 +2833,8 @@ pub fn controlled_opcode_identity(
         .validate_controlled_contract()
         .map_err(anyhow::Error::msg)?;
     let backend_input = bincode::serialize(input)?;
-    let canonical_tx = build_benchmark_tx(input)?;
-    let canonical_block = build_benchmark_block_env(input);
+    let canonical_tx = build_benchmark_tx(input.execution_gas_limit(), input.storage.as_ref())?;
+    let canonical_block = BlockEnv::default();
     let (transaction_envelope_sha256, access_list_sha256) = transaction_identities(&canonical_tx)?;
     Ok(ControlledOpcodeIdentityEvidence {
         schema_version: 2,
@@ -2864,11 +2903,25 @@ fn measured_events<'a>(
 pub fn check_revm_opcode_semantics(
     input: &OpcodeLabInput,
 ) -> Result<ControlledOpcodeSemanticCheck> {
+    let backend_input = bincode::serialize(input)?;
+    check_opcode_semantics_with_environment(
+        input,
+        &backend_input,
+        build_benchmark_tx(input.execution_gas_limit(), input.storage.as_ref())?,
+        BlockEnv::default(),
+    )
+}
+
+fn check_opcode_semantics_with_environment(
+    input: &OpcodeLabInput,
+    backend_input: &[u8],
+    canonical_tx: TxEnv,
+    canonical_block: BlockEnv,
+) -> Result<ControlledOpcodeSemanticCheck> {
     input
         .validate_controlled_contract()
         .map_err(anyhow::Error::msg)?;
-    let backend_input = bincode::serialize(input)?;
-    let backend_input_sha256 = alloy_primitives::hex::encode(Sha256::digest(&backend_input));
+    let backend_input_sha256 = alloy_primitives::hex::encode(Sha256::digest(backend_input));
     let mut observations = Vec::new();
     let mut observed_storage_opcode_count = 0u64;
     for (program_index, program) in input
@@ -2880,10 +2933,10 @@ pub fn check_revm_opcode_semantics(
         let bytecode = Bytecode::new_legacy(program.to_vec().into());
         let context = Context::mainnet()
             .modify_cfg_chained(|cfg| cfg.set_spec_and_mainnet_gas_params(OPCODE_LAB_SPEC_ID))
-            .modify_block_chained(|block| *block = build_benchmark_block_env(input))
+            .modify_block_chained(|block| *block = canonical_block.clone())
             .with_db(build_benchmark_db(bytecode, input.storage.as_ref()));
         let mut evm = context.build_mainnet_with_inspector(StorageSemanticInspector::default());
-        let execution = evm.inspect_tx(build_benchmark_tx(input)?)?;
+        let execution = evm.inspect_tx(canonical_tx.clone())?;
         let status = result_status(&execution.result).to_string();
         if status != "success" {
             bail!("opcode-lab semantic program {program_index} did not succeed: {status}");
@@ -2995,12 +3048,45 @@ pub fn check_revm_opcode_semantics(
 
 pub fn trace_revm_opcode_workload(input: &OpcodeLabInput) -> Result<ControlledOpcodeTrace> {
     let identity = controlled_opcode_identity(input)?;
+    let canonical_tx = build_benchmark_tx(input.execution_gas_limit(), input.storage.as_ref())?;
+    let canonical_block = BlockEnv::default();
+    let semantic_check = check_revm_opcode_semantics(input)?;
+    trace_opcode_workload_with_environment(
+        input,
+        identity.workload_id,
+        identity.backend_input_sha256,
+        identity.backend_input_len,
+        identity.transaction_envelope_sha256,
+        identity.block_environment_sha256,
+        identity.access_list_sha256,
+        identity.prestate_sha256,
+        canonical_tx,
+        canonical_block,
+        semantic_check,
+        "raiko2-opcode-lab",
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn trace_opcode_workload_with_environment(
+    input: &OpcodeLabInput,
+    workload_id: String,
+    backend_input_sha256: String,
+    backend_input_len: usize,
+    transaction_envelope_sha256: String,
+    block_environment_sha256: String,
+    access_list_sha256: String,
+    prestate_sha256: String,
+    canonical_tx: TxEnv,
+    canonical_block: BlockEnv,
+    semantic_check: ControlledOpcodeSemanticCheck,
+    shared_constructor: &'static str,
+) -> Result<ControlledOpcodeTrace> {
     let programs = input.execution_programs().map_err(anyhow::Error::msg)?;
     let program_sha256 = programs
         .iter()
         .map(|program| alloy_primitives::hex::encode(Sha256::digest(program)))
         .collect::<Vec<_>>();
-    let canonical_tx = build_benchmark_tx(input)?;
     let mut inspector = OpcodeFootprintInspector::default();
     let mut program_events = Vec::with_capacity(programs.len());
     let mut result_statuses = BTreeMap::new();
@@ -3008,7 +3094,7 @@ pub fn trace_revm_opcode_workload(input: &OpcodeLabInput) -> Result<ControlledOp
         let bytecode = Bytecode::new_legacy(program.to_vec().into());
         let context = Context::mainnet()
             .modify_cfg_chained(|cfg| cfg.set_spec_and_mainnet_gas_params(OPCODE_LAB_SPEC_ID))
-            .modify_block_chained(|block| *block = build_benchmark_block_env(input))
+            .modify_block_chained(|block| *block = canonical_block.clone())
             .with_db(build_benchmark_db(bytecode, input.storage.as_ref()));
         let mut evm = context.build_mainnet_with_inspector(OpcodeFootprintInspector::default());
         let execution = evm.inspect_one_tx(canonical_tx.clone())?;
@@ -3075,12 +3161,11 @@ pub fn trace_revm_opcode_workload(input: &OpcodeLabInput) -> Result<ControlledOp
         .into_iter()
         .map(|(opcode, count)| (format!("opcode:0x{opcode:02x}"), count))
         .collect();
-    let semantic_check = check_revm_opcode_semantics(input)?;
     Ok(ControlledOpcodeTrace {
         schema_version: 3,
-        workload_id: identity.workload_id,
-        backend_input_sha256: identity.backend_input_sha256,
-        backend_input_len: identity.backend_input_len,
+        workload_id,
+        backend_input_sha256,
+        backend_input_len,
         target_opcode: input.opcode,
         declared_target_count: input.target_count,
         declared_target_raw_gas: input.target_raw_gas,
@@ -3093,11 +3178,11 @@ pub fn trace_revm_opcode_workload(input: &OpcodeLabInput) -> Result<ControlledOp
         bytecode_len: input.bytecode.len(),
         evm_spec: "osaka",
         revm_version: "41.0.0",
-        shared_constructor: "raiko2-opcode-lab",
-        transaction_envelope_sha256: identity.transaction_envelope_sha256,
-        block_environment_sha256: identity.block_environment_sha256,
-        access_list_sha256: identity.access_list_sha256,
-        prestate_sha256: identity.prestate_sha256,
+        shared_constructor,
+        transaction_envelope_sha256,
+        block_environment_sha256,
+        access_list_sha256,
+        prestate_sha256,
         bytecode_sha256: alloy_primitives::hex::encode(Sha256::digest(&input.bytecode)),
         program_sha256,
         executed_opcode_counts,
@@ -3129,6 +3214,62 @@ pub fn controlled_opcode_identity_bundle(
     })
 }
 
+pub fn controlled_context_opcode_identity_bundle(
+    input: &ContextOpcodeLabInputV1,
+) -> Result<ControlledContextOpcodeIdentityBundle> {
+    input
+        .validate_controlled_contract()
+        .map_err(anyhow::Error::msg)?;
+    let legacy = input.legacy_input();
+    let backend_input = bincode::serialize(input)?;
+    let backend_input_sha256 = alloy_primitives::hex::encode(Sha256::digest(&backend_input));
+    let canonical_tx = build_context_benchmark_tx(input)?;
+    let canonical_block = build_context_benchmark_block_env(input);
+    let (transaction_envelope_sha256, access_list_sha256) = transaction_identities(&canonical_tx)?;
+    let identity = ControlledContextOpcodeIdentityEvidence {
+        schema_version: 2,
+        input: input.clone(),
+        backend_input_sha256: backend_input_sha256.clone(),
+        backend_input_len: backend_input.len(),
+        workload_id: controlled_workload_id(&controlled_context_opcode_workload_spec(input))?,
+        transaction_envelope_sha256: transaction_envelope_sha256.clone(),
+        block_environment_sha256: block_environment_sha256(&canonical_block)?,
+        access_list_sha256: access_list_sha256.clone(),
+        prestate_sha256: storage_prestate_sha256(input.storage.as_ref())?,
+    };
+    let semantic_check = check_opcode_semantics_with_environment(
+        &legacy,
+        &backend_input,
+        canonical_tx.clone(),
+        canonical_block.clone(),
+    )?;
+    let trace = trace_opcode_workload_with_environment(
+        &legacy,
+        identity.workload_id.clone(),
+        backend_input_sha256,
+        backend_input.len(),
+        transaction_envelope_sha256,
+        identity.block_environment_sha256.clone(),
+        access_list_sha256,
+        identity.prestate_sha256.clone(),
+        canonical_tx,
+        canonical_block,
+        semantic_check,
+        "raiko2-context-opcode-lab",
+    )?;
+    let expected_public_values = expected_context_opcode_public_values(input)?;
+    Ok(ControlledContextOpcodeIdentityBundle {
+        schema_version: 2,
+        expected_public_values,
+        report: ControlledOpcodeIdentityReport {
+            guest_input_sha256: format!("0x{}", identity.backend_input_sha256),
+            guest_input_bincode_length: identity.backend_input_len,
+            controlled_trace: ControlledTrace::RevmOpcode(Box::new(trace)),
+        },
+        identity,
+    })
+}
+
 fn expected_revm_opcode_public_values(input: &OpcodeLabInput) -> Result<String> {
     input
         .validate_controlled_contract()
@@ -3138,11 +3279,11 @@ fn expected_revm_opcode_public_values(input: &OpcodeLabInput) -> Result<String> 
         let bytecode = Bytecode::new_legacy(program.to_vec().into());
         let context = Context::mainnet()
             .modify_cfg_chained(|cfg| cfg.set_spec_and_mainnet_gas_params(OPCODE_LAB_SPEC_ID))
-            .modify_block_chained(|block| *block = build_benchmark_block_env(input))
             .with_db(build_benchmark_db(bytecode, input.storage.as_ref()));
-        let execution = context
-            .build_mainnet()
-            .transact(build_benchmark_tx(input)?)?;
+        let execution = context.build_mainnet().transact(build_benchmark_tx(
+            input.execution_gas_limit(),
+            input.storage.as_ref(),
+        )?)?;
         accumulator = fold_revm_opcode_program(
             accumulator,
             fold_revm_opcode_execution_result(&execution.result),
@@ -3151,6 +3292,31 @@ fn expected_revm_opcode_public_values(input: &OpcodeLabInput) -> Result<String> 
     Ok(format!(
         "{:#x}",
         revm_opcode_public_values(input, accumulator)
+    ))
+}
+
+fn expected_context_opcode_public_values(input: &ContextOpcodeLabInputV1) -> Result<String> {
+    input
+        .validate_controlled_contract()
+        .map_err(anyhow::Error::msg)?;
+    let mut accumulator = 0u64;
+    for program in input.execution_programs().map_err(anyhow::Error::msg)? {
+        let bytecode = Bytecode::new_legacy(program.to_vec().into());
+        let context = Context::mainnet()
+            .modify_cfg_chained(|cfg| cfg.set_spec_and_mainnet_gas_params(OPCODE_LAB_SPEC_ID))
+            .modify_block_chained(|block| *block = build_context_benchmark_block_env(input))
+            .with_db(build_benchmark_db(bytecode, input.storage.as_ref()));
+        let execution = context
+            .build_mainnet()
+            .transact(build_context_benchmark_tx(input)?)?;
+        accumulator = fold_revm_opcode_program(
+            accumulator,
+            fold_revm_opcode_execution_result(&execution.result),
+        );
+    }
+    Ok(format!(
+        "{:#x}",
+        context_opcode_public_values(&bincode::serialize(input)?, accumulator)
     ))
 }
 

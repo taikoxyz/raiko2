@@ -6,7 +6,9 @@ extern crate alloc;
 
 use alloc::{vec, vec::Vec};
 use alloy_primitives::keccak256;
-use raiko2_primitives::{OpcodeLabInput, OpcodeLabStorageAccess, OpcodeLabStorageInput};
+use raiko2_primitives::{
+    ContextOpcodeLabInputV1, OpcodeLabInput, OpcodeLabStorageAccess, OpcodeLabStorageInput,
+};
 use revm::{
     bytecode::Bytecode,
     context::{
@@ -135,10 +137,14 @@ pub fn revm_opcode_public_values(input: &OpcodeLabInput, accumulator: u64) -> B2
     output.extend_from_slice(&input.opcode.to_le_bytes());
     output.extend_from_slice(&input.target_count.to_le_bytes());
     output.extend_from_slice(&input.target_raw_gas.to_le_bytes());
-    output.extend_from_slice(&input.tx_value);
-    output.extend_from_slice(&(input.calldata.len() as u64).to_le_bytes());
-    output.extend_from_slice(&input.calldata);
-    output.extend_from_slice(&input.effective_block_timestamp().to_le_bytes());
+    output.extend_from_slice(&accumulator.to_le_bytes());
+    keccak256(output)
+}
+
+/// Computes the exact public output committed by `sp1-context-opcode-lab`.
+#[must_use]
+pub fn context_opcode_public_values(input_bincode: &[u8], accumulator: u64) -> B256 {
+    let mut output = input_bincode.to_vec();
     output.extend_from_slice(&accumulator.to_le_bytes());
     keccak256(output)
 }
@@ -188,16 +194,12 @@ pub fn build_benchmark_db(
 /// # Errors
 ///
 /// Returns [`TxEnvBuildError`] if REVM rejects the benchmark transaction envelope.
-pub fn build_benchmark_tx(input: &OpcodeLabInput) -> Result<TxEnv, TxEnvBuildError> {
-    let mut builder = TxEnv::builder_for_bench()
-        .gas_limit(
-            input
-                .execution_gas_limit()
-                .max(OpcodeLabInput::MIN_EXECUTION_GAS_LIMIT),
-        )
-        .value(U256::from_be_bytes(input.tx_value))
-        .data(Bytes::copy_from_slice(&input.calldata));
-    if let Some(storage) = input.storage.as_ref()
+pub fn build_benchmark_tx(
+    gas_limit: u64,
+    storage: Option<&OpcodeLabStorageInput>,
+) -> Result<TxEnv, TxEnvBuildError> {
+    let mut builder = TxEnv::builder_for_bench().gas_limit(gas_limit);
+    if let Some(storage) = storage
         && storage.access == OpcodeLabStorageAccess::Warm
     {
         builder = builder
@@ -210,9 +212,23 @@ pub fn build_benchmark_tx(input: &OpcodeLabInput) -> Result<TxEnv, TxEnvBuildErr
     builder.build()
 }
 
-/// Builds the canonical benchmark block environment from the normalized lab input.
+/// Builds the canonical benchmark transaction from the normalized context input.
+///
+/// # Errors
+///
+/// Returns [`TxEnvBuildError`] if REVM rejects the benchmark transaction envelope.
+pub fn build_context_benchmark_tx(
+    input: &ContextOpcodeLabInputV1,
+) -> Result<TxEnv, TxEnvBuildError> {
+    let mut tx = build_benchmark_tx(input.execution_gas_limit(), input.storage.as_ref())?;
+    tx.value = U256::from_be_bytes(input.tx_value);
+    tx.data = Bytes::copy_from_slice(&input.calldata);
+    Ok(tx)
+}
+
+/// Builds the canonical context-opcode block environment.
 #[must_use]
-pub fn build_benchmark_block_env(input: &OpcodeLabInput) -> BlockEnv {
+pub fn build_context_benchmark_block_env(input: &ContextOpcodeLabInputV1) -> BlockEnv {
     BlockEnv {
         timestamp: U256::from(input.effective_block_timestamp()),
         ..BlockEnv::default()
@@ -225,8 +241,10 @@ extern crate std;
 #[cfg(test)]
 mod tests {
     use super::{
-        OPCODE_LAB_SPEC_ID, build_benchmark_block_env, build_benchmark_db, build_benchmark_tx,
-        fold_revm_opcode_program, opcode_anchor_public_values, revm_opcode_public_values,
+        OPCODE_LAB_SPEC_ID, build_benchmark_db, build_benchmark_tx,
+        build_context_benchmark_block_env, build_context_benchmark_tx,
+        context_opcode_public_values, fold_revm_opcode_program, opcode_anchor_public_values,
+        revm_opcode_public_values,
     };
     use raiko2_primitives::{
         OpcodeLabStorageAccess, OpcodeLabStorageInput, OpcodeLabStorageLane,
@@ -259,17 +277,6 @@ mod tests {
         }
     }
 
-    fn tx_input(
-        gas_limit: u64,
-        storage: Option<&OpcodeLabStorageInput>,
-    ) -> raiko2_primitives::OpcodeLabInput {
-        raiko2_primitives::OpcodeLabInput {
-            tx_gas_limit: Some(gas_limit),
-            storage: storage.cloned(),
-            ..Default::default()
-        }
-    }
-
     #[test]
     fn opcode_lab_uses_osaka() {
         assert_eq!(OPCODE_LAB_SPEC_ID, SpecId::OSAKA);
@@ -291,7 +298,7 @@ mod tests {
             revm_opcode_public_values(&input, 4),
             B256::from_slice(
                 &alloy_primitives::hex::decode(
-                    "eae827c206c2bdc7b97283dc8f4e06f8e4659da1701dda862eb65574468f0299",
+                    "97fadfb98a033ca1f2c4a5fc10e77a2e2fee83ebcff769c6a1af05d943f4345d",
                 )
                 .unwrap(),
             )
@@ -326,7 +333,7 @@ mod tests {
     fn benchmark_environment_uses_the_explicit_context_input() {
         let mut value = [0u8; 32];
         value[31] = 7;
-        let input = raiko2_primitives::OpcodeLabInput {
+        let input = raiko2_primitives::ContextOpcodeLabInputV1 {
             tx_gas_limit: Some(123_456),
             tx_value: value,
             calldata: vec![1, 2, 3],
@@ -334,8 +341,8 @@ mod tests {
             ..Default::default()
         };
 
-        let tx = build_benchmark_tx(&input).expect("valid benchmark transaction");
-        let block = build_benchmark_block_env(&input);
+        let tx = build_context_benchmark_tx(&input).expect("valid benchmark transaction");
+        let block = build_context_benchmark_block_env(&input);
 
         assert_eq!(tx.gas_limit, 123_456);
         assert_eq!(tx.value, U256::from(7));
@@ -344,27 +351,16 @@ mod tests {
     }
 
     #[test]
-    fn public_commitment_binds_each_resolved_context_field() {
-        let baseline = raiko2_primitives::OpcodeLabInput::default();
-        let baseline_digest = revm_opcode_public_values(&baseline, 4);
-        let mut value = [0u8; 32];
-        value[31] = 1;
-        for alternate in [
-            raiko2_primitives::OpcodeLabInput {
-                tx_value: value,
-                ..baseline.clone()
-            },
-            raiko2_primitives::OpcodeLabInput {
-                calldata: vec![1],
-                ..baseline.clone()
-            },
-            raiko2_primitives::OpcodeLabInput {
-                block_timestamp: Some(0),
-                ..baseline.clone()
-            },
-        ] {
-            assert_ne!(revm_opcode_public_values(&alternate, 4), baseline_digest);
-        }
+    fn context_public_commitment_binds_complete_encoded_input_and_accumulator() {
+        let baseline = context_opcode_public_values(b"complete-context-wire", 4);
+        assert_ne!(
+            context_opcode_public_values(b"complete-context-wirf", 4),
+            baseline
+        );
+        assert_ne!(
+            context_opcode_public_values(b"complete-context-wire", 5),
+            baseline
+        );
     }
 
     #[test]
@@ -411,8 +407,7 @@ mod tests {
         let cold = storage([0x22; 32], OpcodeLabStorageAccess::Cold);
 
         for storage in [None, Some(&cold)] {
-            let tx = build_benchmark_tx(&tx_input(123_456, storage))
-                .expect("valid benchmark transaction");
+            let tx = build_benchmark_tx(123_456, storage).expect("valid benchmark transaction");
             assert_eq!(tx.gas_limit, 123_456);
             assert!(tx.access_list.0.is_empty());
         }
@@ -422,8 +417,7 @@ mod tests {
     fn warm_transaction_has_exact_target_slot_access_list() {
         let warm = storage([0x22; 32], OpcodeLabStorageAccess::Warm);
 
-        let tx = build_benchmark_tx(&tx_input(123_456, Some(&warm)))
-            .expect("valid benchmark transaction");
+        let tx = build_benchmark_tx(123_456, Some(&warm)).expect("valid benchmark transaction");
 
         assert_eq!(
             tx.access_list,
@@ -451,7 +445,7 @@ mod tests {
                 .modify_cfg_chained(|cfg| cfg.set_spec_and_mainnet_gas_params(OPCODE_LAB_SPEC_ID))
                 .with_db(build_benchmark_db(bytecode.clone(), Some(storage)));
             ctx.build_mainnet()
-                .transact(build_benchmark_tx(&tx_input(100_000, Some(storage))).expect("valid tx"))
+                .transact(build_benchmark_tx(100_000, Some(storage)).expect("valid tx"))
                 .expect("SLOAD execution")
                 .result
                 .tx_gas_used()
@@ -466,8 +460,7 @@ mod tests {
 
     #[test]
     fn stateless_transaction_preserves_benchmark_envelope() {
-        let actual =
-            build_benchmark_tx(&tx_input(123_456, None)).expect("valid benchmark transaction");
+        let actual = build_benchmark_tx(123_456, None).expect("valid benchmark transaction");
         let expected = TxEnv::builder_for_bench()
             .gas_limit(123_456)
             .build()

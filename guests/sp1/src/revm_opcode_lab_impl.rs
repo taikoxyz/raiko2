@@ -1,8 +1,7 @@
 use raiko2_opcode_lab::{
-    build_benchmark_block_env, build_benchmark_db, build_benchmark_tx,
-    fold_revm_opcode_execution_result, OPCODE_LAB_SPEC_ID,
+    build_benchmark_db, build_benchmark_tx, fold_revm_opcode_execution_result, OPCODE_LAB_SPEC_ID,
 };
-use raiko2_primitives::{OpcodeLabInput, OpcodeLabStorageInput};
+use raiko2_primitives::OpcodeLabStorageInput;
 use revm::{
     bytecode::Bytecode, context_interface::result::ResultAndState, primitives::hardfork::SpecId,
     Context, ExecuteEvm, MainBuilder, MainContext,
@@ -41,25 +40,7 @@ pub fn execute_revm_bytecode_with_storage(
     gas_limit: u64,
     storage: Option<&OpcodeLabStorageInput>,
 ) -> u64 {
-    let input = OpcodeLabInput {
-        tx_gas_limit: Some(gas_limit.max(OpcodeLabInput::MIN_EXECUTION_GAS_LIMIT)),
-        storage: storage.cloned(),
-        ..Default::default()
-    };
-    execute_revm_bytecode_with_input_for_spec(bytecode, &input, configured_revm_spec!())
-}
-
-/// Executes one opcode-lab program with the canonical transaction and block environments.
-pub fn execute_revm_bytecode_with_input(bytecode: &[u8], input: &OpcodeLabInput) -> u64 {
-    execute_revm_bytecode_with_input_for_spec(bytecode, input, configured_revm_spec!())
-}
-
-fn execute_revm_bytecode_with_input_for_spec(
-    bytecode: &[u8],
-    input: &OpcodeLabInput,
-    spec_id: SpecId,
-) -> u64 {
-    let execution = execute_revm_bytecode_result(bytecode, input, spec_id);
+    let execution = execute_revm_bytecode_result(bytecode, gas_limit, storage, configured_revm_spec!());
     #[cfg(test)]
     record_test_revm_success(&execution);
     fold_revm_opcode_execution_result(&execution.result)
@@ -67,17 +48,19 @@ fn execute_revm_bytecode_with_input_for_spec(
 
 fn execute_revm_bytecode_result(
     bytecode: &[u8],
-    input: &OpcodeLabInput,
+    gas_limit: u64,
+    storage: Option<&OpcodeLabStorageInput>,
     spec_id: SpecId,
 ) -> ResultAndState {
     let bytecode = Bytecode::new_legacy(bytecode.to_vec().into());
     let ctx = Context::mainnet()
         .modify_cfg_chained(|cfg| cfg.set_spec_and_mainnet_gas_params(spec_id))
-        .modify_block_chained(|block| *block = build_benchmark_block_env(input))
-        .with_db(build_benchmark_db(bytecode, input.storage.as_ref()));
+        .with_db(build_benchmark_db(bytecode, storage));
     let mut evm = ctx.build_mainnet();
-    evm.transact(build_benchmark_tx(input).expect("valid revm benchmark tx"))
-        .expect("revm opcode lab execution")
+    evm.transact(
+        build_benchmark_tx(gas_limit.max(100_000), storage).expect("valid revm benchmark tx"),
+    )
+    .expect("revm opcode lab execution")
 }
 
 #[cfg(test)]
@@ -170,13 +153,9 @@ mod tests {
     fn revm_opcode_lab_sload_returns_zero_and_nonzero_prestate() {
         for original_value in [[0u8; 32], [0x22; 32]] {
             let storage = storage_load(original_value);
-            let input = OpcodeLabInput {
-                tx_gas_limit: Some(100_000),
-                storage: Some(storage),
-                ..Default::default()
-            };
-            let execution =
-                execute_revm_bytecode_result(&sload_return_program(), &input, SpecId::OSAKA);
+            let execution = execute_revm_bytecode_result(
+                &sload_return_program(), 100_000, Some(&storage), SpecId::OSAKA,
+            );
 
             assert!(execution.result.is_success());
             assert_eq!(
@@ -194,13 +173,9 @@ mod tests {
             (one.to_be_bytes(), [0u8; 32], U256::ZERO),
         ] {
             let storage = storage_store(original_value, new_value);
-            let input = OpcodeLabInput {
-                tx_gas_limit: Some(100_000),
-                storage: Some(storage),
-                ..Default::default()
-            };
-            let execution =
-                execute_revm_bytecode_result(&sstore_program(new_value), &input, SpecId::OSAKA);
+            let execution = execute_revm_bytecode_result(
+                &sstore_program(new_value), 100_000, Some(&storage), SpecId::OSAKA,
+            );
 
             assert!(execution.result.is_success());
             assert_eq!(
@@ -208,5 +183,25 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn legacy_revm_opcode_lab_preserves_neutral_value_and_default_timestamp() {
+        let return_word = |opcode| {
+            execute_revm_bytecode_result(
+                &[opcode, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xf3],
+                100_000,
+                None,
+                SpecId::OSAKA,
+            )
+            .result
+            .output()
+            .expect("successful output")
+            .to_vec()
+        };
+        assert_eq!(return_word(0x34), vec![0; 32]);
+        let mut timestamp = vec![0; 32];
+        timestamp[31] = 1;
+        assert_eq!(return_word(0x42), timestamp);
     }
 }

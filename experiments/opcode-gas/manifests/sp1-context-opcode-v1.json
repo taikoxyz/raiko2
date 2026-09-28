@@ -21,6 +21,12 @@
     "control_anchor_opcodes": [95, 144],
     "control_opcode_lab_elf_path": "crates/guests/elf/sp1_opcode_lab.elf",
     "control_relation_drift_mape_max": "0.05",
+    "context_opcode_lab_elf_path": "crates/guests/elf/sp1_context_opcode_lab.elf",
+    "context_transport": {
+      "required_before_candidate_promotion": true,
+      "scope": "cross_elf_context_to_legacy_cost_transport",
+      "status": "not_evaluated"
+    },
     "historical_anchor_calibration_id": "09ebb08d76d3f461086b0cf4",
     "legacy_relation_drift_mape_max": "0.05",
     "legacy_relation_ids": [
@@ -37,7 +43,7 @@
       "opcode:0x5e:copy-32"
     ],
     "per_relation_drift_ape_max": "0.10",
-    "revm_opcode_lab_elf_path": "crates/guests/elf/sp1_revm_opcode_lab.elf",
+    "legacy_revm_opcode_lab_elf_path": "crates/guests/elf/sp1_revm_opcode_lab.elf",
     "reuse_only_no_refit": true
   },
   "quality_gates": {
@@ -51,12 +57,12 @@
     "tail_holdout_ape_max": "0.10"
   },
   "execution": {
-    "elf_path": "crates/guests/elf/sp1_revm_opcode_lab.elf",
+    "elf_path": "crates/guests/elf/sp1_context_opcode_lab.elf",
     "evm_spec": "osaka",
     "mode": "execute",
     "proof_type": "sp1",
     "sp1_execution_engine": "gas-estimator",
-    "stage": "revm-opcode-lab"
+    "stage": "context-opcode-lab"
   },
   "purpose": "context_opcode_calibration",
   "operation_coverage_v5": {

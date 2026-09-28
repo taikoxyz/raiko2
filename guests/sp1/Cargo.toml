@@ -24,6 +24,10 @@ path = "src/precompile_lab.rs"
 name = "sp1-revm-opcode-lab"
 path = "src/revm_opcode_lab.rs"
 
+[[bin]]
+name = "sp1-context-opcode-lab"
+path = "src/context_opcode_lab.rs"
+
 [dependencies]
 raiko2-guest-common = { path = "../../crates/guest-common", default-features = false }
 raiko2-opcode-lab = { path = "../../crates/opcode-lab" }

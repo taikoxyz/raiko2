@@ -569,6 +569,37 @@ next predeclared family but cannot repair the sealed storage coefficients.
 The production zkGas registry, runtime configuration, block limit, Boundless configuration, frozen
 integration smokes, and final proposal-validation corpus remain untouched.
 
+## In-Progress Milestone: Context Opcode Guest Isolation
+
+The first context campaign attempt correctly stopped at the fixed legacy compatibility canary before
+sampling any context coefficient. Calibration `d9b45369e540fb6606429fda` used the context-expanded
+legacy guest and reproduced a material `JUMPI` drift: its bound-8 checkpoint APE was about `15.26%`,
+above the frozen `10%` gate. `EXP` and `KECCAK256` still passed, so accepting the whole legacy table
+or expanding only the failed canary relation would have been result-driven reuse. The canary remains
+fixed at its historical program identity and is not an adaptive campaign.
+
+The failure was repeatable even though the EVM program projection and raw EVM gas were unchanged.
+A diagnostic default-context fast path reduced neither the direction nor the material size of the
+drift (`JUMPI` checkpoint APE remained about `16%`) and was reverted. The context-expanded binary
+input/public commitment had changed the SP1 guest cost surface itself; this is not evidence that
+`JUMPI` changed under Osaka and must not trigger a one-relation resample.
+
+The implementation is therefore being split into three explicit artifacts in one calibration
+identity:
+
+- `sp1_revm_opcode_lab.elf` preserves the legacy `OpcodeLabInput`, default environment, and public
+  commitment and is the only guest used by the fixed 11-relation reuse canary;
+- `sp1_opcode_lab.elf` remains the independent historical PUSH0/SWAP1 absolute control guest;
+- `sp1_context_opcode_lab.elf` owns `ContextOpcodeLabInputV1` and the new context campaign, with
+  dedicated `context-opcode-lab` and `context-opcode-identity` launcher stages.
+
+The legacy canary can authorize historical-table reuse only on the preserved legacy cost surface.
+It cannot prove that a marginal coefficient from a different context ELF shares that scale. Until
+an independent cross-ELF bridge is evaluated, the context artifact records transport status
+`not_evaluated`, requires transport evidence before candidate promotion, and remains
+`candidate_eligible=false`. Controlled context sampling may proceed and be sealed as non-candidate
+evidence; composite resealing and proposal replay may not.
+
 ## Next Gate
 
 Close the remaining ordinary operation families before CALL wrappers and direct precompiles. Begin

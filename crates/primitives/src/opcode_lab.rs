@@ -154,6 +154,23 @@ pub struct OpcodeLabInput {
     pub generator_max_count: Option<u64>,
     pub fixed_bytecode_len: Option<u64>,
     pub storage: Option<OpcodeLabStorageInput>,
+}
+
+/// Versioned input for the context-opcode laboratory guest.
+///
+/// This is deliberately a distinct wire type from [`OpcodeLabInput`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ContextOpcodeLabInputV1 {
+    pub case: String,
+    pub scenario: String,
+    pub opcode: u8,
+    pub target_count: u64,
+    pub target_raw_gas: u64,
+    pub tx_gas_limit: Option<u64>,
+    pub bytecode: Vec<u8>,
+    pub generator_max_count: Option<u64>,
+    pub fixed_bytecode_len: Option<u64>,
+    pub storage: Option<OpcodeLabStorageInput>,
     pub tx_value: [u8; 32],
     pub calldata: Vec<u8>,
     pub block_timestamp: Option<u64>,
@@ -180,12 +197,6 @@ struct ReadableOpcodeLabInputRef<'a> {
     fixed_bytecode_len: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     storage: Option<&'a OpcodeLabStorageInput>,
-    #[serde(with = "hex_word", skip_serializing_if = "word_is_zero")]
-    tx_value: &'a [u8; 32],
-    #[serde(with = "hex_bytes", skip_serializing_if = "<[u8]>::is_empty")]
-    calldata: &'a [u8],
-    #[serde(skip_serializing_if = "Option::is_none")]
-    block_timestamp: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -205,12 +216,6 @@ struct ReadableOpcodeLabInput {
     fixed_bytecode_len: Option<u64>,
     #[serde(default)]
     storage: Option<OpcodeLabStorageInput>,
-    #[serde(default, with = "hex_word")]
-    tx_value: [u8; 32],
-    #[serde(default, with = "hex_bytes")]
-    calldata: Vec<u8>,
-    #[serde(default)]
-    block_timestamp: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -225,9 +230,6 @@ struct BinaryOpcodeLabInputRef<'a> {
     generator_max_count: Option<u64>,
     fixed_bytecode_len: Option<u64>,
     storage: Option<&'a OpcodeLabStorageInput>,
-    tx_value: &'a [u8; 32],
-    calldata: &'a [u8],
-    block_timestamp: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -242,9 +244,6 @@ struct BinaryOpcodeLabInput {
     generator_max_count: Option<u64>,
     fixed_bytecode_len: Option<u64>,
     storage: Option<OpcodeLabStorageInput>,
-    tx_value: [u8; 32],
-    calldata: Vec<u8>,
-    block_timestamp: Option<u64>,
 }
 
 impl Serialize for OpcodeLabInput {
@@ -264,9 +263,6 @@ impl Serialize for OpcodeLabInput {
                 generator_max_count: self.generator_max_count,
                 fixed_bytecode_len: self.fixed_bytecode_len,
                 storage: self.storage.as_ref(),
-                tx_value: &self.tx_value,
-                calldata: &self.calldata,
-                block_timestamp: self.block_timestamp,
             }
             .serialize(serializer)
         } else {
@@ -281,9 +277,6 @@ impl Serialize for OpcodeLabInput {
                 generator_max_count: self.generator_max_count,
                 fixed_bytecode_len: self.fixed_bytecode_len,
                 storage: self.storage.as_ref(),
-                tx_value: &self.tx_value,
-                calldata: &self.calldata,
-                block_timestamp: self.block_timestamp,
             }
             .serialize(serializer)
         }
@@ -308,9 +301,6 @@ impl<'de> Deserialize<'de> for OpcodeLabInput {
                 generator_max_count: input.generator_max_count,
                 fixed_bytecode_len: input.fixed_bytecode_len,
                 storage: input.storage,
-                tx_value: input.tx_value,
-                calldata: input.calldata,
-                block_timestamp: input.block_timestamp,
             })
         } else {
             let input = BinaryOpcodeLabInput::deserialize(deserializer)?;
@@ -325,19 +315,177 @@ impl<'de> Deserialize<'de> for OpcodeLabInput {
                 generator_max_count: input.generator_max_count,
                 fixed_bytecode_len: input.fixed_bytecode_len,
                 storage: input.storage,
-                tx_value: input.tx_value,
-                calldata: input.calldata,
-                block_timestamp: input.block_timestamp,
             })
         }
     }
 }
 
-impl OpcodeLabInput {
+#[derive(Serialize)]
+struct ReadableContextOpcodeLabInputRef<'a> {
+    case: &'a str,
+    scenario: &'a str,
+    opcode: u8,
+    target_count: u64,
+    target_raw_gas: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tx_gas_limit: Option<u64>,
+    #[serde(with = "hex_bytes")]
+    bytecode: &'a [u8],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    generator_max_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fixed_bytecode_len: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    storage: Option<&'a OpcodeLabStorageInput>,
+    #[serde(with = "hex_word", skip_serializing_if = "word_is_zero")]
+    tx_value: &'a [u8; 32],
+    #[serde(with = "hex_bytes", skip_serializing_if = "<[u8]>::is_empty")]
+    calldata: &'a [u8],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    block_timestamp: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct ReadableContextOpcodeLabInput {
+    case: String,
+    scenario: String,
+    opcode: u8,
+    target_count: u64,
+    target_raw_gas: u64,
+    #[serde(default)]
+    tx_gas_limit: Option<u64>,
+    #[serde(with = "hex_bytes")]
+    bytecode: Vec<u8>,
+    #[serde(default)]
+    generator_max_count: Option<u64>,
+    #[serde(default)]
+    fixed_bytecode_len: Option<u64>,
+    #[serde(default)]
+    storage: Option<OpcodeLabStorageInput>,
+    #[serde(default, with = "hex_word")]
+    tx_value: [u8; 32],
+    #[serde(default, with = "hex_bytes")]
+    calldata: Vec<u8>,
+    #[serde(default)]
+    block_timestamp: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct BinaryContextOpcodeLabInputRef<'a> {
+    case: &'a str,
+    scenario: &'a str,
+    opcode: u8,
+    target_count: u64,
+    target_raw_gas: u64,
+    tx_gas_limit: Option<u64>,
+    bytecode: &'a [u8],
+    generator_max_count: Option<u64>,
+    fixed_bytecode_len: Option<u64>,
+    storage: Option<&'a OpcodeLabStorageInput>,
+    tx_value: &'a [u8; 32],
+    calldata: &'a [u8],
+    block_timestamp: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct BinaryContextOpcodeLabInput {
+    case: String,
+    scenario: String,
+    opcode: u8,
+    target_count: u64,
+    target_raw_gas: u64,
+    tx_gas_limit: Option<u64>,
+    bytecode: Vec<u8>,
+    generator_max_count: Option<u64>,
+    fixed_bytecode_len: Option<u64>,
+    storage: Option<OpcodeLabStorageInput>,
+    tx_value: [u8; 32],
+    calldata: Vec<u8>,
+    block_timestamp: Option<u64>,
+}
+
+impl Serialize for ContextOpcodeLabInputV1 {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        if serializer.is_human_readable() {
+            ReadableContextOpcodeLabInputRef {
+                case: &self.case,
+                scenario: &self.scenario,
+                opcode: self.opcode,
+                target_count: self.target_count,
+                target_raw_gas: self.target_raw_gas,
+                tx_gas_limit: self.tx_gas_limit,
+                bytecode: &self.bytecode,
+                generator_max_count: self.generator_max_count,
+                fixed_bytecode_len: self.fixed_bytecode_len,
+                storage: self.storage.as_ref(),
+                tx_value: &self.tx_value,
+                calldata: &self.calldata,
+                block_timestamp: self.block_timestamp,
+            }
+            .serialize(serializer)
+        } else {
+            BinaryContextOpcodeLabInputRef {
+                case: &self.case,
+                scenario: &self.scenario,
+                opcode: self.opcode,
+                target_count: self.target_count,
+                target_raw_gas: self.target_raw_gas,
+                tx_gas_limit: self.tx_gas_limit,
+                bytecode: &self.bytecode,
+                generator_max_count: self.generator_max_count,
+                fixed_bytecode_len: self.fixed_bytecode_len,
+                storage: self.storage.as_ref(),
+                tx_value: &self.tx_value,
+                calldata: &self.calldata,
+                block_timestamp: self.block_timestamp,
+            }
+            .serialize(serializer)
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ContextOpcodeLabInputV1 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        macro_rules! into_context {
+            ($input:expr) => {{
+                let input = $input;
+                Self {
+                    case: input.case,
+                    scenario: input.scenario,
+                    opcode: input.opcode,
+                    target_count: input.target_count,
+                    target_raw_gas: input.target_raw_gas,
+                    tx_gas_limit: input.tx_gas_limit,
+                    bytecode: input.bytecode,
+                    generator_max_count: input.generator_max_count,
+                    fixed_bytecode_len: input.fixed_bytecode_len,
+                    storage: input.storage,
+                    tx_value: input.tx_value,
+                    calldata: input.calldata,
+                    block_timestamp: input.block_timestamp,
+                }
+            }};
+        }
+        if deserializer.is_human_readable() {
+            Ok(into_context!(ReadableContextOpcodeLabInput::deserialize(
+                deserializer
+            )?))
+        } else {
+            Ok(into_context!(BinaryContextOpcodeLabInput::deserialize(
+                deserializer
+            )?))
+        }
+    }
+}
+
+impl ContextOpcodeLabInputV1 {
     pub const DEFAULT_BLOCK_TIMESTAMP: u64 = 1;
-    pub const GAS_LIMIT_OVERHEAD: u64 = 1_000_000;
-    pub const MIN_EXECUTION_GAS_LIMIT: u64 = 100_000;
-    pub const FIXED_MICROPROGRAM_MAGIC: [u8; 4] = [0xef, 0x4d, 0x50, 0x01];
 
     #[must_use]
     pub const fn effective_block_timestamp(&self) -> u64 {
@@ -346,6 +494,55 @@ impl OpcodeLabInput {
             None => Self::DEFAULT_BLOCK_TIMESTAMP,
         }
     }
+
+    #[must_use]
+    pub fn legacy_input(&self) -> OpcodeLabInput {
+        OpcodeLabInput {
+            case: self.case.clone(),
+            scenario: self.scenario.clone(),
+            opcode: self.opcode,
+            target_count: self.target_count,
+            target_raw_gas: self.target_raw_gas,
+            tx_gas_limit: self.tx_gas_limit,
+            bytecode: self.bytecode.clone(),
+            generator_max_count: self.generator_max_count,
+            fixed_bytecode_len: self.fixed_bytecode_len,
+            storage: self.storage.clone(),
+        }
+    }
+
+    #[must_use]
+    pub const fn execution_gas_limit(&self) -> u64 {
+        match self.tx_gas_limit {
+            Some(gas_limit) => gas_limit,
+            None => self
+                .target_raw_gas
+                .saturating_mul(self.target_count)
+                .saturating_add(OpcodeLabInput::GAS_LIMIT_OVERHEAD),
+        }
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error when the embedded legacy opcode-lab input violates the
+    /// controlled-workload contract.
+    pub fn validate_controlled_contract(&self) -> Result<(), &'static str> {
+        self.legacy_input().validate_controlled_contract()
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error when the bytecode does not contain a valid controlled
+    /// microprogram sequence for the declared generator bound.
+    pub fn execution_programs(&self) -> Result<Vec<&[u8]>, &'static str> {
+        execution_programs_from_bytecode(&self.bytecode, self.generator_max_count)
+    }
+}
+
+impl OpcodeLabInput {
+    pub const GAS_LIMIT_OVERHEAD: u64 = 1_000_000;
+    pub const MIN_EXECUTION_GAS_LIMIT: u64 = 100_000;
+    pub const FIXED_MICROPROGRAM_MAGIC: [u8; 4] = [0xef, 0x4d, 0x50, 0x01];
 
     #[must_use]
     pub const fn execution_gas_limit(&self) -> u64 {
@@ -559,54 +756,58 @@ impl OpcodeLabInput {
     /// Returns an error when the framed microprogram header, count, or length table is malformed,
     /// or when its program count differs from the declared generator footprint.
     pub fn execution_programs(&self) -> Result<Vec<&[u8]>, &'static str> {
-        if !self.bytecode.starts_with(&Self::FIXED_MICROPROGRAM_MAGIC) {
-            return Ok(vec![self.bytecode.as_slice()]);
-        }
-        if self.bytecode.len() < 8 {
-            return Err("truncated fixed-microprogram header");
-        }
-        let count = u32::from_be_bytes(
-            self.bytecode[4..8]
-                .try_into()
-                .map_err(|_| "truncated fixed-microprogram header")?,
-        );
-        if count == 0 {
-            return Err("fixed microprogram list is empty");
-        }
-        if let Some(max_count) = self.generator_max_count
-            && u64::from(count) != max_count
-        {
-            return Err("fixed microprogram count differs from generator_max_count");
-        }
-        let mut cursor = 8usize;
-        let mut programs = Vec::with_capacity(count as usize);
-        for _ in 0..count {
-            if cursor
-                .checked_add(4)
-                .is_none_or(|end| end > self.bytecode.len())
-            {
-                return Err("truncated fixed-microprogram length");
-            }
-            let length = u32::from_be_bytes(
-                self.bytecode[cursor..cursor + 4]
-                    .try_into()
-                    .map_err(|_| "truncated fixed-microprogram length")?,
-            ) as usize;
-            cursor += 4;
-            let end = cursor
-                .checked_add(length)
-                .ok_or("fixed microprogram length overflow")?;
-            if end > self.bytecode.len() {
-                return Err("truncated fixed microprogram");
-            }
-            programs.push(&self.bytecode[cursor..end]);
-            cursor = end;
-        }
-        if cursor != self.bytecode.len() {
-            return Err("trailing fixed-microprogram bytes");
-        }
-        Ok(programs)
+        execution_programs_from_bytecode(&self.bytecode, self.generator_max_count)
     }
+}
+
+fn execution_programs_from_bytecode(
+    bytecode: &[u8],
+    generator_max_count: Option<u64>,
+) -> Result<Vec<&[u8]>, &'static str> {
+    if !bytecode.starts_with(&OpcodeLabInput::FIXED_MICROPROGRAM_MAGIC) {
+        return Ok(vec![bytecode]);
+    }
+    if bytecode.len() < 8 {
+        return Err("truncated fixed-microprogram header");
+    }
+    let count = u32::from_be_bytes(
+        bytecode[4..8]
+            .try_into()
+            .map_err(|_| "truncated fixed-microprogram header")?,
+    );
+    if count == 0 {
+        return Err("fixed microprogram list is empty");
+    }
+    if let Some(max_count) = generator_max_count
+        && u64::from(count) != max_count
+    {
+        return Err("fixed microprogram count differs from generator_max_count");
+    }
+    let mut cursor = 8usize;
+    let mut programs = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        if cursor.checked_add(4).is_none_or(|end| end > bytecode.len()) {
+            return Err("truncated fixed-microprogram length");
+        }
+        let length = u32::from_be_bytes(
+            bytecode[cursor..cursor + 4]
+                .try_into()
+                .map_err(|_| "truncated fixed-microprogram length")?,
+        ) as usize;
+        cursor += 4;
+        let end = cursor
+            .checked_add(length)
+            .ok_or("fixed microprogram length overflow")?;
+        if end > bytecode.len() {
+            return Err("truncated fixed microprogram");
+        }
+        programs.push(&bytecode[cursor..end]);
+        cursor = end;
+    }
+    if cursor != bytecode.len() {
+        return Err("trailing fixed-microprogram bytes");
+    }
+    Ok(programs)
 }
 
 #[derive(Clone, Copy)]
@@ -756,11 +957,11 @@ mod hex_word {
 
 #[cfg(test)]
 mod tests {
-    use super::OpcodeLabInput;
+    use super::{ContextOpcodeLabInputV1, OpcodeLabInput};
 
     #[test]
     fn opcode_lab_context_defaults_preserve_readable_fixture_shape() {
-        let input: OpcodeLabInput = serde_json::from_str(
+        let input: ContextOpcodeLabInputV1 = serde_json::from_str(
             r#"{
               "case": "address",
               "scenario": "canonical",
@@ -784,7 +985,7 @@ mod tests {
 
     #[test]
     fn opcode_lab_context_is_canonical_json_and_bincode_identity_input() {
-        let input: OpcodeLabInput = serde_json::from_str(
+        let input: ContextOpcodeLabInputV1 = serde_json::from_str(
             r#"{
               "case": "calldataload",
               "scenario": "partial",
@@ -811,19 +1012,19 @@ mod tests {
         assert_eq!(serialized["block_timestamp"], 17);
 
         let encoded = bincode::serialize(&input).expect("serialize binary context");
-        let decoded: OpcodeLabInput =
+        let decoded: ContextOpcodeLabInputV1 =
             bincode::deserialize(&encoded).expect("deserialize binary context");
         assert_eq!(decoded, input);
         for alternate in [
-            OpcodeLabInput {
+            ContextOpcodeLabInputV1 {
                 tx_value: [0; 32],
                 ..input.clone()
             },
-            OpcodeLabInput {
+            ContextOpcodeLabInputV1 {
                 calldata: Vec::new(),
                 ..input.clone()
             },
-            OpcodeLabInput {
+            ContextOpcodeLabInputV1 {
                 block_timestamp: Some(18),
                 ..input.clone()
             },

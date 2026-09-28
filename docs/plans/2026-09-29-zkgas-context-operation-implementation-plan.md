@@ -31,24 +31,36 @@ The campaign therefore produces a separate content-addressed augmentation. V1 th
 original Osaka augmented core remain byte-for-byte immutable. Before this campaign is promoted, a
 formula-only successor to the Osaka core corrects the historical `ISZERO`/`CLZ` recovery by applying
 the sealed `body_scale` to their lab-basis relation slopes. That correction reuses the original raw
-rows, requires no SP1 resampling, and produces operation coverage V5. This campaign then derives
-operation coverage V6 from V5.
+rows, requires no SP1 resampling, and produces operation coverage V5. This campaign records
+provisional context models; only a later artifact with independently supported cross-ELF transport
+may derive operation coverage V6 from V5.
 
-The context-input change rebuilds both opcode-lab guests. Before any old control body or
-`body_scale` is reused, the new `sp1_revm_opcode_lab.elf` must pass the existing non-fitting Osaka
-compatibility-canary relation set and thresholds. Separately, measured `PUSH0` and `SWAP1` remain
-anchored by the historical `09ebb08d76d3f461086b0cf4` absolute-probe evidence: the same-revision
-`sp1_opcode_lab.elf` reruns that frozen probe and must pass 10% per-control APE and 5% MAPE. The
-canary binds both ELF digests and the common launcher. It authorizes or rejects transport only; it
-cannot refit an old coefficient or weaken a gate.
+The context-input change must not change the legacy opcode-lab wire format, public commitment, or
+guest binary. `sp1_revm_opcode_lab.elf` retains the historical `OpcodeLabInput` contract;
+`sp1_context_opcode_lab.elf` owns the new context-aware input and public commitment. Before any old
+control body or `body_scale` is reused, the isolated legacy ELF must pass the existing non-fitting
+Osaka compatibility-canary relation set and thresholds. Separately, measured `PUSH0` and `SWAP1`
+remain anchored by the historical `09ebb08d76d3f461086b0cf4` absolute-probe evidence: the
+same-revision `sp1_opcode_lab.elf` reruns that frozen probe and must pass 10% per-control APE and 5%
+MAPE. The canary binds all three ELF identities and the common launcher.
+
+The fixed legacy canary is not adaptive and may not expand its bound, refit a historical relation,
+or execute the context ELF. It authorizes reuse only on the preserved legacy cost surface. A
+separate context ELF can introduce a different SP1 marginal-cost surface even when both guests run
+the same EVM microprogram. V1 therefore marks cross-ELF context-to-legacy cost transport
+`not_evaluated`, requires transport evidence before candidate promotion, and keeps every context
+result `candidate_eligible=false`. The campaign may still collect and seal non-candidate controlled
+evidence; it must not silently treat the legacy canary as transport proof.
 
 ## Controlled Environment
 
-Extend `OpcodeLabInput` with canonical context fields for transaction calldata, transaction value,
-and an optional block-timestamp override. The shared `raiko2-opcode-lab` constructor is the only implementation of the
-corresponding REVM `TxEnv` and `BlockEnv`; the host tracer and SP1 guest must use that same
-constructor. Parsed defaults preserve old JSON fixtures, while the canonical binary input, workload
-identity, transaction-envelope identity, and guest public commitment bind the resolved values.
+Add a versioned `ContextOpcodeLabInputV1` with canonical fields for transaction calldata,
+transaction value, and an optional block-timestamp override. Keep `OpcodeLabInput` byte-for-byte on
+the legacy wire and retain its historical default transaction/block environment and public
+commitment. The shared `raiko2-opcode-lab` context constructor is the only implementation of the
+corresponding REVM `TxEnv` and `BlockEnv`; the context host tracer and context SP1 guest must use
+that same constructor. The context binary input, workload identity, transaction-envelope identity,
+and guest public commitment bind the resolved values.
 Because timestamp is not part of a transaction envelope, identity evidence and trace/report joins
 also carry a canonical block-environment digest; binding only the serialized backend input is not a
 substitute for this explicit execution-envelope check.
@@ -86,8 +98,9 @@ dispatch-only approximation rather than an independently measured body.
 
 Let `delta_lab` be the fitted target-minus-control marginal SP1 `proverGas` per event in the
 controlled lab-body basis, `r_t` and `r_c` the executed raw EVM gas of target and control, `s` the
-sealed production `body_scale`, and `b_c` the sealed production-scaled body per raw gas of the
-control opcode. The common dispatch and identical surrounding instructions cancel:
+sealed legacy `body_scale`, and `b_c` the sealed legacy production-scaled body per raw gas of the
+control opcode. The common dispatch and identical surrounding instructions cancel inside the
+context guest, producing this provisional legacy-basis projection:
 
 ```text
 delta_lab = r_t * lab_body_t - r_c * lab_body_c
@@ -95,9 +108,13 @@ b_t       = (s * delta_lab + r_c * b_c) / r_t
 event_cost = common_dispatch + raw_evm_gas * b_t
 ```
 
-The recovery uses exact `Fraction` equations and canonical 80-digit `Decimal` serialization. It
+The projection uses exact `Fraction` equations and canonical 80-digit `Decimal` serialization. It
 must not combine an unscaled relation slope directly with a stored production-scaled control body,
 subtract `common_dispatch` a second time, or apply `body_scale` again after storing `b_t`.
+However, exact arithmetic does not prove that `delta_lab` from the context ELF shares the legacy
+guest's SP1 marginal-cost scale. Until the cross-ELF bridge is supported, store the parameter basis
+as `provisional_legacy_projection_unvalidated_cross_elf_transport`; do not use `b_t` in a production
+overlay.
 
 Every required scenario for a key must pass the existing signal, repeat, fit, residual, and
 extrapolation gates. Recovered bodies across required scenarios must also pass the frozen 5%
@@ -109,7 +126,8 @@ remains unmeasured. Proposal rows cannot fit, choose, or repair a parameter.
 The create-only result directory binds:
 
 - the frozen campaign manifest and exact generated-fixture identities;
-- a passed compatibility canary produced by the same launcher and new opcode-lab ELF;
+- a passed fixed legacy compatibility canary, the separate context ELF identity, and an explicit
+  `not_evaluated` cross-ELF transport status;
 - implementation revision, Unzen/Fusaka/Osaka version axes, launcher, and SP1 ELF/VK identities;
 - every raw target/control row, adaptive decision, repeat, checkpoint, and fit result;
 - the exact sealed core artifact and control-model parameters used by parameter recovery;
@@ -123,31 +141,36 @@ Operation coverage V5 is derived from V4. The only semantic parameter changes ar
 production-scaled `ISZERO` and `CLZ` bodies. Because the registry is one content-addressed core,
 every measured core-owned row must update its artifact reference and provenance to the corrected
 successor; unsupported/precompile classification and side-effect ownership remain unchanged.
-Operation coverage V6 is derived from V5 and may change only the six rows above from
-`explicitly_unsupported` to measured `static_raw_gas`. A new composite-estimator schema overlays
-the six static models and the existing typed-storage model on the corrected immutable Osaka-core
-successor. Each event receives `common_dispatch` exactly once.
+A future operation coverage V6 may be derived from V5 only after an independently supported
+cross-ELF transport artifact makes the result candidate-eligible. That later step may change only
+the six rows above from `explicitly_unsupported` to measured `static_raw_gas`. Until then, V5 stays
+authoritative and all composite-overlay entrypoints must reject the provisional context result.
 
 ## Implementation And Verification Order
 
-1. Add failing Rust tests for JSON/bincode compatibility, canonical environment identity, shared
+1. Add failing Rust tests proving the legacy JSON/bincode/public-commitment contract remains
+   unchanged and testing the new context binary contract, canonical environment identity, shared
    host/guest construction, and environment-sensitive semantics.
-2. Implement the canonical context fields and shared REVM constructor.
+2. Keep the legacy guest on `OpcodeLabInput`, implement `ContextOpcodeLabInputV1` and the shared
+   context REVM constructor, and expose distinct `context-opcode-lab` and
+   `context-opcode-identity` launcher stages.
 3. Add failing Python tests for manifest validation, exact fixed-footprint controls, sibling
-   rejection, parameter recovery, tamper rejection, V4/V5 immutability, V6 exact delta, and composite
-   no-double-count behavior.
-4. Implement generation, execution/resume, fitting, sealing, directory replay, V5 coverage, and
-   composite overlay.
+   rejection, provisional parameter recovery, tamper rejection, V4/V5 immutability, and rejection
+   of V6/composite promotion without supported transport.
+4. Implement generation, execution/resume, fitting, sealing, directory replay, V5 preservation, and
+   the candidate/transport promotion gate.
 5. Run focused Rust/Python checks, the complete opcode-gas suite, formatting, byte-compilation, and
    diff/path hygiene.
 6. Build the current SP1 guest artifacts and independently review the complete source and artifact
    diff.
-7. Run and seal the existing non-fitting compatibility canary against that exact ELF.
+7. Run and seal the existing non-fitting compatibility canary against the preserved legacy ELF;
+   bind, but do not execute or claim transport validation for, the separate context ELF.
 8. Execute and seal the controlled campaign. If any key fails, preserve the rejected evidence and
-   promote only keys whose complete required scenario set passed; never weaken a gate after seeing
-   results.
-9. Re-seal the composite estimator and replay the same two ad-hoc Mainnet proposals. Record coverage
-   and residual changes without tuning a coefficient.
+   retain measured provisional models only for keys whose complete required scenario set passed;
+   never weaken a gate after seeing results.
+9. Do not re-seal the composite estimator while cross-ELF transport remains `not_evaluated`.
+   Independently validate or replace that transport first; only a later candidate-eligible milestone
+   may replay the same two ad-hoc Mainnet proposals.
 
 ## Deferred Families
 

@@ -63,8 +63,13 @@ QUALITY_GATES = {
     "signal_min_repeat_noise_multiple": "20",
     "tail_holdout_ape_max": "0.10",
 }
+CONTEXT_TRANSPORT_STATUS = {
+    "status": "not_evaluated",
+    "scope": "cross_elf_context_to_legacy_cost_transport",
+    "required_before_candidate_promotion": True,
+}
 CONTEXT_MANIFEST_CANONICAL_SHA256 = (
-    "d9c6cdef20ccb911d28532c8703be34a335e57cc49bdda355420eecd1df467af"
+    "92156777ab3792955b4cd8543cf26edcf6232cd78727dd3ecafb3fec7f6f9165"
 )
 HISTORICAL_ANCHOR_DERIVATION_SHA256 = (
     "b61fda990d258ea8dbb909572d0df8efb12adca0b14e8bb01bc8f2c437a33115"
@@ -101,6 +106,18 @@ def _sha256(value: Any, label: str) -> str:
     if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
         raise ValueError(f"{label} must be a lowercase SHA256")
     return value
+
+
+def _validate_distinct_context_artifact_hashes(
+    legacy_revm: Any, context_elf: Any, control_elf: Any
+) -> None:
+    hashes = (
+        _sha256(legacy_revm, "legacy REVM opcode-lab ELF"),
+        _sha256(context_elf, "context opcode-lab ELF"),
+        _sha256(control_elf, "control opcode-lab ELF"),
+    )
+    if len(set(hashes)) != len(hashes):
+        raise ValueError("context campaign requires three distinct guest artifacts")
 
 
 def fraction_from_decimal(value: str) -> Fraction:
@@ -162,11 +179,17 @@ def load_context_manifest(path: pathlib.Path) -> dict[str, Any]:
         "control_anchor_opcodes": [0x5F, 0x90],
         "control_opcode_lab_elf_path": "crates/guests/elf/sp1_opcode_lab.elf",
         "control_relation_drift_mape_max": "0.05",
+        "context_opcode_lab_elf_path": (
+            "crates/guests/elf/sp1_context_opcode_lab.elf"
+        ),
+        "context_transport": CONTEXT_TRANSPORT_STATUS,
         "historical_anchor_calibration_id": "09ebb08d76d3f461086b0cf4",
+        "legacy_revm_opcode_lab_elf_path": (
+            "crates/guests/elf/sp1_revm_opcode_lab.elf"
+        ),
         "legacy_relation_drift_mape_max": "0.05",
         "legacy_relation_ids": list(OSAKA_CANARY_RELATION_IDS),
         "per_relation_drift_ape_max": "0.10",
-        "revm_opcode_lab_elf_path": "crates/guests/elf/sp1_revm_opcode_lab.elf",
         "reuse_only_no_refit": True,
     }:
         raise ValueError("context compatibility canary contract differs")
@@ -733,7 +756,7 @@ def _synthetic_identity_for_fixture(fixture: Mapping[str, Any]) -> dict[str, Any
         "program_sha256": [sha256_bytes(program) for program in programs],
         "evm_spec": "osaka",
         "revm_version": "41.0.0",
-        "shared_constructor": "raiko2-opcode-lab",
+        "shared_constructor": "raiko2-context-opcode-lab",
         "transaction_envelope_sha256": tx_hash,
         "block_environment_sha256": fixture["environment_sha256"],
         "access_list_sha256": sha256_bytes(b"[]"),
@@ -794,7 +817,7 @@ def synthetic_execution_reports(
         oracle = synthetic_identity_replayer(path)
         reports.append(
             {
-                "stage": "revm-opcode-lab",
+                "stage": "context-opcode-lab",
                 "mode": "execute",
                 "proof_mode": "compressed",
                 "input": str(path),
@@ -848,7 +871,7 @@ def _admit_executed_context_row(
     if (
         trace.get("kind") != "revm_opcode"
         or trace.get("evm_spec") != "osaka"
-        or trace.get("shared_constructor") != "raiko2-opcode-lab"
+        or trace.get("shared_constructor") != "raiko2-context-opcode-lab"
         or trace.get("target_opcode") != fixture["opcode"]
         or trace.get("declared_target_count") != fixture["target_count"]
         or trace.get("executed_target_count") != fixture["target_count"]
@@ -898,7 +921,7 @@ def _default_context_executor(
         [
             str(guest_launcher),
             "--stage",
-            "revm-opcode-lab",
+            "context-opcode-lab",
             "--proof-type",
             "sp1",
             "--mode",
@@ -927,7 +950,7 @@ def _default_identity_replayer(
             [
                 str(guest_launcher),
                 "--stage",
-                "revm-opcode-identity",
+                "context-opcode-identity",
                 "--proof-type",
                 "native",
                 "--input",
@@ -1290,7 +1313,9 @@ def _default_context_source_validator(
 
     repo_root = pathlib.Path(__file__).resolve().parents[2]
     expected_launcher = (repo_root / "target/release/guest-launcher").resolve()
-    expected_elf = (repo_root / "crates/guests/elf/sp1_revm_opcode_lab.elf").resolve()
+    expected_elf = (
+        repo_root / "crates/guests/elf/sp1_context_opcode_lab.elf"
+    ).resolve()
     expected_control_elf = (
         repo_root / "crates/guests/elf/sp1_opcode_lab.elf"
     ).resolve()
@@ -1307,11 +1332,17 @@ def _default_context_source_validator(
     launcher_sha256 = opcode_gas.validate_calibration_guest_launcher(identity, guest_launcher)
     elf_sha256 = opcode_gas.sha256_file(elf)
     control_elf_sha256 = opcode_gas.sha256_file(control_opcode_lab_elf)
-    if identity.get("guest_artifacts", {}).get(
+    guest_artifacts = identity.get("guest_artifacts", {})
+    legacy_revm_elf_sha256 = guest_artifacts.get(
         "crates/guests/elf/sp1_revm_opcode_lab.elf"
-    ) != elf_sha256 or identity.get("guest_artifacts", {}).get(
+    )
+    if guest_artifacts.get(
+        "crates/guests/elf/sp1_context_opcode_lab.elf"
+    ) != elf_sha256 or guest_artifacts.get(
         "crates/guests/elf/sp1_opcode_lab.elf"
-    ) != control_elf_sha256:
+    ) != control_elf_sha256 or re.fullmatch(
+        r"[0-9a-f]{64}", str(legacy_revm_elf_sha256)
+    ) is None:
         raise ValueError("context campaign ELFs differ from calibration identity")
     return {
         "evidence_mode": "production_execution",
@@ -1320,7 +1351,8 @@ def _default_context_source_validator(
         "calibration_identity": copy.deepcopy(identity),
         "implementation_revision": identity["implementation_revision"],
         "launcher_sha256": launcher_sha256,
-        "revm_elf_sha256": elf_sha256,
+        "legacy_revm_elf_sha256": legacy_revm_elf_sha256,
+        "context_elf_sha256": elf_sha256,
         "control_opcode_lab_elf_sha256": control_elf_sha256,
     }
 
@@ -1781,7 +1813,7 @@ def synthetic_passing_production_rows(
                         100 * count if lane == "target" else 0
                     )
                     report = {
-                        "stage": "revm-opcode-lab",
+                        "stage": "context-opcode-lab",
                         "mode": "execute",
                         "proof_mode": "compressed",
                         "input": f"synthetic/{scenario['name']}/{lane}/{count}",
@@ -1932,7 +1964,8 @@ def validate_context_adaptive_evidence(
             ("calibration_id", "calibration_id"),
             ("calibration_identity_sha256", "calibration_identity_sha256"),
             ("implementation_revision", "execution_revision"),
-            ("revm_elf_sha256", "elf_sha256"),
+            ("legacy_revm_elf_sha256", "legacy_revm_elf_sha256"),
+            ("context_elf_sha256", "context_elf_sha256"),
             ("control_opcode_lab_elf_sha256", "control_opcode_lab_elf_sha256"),
             ("launcher_sha256", "launcher_sha256"),
         )
@@ -2048,7 +2081,8 @@ def _validate_production_campaign_source(source: Mapping[str, Any]) -> None:
         "calibration_identity",
         "implementation_revision",
         "launcher_sha256",
-        "revm_elf_sha256",
+        "legacy_revm_elf_sha256",
+        "context_elf_sha256",
         "control_opcode_lab_elf_sha256",
     }
     calibration_identity = source.get("calibration_identity")
@@ -2059,9 +2093,13 @@ def _validate_production_campaign_source(source: Mapping[str, Any]) -> None:
     )
     required_guest_artifacts = {
         "crates/guests/elf/sp1_revm_opcode_lab.elf": source.get(
-            "revm_elf_sha256"
+            "legacy_revm_elf_sha256"
         ),
         "crates/guests/elf/sp1_revm_opcode_lab.vk.bin": None,
+        "crates/guests/elf/sp1_context_opcode_lab.elf": source.get(
+            "context_elf_sha256"
+        ),
+        "crates/guests/elf/sp1_context_opcode_lab.vk.bin": None,
         "crates/guests/elf/sp1_opcode_lab.elf": source.get(
             "control_opcode_lab_elf_sha256"
         ),
@@ -2120,7 +2158,7 @@ def synthetic_passing_adaptive_evidence(
                 "calibration_identity_sha256": "1" * 64,
                 "implementation_revision": "2" * 40,
                 "launcher_sha256": source_identity["launcher_sha256"],
-                "revm_elf_sha256": source_identity["elf_sha256"],
+                "context_elf_sha256": source_identity["context_elf_sha256"],
                 "control_opcode_lab_elf_sha256": source_identity[
                     "control_opcode_lab_elf_sha256"
                 ],
@@ -2233,7 +2271,7 @@ def synthetic_passing_compatibility_canary(
     }
     return {
         "schema_version": 1,
-        "purpose": "context_opcode_elf_compatibility_canary",
+        "purpose": "legacy_opcode_reuse_canary_with_context_binding",
         "evidence_mode": "synthetic_test_only",
         "elf_sha256": elf_sha256,
         "launcher_sha256": launcher_sha256,
@@ -2418,6 +2456,7 @@ def _replay_legacy_osaka_evidence(
 def _build_context_compatibility_canary(
     *,
     legacy_osaka_canary: Mapping[str, Any],
+    context_elf_sha256: str,
     historical_anchor_fit: Mapping[str, Any],
     current_anchor_fit: Mapping[str, Any],
     historical_raw_sha256: str,
@@ -2434,6 +2473,11 @@ def _build_context_compatibility_canary(
 
     opcode_gas._validate_osaka_compatibility_canary_artifact(
         legacy_osaka_canary
+    )
+    _validate_distinct_context_artifact_hashes(
+        legacy_osaka_canary.get("provenance", {}).get("guest_elf_sha256"),
+        context_elf_sha256,
+        current_anchor_fit.get("elf_sha256"),
     )
     if not isinstance(legacy_osaka_replay, Mapping):
         raise ValueError("context compatibility canary requires portable Osaka replay")
@@ -2535,13 +2579,15 @@ def _build_context_compatibility_canary(
     )
     artifact = {
         "schema_version": 1,
-        "purpose": "context_opcode_elf_compatibility_canary",
+        "purpose": "legacy_opcode_reuse_canary_with_context_binding",
         "evidence_mode": "production_replay",
-        "revm_elf_sha256": legacy_osaka_canary.get("provenance", {}).get(
+        "legacy_revm_elf_sha256": legacy_osaka_canary.get("provenance", {}).get(
             "guest_elf_sha256"
         ),
+        "context_elf_sha256": context_elf_sha256,
         "control_opcode_lab_elf_sha256": current_anchor_fit.get("elf_sha256"),
         "launcher_sha256": current_anchor_fit.get("guest_launcher_sha256"),
+        "context_transport": copy.deepcopy(CONTEXT_TRANSPORT_STATUS),
         "legacy_osaka_canary": copy.deepcopy(legacy_osaka_canary),
         "legacy_osaka_replay": copy.deepcopy(legacy_osaka_replay),
         "control_relations": controls,
@@ -2582,15 +2628,25 @@ def _build_context_compatibility_canary(
 def validate_context_compatibility_canary(canary: Mapping[str, Any]) -> None:
     import opcode_gas
 
+    if canary.get("context_transport") != CONTEXT_TRANSPORT_STATUS:
+        raise ValueError("context transport status differs")
     legacy = canary.get("legacy_osaka_canary")
     legacy_replay = canary.get("legacy_osaka_replay")
     controls = canary.get("control_relations")
     if (
         canary.get("schema_version") != 1
-        or canary.get("purpose") != "context_opcode_elf_compatibility_canary"
+        or canary.get("purpose")
+        != "legacy_opcode_reuse_canary_with_context_binding"
         or canary.get("evidence_mode") != "production_replay"
         or canary.get("status") != "passed"
-        or re.fullmatch(r"[0-9a-f]{64}", str(canary.get("revm_elf_sha256"))) is None
+        or re.fullmatch(
+            r"[0-9a-f]{64}", str(canary.get("legacy_revm_elf_sha256"))
+        )
+        is None
+        or re.fullmatch(
+            r"[0-9a-f]{64}", str(canary.get("context_elf_sha256"))
+        )
+        is None
         or re.fullmatch(
             r"[0-9a-f]{64}", str(canary.get("control_opcode_lab_elf_sha256"))
         )
@@ -2601,6 +2657,11 @@ def validate_context_compatibility_canary(canary: Mapping[str, Any]) -> None:
         or legacy.get("relation_ids") != list(OSAKA_CANARY_RELATION_IDS)
     ):
         raise ValueError("context legacy compatibility canary differs")
+    _validate_distinct_context_artifact_hashes(
+        canary["legacy_revm_elf_sha256"],
+        canary["context_elf_sha256"],
+        canary["control_opcode_lab_elf_sha256"],
+    )
     opcode_gas._validate_osaka_compatibility_canary_artifact(legacy)
     provenance = legacy.get("provenance")
     if (
@@ -2630,7 +2691,8 @@ def validate_context_compatibility_canary(canary: Mapping[str, Any]) -> None:
                 "guest_elf_sha256",
             )
         )
-        or provenance["guest_elf_sha256"] != canary["revm_elf_sha256"]
+        or provenance["guest_elf_sha256"]
+        != canary["legacy_revm_elf_sha256"]
         or not isinstance(provenance.get("version_identity"), Mapping)
     ):
         raise ValueError("context legacy compatibility canary provenance differs")
@@ -2831,7 +2893,8 @@ def run_context_compatibility_canary(
     historical_manifest: pathlib.Path,
     historical_anchor_run: pathlib.Path,
     guest_launcher: pathlib.Path,
-    revm_elf: pathlib.Path,
+    legacy_revm_elf: pathlib.Path,
+    context_elf: pathlib.Path,
     control_opcode_lab_elf: pathlib.Path,
     output_root: pathlib.Path,
 ) -> dict[str, Any]:
@@ -2851,7 +2914,8 @@ def run_context_compatibility_canary(
     )
     for label, path in (
         ("guest launcher", guest_launcher),
-        ("REVM opcode-lab ELF", revm_elf),
+        ("legacy REVM opcode-lab ELF", legacy_revm_elf),
+        ("context opcode-lab ELF", context_elf),
         ("control opcode-lab ELF", control_opcode_lab_elf),
     ):
         path = pathlib.Path(path)
@@ -2862,11 +2926,18 @@ def run_context_compatibility_canary(
         identity, guest_launcher
     )
     artifacts = identity.get("guest_artifacts")
-    revm_sha = opcode_gas.sha256_file(revm_elf)
+    legacy_revm_sha = opcode_gas.sha256_file(legacy_revm_elf)
+    context_sha = opcode_gas.sha256_file(context_elf)
     control_sha = opcode_gas.sha256_file(control_opcode_lab_elf)
+    _validate_distinct_context_artifact_hashes(
+        legacy_revm_sha, context_sha, control_sha
+    )
     if (
         not isinstance(artifacts, Mapping)
-        or artifacts.get("crates/guests/elf/sp1_revm_opcode_lab.elf") != revm_sha
+        or artifacts.get("crates/guests/elf/sp1_revm_opcode_lab.elf")
+        != legacy_revm_sha
+        or artifacts.get("crates/guests/elf/sp1_context_opcode_lab.elf")
+        != context_sha
         or artifacts.get("crates/guests/elf/sp1_opcode_lab.elf") != control_sha
     ):
         raise ValueError("context compatibility guest artifacts differ from calibration identity")
@@ -2897,7 +2968,7 @@ def run_context_compatibility_canary(
             "controlled_manifest_rows_sha256"
         ],
         "complete_schedule_sha256": identity["complete_schedule_sha256"],
-        "guest_elf_sha256": revm_sha,
+        "guest_elf_sha256": legacy_revm_sha,
         "version_identity": version_identity,
     }
     formal_provenance = {
@@ -2911,7 +2982,7 @@ def run_context_compatibility_canary(
     )
     execution_args = argparse.Namespace(
         guest_launcher=guest_launcher,
-        elf=revm_elf,
+        elf=legacy_revm_elf,
         controlled_manifest=controlled_manifest,
     )
     current_observations = opcode_gas._run_osaka_canary_rounds(
@@ -3006,6 +3077,7 @@ def run_context_compatibility_canary(
     )
     canary = _build_context_compatibility_canary(
         legacy_osaka_canary=legacy,
+        context_elf_sha256=context_sha,
         historical_anchor_fit=historical_fit,
         current_anchor_fit=current_fit,
         historical_raw_sha256=opcode_gas.sha256_file(
@@ -3166,8 +3238,10 @@ def _build_context_result(
         "calibration_id",
         "calibration_identity_sha256",
         "execution_revision",
-        "elf_sha256",
-        "elf_path",
+        "legacy_revm_elf_sha256",
+        "legacy_revm_elf_path",
+        "context_elf_sha256",
+        "context_elf_path",
         "control_opcode_lab_elf_sha256",
         "control_opcode_lab_elf_path",
         "launcher_sha256",
@@ -3194,7 +3268,8 @@ def _build_context_result(
     )
     for field in (
         "calibration_identity_sha256",
-        "elf_sha256",
+        "legacy_revm_elf_sha256",
+        "context_elf_sha256",
         "control_opcode_lab_elf_sha256",
         "launcher_sha256",
         "corrected_osaka_core_artifact_sha256",
@@ -3212,7 +3287,8 @@ def _build_context_result(
     ):
         raise ValueError("context execution calibration identity differs")
     path_contract = {
-        "elf_path": "crates/guests/elf/sp1_revm_opcode_lab.elf",
+        "legacy_revm_elf_path": "crates/guests/elf/sp1_revm_opcode_lab.elf",
+        "context_elf_path": "crates/guests/elf/sp1_context_opcode_lab.elf",
         "control_opcode_lab_elf_path": "crates/guests/elf/sp1_opcode_lab.elf",
         "launcher_path": "target/release/guest-launcher",
         "operation_coverage_v5_path": (
@@ -3238,7 +3314,10 @@ def _build_context_result(
         raise ValueError("context operation coverage V5 source differs")
     corrected_bytes = (json.dumps(source_registry, indent=2, sort_keys=True) + "\n").encode()
     if (
-        compatibility_canary.get("revm_elf_sha256") != source_identity["elf_sha256"]
+        compatibility_canary.get("legacy_revm_elf_sha256")
+        != source_identity["legacy_revm_elf_sha256"]
+        or compatibility_canary.get("context_elf_sha256")
+        != source_identity["context_elf_sha256"]
         or compatibility_canary.get("control_opcode_lab_elf_sha256")
         != source_identity["control_opcode_lab_elf_sha256"]
         or compatibility_canary.get("launcher_sha256")
@@ -3247,6 +3326,21 @@ def _build_context_result(
         != source_identity["corrected_osaka_core_artifact_sha256"]
     ):
         raise ValueError("context compatibility canary or corrected source identity differs")
+    legacy_provenance = compatibility_canary.get("legacy_osaka_canary", {}).get(
+        "provenance"
+    )
+    if (
+        not isinstance(legacy_provenance, Mapping)
+        or legacy_provenance.get("calibration_id")
+        != source_identity["calibration_id"]
+        or legacy_provenance.get("calibration_identity_sha256")
+        != source_identity["calibration_identity_sha256"]
+        or legacy_provenance.get("implementation_revision")
+        != source_identity["execution_revision"]
+        or legacy_provenance.get("guest_elf_sha256")
+        != source_identity["legacy_revm_elf_sha256"]
+    ):
+        raise ValueError("context legacy compatibility canary calibration differs")
     current_anchor_fit = compatibility_canary.get("current_anchor", {}).get("fit")
     current_run_provenance = (
         current_anchor_fit.get("run_provenance")
@@ -3347,7 +3441,9 @@ def _build_context_result(
             continue
         models[key] = {
             "kind": "static_raw_gas",
-            "parameter_basis": "production_scaled_body_excluding_common_dispatch",
+            "parameter_basis": (
+                "provisional_legacy_projection_unvalidated_cross_elf_transport"
+            ),
             "body_per_raw_gas_exact": fraction_payload(sum(bodies, Fraction()) / len(bodies)),
             "body_scale_exact": fraction_payload(body_scale),
             "required_scenarios": [name for name, _body, _reference in scenario_evidence],
@@ -3367,10 +3463,11 @@ def _build_context_result(
         "schema_version": 1,
         "purpose": "context_opcode_calibration_result",
         "status": "sealed",
-        "promoted_model_keys": sorted(models),
+        "measured_model_keys": sorted(models),
         "candidate_eligible": False,
         "production_registry_modified": False,
         "proposal_validated": False,
+        "context_transport": copy.deepcopy(CONTEXT_TRANSPORT_STATUS),
         "execution_evidence_authority": {
             "seal_entrypoint": "canonical_create_only_run_and_live_calibration",
             "portable_verification_scope": (
@@ -3765,8 +3862,12 @@ def seal_context_result(
             "calibration_identity_sha256"
         ],
         "execution_revision": campaign_source["implementation_revision"],
-        "elf_sha256": campaign_source["revm_elf_sha256"],
-        "elf_path": "crates/guests/elf/sp1_revm_opcode_lab.elf",
+        "legacy_revm_elf_sha256": campaign_source[
+            "legacy_revm_elf_sha256"
+        ],
+        "legacy_revm_elf_path": "crates/guests/elf/sp1_revm_opcode_lab.elf",
+        "context_elf_sha256": campaign_source["context_elf_sha256"],
+        "context_elf_path": "crates/guests/elf/sp1_context_opcode_lab.elf",
         "control_opcode_lab_elf_sha256": campaign_source[
             "control_opcode_lab_elf_sha256"
         ],
@@ -3923,9 +4024,24 @@ def build_operation_coverage_v5(
     return promoted
 
 
+def _require_candidate_context_transport(result: Mapping[str, Any]) -> None:
+    if (
+        result.get("schema_version") != 1
+        or result.get("purpose") != "context_opcode_calibration_result"
+        or result.get("candidate_eligible") is not False
+        or result.get("context_transport") != CONTEXT_TRANSPORT_STATUS
+    ):
+        raise ValueError("context V1 transport contract differs")
+    raise ValueError(
+        "context V1 transport is not evaluated; an independently evidenced successor schema is required"
+    )
+
+
 def promote_operation_coverage_v6(
     coverage_v5: Mapping[str, Any], result: Mapping[str, Any]
 ) -> dict[str, Any]:
+    _validate_result_envelope(result)
+    _require_candidate_context_transport(result)
     required = {f"opcode:0x{opcode:02x}" for opcode in CONTEXT_OPCODES}
     v5_unsigned = dict(coverage_v5)
     v5_artifact = v5_unsigned.pop("artifact_sha256", None)
@@ -3950,7 +4066,7 @@ def promote_operation_coverage_v6(
     promoted_keys = set(result.get("models", {}))
     if (
         result.get("status") != "sealed"
-        or result.get("promoted_model_keys") != sorted(promoted_keys)
+        or result.get("measured_model_keys") != sorted(promoted_keys)
         or not promoted_keys.issubset(required)
     ):
         raise ValueError("context result promoted-key inventory differs")
@@ -3994,11 +4110,13 @@ def overlay_context_models(
     corrected_registry: Mapping[str, Any], result: Mapping[str, Any]
 ) -> dict[str, Any]:
     """Overlay only the six context bodies on an already corrected Osaka registry."""
+    _validate_result_envelope(result)
+    _require_candidate_context_transport(result)
     required = {f"opcode:0x{opcode:02x}" for opcode in CONTEXT_OPCODES}
     promoted_keys = set(result.get("models", {}))
     if (
         result.get("status") != "sealed"
-        or result.get("promoted_model_keys") != sorted(promoted_keys)
+        or result.get("measured_model_keys") != sorted(promoted_keys)
         or not promoted_keys.issubset(required)
     ):
         raise ValueError("context result promoted-key overlay differs")
@@ -4037,12 +4155,13 @@ def build_context_composite_estimator(
 
     validate_estimator_artifact(base_estimator)
     _validate_result_envelope(result)
+    _require_candidate_context_transport(result)
     if result.get("status") != "sealed":
         raise ValueError("context composite requires a complete sealed context result")
     required = {f"opcode:0x{opcode:02x}" for opcode in CONTEXT_OPCODES}
     promoted_keys = set(result.get("models", {}))
     if (
-        result.get("promoted_model_keys") != sorted(promoted_keys)
+        result.get("measured_model_keys") != sorted(promoted_keys)
         or not promoted_keys.issubset(required)
     ):
         raise ValueError("context composite result model inventory differs")
@@ -4131,7 +4250,7 @@ def build_context_composite_estimator(
             name: sha256_bytes(data) for name, data in sorted(result_files.items())
         },
         "models_sha256": sha256_bytes(canonical_json(context_models)),
-        "promoted_model_keys": sorted(promoted_keys),
+        "measured_model_keys": sorted(promoted_keys),
         "execution_revision": result["source_identity"]["execution_revision"],
         "analysis_revision": implementation_revision,
     }
@@ -4194,7 +4313,8 @@ def cmd_run_compatibility_canary(args: argparse.Namespace) -> None:
         historical_manifest=args.historical_manifest,
         historical_anchor_run=args.historical_anchor_run,
         guest_launcher=args.guest_launcher,
-        revm_elf=args.revm_elf,
+        legacy_revm_elf=args.legacy_revm_elf,
+        context_elf=args.context_elf,
         control_opcode_lab_elf=args.control_opcode_lab_elf,
         output_root=args.out,
     )
@@ -4211,7 +4331,7 @@ def cmd_run_campaign(args: argparse.Namespace) -> None:
         run=args.run,
         fixtures_root=args.fixtures,
         guest_launcher=args.guest_launcher,
-        elf=args.revm_elf,
+        elf=args.context_elf,
         control_opcode_lab_elf=args.control_opcode_lab_elf,
     )
     print(
@@ -4283,7 +4403,8 @@ def build_parser() -> argparse.ArgumentParser:
     canary.add_argument("--historical-manifest", type=pathlib.Path, required=True)
     canary.add_argument("--historical-anchor-run", type=pathlib.Path, required=True)
     canary.add_argument("--guest-launcher", type=pathlib.Path, required=True)
-    canary.add_argument("--revm-elf", type=pathlib.Path, required=True)
+    canary.add_argument("--legacy-revm-elf", type=pathlib.Path, required=True)
+    canary.add_argument("--context-elf", type=pathlib.Path, required=True)
     canary.add_argument(
         "--control-opcode-lab-elf", type=pathlib.Path, required=True
     )
@@ -4295,7 +4416,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--run", type=pathlib.Path, required=True)
     run.add_argument("--fixtures", type=pathlib.Path, required=True)
     run.add_argument("--guest-launcher", type=pathlib.Path, required=True)
-    run.add_argument("--revm-elf", type=pathlib.Path, required=True)
+    run.add_argument("--context-elf", type=pathlib.Path, required=True)
     run.add_argument("--control-opcode-lab-elf", type=pathlib.Path, required=True)
     run.set_defaults(func=cmd_run_campaign)
     seal = commands.add_parser("seal-result")

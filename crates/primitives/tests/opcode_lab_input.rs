@@ -1,9 +1,10 @@
 #![allow(missing_docs)]
 
 use raiko2_primitives::{
-    OpcodeLabInput, OpcodeLabStorageAccess, OpcodeLabStorageInput, OpcodeLabStorageLane,
-    OpcodeLabStorageOperation,
+    ContextOpcodeLabInputV1, OpcodeLabInput, OpcodeLabStorageAccess, OpcodeLabStorageInput,
+    OpcodeLabStorageLane, OpcodeLabStorageOperation,
 };
+use sha2::{Digest as _, Sha256};
 
 const ZERO: &str = "0x0000000000000000000000000000000000000000000000000000000000000000";
 const ONE: &str = "0x0000000000000000000000000000000000000000000000000000000000000001";
@@ -90,6 +91,44 @@ fn opcode_lab_stateless_input_round_trips_through_bincode_without_storage() {
     let decoded: OpcodeLabInput =
         bincode::deserialize(&encoded).expect("deserialize stateless opcode input");
     assert_eq!(decoded, input);
+    assert_eq!(
+        alloy_primitives::hex::encode(Sha256::digest(&encoded)),
+        "61eb1dd91af88f81325981b70dd209062c4bcdec08eb9d0af82cf90d705a09aa",
+        "legacy OpcodeLabInput wire digest is frozen",
+    );
+}
+
+#[test]
+fn context_opcode_input_has_an_independent_explicit_wire_identity() {
+    let mut value = [0u8; 32];
+    value[31] = 7;
+    let context = ContextOpcodeLabInputV1 {
+        case: "calldataload".into(),
+        scenario: "partial".into(),
+        opcode: 0x35,
+        target_count: 1,
+        target_raw_gas: 3,
+        tx_gas_limit: Some(100_000),
+        bytecode: vec![0x5f, 0x35, 0x00],
+        generator_max_count: Some(1),
+        fixed_bytecode_len: Some(3),
+        storage: None,
+        tx_value: value,
+        calldata: vec![1, 2, 3],
+        block_timestamp: Some(17),
+    };
+    let json = serde_json::to_value(&context).unwrap();
+    assert_eq!(json["calldata"], "0x010203");
+    assert_eq!(json["block_timestamp"], 17);
+    let encoded = bincode::serialize(&context).unwrap();
+    assert_eq!(
+        bincode::deserialize::<ContextOpcodeLabInputV1>(&encoded).unwrap(),
+        context
+    );
+    assert_ne!(
+        encoded,
+        bincode::serialize(&context.legacy_input()).unwrap()
+    );
 }
 
 #[test]

@@ -1067,13 +1067,26 @@ The context campaign is a separate adaptive controlled run for `ADDRESS`, `CALLE
 `CALLDATALOAD`, `CALLDATASIZE`, and `TIMESTAMP`. It does not modify the historical core or the
 production table. It uses generator bounds `8, 32, 128, 512, 2048`; count zero, the fit prefix, and
 the checkpoint are fixed before execution, accepted scenarios freeze, and only failed scenarios
-advance. Every required sibling must pass before its opcode can enter operation coverage V6.
+advance. Every required sibling must pass before its opcode can be recorded as a measured
+provisional model; operation coverage V6 remains blocked until the separate cross-ELF transport is
+supported.
 
 Use the repository's existing experiment Python environment and run the two-part compatibility
-canary before the campaign. The
-legacy 11 relations execute only on `sp1_revm_opcode_lab.elf`; the historical PUSH0/SWAP1 absolute
-anchor probe executes only on `sp1_opcode_lab.elf`. Both guests and the release launcher must belong
+canary before the campaign. The context input is deliberately isolated in
+`sp1_context_opcode_lab.elf`; changing the binary input or public commitment of the legacy guest
+invalidates historical relation reuse even when its EVM bytecode and raw gas are unchanged. The
+legacy 11 relations therefore execute only on `sp1_revm_opcode_lab.elf`, while the historical
+PUSH0/SWAP1 absolute anchor probe executes only on `sp1_opcode_lab.elf`. The controlled campaign
+executes only on `sp1_context_opcode_lab.elf`. All three guests and the release launcher must belong
 to the same calibration identity.
+
+The fixed legacy canary is an authorization check, not an adaptive measurement. Never expand its
+count bounds, refit it, or substitute the context ELF after a failure. The canary proves only that
+the isolated legacy guest still authorizes reuse of the historical table. It does not prove that a
+marginal cost measured in the separate context ELF is numerically transportable to the legacy cost
+basis. V1 records that cross-ELF transport as `not_evaluated`, keeps the context result
+`candidate_eligible=false`, and requires independent transport evidence before any candidate
+promotion. Controlled sampling may proceed in that explicitly non-candidate state.
 
 ```bash
 CONTEXT_RUN="$CALIBRATION_RUN/context-campaign"
@@ -1087,7 +1100,8 @@ CONTEXT_CANARY="$CALIBRATION_RUN/context-compatibility"
   --historical-manifest experiments/opcode-gas/tests/fixtures/historical-core-102/controlled-manifest.toml \
   --historical-anchor-run experiments/opcode-gas/runs/09ebb08d76d3f461086b0cf4 \
   --guest-launcher target/release/guest-launcher \
-  --revm-elf crates/guests/elf/sp1_revm_opcode_lab.elf \
+  --legacy-revm-elf crates/guests/elf/sp1_revm_opcode_lab.elf \
+  --context-elf crates/guests/elf/sp1_context_opcode_lab.elf \
   --control-opcode-lab-elf crates/guests/elf/sp1_opcode_lab.elf \
   --out "$CONTEXT_CANARY"
 
@@ -1096,7 +1110,7 @@ CONTEXT_CANARY="$CALIBRATION_RUN/context-compatibility"
   --calibration-run "$CALIBRATION_RUN" \
   --run "$CONTEXT_RUN" --fixtures "$CONTEXT_FIXTURES" \
   --guest-launcher target/release/guest-launcher \
-  --revm-elf crates/guests/elf/sp1_revm_opcode_lab.elf \
+  --context-elf crates/guests/elf/sp1_context_opcode_lab.elf \
   --control-opcode-lab-elf crates/guests/elf/sp1_opcode_lab.elf
 
 ~/.venv/bin/python experiments/opcode-gas/context_opcode_campaign.py seal-result \
@@ -1118,14 +1132,15 @@ failed-only decision, terminal selection, fit, formal report, and canonical fixt
 Portable replay proves the sealed bytes, identities, and exact fit graph are self-consistent; it does
 not independently reauthenticate the origin of recorded `prover_gas`. That authority comes from the
 create-only production runner plus live calibration validation at seal time.
-Parameter recovery is exact:
+The provisional legacy-basis projection is exact as arithmetic:
 `stored_b_t = (body_scale * delta_lab + r_control * stored_b_control) / r_target`.
 Common dispatch and identical setup/cleanup cancel in `delta_lab`; the composite prediction adds
-common dispatch exactly once. Operation coverage V5 is the corrected Osaka successor; V6 changes
-only the subset of these six keys whose complete sibling family passed, leaving failed keys
-unsupported. Schema-3 composite artifacts layer V6 after the corrected core and before
-the already sealed typed-storage model. Until a formal result is sampled and independently reviewed,
-do not publish V6, reseal production estimators, or run proposal validation.
+common dispatch exactly once only after transport has independently established a shared cost basis.
+While transport is `not_evaluated`, the stored model basis is
+`provisional_legacy_projection_unvalidated_cross_elf_transport`; promotion helpers reject it. A
+future supported-transport artifact may derive V6 from V5 for the subset of keys whose complete
+sibling family passed. Until then, do not publish V6, reseal production estimators, or run proposal
+validation.
 
 ## Coverage-Qualified Composite Estimator
 

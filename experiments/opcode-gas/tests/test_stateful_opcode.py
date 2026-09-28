@@ -822,10 +822,11 @@ class StatefulCampaignRowIdentityTests(unittest.TestCase):
     def test_campaign_wrapper_create_only_terminal_and_portable_verification(self):
         manifest = stateful.load_stateful_campaign_manifest(STATEFUL_MANIFEST)
         specs = self._pair_specs(manifest)
-        launcher = ROOT / "target" / "debug" / "guest-launcher"
         elf = ROOT / stateful.EXECUTION_CONTRACT["elf_path"]
         with tempfile.TemporaryDirectory(dir=ROOT / "target") as directory:
             root = pathlib.Path(directory)
+            launcher = root / "guest-launcher"
+            launcher.write_bytes(b"stateful-test-launcher")
             _paths, fixtures = self._write_pair_fixtures(root / "fixtures", manifest)
             run = root / "run"
 

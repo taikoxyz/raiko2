@@ -1278,6 +1278,123 @@ class ProductionContextFitTests(unittest.TestCase):
         self.assertNotIn(b"NaN", encoded)
         self.assertEqual(json.loads(encoded), fit)
 
+    def test_prepared_row_evidence_requires_every_frozen_observation(self):
+        row_id = "1" * 64
+        payload = {
+            "row_id": row_id,
+            "workload_id": "2" * 64,
+            "scenario": "address_canonical",
+            "split": "fit",
+            "count": 1,
+            "lane": "target",
+            "repeat_index": 0,
+            "builder_input": {
+                "row_id": row_id,
+                "workload_family": "context_opcode",
+                "split": "fit",
+                "block_count": 1,
+                "transaction_count": 1,
+                "program": {
+                    "kind": "context_opcode_loop",
+                    "workload_id": "2" * 64,
+                    "repeat_index": 0,
+                    "opcode": "address",
+                    "lane": "target",
+                    "count": 1,
+                    "profile": {
+                        "kind": "address",
+                        "address_profile": "canonical",
+                    },
+                },
+                "expected_final_state_root": "0x" + "3" * 64,
+                "expected_raw_gas_by_key": {"opcode:0x60": 3},
+                "expected_operation_event_count_by_key": {"opcode:0x60": 1},
+                "expected_context_features": {"context_fixed:opcode:0x30": 1},
+                "expected_features": {
+                    "proposal_startup": 1,
+                    "block_base": 1,
+                    "tx_base": 1,
+                    "native_value_transfer": 0,
+                },
+                "expected_diagnostics": {"bytecode_length": 256},
+                "expected_backend_input_sha256": "a" * 64,
+                "expected_host_trace_sha256": "b" * 64,
+            },
+        }
+        row_input = {
+            **payload,
+            "input_sha256": production.sha256_bytes(production.canonical_json(payload)),
+        }
+        evidence = {
+            "row_id": row_id,
+            "input_sha256": row_input["input_sha256"],
+            "workload_id": "2" * 64,
+            "scenario": "address_canonical",
+            "split": "fit",
+            "count": 1,
+            "lane": "target",
+            "repeat_index": 0,
+            "prover_gas": "123",
+            "public_output": "0x1234",
+            "backend_input_sha256": "a" * 64,
+            "host_trace_sha256": "b" * 64,
+            "sp1_proposal_elf_sha256": "c" * 64,
+            "guest_launcher_sha256": "d" * 64,
+            "actual_final_state_root": "0x" + "3" * 64,
+            "actual_raw_gas_by_key": {"opcode:0x60": 3},
+            "actual_operation_event_count_by_key": {"opcode:0x60": 1},
+            "actual_context_features": {"context_fixed:opcode:0x30": 1},
+            "actual_features": {
+                "proposal_startup": 1,
+                "block_base": 1,
+                "tx_base": 1,
+                "native_value_transfer": 0,
+            },
+            "actual_diagnostics": {"bytecode_length": 256},
+        }
+        evidence["evidence_sha256"] = production.sha256_bytes(
+            production.canonical_json(evidence)
+        )
+        self.assertEqual(
+            production._validate_prepared_row_evidence(
+                row_input,
+                evidence,
+                production_elf_sha256="c" * 64,
+                guest_launcher_sha256="d" * 64,
+            ),
+            evidence,
+        )
+        substitutions = {
+            "actual_final_state_root": "0x" + "4" * 64,
+            "actual_raw_gas_by_key": {"opcode:0x61": 6},
+            "actual_operation_event_count_by_key": {"opcode:0x61": 2},
+            "actual_context_features": {"context_fixed:opcode:0x33": 1},
+            "actual_features": {
+                "proposal_startup": 1,
+                "block_base": 2,
+                "tx_base": 1,
+                "native_value_transfer": 0,
+            },
+            "actual_diagnostics": {"bytecode_length": 257},
+        }
+        for field, replacement in substitutions.items():
+            forged = copy.deepcopy(evidence)
+            forged[field] = replacement
+            forged_unhashed = dict(forged)
+            forged_unhashed.pop("evidence_sha256")
+            forged["evidence_sha256"] = production.sha256_bytes(
+                production.canonical_json(forged_unhashed)
+            )
+            with self.subTest(field=field), self.assertRaisesRegex(
+                ValueError, "frozen observation"
+            ):
+                production._validate_prepared_row_evidence(
+                    row_input,
+                    forged,
+                    production_elf_sha256="c" * 64,
+                    guest_launcher_sha256="d" * 64,
+                )
+
     def test_residualization_rejects_incomplete_or_contaminated_inputs(self):
         manifest = production.load_production_context_manifest(MANIFEST)
         cases = []
@@ -1579,6 +1696,52 @@ class ProductionContextFitTests(unittest.TestCase):
             ):
                 path.write_bytes(value)
             run = root / "run"
+            invalid_builders = []
+            missing = copy.deepcopy(fixture.builder_input)
+            missing.pop("expected_raw_gas_by_key")
+            invalid_builders.append(("missing", missing))
+            extra = copy.deepcopy(fixture.builder_input)
+            extra["expected_unknown_observation"] = {}
+            invalid_builders.append(("extra", extra))
+            type_drift = copy.deepcopy(fixture.builder_input)
+            type_drift["expected_raw_gas_by_key"] = {"opcode:0x60": "3"}
+            invalid_builders.append(("type", type_drift))
+            root_type_drift = copy.deepcopy(fixture.builder_input)
+            root_type_drift["expected_final_state_root"] = 3
+            invalid_builders.append(("root-type", root_type_drift))
+            hash_type_drift = copy.deepcopy(fixture.builder_input)
+            hash_type_drift["expected_backend_input_sha256"] = 10
+            invalid_builders.append(("hash-type", hash_type_drift))
+            for label, invalid_builder in invalid_builders:
+                invalid_fixture = production.ProductionContextFixtureRequest(
+                    scenario=fixture.scenario,
+                    split=fixture.split,
+                    count=fixture.count,
+                    lane=fixture.lane,
+                    repeat_index=fixture.repeat_index,
+                    workload_id=fixture.workload_id,
+                    row_id=fixture.row_id,
+                    builder_input=invalid_builder,
+                )
+                invalid_run = root / f"invalid-{label}"
+                with self.subTest(label=label), self.assertRaisesRegex(
+                    ValueError, "prepared row semantic fields"
+                ):
+                    production.prepare_production_context_run(
+                        manifest=manifest,
+                        row_requests=(invalid_fixture,),
+                        run=invalid_run,
+                        launcher=launcher,
+                        production_elf=elf,
+                        production_vk=vk,
+                        trace_source=trace,
+                        implementation_revision="1" * 40,
+                        source_hashes={"operation_coverage_v5": "2" * 64},
+                        parity_identity=self._parity_identity(
+                            row_id=fixture.row_id, launcher=launcher, elf=elf
+                        ),
+                    )
+                self.assertFalse(invalid_run.exists())
             substituted = self._parity_identity(
                 row_id=fixture.row_id, launcher=launcher, elf=elf
             )
@@ -1648,6 +1811,7 @@ class ProductionContextFitTests(unittest.TestCase):
                         "backend_input_sha256": "a" * 64,
                         "host_trace_sha256": "b" * 64,
                         "public_output": "0x1234",
+                        "actual_final_state_root": "0x" + "00" * 32,
                         "actual_raw_gas_by_key": {},
                         "actual_operation_event_count_by_key": {},
                         "actual_context_features": {},
@@ -1748,6 +1912,157 @@ class ProductionContextFitTests(unittest.TestCase):
                 ):
                     production.run_production_context_campaign(run, executor=execute)
 
+    def test_run_and_fit_reject_rehashed_frozen_observation_substitution(self):
+        manifest = production.load_production_context_manifest(MANIFEST)
+        source = production.production_context_fixture_requests(manifest)[0]
+        builder = copy.deepcopy(source.builder_input)
+        builder.update(
+            {
+                "expected_final_state_root": "0x" + "3" * 64,
+                "expected_raw_gas_by_key": {"opcode:0x60": 3},
+                "expected_operation_event_count_by_key": {"opcode:0x60": 1},
+                "expected_context_features": {"context_fixed:opcode:0x30": 1},
+                "expected_features": {
+                    "proposal_startup": 1,
+                    "block_base": 1,
+                    "tx_base": 1,
+                    "native_value_transfer": 0,
+                },
+                "expected_diagnostics": {"bytecode_length": 256},
+                "expected_backend_input_sha256": "a" * 64,
+                "expected_host_trace_sha256": "b" * 64,
+            }
+        )
+        fixture = production.ProductionContextFixtureRequest(
+            scenario=source.scenario,
+            split=source.split,
+            count=source.count,
+            lane=source.lane,
+            repeat_index=source.repeat_index,
+            workload_id=source.workload_id,
+            row_id=source.row_id,
+            builder_input=builder,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            launcher = root / "guest-launcher"
+            elf = root / "proposal.elf"
+            vk = root / "proposal.vk"
+            trace = root / "reconstruct.rs"
+            for path in (launcher, elf, vk, trace):
+                path.write_bytes(path.name.encode())
+            run = root / "run"
+            production.prepare_production_context_run(
+                manifest=manifest,
+                row_requests=(fixture,),
+                run=run,
+                launcher=launcher,
+                production_elf=elf,
+                production_vk=vk,
+                trace_source=trace,
+                implementation_revision="1" * 40,
+                source_hashes={"operation_coverage_v5": "2" * 64},
+                parity_identity=self._parity_identity(
+                    row_id=fixture.row_id, launcher=launcher, elf=elf
+                ),
+            )
+            row_input = production._load_canonical_json(
+                run / "row-inputs" / f"{fixture.row_id}.json",
+                label="test prepared row",
+            )
+            report = {
+                "stage": "controlled-block",
+                "mode": "execute",
+                "gas": 123,
+                "public_values": "0x1234",
+                "exit_code": 0,
+                "sp1_execution_engine": "gas-estimator",
+                "sp1_proposal_elf_sha256": production._sha256_file(elf),
+                "guest_launcher_sha256": production._sha256_file(launcher),
+                "guest_input_sha256": "0x" + "a" * 64,
+                "controlled_block": {
+                    "status": "accepted",
+                    "row_id": fixture.row_id,
+                    "observation": {
+                        "backend_input_sha256": "a" * 64,
+                        "host_trace_sha256": "b" * 64,
+                        "public_output": "0x1234",
+                        "actual_final_state_root": "0x" + "3" * 64,
+                        "actual_raw_gas_by_key": {"opcode:0x60": 3},
+                        "actual_operation_event_count_by_key": {"opcode:0x60": 1},
+                        "actual_context_features": {
+                            "context_fixed:opcode:0x30": 1
+                        },
+                        "actual_features": dict(builder["expected_features"]),
+                        "actual_diagnostics": {"bytecode_length": 256},
+                    },
+                },
+            }
+            valid = production._normalize_execution_report(
+                row_input,
+                report,
+                production_elf_sha256=production._sha256_file(elf),
+                guest_launcher_sha256=production._sha256_file(launcher),
+            )
+            forged = copy.deepcopy(valid)
+            forged.update(
+                {
+                    "actual_final_state_root": "0x" + "4" * 64,
+                    "actual_raw_gas_by_key": {"opcode:0x61": 6},
+                    "actual_operation_event_count_by_key": {"opcode:0x61": 2},
+                    "actual_context_features": {"context_fixed:opcode:0x33": 1},
+                    "actual_features": {
+                        **builder["expected_features"],
+                        "block_base": 2,
+                    },
+                    "actual_diagnostics": {"bytecode_length": 257},
+                }
+            )
+            forged_unhashed = dict(forged)
+            forged_unhashed.pop("evidence_sha256")
+            forged["evidence_sha256"] = production.sha256_bytes(
+                production.canonical_json(forged_unhashed)
+            )
+            production._write_json_create_only(
+                run / "rows" / f"{fixture.row_id}.json", forged
+            )
+            with mock.patch.object(
+                production, "_require_current_implementation_revision"
+            ), self.assertRaisesRegex(ValueError, "frozen observation"):
+                production.run_production_context_campaign(run)
+            self.assertFalse((run / "execution-complete.json").exists())
+
+            identity = production._load_canonical_json(
+                run / "calibration-identity.json", label="test identity"
+            )
+            completion = {
+                "schema_version": 1,
+                "status": "execution_complete",
+                "identity_sha256": identity["identity_sha256"],
+                "row_hashes": [
+                    {
+                        "row_id": fixture.row_id,
+                        "evidence_sha256": forged["evidence_sha256"],
+                    }
+                ],
+            }
+            completion["terminal_sha256"] = production.sha256_bytes(
+                production.canonical_json(completion)
+            )
+            production._write_json_create_only(
+                run / "execution-complete.json", completion
+            )
+            with mock.patch.object(
+                production, "_require_current_implementation_revision"
+            ), self.assertRaisesRegex(ValueError, "frozen observation"):
+                production.fit_production_context_run(
+                    run,
+                    manifest=manifest,
+                    subtotal_model=self._subtotal_model(),
+                )
+            self.assertFalse((run / "campaign-decisions.json").exists())
+            self.assertFalse((run / "terminal.json").exists())
+
     def test_subprocess_failure_preserves_rows_without_terminal(self):
         manifest = production.load_production_context_manifest(MANIFEST)
         fixtures = tuple(
@@ -1800,6 +2115,7 @@ class ProductionContextFitTests(unittest.TestCase):
                             "backend_input_sha256": "a" * 64,
                             "host_trace_sha256": "b" * 64,
                             "public_output": "0x01",
+                            "actual_final_state_root": "0x" + "00" * 32,
                             "actual_raw_gas_by_key": {},
                             "actual_operation_event_count_by_key": {},
                             "actual_context_features": {},
@@ -1864,6 +2180,7 @@ class ProductionContextFitTests(unittest.TestCase):
                         "backend_input_sha256": "a" * 64,
                         "host_trace_sha256": "b" * 64,
                         "public_output": "0x01",
+                        "actual_final_state_root": "0x" + "00" * 32,
                         "actual_raw_gas_by_key": {},
                         "actual_operation_event_count_by_key": {},
                         "actual_context_features": {},

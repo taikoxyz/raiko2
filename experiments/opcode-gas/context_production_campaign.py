@@ -2828,7 +2828,7 @@ def _validate_run_identity(
 
 
 def _validate_prepared_row_semantics(payload: Mapping[str, Any]) -> None:
-    if set(payload) != {
+    if not isinstance(payload, Mapping) or set(payload) != {
         "row_id",
         "workload_id",
         "scenario",
@@ -2841,7 +2841,28 @@ def _validate_prepared_row_semantics(payload: Mapping[str, Any]) -> None:
     }:
         raise ValueError("production context prepared row schema differs")
     builder = payload["builder_input"]
+    expected_builder_fields = {
+        "row_id",
+        "workload_family",
+        "split",
+        "block_count",
+        "transaction_count",
+        "program",
+        *_FIXTURE_EVIDENCE_FIELDS,
+    }
+    if not isinstance(builder, Mapping) or set(builder) != expected_builder_fields:
+        raise ValueError("production context prepared row semantic fields differ")
     program = builder.get("program") if isinstance(builder, Mapping) else None
+    count_maps = (
+        "expected_raw_gas_by_key",
+        "expected_operation_event_count_by_key",
+        "expected_context_features",
+        "expected_features",
+        "expected_diagnostics",
+    )
+    expected_backend = builder.get("expected_backend_input_sha256")
+    expected_trace = builder.get("expected_host_trace_sha256")
+    expected_state_root = builder.get("expected_final_state_root")
     if (
         not isinstance(program, Mapping)
         or builder.get("row_id") != payload["row_id"]
@@ -2849,11 +2870,22 @@ def _validate_prepared_row_semantics(payload: Mapping[str, Any]) -> None:
         or program.get("count") != payload["count"]
         or program.get("lane") != payload["lane"]
         or program.get("repeat_index") != payload["repeat_index"]
-        or _SHA256_RE.fullmatch(builder.get("expected_backend_input_sha256", ""))
-        is None
-        or _SHA256_RE.fullmatch(builder.get("expected_host_trace_sha256", ""))
-        is None
-        or not isinstance(builder.get("expected_operation_event_count_by_key"), Mapping)
+        or not isinstance(expected_backend, str)
+        or _SHA256_RE.fullmatch(expected_backend) is None
+        or not isinstance(expected_trace, str)
+        or _SHA256_RE.fullmatch(expected_trace) is None
+        or not isinstance(expected_state_root, str)
+        or re.fullmatch(r"0x[0-9a-f]{64}", expected_state_root) is None
+        or any(
+            not isinstance(builder[field], Mapping)
+            or any(
+                not isinstance(key, str)
+                or type(value) is not int
+                or value < 0
+                for key, value in builder[field].items()
+            )
+            for field in count_maps
+        )
     ):
         raise ValueError("production context prepared row semantic fields differ")
 
@@ -2887,6 +2919,7 @@ def _validate_prepared_row_evidence(
     guest_launcher_sha256: str,
 ) -> dict[str, Any]:
     """Join persisted evidence exactly to its immutable prepared row and assets."""
+    _validate_prepared_row_semantics(row_input)
     expected_fields = {
         "row_id",
         "input_sha256",
@@ -2902,6 +2935,7 @@ def _validate_prepared_row_evidence(
         "host_trace_sha256",
         "sp1_proposal_elf_sha256",
         "guest_launcher_sha256",
+        "actual_final_state_root",
         "actual_raw_gas_by_key",
         "actual_operation_event_count_by_key",
         "actual_context_features",
@@ -2930,11 +2964,15 @@ def _validate_prepared_row_evidence(
         if evidence[field] != row_input[field]:
             raise ValueError("production context prepared-row join metadata differs")
     builder = row_input["builder_input"]
+    for expected_field, actual_field in _FIXTURE_EVIDENCE_FIELDS.items():
+        if builder.get(expected_field) != evidence.get(actual_field):
+            raise ValueError(
+                "production context prepared-row frozen observation differs"
+            )
+    if re.fullmatch(r"0x[0-9a-f]{64}", evidence["actual_final_state_root"]) is None:
+        raise ValueError("production context prepared-row final state root differs")
     if (
-        evidence["backend_input_sha256"]
-        != builder["expected_backend_input_sha256"]
-        or evidence["host_trace_sha256"] != builder["expected_host_trace_sha256"]
-        or evidence["sp1_proposal_elf_sha256"] != production_elf_sha256
+        evidence["sp1_proposal_elf_sha256"] != production_elf_sha256
         or evidence["guest_launcher_sha256"] != guest_launcher_sha256
     ):
         raise ValueError("production context prepared-row join identity differs")
@@ -2985,6 +3023,7 @@ def _normalize_execution_report(
             "host_trace_sha256": observation["host_trace_sha256"],
             "sp1_proposal_elf_sha256": report["sp1_proposal_elf_sha256"],
             "guest_launcher_sha256": report["guest_launcher_sha256"],
+            "actual_final_state_root": observation["actual_final_state_root"],
             "actual_raw_gas_by_key": observation["actual_raw_gas_by_key"],
             "actual_operation_event_count_by_key": observation[
                 "actual_operation_event_count_by_key"

@@ -32,6 +32,32 @@ cargo run -r -p xtask -- build-guest sp1 --bench
 cargo build -r -p guest-launcher --features sp1-sdk/profiling
 ```
 
+### Production Context Campaign Contract
+
+The production-guest context campaign has a frozen manifest for `ADDRESS`, `CALLER`, `CALLVALUE`,
+`CALLDATALOAD`, `CALLDATASIZE`, and `TIMESTAMP`. At this stage the CLI exposes only manifest
+generation and validation; preparation, execution, fitting, result verification, and sealing are
+not registered until those operations have executable implementations.
+
+Generate the canonical manifest into a new path, or validate the tracked manifest and all sealed
+source identities it pins:
+
+```bash
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py \
+  generate-context-production-manifest \
+  --out experiments/opcode-gas/manifests/sp1-context-production-v1.generated.json
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py \
+  validate-context-production-manifest \
+  --manifest experiments/opcode-gas/manifests/sp1-context-production-v1.json
+```
+
+Generation is create-only and will not replace an existing file. Validation checks the exact V5
+operation coverage, sealed higher-layer calibration, and sealed context discovery result, while
+the manifest requires launcher, production ELF/VK, trace source, and clean implementation revision
+identities to be captured when a future prepare operation is implemented. The discovery result
+defines only the feature vocabulary and candidate function shapes: none of its numeric
+coefficients, the historical `body_scale`, or a cross-ELF scale is a production-model input.
+
 ### Synthetic Four-Anchor Ratio Probe
 
 The dedicated `sp1-opcode-lab` guest has an independent diagnostic mode for the four free relation

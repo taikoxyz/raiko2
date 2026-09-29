@@ -25671,9 +25671,43 @@ def cmd_estimate_composite_trace(args: argparse.Namespace) -> None:
         _write_composite_output_create_only(output_path, output)
 
 
+def cmd_generate_context_production_manifest(args: argparse.Namespace) -> None:
+    from context_production_campaign import write_production_context_manifest_create_only
+
+    manifest = write_production_context_manifest_create_only(args.out)
+    print(f"wrote production context manifest {manifest.identity_sha256} to {args.out}")
+
+
+def cmd_validate_context_production_manifest(args: argparse.Namespace) -> None:
+    from context_production_campaign import (
+        load_production_context_manifest,
+        validate_production_context_sources,
+    )
+
+    manifest = load_production_context_manifest(args.manifest)
+    validate_production_context_sources(manifest, REPO_ROOT)
+    print(f"validated production context manifest {manifest.identity_sha256}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subcommands = parser.add_subparsers(dest="command", required=True)
+
+    context_manifest_generate = subcommands.add_parser(
+        "generate-context-production-manifest",
+        help="create the frozen production context campaign manifest",
+    )
+    context_manifest_generate.add_argument("--out", type=pathlib.Path, required=True)
+    context_manifest_generate.set_defaults(func=cmd_generate_context_production_manifest)
+
+    context_manifest_validate = subcommands.add_parser(
+        "validate-context-production-manifest",
+        help="validate the frozen manifest and its sealed source artifacts",
+    )
+    context_manifest_validate.add_argument(
+        "--manifest", type=pathlib.Path, required=True
+    )
+    context_manifest_validate.set_defaults(func=cmd_validate_context_production_manifest)
 
     higher_prepare = subcommands.add_parser(
         "prepare-higher-layer-calibration",

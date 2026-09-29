@@ -8,6 +8,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from decimal import Decimal
 from unittest import mock
@@ -2607,6 +2608,8 @@ class ProductionContextSealTests(unittest.TestCase):
 
     def test_bounded_readers_reject_same_size_in_place_mutation(self):
         real_read = os.read
+        real_fstat = os.fstat
+        real_lseek = os.lseek
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             for helper in (
@@ -2616,8 +2619,8 @@ class ProductionContextSealTests(unittest.TestCase):
                 with self.subTest(helper=helper.__name__):
                     path = root / f"{helper.__name__}.bin"
                     path.write_bytes(b"a" * (1024 * 1024 + 16))
-                    before = path.stat()
                     mutated = False
+                    frozen_times = {}
 
                     def mutate_after_first_chunk(descriptor, size):
                         nonlocal mutated
@@ -2629,16 +2632,113 @@ class ProductionContextSealTests(unittest.TestCase):
                                 target.write(b"b")
                                 target.flush()
                                 os.fsync(target.fileno())
-                            os.utime(
-                                path,
-                                ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000_000),
-                            )
                         return chunk
+
+                    def restore_before_second_pass(descriptor, offset, whence):
+                        with path.open("r+b") as target:
+                            target.seek(-1, os.SEEK_END)
+                            target.write(b"a")
+                            target.flush()
+                            os.fsync(target.fileno())
+                        return real_lseek(descriptor, offset, whence)
+
+                    def stable_timestamps(descriptor):
+                        current = real_fstat(descriptor)
+                        mtime_ns, ctime_ns = frozen_times.setdefault(
+                            descriptor, (current.st_mtime_ns, current.st_ctime_ns)
+                        )
+                        return types.SimpleNamespace(
+                            st_dev=current.st_dev,
+                            st_ino=current.st_ino,
+                            st_mode=current.st_mode,
+                            st_nlink=current.st_nlink,
+                            st_size=current.st_size,
+                            st_mtime_ns=mtime_ns,
+                            st_ctime_ns=ctime_ns,
+                        )
 
                     with mock.patch.object(
                         production.os, "read", side_effect=mutate_after_first_chunk
+                    ), mock.patch.object(
+                        production.os, "lseek", side_effect=restore_before_second_pass
+                    ), mock.patch.object(
+                        production.os, "fstat", side_effect=stable_timestamps
                     ), self.assertRaisesRegex(ValueError, "changed while it was read"):
                         helper(path, 2 * 1024 * 1024, label="mutating test file")
+
+    def test_bounded_readers_reject_truncated_grown_and_shrunk_files(self):
+        real_read = os.read
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            for helper in (
+                production._read_bounded_regular_file,
+                production._sha256_bounded_regular_file,
+            ):
+                empty = root / f"{helper.__name__}-empty.bin"
+                empty.touch()
+                with self.subTest(helper=helper.__name__, mutation="truncated"), self.assertRaisesRegex(
+                    ValueError, "size limit"
+                ):
+                    helper(empty, 2 * 1024 * 1024, label="truncated test file")
+
+                for mutation in ("grown", "shrunk"):
+                    with self.subTest(helper=helper.__name__, mutation=mutation):
+                        path = root / f"{helper.__name__}-{mutation}.bin"
+                        path.write_bytes(b"a" * (1024 * 1024 + 16))
+                        changed = False
+
+                        def change_after_first_chunk(descriptor, size):
+                            nonlocal changed
+                            chunk = real_read(descriptor, size)
+                            if not changed:
+                                changed = True
+                                if mutation == "grown":
+                                    with path.open("ab") as target:
+                                        target.write(b"b")
+                                else:
+                                    with path.open("r+b") as target:
+                                        target.truncate(1024 * 1024)
+                            return chunk
+
+                        with mock.patch.object(
+                            production.os, "read", side_effect=change_after_first_chunk
+                        ), self.assertRaisesRegex(ValueError, "changed while it was read"):
+                            helper(path, 2 * 1024 * 1024, label=f"{mutation} test file")
+
+    def test_bounded_readers_fail_closed_on_seek_or_second_pass_failure(self):
+        real_read = os.read
+        real_lseek = os.lseek
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            for helper in (
+                production._read_bounded_regular_file,
+                production._sha256_bounded_regular_file,
+            ):
+                path = root / f"{helper.__name__}.bin"
+                path.write_bytes(b"bounded source")
+                with self.subTest(helper=helper.__name__, failure="seek"), mock.patch.object(
+                    production.os, "lseek", side_effect=OSError("seek unavailable")
+                ), self.assertRaisesRegex(ValueError, "reread is unavailable"):
+                    helper(path, 1024, label="seek failure test file")
+
+                second_pass = False
+
+                def begin_second_pass(descriptor, offset, whence):
+                    nonlocal second_pass
+                    second_pass = True
+                    return real_lseek(descriptor, offset, whence)
+
+                def fail_second_pass(descriptor, size):
+                    if second_pass:
+                        raise OSError("second pass failed")
+                    return real_read(descriptor, size)
+
+                with self.subTest(helper=helper.__name__, failure="second-pass"), mock.patch.object(
+                    production.os, "lseek", side_effect=begin_second_pass
+                ), mock.patch.object(
+                    production.os, "read", side_effect=fail_second_pass
+                ), self.assertRaisesRegex(ValueError, "reread is unavailable"):
+                    helper(path, 1024, label="second-pass failure test file")
 
     def test_source_code_hashing_rejects_unavailable_and_unsafe_paths(self):
         with tempfile.TemporaryDirectory() as directory:

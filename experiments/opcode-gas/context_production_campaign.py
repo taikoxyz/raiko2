@@ -3344,24 +3344,22 @@ def _read_bounded_regular_file(
         ):
             raise ValueError(f"{label} exceeds the frozen size limit")
         opened_snapshot = _immutable_regular_file_snapshot(opened)
-        chunks = []
-        remaining = opened.st_size
-        while remaining:
-            chunk = os.read(descriptor, min(1024 * 1024, remaining))
-            if not chunk:
-                raise ValueError(f"{label} changed while it was read")
-            chunks.append(chunk)
-            remaining -= len(chunk)
-        if os.read(descriptor, 1):
-            raise ValueError(f"{label} changed while it was read")
-        closed = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(closed.st_mode)
-            or closed.st_nlink <= 0
-            or _immutable_regular_file_snapshot(closed) != opened_snapshot
-        ):
-            raise ValueError(f"{label} changed while it was read")
-        return b"".join(chunks)
+        first = _read_bounded_file_pass(
+            descriptor,
+            opened_snapshot,
+            opened.st_size,
+            label=label,
+            expected=None,
+        )
+        _rewind_bounded_regular_file(descriptor, opened_snapshot, label=label)
+        _read_bounded_file_pass(
+            descriptor,
+            opened_snapshot,
+            opened.st_size,
+            label=label,
+            expected=first,
+        )
+        return first
     finally:
         os.close(descriptor)
 
@@ -3391,24 +3389,24 @@ def _sha256_bounded_regular_file(
         ):
             raise ValueError(f"{label} exceeds the frozen size limit")
         opened_snapshot = _immutable_regular_file_snapshot(opened)
-        digest = hashlib.sha256()
-        remaining = opened.st_size
-        while remaining:
-            chunk = os.read(descriptor, min(1024 * 1024, remaining))
-            if not chunk:
-                raise ValueError(f"{label} changed while it was read")
-            digest.update(chunk)
-            remaining -= len(chunk)
-        if os.read(descriptor, 1):
+        first = _hash_bounded_file_pass(
+            descriptor,
+            opened_snapshot,
+            opened.st_size,
+            label=label,
+            reread=False,
+        )
+        _rewind_bounded_regular_file(descriptor, opened_snapshot, label=label)
+        second = _hash_bounded_file_pass(
+            descriptor,
+            opened_snapshot,
+            opened.st_size,
+            label=label,
+            reread=True,
+        )
+        if first != second:
             raise ValueError(f"{label} changed while it was read")
-        closed = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(closed.st_mode)
-            or closed.st_nlink <= 0
-            or _immutable_regular_file_snapshot(closed) != opened_snapshot
-        ):
-            raise ValueError(f"{label} changed while it was read")
-        return digest.hexdigest()
+        return first
     finally:
         os.close(descriptor)
 
@@ -3422,6 +3420,105 @@ def _immutable_regular_file_snapshot(status: os.stat_result) -> tuple[int, ...]:
         status.st_size,
         status.st_mtime_ns,
         status.st_ctime_ns,
+    )
+
+
+def _require_bounded_regular_snapshot(
+    descriptor: int, expected: tuple[int, ...], *, label: str, reread: bool
+) -> None:
+    try:
+        current = os.fstat(descriptor)
+    except OSError as error:
+        operation = "reread" if reread else "read"
+        raise ValueError(f"{label} {operation} is unavailable") from error
+    if (
+        not stat.S_ISREG(current.st_mode)
+        or current.st_nlink <= 0
+        or _immutable_regular_file_snapshot(current) != expected
+    ):
+        raise ValueError(f"{label} changed while it was read")
+
+
+def _read_bounded_file_pass(
+    descriptor: int,
+    expected_snapshot: tuple[int, ...],
+    expected_size: int,
+    *,
+    label: str,
+    expected: bytes | None,
+) -> bytes:
+    reread = expected is not None
+    _require_bounded_regular_snapshot(
+        descriptor, expected_snapshot, label=label, reread=reread
+    )
+    chunks = []
+    offset = 0
+    try:
+        while offset < expected_size:
+            chunk = os.read(descriptor, min(1024 * 1024, expected_size - offset))
+            if not chunk:
+                raise ValueError(f"{label} changed while it was read")
+            if expected is None:
+                chunks.append(chunk)
+            elif chunk != expected[offset : offset + len(chunk)]:
+                raise ValueError(f"{label} changed while it was read")
+            offset += len(chunk)
+        if offset != expected_size or os.read(descriptor, 1):
+            raise ValueError(f"{label} changed while it was read")
+    except OSError as error:
+        operation = "reread" if reread else "read"
+        raise ValueError(f"{label} {operation} is unavailable") from error
+    _require_bounded_regular_snapshot(
+        descriptor, expected_snapshot, label=label, reread=reread
+    )
+    return b"".join(chunks) if expected is None else expected
+
+
+def _hash_bounded_file_pass(
+    descriptor: int,
+    expected_snapshot: tuple[int, ...],
+    expected_size: int,
+    *,
+    label: str,
+    reread: bool,
+) -> str:
+    _require_bounded_regular_snapshot(
+        descriptor, expected_snapshot, label=label, reread=reread
+    )
+    digest = hashlib.sha256()
+    offset = 0
+    try:
+        while offset < expected_size:
+            chunk = os.read(descriptor, min(1024 * 1024, expected_size - offset))
+            if not chunk:
+                raise ValueError(f"{label} changed while it was read")
+            digest.update(chunk)
+            offset += len(chunk)
+        if offset != expected_size or os.read(descriptor, 1):
+            raise ValueError(f"{label} changed while it was read")
+    except OSError as error:
+        operation = "reread" if reread else "read"
+        raise ValueError(f"{label} {operation} is unavailable") from error
+    _require_bounded_regular_snapshot(
+        descriptor, expected_snapshot, label=label, reread=reread
+    )
+    return digest.hexdigest()
+
+
+def _rewind_bounded_regular_file(
+    descriptor: int, expected_snapshot: tuple[int, ...], *, label: str
+) -> None:
+    _require_bounded_regular_snapshot(
+        descriptor, expected_snapshot, label=label, reread=True
+    )
+    try:
+        offset = os.lseek(descriptor, 0, os.SEEK_SET)
+    except OSError as error:
+        raise ValueError(f"{label} reread is unavailable") from error
+    if offset != 0:
+        raise ValueError(f"{label} reread is unavailable")
+    _require_bounded_regular_snapshot(
+        descriptor, expected_snapshot, label=label, reread=True
     )
 
 

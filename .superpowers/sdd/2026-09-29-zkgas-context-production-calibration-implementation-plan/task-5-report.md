@@ -127,3 +127,29 @@ Focused GREEN evidence:
 - Complete test file: `2 failed, 43 passed, 94 subtests passed in 595.43s`. The only failures are
   the same two documented local sealed-helper fingerprint mismatches at
   `context_opcode_campaign.py:4484`; the production check remains strict.
+
+## Review Round 2
+
+Review demonstrated that a same-tick, same-size transient mutation can preserve the complete stat
+snapshot. Both bounded helpers now perform exactly two complete passes on the same
+`O_NOFOLLOW | O_NONBLOCK` descriptor, with an explicit checked seek to offset zero between them.
+Each pass checks the original cap and byte count, EOF, regular-file type, link count, and complete
+pre/between/post stat snapshot. The byte reader compares pass-two bytes exactly against its single
+retained pass-one buffer; the hash reader compares two independently computed SHA-256 digests.
+Unavailable seek or reread fails closed, and there is no retry-until-stable loop.
+
+RED evidence:
+
+- Timestamp-frozen, first-pass-only unread-half mutations were accepted by both helpers, and seek
+  or second-pass failures were never exercised: `6 failed, 2 passed`.
+
+GREEN evidence:
+
+- Double-pass transient-mutation, empty/truncated, grown, shrunk, seek-failure, and second-pass
+  failure coverage: `3 passed, 12 subtests passed in 0.10s`.
+- End-to-end inventory/tamper suite: `1 passed, 19 subtests passed in 184.38s`.
+- Narrow complete-source seal and replay: `1 passed in 117.20s`.
+- Non-artifact suite: `42 passed, 5 deselected, 85 subtests passed in 1.09s`.
+- Complete test file: `2 failed, 45 passed, 104 subtests passed in 428.54s`. The only failures are
+  the same two documented local sealed-helper fingerprint mismatches at
+  `context_opcode_campaign.py:4484`; the production check remains strict.

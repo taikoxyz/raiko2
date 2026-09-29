@@ -2272,6 +2272,26 @@ pub fn observe_controlled_block_fixture(
 pub fn validate_controlled_block_fixture(
     fixture: &ControlledBlockFixture,
 ) -> Result<ControlledBlockObservation> {
+    if matches!(
+        &fixture.spec.program,
+        ControlledProgram::ContextOpcodeLoop { .. }
+    ) {
+        let missing = match (
+            fixture.spec.expected_backend_input_sha256.is_none(),
+            fixture.spec.expected_host_trace_sha256.is_none(),
+        ) {
+            (true, true) => Some("backend-input and host-trace"),
+            (true, false) => Some("backend-input"),
+            (false, true) => Some("host-trace"),
+            (false, false) => None,
+        };
+        if let Some(missing) = missing {
+            bail!(
+                "controlled context row {} requires {missing} identity evidence before SP1",
+                fixture.spec.row_id
+            );
+        }
+    }
     let observation = observe_controlled_block_fixture(fixture)?;
     if observation.actual_raw_gas_by_key != fixture.spec.expected_raw_gas_by_key {
         bail!(

@@ -1166,15 +1166,25 @@ def production_context_parity_identity(
 
     def parity_values(report: Mapping[str, Any]) -> dict[str, Any]:
         try:
+            controlled_block = report["controlled_block"]
+            if (
+                controlled_block["row_id"] != row_id
+                or controlled_block["status"] != "accepted"
+            ):
+                raise ValueError(
+                    "production context parity evidence is not an accepted row-bound result"
+                )
+            if type(report["exit_code"]) is not int or report["exit_code"] != 0:
+                raise ValueError(
+                    "production context parity evidence is not a successful execution"
+                )
             return {
                 "gas": report["gas"],
                 "total_instruction_count": report["total_instruction_count"],
                 "total_syscall_count": report["total_syscall_count"],
                 "public_values": report["public_values"],
                 "guest_input_sha256": report["guest_input_sha256"],
-                "host_trace_sha256": report["controlled_block"]["observation"][
-                    "host_trace_sha256"
-                ],
+                "host_trace_sha256": controlled_block["observation"]["host_trace_sha256"],
                 "exit_code": report["exit_code"],
             }
         except (KeyError, TypeError) as error:

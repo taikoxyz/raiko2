@@ -628,7 +628,11 @@ class ProductionContextIdentityTests(unittest.TestCase):
             "public_values": "0x1234",
             "guest_input_sha256": "0x" + "a" * 64,
             "exit_code": 0,
-            "controlled_block": {"observation": {"host_trace_sha256": "b" * 64}},
+            "controlled_block": {
+                "status": "accepted",
+                "row_id": "c" * 64,
+                "observation": {"host_trace_sha256": "b" * 64},
+            },
         }
         standard = {**common, "sp1_execution_engine": "standard"}
         estimator = {**common, "sp1_execution_engine": "gas-estimator"}
@@ -644,6 +648,74 @@ class ProductionContextIdentityTests(unittest.TestCase):
             production.production_context_parity_identity(
                 row_id="c" * 64, standard=standard, gas_estimator=drifted
             )
+
+    def test_standard_estimator_parity_requires_accepted_row_bound_successes(self):
+        common = {
+            "gas": 1,
+            "total_instruction_count": 2,
+            "total_syscall_count": 3,
+            "public_values": "0x1234",
+            "guest_input_sha256": "0x" + "a" * 64,
+            "exit_code": 0,
+            "controlled_block": {
+                "status": "accepted",
+                "row_id": "c" * 64,
+                "observation": {"host_trace_sha256": "b" * 64},
+            },
+        }
+        standard = {**copy.deepcopy(common), "sp1_execution_engine": "standard"}
+        estimator = {
+            **copy.deepcopy(common),
+            "sp1_execution_engine": "gas-estimator",
+        }
+        invalid_reports = []
+        wrong_row = copy.deepcopy(estimator)
+        wrong_row["controlled_block"]["row_id"] = "d" * 64
+        invalid_reports.append(("wrong row", standard, wrong_row))
+        wrong_standard_row = copy.deepcopy(standard)
+        wrong_standard_row["controlled_block"]["row_id"] = "d" * 64
+        invalid_reports.append(("wrong standard row", wrong_standard_row, estimator))
+        rejected = copy.deepcopy(estimator)
+        rejected["controlled_block"]["status"] = "rejected"
+        invalid_reports.append(("rejected status", standard, rejected))
+        rejected_standard = copy.deepcopy(standard)
+        rejected_standard["controlled_block"]["status"] = "rejected"
+        invalid_reports.append(
+            ("rejected standard status", rejected_standard, estimator)
+        )
+        nonzero_standard = copy.deepcopy(standard)
+        nonzero_estimator = copy.deepcopy(estimator)
+        nonzero_standard["exit_code"] = 1
+        nonzero_estimator["exit_code"] = 1
+        invalid_reports.append(
+            ("matching nonzero exits", nonzero_standard, nonzero_estimator)
+        )
+        for field in ("row_id", "status"):
+            missing = copy.deepcopy(estimator)
+            del missing["controlled_block"][field]
+            invalid_reports.append((f"missing {field}", standard, missing))
+            missing_standard = copy.deepcopy(standard)
+            del missing_standard["controlled_block"][field]
+            invalid_reports.append(
+                (f"missing standard {field}", missing_standard, estimator)
+            )
+        missing_trace = copy.deepcopy(estimator)
+        del missing_trace["controlled_block"]["observation"]["host_trace_sha256"]
+        invalid_reports.append(("missing host trace", standard, missing_trace))
+        missing_controlled = copy.deepcopy(estimator)
+        del missing_controlled["controlled_block"]
+        invalid_reports.append(
+            ("missing controlled block", standard, missing_controlled)
+        )
+        for case, candidate_standard, candidate_estimator in invalid_reports:
+            with self.subTest(case=case), self.assertRaisesRegex(
+                ValueError, "parity evidence"
+            ):
+                production.production_context_parity_identity(
+                    row_id="c" * 64,
+                    standard=candidate_standard,
+                    gas_estimator=candidate_estimator,
+                )
 
 
 class ProductionContextCliTests(unittest.TestCase):

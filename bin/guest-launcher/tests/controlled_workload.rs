@@ -913,6 +913,31 @@ fn context_identity_freezes_the_same_trace_that_controlled_block_validates() {
         .expect("subsequent controlled-block preflight replays identity evidence");
     assert_eq!(replay, bundle.observation);
 
+    for (backend_input, host_trace, missing) in [
+        (
+            None,
+            bundle.spec.expected_host_trace_sha256.clone(),
+            "backend-input",
+        ),
+        (
+            bundle.spec.expected_backend_input_sha256.clone(),
+            None,
+            "host-trace",
+        ),
+        (None, None, "backend-input and host-trace"),
+    ] {
+        let mut incomplete = bundle.spec.clone();
+        incomplete.expected_backend_input_sha256 = backend_input;
+        incomplete.expected_host_trace_sha256 = host_trace;
+        let fixture = build_controlled_block_fixture(&incomplete).unwrap();
+        let error = validate_controlled_block_fixture(&fixture)
+            .expect_err("context rows must bind both identities before SP1");
+        assert!(
+            error.to_string().contains(missing),
+            "unexpected missing-identity error: {error:#}"
+        );
+    }
+
     let mut stale = bundle.spec;
     stale
         .expected_context_features
@@ -921,6 +946,17 @@ fn context_identity_freezes_the_same_trace_that_controlled_block_validates() {
     let error = validate_controlled_block_fixture(&fixture)
         .expect_err("any declared/observed ledger mismatch must stop before SP1");
     assert!(error.to_string().contains("context-feature mismatch"));
+}
+
+#[test]
+fn context_identity_requirement_preserves_legacy_optional_identity_fields() {
+    let mut spec = block_row_spec();
+    spec.row_id = controlled_block_row_id(&spec).unwrap();
+    assert!(spec.expected_backend_input_sha256.is_none());
+    assert!(spec.expected_host_trace_sha256.is_none());
+    let fixture = build_controlled_block_fixture(&spec).unwrap();
+    validate_controlled_block_fixture(&fixture)
+        .expect("legacy non-context rows keep optional backend and trace identities");
 }
 
 #[test]

@@ -668,6 +668,7 @@ fn context_opcode_pairs_change_only_the_measurement_instruction_and_feature() {
                 address_profile: ControlledContextAddressProfile::Canonical,
             },
             "context_fixed:opcode:0x30",
+            0,
         ),
         (
             ControlledContextOpcode::Caller,
@@ -675,15 +676,17 @@ fn context_opcode_pairs_change_only_the_measurement_instruction_and_feature() {
                 caller_profile: ControlledContextCallerProfile::Canonical,
             },
             "context_fixed:opcode:0x33",
+            0,
         ),
         (
             ControlledContextOpcode::CallValue,
             ControlledContextProfile::CallValue {
-                value: 7,
-                value_class: ContextValueClass::Nonzero,
-                input_length: 0,
+                value: 0,
+                value_class: ContextValueClass::Zero,
+                input_length: 1,
             },
-            "context_value:opcode:0x34:value_class:nonzero",
+            "context_value:opcode:0x34:value_class:zero",
+            1,
         ),
         (
             ControlledContextOpcode::CalldataLoad,
@@ -693,11 +696,13 @@ fn context_opcode_pairs_change_only_the_measurement_instruction_and_feature() {
                 access_class: CalldataLoadAccessClass::Partial,
             },
             "calldata_load:opcode:0x35:access_class:partial",
+            33,
         ),
         (
             ControlledContextOpcode::CalldataSize,
             ControlledContextProfile::CalldataSize { input_length: 33 },
             "calldata_size:opcode:0x36:input_length:33",
+            33,
         ),
         (
             ControlledContextOpcode::Timestamp,
@@ -706,9 +711,10 @@ fn context_opcode_pairs_change_only_the_measurement_instruction_and_feature() {
                 value_class: ContextValueClass::Nonzero,
             },
             "context_value:opcode:0x42:value_class:nonzero",
+            0,
         ),
     ];
-    for (opcode, profile, expected_feature) in cases {
+    for (opcode, profile, expected_feature, expected_input_length) in cases {
         let (_, target, target_shape) =
             materialize_context_block_row(opcode, ControlledLane::Target, 1, profile.clone());
         let (_, control, control_shape) =
@@ -716,6 +722,7 @@ fn context_opcode_pairs_change_only_the_measurement_instruction_and_feature() {
         assert_eq!(target_shape.0.len(), 256);
         assert_eq!(control_shape.0.len(), 256);
         assert_eq!(target_shape.1, control_shape.1);
+        assert_eq!(target_shape.1, expected_input_length);
         assert_eq!(target_shape.2, 100_000);
         assert_eq!(control_shape.2, 100_000);
         assert_eq!(target.actual_features, control.actual_features);

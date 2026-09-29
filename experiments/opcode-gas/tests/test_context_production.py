@@ -26,6 +26,28 @@ MANIFEST = OPCODE_GAS / "manifests" / "sp1-context-production-v1.json"
 
 
 class ProductionContextManifestTests(unittest.TestCase):
+    def test_canonical_manifest_payload_is_deeply_independent(self):
+        payload = production.canonical_production_context_manifest_payload()
+        payload["execution"]["parity_row"]["count"] = 2
+        regenerated = production.canonical_production_context_manifest_payload()
+        self.assertEqual(regenerated["execution"]["parity_row"]["count"], 1)
+
+    def test_parsed_manifest_and_parity_authority_are_deeply_immutable(self):
+        manifest = production.load_production_context_manifest(MANIFEST)
+
+        with self.assertRaises(TypeError):
+            manifest.execution["parity_row"]["count"] = 2
+        with self.assertRaises(TypeError):
+            production.EXECUTION["parity_row"]["count"] = 2
+        with self.assertRaises(TypeError):
+            production.PARITY_ROW_CONTRACT["count"] = 2
+
+    def test_manifest_rejects_mutated_nested_parity_contract(self):
+        payload = production.canonical_production_context_manifest_payload()
+        payload["execution"]["parity_row"]["count"] = 2
+        with self.assertRaisesRegex(ValueError, "frozen contract"):
+            production.ProductionContextManifest.from_mapping(payload)
+
     def test_operation_inventory_binds_trace_schedule_candidates_and_scenarios(self):
         manifest = production.load_production_context_manifest(MANIFEST)
 

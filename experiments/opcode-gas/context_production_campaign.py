@@ -113,6 +113,28 @@ class CandidateFitRejected(ValueError):
     """Expected numerical rejection of one frozen model candidate."""
 
 
+def _deep_freeze(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return MappingProxyType(
+            {key: _deep_freeze(member) for key, member in value.items()}
+        )
+    if isinstance(value, list):
+        return tuple(_deep_freeze(member) for member in value)
+    return value
+
+
+def _deep_thaw(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {key: _deep_thaw(member) for key, member in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_deep_thaw(member) for member in value]
+    return value
+
+
+def _canonical_deep_copy(value: Any) -> Any:
+    return json.loads(canonical_json(_deep_thaw(value)))
+
+
 SOURCES = {
     "operation_coverage_v5": {
         "path": "experiments/opcode-gas/manifests/operation-coverage-v5.json",
@@ -137,29 +159,31 @@ SOURCES = {
     },
 }
 
-EXECUTION = {
-    "stage": "controlled-block",
-    "proof_type": "sp1",
-    "mode": "execute",
-    "sp1_prover": "local",
-    "sp1_execution_engine": "gas-estimator",
-    "launcher_path": "target/release/guest-launcher",
-    "launcher_binding": "sha256_at_clean_prepare",
-    "production_elf_path": "crates/guests/elf/sp1_shasta_proposal.elf",
-    "production_vk_path": "crates/guests/elf/sp1_shasta_proposal.vk.bin",
-    "guest_artifact_binding": "sha256_at_clean_prepare",
-    "implementation_revision_binding": "clean_git_head_at_prepare",
-    "trace_schema_source": "crates/zkgas-trace/src/reconstruct.rs",
-    "trace_schema_version": 4,
-    "trace_source_binding": "sha256_at_clean_prepare",
-    "parity_row": {
-        "scenario": "address_canonical",
-        "split": "fit",
-        "count": 1,
-        "lane": "target",
-        "repeat_index": 0,
-    },
-}
+EXECUTION = _deep_freeze(
+    {
+        "stage": "controlled-block",
+        "proof_type": "sp1",
+        "mode": "execute",
+        "sp1_prover": "local",
+        "sp1_execution_engine": "gas-estimator",
+        "launcher_path": "target/release/guest-launcher",
+        "launcher_binding": "sha256_at_clean_prepare",
+        "production_elf_path": "crates/guests/elf/sp1_shasta_proposal.elf",
+        "production_vk_path": "crates/guests/elf/sp1_shasta_proposal.vk.bin",
+        "guest_artifact_binding": "sha256_at_clean_prepare",
+        "implementation_revision_binding": "clean_git_head_at_prepare",
+        "trace_schema_source": "crates/zkgas-trace/src/reconstruct.rs",
+        "trace_schema_version": 4,
+        "trace_source_binding": "sha256_at_clean_prepare",
+        "parity_row": {
+            "scenario": "address_canonical",
+            "split": "fit",
+            "count": 1,
+            "lane": "target",
+            "repeat_index": 0,
+        },
+    }
+)
 
 PARITY_ROW_CONTRACT = EXECUTION["parity_row"]
 
@@ -451,27 +475,27 @@ def _canonical_operations() -> list[dict[str, Any]]:
 
 
 def canonical_production_context_manifest_payload() -> dict[str, Any]:
-    return {
-        "schema_version": SCHEMA_VERSION,
-        "purpose": PURPOSE,
-        "keys": list(KEYS),
-        "fit_counts": list(FIT_COUNTS),
-        "validation_counts": list(VALIDATION_COUNTS),
-        "repeats": REPEATS,
-        "sources": json.loads(canonical_json(SOURCES)),
-        "execution": dict(EXECUTION),
-        "version_identity": dict(VERSION_IDENTITY),
-        "fit_equations": dict(FIT_EQUATIONS),
-        "quality_gates": dict(QUALITY_GATES),
-        "repeat_contract": json.loads(canonical_json(REPEAT_CONTRACT)),
-        "family_promotion_contract": json.loads(
-            canonical_json(FAMILY_PROMOTION_CONTRACT)
-        ),
-        "model_selection_order": list(MODEL_SELECTION_ORDER),
-        "model_candidates": json.loads(canonical_json(MODEL_CANDIDATES)),
-        "operations": _canonical_operations(),
-        "scenarios": _canonical_scenarios(),
-    }
+    return _canonical_deep_copy(
+        {
+            "schema_version": SCHEMA_VERSION,
+            "purpose": PURPOSE,
+            "keys": list(KEYS),
+            "fit_counts": list(FIT_COUNTS),
+            "validation_counts": list(VALIDATION_COUNTS),
+            "repeats": REPEATS,
+            "sources": SOURCES,
+            "execution": EXECUTION,
+            "version_identity": VERSION_IDENTITY,
+            "fit_equations": FIT_EQUATIONS,
+            "quality_gates": QUALITY_GATES,
+            "repeat_contract": REPEAT_CONTRACT,
+            "family_promotion_contract": FAMILY_PROMOTION_CONTRACT,
+            "model_selection_order": list(MODEL_SELECTION_ORDER),
+            "model_candidates": MODEL_CANDIDATES,
+            "operations": _canonical_operations(),
+            "scenarios": _canonical_scenarios(),
+        }
+    )
 
 
 def _reject_binary_floats(value: Any, path: str = "manifest") -> None:
@@ -690,16 +714,6 @@ def _validate_internal_joins(
         raise ValueError("production context operation scenario ownership differs")
 
 
-def _deep_freeze(value: Any) -> Any:
-    if isinstance(value, Mapping):
-        return MappingProxyType(
-            {key: _deep_freeze(member) for key, member in value.items()}
-        )
-    if isinstance(value, list):
-        return tuple(_deep_freeze(member) for member in value)
-    return value
-
-
 @dataclass(frozen=True)
 class ProductionContextManifest:
     schema_version: int
@@ -799,7 +813,7 @@ class ProductionContextManifest:
             validation_counts=tuple(value["validation_counts"]),
             repeats=value["repeats"],
             sources=MappingProxyType({name: MappingProxyType(dict(source)) for name, source in value["sources"].items()}),
-            execution=MappingProxyType(dict(value["execution"])),
+            execution=_deep_freeze(value["execution"]),
             version_identity=MappingProxyType(dict(value["version_identity"])),
             fit_equations=MappingProxyType(dict(value["fit_equations"])),
             quality_gates=MappingProxyType(dict(value["quality_gates"])),

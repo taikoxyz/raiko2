@@ -1035,7 +1035,14 @@ class OsakaRunnerTests(unittest.TestCase):
             return []
 
         def fake_run(args):
-            executed.append((args.out, args.repeats, args.expected_purpose))
+            executed.append(
+                (
+                    args.out,
+                    args.repeats,
+                    args.expected_purpose,
+                    args.revm_opcode_lab_contract,
+                )
+            )
             relation_ids = next(ids for bound, ids in generated if f"max-{bound}" in str(args.fixtures))
             args.out.parent.mkdir(parents=True, exist_ok=True)
             args.out.write_text(
@@ -1076,6 +1083,9 @@ class OsakaRunnerTests(unittest.TestCase):
                     guest_launcher=root / "guest-launcher",
                     elf=root / "opcode.elf",
                     controlled_manifest=CURRENT_MANIFEST,
+                    revm_opcode_lab_contract=(
+                        opcode_gas.REVM_OPCODE_LAB_CONTRACT_FROZEN_LEGACY
+                    ),
                 ),
             )
             first = opcode_gas._run_osaka_canary_rounds(**kwargs)
@@ -1085,8 +1095,21 @@ class OsakaRunnerTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual([bound for bound, _ids in generated], [8, 32, 128, 512])
         self.assertEqual({item for _bound, ids in generated for item in ids}, set(opcode_gas.OSAKA_CANARY_RELATION_IDS))
-        self.assertTrue(all(repeats == 3 for _path, repeats, _purpose in executed))
-        self.assertTrue(all(purpose == opcode_gas.FORMAL_RELATION_PURPOSE for _path, _repeats, purpose in executed))
+        self.assertTrue(
+            all(repeats == 3 for _path, repeats, _purpose, _contract in executed)
+        )
+        self.assertTrue(
+            all(
+                purpose == opcode_gas.FORMAL_RELATION_PURPOSE
+                for _path, _repeats, purpose, _contract in executed
+            )
+        )
+        self.assertTrue(
+            all(
+                contract == opcode_gas.REVM_OPCODE_LAB_CONTRACT_FROZEN_LEGACY
+                for _path, _repeats, _purpose, contract in executed
+            )
+        )
         self.assertEqual(len(executed), 4)
 
     def test_canary_resume_rejects_changed_persisted_raw_hash(self):

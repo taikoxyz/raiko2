@@ -373,6 +373,74 @@ class RunnerTests(unittest.TestCase):
                 )
             )
 
+    def test_formal_run_requires_explicit_frozen_legacy_elf_contract(self):
+        common = {
+            "repeats": 3,
+            "expected_purpose": opcode_gas.FORMAL_RELATION_PURPOSE,
+            "opcode_stage": "revm-opcode-lab",
+            "elf": opcode_gas.FROZEN_LEGACY_REVM_ELF_PATH,
+            "calibration_run": pathlib.Path("calibration"),
+        }
+        with self.assertRaisesRegex(ValueError, "explicit frozen legacy contract"):
+            opcode_gas.cmd_run(opcode_gas.argparse.Namespace(**common))
+
+        with mock.patch.object(
+            opcode_gas, "_resolve_repo_path", side_effect=lambda path, **_kwargs: path
+        ), mock.patch.object(
+            opcode_gas,
+            "validate_calibration_execution_identity",
+            side_effect=RuntimeError("reached calibration validation"),
+        ) as validate, self.assertRaisesRegex(
+            RuntimeError, "reached calibration validation"
+        ):
+            opcode_gas.cmd_run(
+                opcode_gas.argparse.Namespace(
+                    **common,
+                    revm_opcode_lab_contract=(
+                        opcode_gas.REVM_OPCODE_LAB_CONTRACT_FROZEN_LEGACY
+                    ),
+                )
+            )
+        validate.assert_called_once()
+
+    def test_generic_revm_run_rejects_implicit_frozen_legacy_elf(self):
+        with tempfile.TemporaryDirectory(dir=ROOT / "target") as tmp:
+            symlink_alias = pathlib.Path(tmp) / "legacy.elf"
+            symlink_alias.symlink_to(
+                ROOT / opcode_gas.FROZEN_LEGACY_REVM_ELF_PATH
+            )
+            aliases = (
+                opcode_gas.FROZEN_LEGACY_REVM_ELF_PATH,
+                ROOT / opcode_gas.FROZEN_LEGACY_REVM_ELF_PATH,
+                pathlib.Path(
+                    "experiments/opcode-gas/../opcode-gas/artifacts/legacy-revm-v1/"
+                    "sp1_revm_opcode_lab.elf"
+                ),
+                symlink_alias,
+            )
+            with mock.patch.object(
+                opcode_gas, "_resolve_repo_path", side_effect=lambda path, **_kwargs: path
+            ), mock.patch.object(
+                opcode_gas,
+                "validate_calibration_execution_identity",
+                side_effect=RuntimeError("reached calibration validation"),
+            ) as validate:
+                for alias in aliases:
+                    with self.subTest(alias=alias), self.assertRaisesRegex(
+                        ValueError,
+                        "explicit frozen legacy contract|must not contain symlinks",
+                    ):
+                        opcode_gas.cmd_run(
+                            opcode_gas.argparse.Namespace(
+                                repeats=1,
+                                expected_purpose=None,
+                                opcode_stage="opcode-lab",
+                                elf=alias,
+                                calibration_run=pathlib.Path("calibration"),
+                            )
+                        )
+                validate.assert_not_called()
+
     def test_formal_relation_runner_advances_only_quality_failures_and_resumes(self):
         manifest = opcode_gas.load_manifest(
             ROOT / "experiments/opcode-gas/manifests/sp1-calibration-v1.toml"

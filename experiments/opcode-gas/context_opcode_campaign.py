@@ -3035,8 +3035,11 @@ def run_context_compatibility_canary(
     )
     execution_args = argparse.Namespace(
         guest_launcher=guest_launcher,
-        elf=legacy_revm_elf,
+        elf=pathlib.Path(FROZEN_LEGACY_REVM_ELF_PATH),
         controlled_manifest=controlled_manifest,
+        revm_opcode_lab_contract=(
+            opcode_gas.REVM_OPCODE_LAB_CONTRACT_FROZEN_LEGACY
+        ),
     )
     current_observations = opcode_gas._run_osaka_canary_rounds(
         calibration_run=calibration_run,

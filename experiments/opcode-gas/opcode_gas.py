@@ -72,6 +72,11 @@ FROZEN_LEGACY_REVM_VK_PATH = (
 FROZEN_LEGACY_REVM_PROVENANCE_PATH = (
     FROZEN_LEGACY_REVM_PACKAGE_PATH / "provenance.json"
 )
+CURRENT_REVM_OPCODE_LAB_ELF_PATH = pathlib.Path(
+    "crates/guests/elf/sp1_revm_opcode_lab.elf"
+)
+REVM_OPCODE_LAB_CONTRACT_CURRENT = "current_calibration_guest"
+REVM_OPCODE_LAB_CONTRACT_FROZEN_LEGACY = "frozen_legacy_canary"
 FROZEN_LEGACY_REVM_PACKAGE_FILES = (
     FROZEN_LEGACY_REVM_ELF_PATH,
     FROZEN_LEGACY_REVM_VK_PATH,
@@ -21919,6 +21924,11 @@ def _run_osaka_canary_rounds(
                 repeats=3,
                 expected_purpose=FORMAL_RELATION_PURPOSE,
                 formal_dynamic_preflight=False,
+                revm_opcode_lab_contract=getattr(
+                    args,
+                    "revm_opcode_lab_contract",
+                    REVM_OPCODE_LAB_CONTRACT_CURRENT,
+                ),
             )
             cmd_run(run_args)
             rows = list(iter_jsonl(raw_path))
@@ -26243,10 +26253,54 @@ def cmd_run(args: argparse.Namespace) -> None:
         and args.opcode_stage != "revm-opcode-lab"
     ):
         raise ValueError("matched-control run requires revm-opcode-lab")
-    if relation_or_diagnostic and args.elf != pathlib.Path(
-        "crates/guests/elf/sp1_revm_opcode_lab.elf"
+    revm_contract = getattr(
+        args, "revm_opcode_lab_contract", REVM_OPCODE_LAB_CONTRACT_CURRENT
+    )
+    expected_revm_elf = {
+        REVM_OPCODE_LAB_CONTRACT_CURRENT: CURRENT_REVM_OPCODE_LAB_ELF_PATH,
+        REVM_OPCODE_LAB_CONTRACT_FROZEN_LEGACY: FROZEN_LEGACY_REVM_ELF_PATH,
+    }.get(revm_contract)
+    if expected_revm_elf is None:
+        raise ValueError("matched-control run has an unknown revm opcode-lab contract")
+
+    default_opcode_elf = pathlib.Path("crates/guests/elf/sp1_opcode_lab.elf")
+    effective_opcode_elf = args.elf
+    if (
+        args.opcode_stage == "revm-opcode-lab"
+        and revm_contract == REVM_OPCODE_LAB_CONTRACT_CURRENT
+        and args.elf == default_opcode_elf
     ):
-        raise ValueError("matched-control run requires the frozen revm opcode-lab ELF")
+        # Preserve the generic run CLI's historical stage-aware default.
+        effective_opcode_elf = CURRENT_REVM_OPCODE_LAB_ELF_PATH
+
+    repo_root = REPO_ROOT.resolve()
+
+    def resolve_artifact_alias(path: pathlib.Path) -> pathlib.Path:
+        return (path if path.is_absolute() else repo_root / path).resolve()
+
+    effective_resolved = resolve_artifact_alias(effective_opcode_elf)
+    current_resolved = resolve_artifact_alias(CURRENT_REVM_OPCODE_LAB_ELF_PATH)
+    frozen_resolved = resolve_artifact_alias(FROZEN_LEGACY_REVM_ELF_PATH)
+    if effective_resolved in {current_resolved, frozen_resolved}:
+        _resolve_repo_path_without_symlinks(
+            effective_opcode_elf, field_name="revm opcode-lab ELF"
+        )
+    if (
+        effective_resolved == frozen_resolved
+        and revm_contract != REVM_OPCODE_LAB_CONTRACT_FROZEN_LEGACY
+    ):
+        raise ValueError(
+            "frozen legacy revm opcode-lab ELF requires an explicit frozen legacy contract"
+        )
+    if (
+        revm_contract == REVM_OPCODE_LAB_CONTRACT_FROZEN_LEGACY
+        and expected_purpose != FORMAL_RELATION_PURPOSE
+    ):
+        raise ValueError("frozen legacy revm opcode-lab is canary-only")
+    if (
+        relation_or_diagnostic or args.opcode_stage == "revm-opcode-lab"
+    ) and effective_resolved != resolve_artifact_alias(expected_revm_elf):
+        raise ValueError("revm opcode-lab run requires the contract-matched ELF")
     calibration_run = _resolve_repo_path(args.calibration_run, field_name="calibration_run")
     execution_identity = validate_calibration_execution_identity(calibration_run)
     guest_launcher = _resolve_repo_path(
@@ -26331,14 +26385,7 @@ def cmd_run(args: argparse.Namespace) -> None:
     report_paths = []
     for kind, cases in sorted(cases_by_kind.items()):
         stage = args.opcode_stage if kind == "opcode" else "precompile-lab"
-        if kind == "opcode" and args.elf == pathlib.Path("crates/guests/elf/sp1_opcode_lab.elf"):
-            elf_path = pathlib.Path(
-                "crates/guests/elf/sp1_revm_opcode_lab.elf"
-                if stage == "revm-opcode-lab"
-                else "crates/guests/elf/sp1_opcode_lab.elf"
-            )
-        else:
-            elf_path = args.elf if kind == "opcode" else args.precompile_elf
+        elf_path = effective_opcode_elf if kind == "opcode" else args.precompile_elf
         report_path = out.with_name(f"{out.stem}.{stage}.jsonl")
         run_guest_inputs(
             guest_launcher=guest_launcher,

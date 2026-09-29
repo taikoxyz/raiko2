@@ -593,6 +593,16 @@ def _validate_internal_joins(
         raise ValueError("production context operation scenario ownership differs")
 
 
+def _deep_freeze(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return MappingProxyType(
+            {key: _deep_freeze(member) for key, member in value.items()}
+        )
+    if isinstance(value, list):
+        return tuple(_deep_freeze(member) for member in value)
+    return value
+
+
 @dataclass(frozen=True)
 class ProductionContextManifest:
     schema_version: int
@@ -696,9 +706,9 @@ class ProductionContextManifest:
             version_identity=MappingProxyType(dict(value["version_identity"])),
             fit_equations=MappingProxyType(dict(value["fit_equations"])),
             quality_gates=MappingProxyType(dict(value["quality_gates"])),
-            repeat_contract=MappingProxyType(dict(value["repeat_contract"])),
-            family_promotion_contract=MappingProxyType(
-                dict(value["family_promotion_contract"])
+            repeat_contract=_deep_freeze(value["repeat_contract"]),
+            family_promotion_contract=_deep_freeze(
+                value["family_promotion_contract"]
             ),
             model_selection_order=tuple(value["model_selection_order"]),
             model_candidates=candidates,

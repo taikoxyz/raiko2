@@ -81,12 +81,12 @@ class ProductionContextManifestTests(unittest.TestCase):
             dict(manifest.repeat_contract),
             {
                 "exact_repeats": 3,
-                "equality_fields": [
+                "equality_fields": (
                     "prover_gas",
                     "public_output",
                     "backend_input_sha256",
                     "host_trace_sha256",
-                ],
+                ),
                 "mismatch_outcome": "reject_scenario",
             },
         )
@@ -94,7 +94,7 @@ class ProductionContextManifestTests(unittest.TestCase):
             dict(manifest.family_promotion_contract),
             {
                 "required_evidence": "all_required_scenarios_classes_and_gates",
-                "required_gates": [
+                "required_gates": (
                     "exact_event_matching",
                     "control_lane_contamination",
                     "repeat",
@@ -103,13 +103,17 @@ class ProductionContextManifestTests(unittest.TestCase):
                     "count_holdout",
                     "extrapolation",
                     "scenario_holdout",
-                ],
+                ),
                 "partial_application": "forbidden",
                 "failed_family_status": "explicit_gap",
                 "final_holdout_parameter_influence": "forbidden",
                 "final_holdout_model_switching": "forbidden",
             },
         )
+        with self.assertRaises(TypeError):
+            manifest.repeat_contract["equality_fields"][0] = "mutated"
+        with self.assertRaises(TypeError):
+            manifest.family_promotion_contract["required_gates"][0] = "mutated"
 
     def test_manifest_freezes_inventory_splits_counts_and_repeats(self):
         manifest = production.load_production_context_manifest(MANIFEST)

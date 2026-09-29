@@ -5,7 +5,7 @@ use alloy_primitives::{Address, U256};
 use reth_revm::{
     Database, Inspector,
     bytecode::OpCode,
-    context::{ContextTr, JournalTr},
+    context::{Block, ContextTr, JournalTr},
     handler::FrameResult,
     interpreter::{
         CallInputs, CallOutcome, CreateInputs, CreateOutcome, FrameInput, Interpreter,
@@ -42,11 +42,36 @@ pub enum OperationPhase {
     Transaction,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextValueClass {
+    Zero,
+    Nonzero,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CalldataLoadAccessClass {
+    Zero,
+    Partial,
+    Full,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum OpcodeModelInput {
     StaticRawGas {
         raw_gas: u64,
+    },
+    ContextFixed {},
+    ContextValue {
+        value_class: ContextValueClass,
+    },
+    CalldataLoad {
+        access_class: CalldataLoadAccessClass,
+    },
+    CalldataSize {
+        input_length: u64,
     },
     Exp {
         exponent_byte_length: u64,
@@ -260,6 +285,7 @@ fn validate_opcode_feature_error(
     let expected_feature = match opcode {
         0x0a => "exponent_byte_length",
         0x20 => "input_length",
+        0x35 => "calldata_offset",
         0x5e => "copy_words",
         _ => return Err("opcode cannot emit a typed feature error"),
     };
@@ -316,6 +342,10 @@ fn validate_opcode_component(
             } if *exponent_byte_length <= 32
         ),
         0x20 => matches!(model_input, OpcodeModelInput::Keccak { .. }),
+        0x30 | 0x33 => matches!(model_input, OpcodeModelInput::ContextFixed {}),
+        0x34 | 0x42 => matches!(model_input, OpcodeModelInput::ContextValue { .. }),
+        0x35 => matches!(model_input, OpcodeModelInput::CalldataLoad { .. }),
+        0x36 => matches!(model_input, OpcodeModelInput::CalldataSize { .. }),
         0x51..=0x53 => matches!(model_input, OpcodeModelInput::MemoryAccess { .. }),
         0x54 => matches!(model_input, OpcodeModelInput::StorageLoad { .. }),
         0x55 => matches!(
@@ -572,10 +602,26 @@ struct StepSnapshot {
 #[derive(Clone, Copy, Debug)]
 enum PendingOpcodeModelInput {
     StaticRawGas,
-    Exp { exponent_byte_length: u64 },
-    Keccak { input_length: u64 },
+    ContextFixed,
+    ContextValue {
+        value_class: ContextValueClass,
+    },
+    CalldataLoad {
+        access_class: CalldataLoadAccessClass,
+    },
+    CalldataSize {
+        input_length: u64,
+    },
+    Exp {
+        exponent_byte_length: u64,
+    },
+    Keccak {
+        input_length: u64,
+    },
     MemoryAccess,
-    MemoryCopy { copy_words: u64 },
+    MemoryCopy {
+        copy_words: u64,
+    },
     StorageLoad(PendingStorageInput),
     StorageStore(PendingStorageInput),
     Invalid,
@@ -622,6 +668,28 @@ impl PendingOpcodeModelInput {
             0x20 => Ok(Self::Keccak {
                 input_length: stack_u64(1, "input_length")?,
             }),
+            0x30 | 0x33 => Ok(Self::ContextFixed),
+            0x34 => Ok(Self::ContextValue {
+                value_class: classify_context_value(interp.input.call_value()),
+            }),
+            0x35 => {
+                let offset = stack_value(0, "calldata_offset")?;
+                let available = usize::try_from(offset).ok().map_or(0, |offset| {
+                    interp.input.input().len().saturating_sub(offset)
+                });
+                let access_class = match available {
+                    0 => CalldataLoadAccessClass::Zero,
+                    1..=31 => CalldataLoadAccessClass::Partial,
+                    _ => CalldataLoadAccessClass::Full,
+                };
+                Ok(Self::CalldataLoad { access_class })
+            }
+            0x36 => Ok(Self::CalldataSize {
+                input_length: interp.input.input().len() as u64,
+            }),
+            0x42 => Ok(Self::ContextValue {
+                value_class: classify_context_value(context.block().timestamp()),
+            }),
             0x51..=0x53 => Ok(Self::MemoryAccess),
             0x54 => Ok(Self::StorageLoad(capture_storage_input(
                 interp, context, None,
@@ -665,6 +733,10 @@ impl PendingOpcodeModelInput {
             Self::StaticRawGas => OpcodeModelInput::StaticRawGas {
                 raw_gas: interpreter_raw_gas,
             },
+            Self::ContextFixed => OpcodeModelInput::ContextFixed {},
+            Self::ContextValue { value_class } => OpcodeModelInput::ContextValue { value_class },
+            Self::CalldataLoad { access_class } => OpcodeModelInput::CalldataLoad { access_class },
+            Self::CalldataSize { input_length } => OpcodeModelInput::CalldataSize { input_length },
             Self::Exp {
                 exponent_byte_length,
             } => OpcodeModelInput::Exp {
@@ -691,6 +763,14 @@ impl PendingOpcodeModelInput {
             Self::StorageStore(storage) => finish_storage_store(storage, context)?,
             Self::Invalid => OpcodeModelInput::Invalid,
         })
+    }
+}
+
+fn classify_context_value(value: U256) -> ContextValueClass {
+    if value.is_zero() {
+        ContextValueClass::Zero
+    } else {
+        ContextValueClass::Nonzero
     }
 }
 

@@ -15,7 +15,7 @@ const fn hash(byte: u8) -> B256 {
 #[test]
 fn proposal_trace_schema_version_fails_closed_and_current_version_roundtrips() {
     let valid = json!({
-        "schema_version": 3,
+        "schema_version": 4,
         "guest_input_sha256": "0x00",
         "guest_input_bincode_length": 0,
         "status": "complete",
@@ -28,7 +28,7 @@ fn proposal_trace_schema_version_fails_closed_and_current_version_roundtrips() {
         serde_json::from_value(valid.clone()).expect("current trace schema");
     assert_eq!(serde_json::to_value(roundtrip).unwrap(), valid);
 
-    for unsupported in [1, 2, 4] {
+    for unsupported in [1, 2, 3, 5] {
         let mut malformed = valid.clone();
         malformed["schema_version"] = json!(unsupported);
         assert!(
@@ -41,7 +41,7 @@ fn proposal_trace_schema_version_fails_closed_and_current_version_roundtrips() {
 #[test]
 fn proposal_trace_summary_schema_version_fails_closed_and_current_version_roundtrips() {
     let valid = json!({
-        "schema_version": 3,
+        "schema_version": 4,
         "full_trace_encoding": "json+gzip",
         "guest_input_sha256": "0x00",
         "guest_input_bincode_length": 0,
@@ -56,7 +56,7 @@ fn proposal_trace_summary_schema_version_fails_closed_and_current_version_roundt
         serde_json::from_value(valid.clone()).expect("current summary schema");
     assert_eq!(serde_json::to_value(roundtrip).unwrap(), valid);
 
-    for unsupported in [1, 2, 4] {
+    for unsupported in [1, 2, 3, 5] {
         let mut malformed = valid.clone();
         malformed["schema_version"] = json!(unsupported);
         assert!(
@@ -214,8 +214,8 @@ fn repository_fixture_passes_fresh_state_ab_gate_and_traces_adjacent_transaction
 
     let trace = trace_shasta_proposal(&input).expect("trace proposal");
     let serialized = serde_json::to_value(&trace).expect("serialize versioned trace");
-    assert_eq!(serialized["schema_version"], 3);
-    assert_eq!(trace.summary().schema_version, 3);
+    assert_eq!(serialized["schema_version"], 4);
+    assert_eq!(trace.summary().schema_version, 4);
     assert_eq!(
         trace.status,
         ProposalTraceStatus::Complete,

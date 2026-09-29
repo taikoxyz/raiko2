@@ -158,6 +158,18 @@ fn tx_env(gas_limit: u64) -> TxEnv {
         .expect("valid transaction environment")
 }
 
+fn context_tx_env(gas_limit: u64, calldata: Vec<u8>, value: U256) -> TxEnv {
+    TxEnv::builder()
+        .caller(CALLER)
+        .kind(TxKind::Call(TARGET))
+        .chain_id(Some(167))
+        .gas_limit(gas_limit)
+        .data(Bytes::from(calldata))
+        .value(value)
+        .build()
+        .expect("valid context transaction environment")
+}
+
 fn storage_tx_env(gas_limit: u64, warm: bool) -> TxEnv {
     let mut builder = TxEnv::builder()
         .caller(CALLER)
@@ -223,6 +235,28 @@ fn execute(bytecode: Bytecode, gas_limit: u64) -> (TraceSink, bool) {
     let result = evm
         .transact(tx_env(gas_limit))
         .expect("transaction execution");
+    sink.lock().finish_transaction();
+    (sink, result.result.is_success())
+}
+
+fn execute_context(
+    bytecode: Bytecode,
+    calldata: Vec<u8>,
+    value: U256,
+    timestamp: u64,
+) -> (TraceSink, bool) {
+    let sink = TraceSink::default();
+    sink.lock().start_transaction(0);
+    let mut env = evm_env();
+    env.block_env.timestamp = U256::from(timestamp);
+    let mut evm = TaikoEvmFactory.create_evm_with_inspector(
+        db_with_contract(bytecode),
+        env,
+        TraceInspector::new(sink.clone()),
+    );
+    let result = evm
+        .transact(context_tx_env(1_000_000, calldata, value))
+        .expect("context transaction execution");
     sink.lock().finish_transaction();
     (sink, result.result.is_success())
 }
@@ -297,6 +331,36 @@ fn executed_opcode_component(bytecode: Vec<u8>, expected_opcode: u8) -> Value {
         })
         .unwrap_or_else(|| panic!("opcode 0x{expected_opcode:02x} operation"));
     serde_json::to_value(&operation.component).expect("serialize opcode component")
+}
+
+fn context_opcode_component(
+    bytecode: Vec<u8>,
+    expected_opcode: u8,
+    calldata: Vec<u8>,
+    value: U256,
+    timestamp: u64,
+) -> Value {
+    let (sink, success) = execute_context(
+        Bytecode::new_raw(Bytes::from(bytecode)),
+        calldata,
+        value,
+        timestamp,
+    );
+    assert!(success, "opcode 0x{expected_opcode:02x} execution");
+    let collector = sink.snapshot();
+    let operation = collector
+        .operations()
+        .iter()
+        .rev()
+        .find(|operation| {
+            matches!(
+                operation.component,
+                OperationComponent::Opcode { opcode, spawned: Some(false), .. }
+                    if opcode == expected_opcode
+            )
+        })
+        .unwrap_or_else(|| panic!("opcode 0x{expected_opcode:02x} operation"));
+    serde_json::to_value(&operation.component).expect("serialize context opcode component")
 }
 
 #[test]
@@ -614,6 +678,204 @@ fn static_opcode_emits_explicit_tagged_model_input() {
     assert_eq!(
         component["model_input"],
         json!({"kind": "static_raw_gas", "raw_gas": 3})
+    );
+}
+
+#[test]
+fn fixed_context_opcodes_emit_exact_typed_inputs() {
+    for target in [opcode::ADDRESS, opcode::CALLER] {
+        let component = context_opcode_component(
+            vec![target, opcode::POP, opcode::STOP],
+            target,
+            Vec::new(),
+            U256::ZERO,
+            1_800_000_017,
+        );
+        assert_eq!(
+            component["model_input"],
+            json!({"kind": "context_fixed"}),
+            "opcode 0x{target:02x}",
+        );
+    }
+}
+
+#[test]
+fn context_values_use_current_call_value_and_actual_block_timestamp() {
+    for (value, expected) in [(U256::ZERO, "zero"), (U256::from(7), "nonzero")] {
+        let component = context_opcode_component(
+            vec![opcode::CALLVALUE, opcode::POP, opcode::STOP],
+            opcode::CALLVALUE,
+            Vec::new(),
+            value,
+            1_800_000_017,
+        );
+        assert_eq!(
+            component["model_input"],
+            json!({"kind": "context_value", "value_class": expected}),
+        );
+    }
+
+    let component = context_opcode_component(
+        vec![opcode::TIMESTAMP, opcode::POP, opcode::STOP],
+        opcode::TIMESTAMP,
+        Vec::new(),
+        U256::ZERO,
+        1_800_000_017,
+    );
+    assert_eq!(
+        component["model_input"],
+        json!({"kind": "context_value", "value_class": "nonzero"}),
+    );
+}
+
+#[test]
+fn calldataload_classifies_zero_partial_full_and_oversized_offsets() {
+    let cases = [
+        ("empty", Vec::new(), vec![opcode::PUSH0], "zero"),
+        ("out of range", vec![0; 4], vec![opcode::PUSH1, 64], "zero"),
+        (
+            "partial",
+            (0..33).collect(),
+            vec![opcode::PUSH1, 17],
+            "partial",
+        ),
+        ("full", vec![0; 32], vec![opcode::PUSH0], "full"),
+        (
+            "larger than host index",
+            vec![0; 32],
+            {
+                let mut push = vec![opcode::PUSH32];
+                push.extend_from_slice(&[0xff; 32]);
+                push
+            },
+            "zero",
+        ),
+    ];
+    for (label, calldata, mut prefix, expected) in cases {
+        prefix.extend_from_slice(&[opcode::CALLDATALOAD, opcode::POP, opcode::STOP]);
+        let component = context_opcode_component(
+            prefix,
+            opcode::CALLDATALOAD,
+            calldata,
+            U256::ZERO,
+            1_800_000_017,
+        );
+        assert_eq!(
+            component["model_input"],
+            json!({"kind": "calldata_load", "access_class": expected}),
+            "{label}",
+        );
+    }
+}
+
+#[test]
+fn calldatasize_emits_exact_current_frame_length_at_boundaries() {
+    for input_length in [0, 31, 32, 33] {
+        let component = context_opcode_component(
+            vec![opcode::CALLDATASIZE, opcode::POP, opcode::STOP],
+            opcode::CALLDATASIZE,
+            vec![0; input_length],
+            U256::ZERO,
+            1_800_000_017,
+        );
+        assert_eq!(
+            component["model_input"],
+            json!({"kind": "calldata_size", "input_length": input_length}),
+        );
+    }
+}
+
+#[test]
+fn nested_frame_uses_child_calldata_and_call_value() {
+    let child = Bytecode::new_raw(Bytes::from(vec![
+        opcode::CALLVALUE,
+        opcode::POP,
+        opcode::CALLDATASIZE,
+        opcode::POP,
+        opcode::PUSH0,
+        opcode::CALLDATALOAD,
+        opcode::POP,
+        opcode::STOP,
+    ]));
+    let mut parent = vec![
+        opcode::PUSH4,
+        0xde,
+        0xad,
+        0xbe,
+        0xef,
+        opcode::PUSH1,
+        28,
+        opcode::MSTORE,
+        opcode::PUSH0,
+        opcode::PUSH0,
+        opcode::PUSH1,
+        4,
+        opcode::PUSH1,
+        28,
+        opcode::PUSH1,
+        7,
+        opcode::PUSH20,
+    ];
+    parent.extend_from_slice(CHILD.as_slice());
+    parent.extend_from_slice(&[
+        opcode::PUSH2,
+        0xff,
+        0xff,
+        opcode::CALL,
+        opcode::POP,
+        opcode::STOP,
+    ]);
+
+    let sink = TraceSink::default();
+    sink.lock().start_transaction(0);
+    let mut db = db_with_contract(Bytecode::new_raw(Bytes::from(parent)));
+    insert_contract(&mut db, CHILD, child);
+    let parent = db.cache.accounts.get_mut(&TARGET).expect("parent account");
+    parent.info.balance = U256::from(7);
+    let mut evm =
+        TaikoEvmFactory.create_evm_with_inspector(db, evm_env(), TraceInspector::new(sink.clone()));
+    let result = evm
+        .transact(context_tx_env(1_000_000, Vec::new(), U256::ZERO))
+        .expect("nested context transaction");
+    sink.lock().finish_transaction();
+    assert!(result.result.is_success());
+
+    let snapshot = sink.snapshot();
+    let child_inputs = snapshot
+        .operations()
+        .iter()
+        .filter(|operation| operation.frame_depth > 0)
+        .filter_map(|operation| match &operation.component {
+            OperationComponent::Opcode {
+                opcode,
+                model_input: Some(model_input),
+                ..
+            } if matches!(
+                *opcode,
+                opcode::CALLVALUE | opcode::CALLDATASIZE | opcode::CALLDATALOAD
+            ) =>
+            {
+                Some((*opcode, serde_json::to_value(model_input).unwrap()))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        child_inputs,
+        vec![
+            (
+                opcode::CALLVALUE,
+                json!({"kind": "context_value", "value_class": "nonzero"}),
+            ),
+            (
+                opcode::CALLDATASIZE,
+                json!({"kind": "calldata_size", "input_length": 4}),
+            ),
+            (
+                opcode::CALLDATALOAD,
+                json!({"kind": "calldata_load", "access_class": "partial"}),
+            ),
+        ],
     );
 }
 
@@ -1309,6 +1571,93 @@ fn opcode_model_input_schema_rejects_missing_extra_and_wrong_fields() {
         assert!(
             serde_json::from_value::<OperationComponent>(malformed).is_err(),
             "{label} model input must fail closed",
+        );
+    }
+}
+
+#[test]
+fn context_model_input_schema_is_exact_and_opcode_specific() {
+    let valid = [
+        (opcode::ADDRESS, json!({"kind": "context_fixed"})),
+        (opcode::CALLER, json!({"kind": "context_fixed"})),
+        (
+            opcode::CALLVALUE,
+            json!({"kind": "context_value", "value_class": "zero"}),
+        ),
+        (
+            opcode::CALLDATALOAD,
+            json!({"kind": "calldata_load", "access_class": "partial"}),
+        ),
+        (
+            opcode::CALLDATASIZE,
+            json!({"kind": "calldata_size", "input_length": 33}),
+        ),
+        (
+            opcode::TIMESTAMP,
+            json!({"kind": "context_value", "value_class": "nonzero"}),
+        ),
+    ];
+    for (target, model_input) in valid {
+        let component = json!({
+            "kind": "opcode",
+            "opcode": target,
+            "pricing_basis": "raw_gas_slope",
+            "interpreter_raw_gas": 2,
+            "model_input": model_input,
+            "spawned": false,
+            "dispatch_status": "not_applicable",
+        });
+        let roundtrip: OperationComponent = serde_json::from_value(component.clone())
+            .unwrap_or_else(|error| panic!("opcode 0x{target:02x}: {error}"));
+        assert_eq!(serde_json::to_value(roundtrip).unwrap(), component);
+    }
+
+    let malformed = [
+        (
+            opcode::ADDRESS,
+            json!({"kind": "context_value", "value_class": "zero"}),
+        ),
+        (
+            opcode::CALLER,
+            json!({"kind": "static_raw_gas", "raw_gas": 2}),
+        ),
+        (opcode::CALLVALUE, json!({"kind": "context_fixed"})),
+        (
+            opcode::CALLVALUE,
+            json!({"kind": "context_value", "value_class": "positive"}),
+        ),
+        (
+            opcode::CALLDATALOAD,
+            json!({"kind": "calldata_size", "input_length": 0}),
+        ),
+        (
+            opcode::CALLDATALOAD,
+            json!({"kind": "calldata_load", "access_class": "empty"}),
+        ),
+        (
+            opcode::CALLDATASIZE,
+            json!({"kind": "calldata_load", "access_class": "zero"}),
+        ),
+        (opcode::TIMESTAMP, json!({"kind": "context_fixed"})),
+        (opcode::ADD, json!({"kind": "context_fixed"})),
+        (
+            opcode::ADDRESS,
+            json!({"kind": "context_fixed", "value_class": "zero"}),
+        ),
+    ];
+    for (target, model_input) in malformed {
+        let component = json!({
+            "kind": "opcode",
+            "opcode": target,
+            "pricing_basis": "raw_gas_slope",
+            "interpreter_raw_gas": 2,
+            "model_input": model_input,
+            "spawned": false,
+            "dispatch_status": "not_applicable",
+        });
+        assert!(
+            serde_json::from_value::<OperationComponent>(component).is_err(),
+            "opcode 0x{target:02x} must reject incompatible context input",
         );
     }
 }

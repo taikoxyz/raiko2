@@ -7,8 +7,9 @@ pub mod reconstruct;
 pub mod transactions;
 
 pub use inspector::{
-    DispatchStatus, OpcodeFeatureError, OpcodeModelInput, OperationComponent, OperationPhase,
-    OperationTrace, PricingBasis, TraceCollector, TraceInspector, TraceSink,
+    CalldataLoadAccessClass, ContextValueClass, DispatchStatus, OpcodeFeatureError,
+    OpcodeModelInput, OperationComponent, OperationPhase, OperationTrace, PricingBasis,
+    TraceCollector, TraceInspector, TraceSink,
 };
 pub use reconstruct::{
     BlockTrace, ExecutionParityRecord, OPERATION_TRACE_SCHEMA_VERSION, ParityStatus,

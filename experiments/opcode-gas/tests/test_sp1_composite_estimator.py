@@ -58,6 +58,36 @@ STATEFUL_SOURCE = (
     / "derivations"
     / "64065fa462311bdc1848e9d0"
 )
+SEALED_SCHEMA_3_ESTIMATOR = (
+    ROOT
+    / "experiments"
+    / "opcode-gas"
+    / "estimators"
+    / "43cdd0adc466743bbb4a2e3b"
+    / "estimator.json"
+)
+
+
+@contextlib.contextmanager
+def _legacy_schema_3_trace_source():
+    read_regular_file_bytes_once = opcode_gas._read_regular_file_bytes_once
+    reconstruct = (ROOT / "crates" / "zkgas-trace" / "src" / "reconstruct.rs").resolve()
+
+    def read_schema_3(path, *, label):
+        raw = read_regular_file_bytes_once(path, label=label)
+        if pathlib.Path(path).resolve() == reconstruct:
+            raw = raw.replace(
+                b"pub const OPERATION_TRACE_SCHEMA_VERSION: u32 = 4;",
+                b"pub const OPERATION_TRACE_SCHEMA_VERSION: u32 = 3;",
+            )
+        return raw
+
+    with mock.patch.object(
+        opcode_gas,
+        "_read_regular_file_bytes_once",
+        side_effect=read_schema_3,
+    ):
+        yield
 
 
 class CorrectedHigherLayerProjectionTests(unittest.TestCase):
@@ -355,15 +385,8 @@ def _sp1_report(trace, gas=160_000_000):
 class CompositeEstimatorTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        with mock.patch.object(opcode_gas, "git_head", return_value="f" * 40), mock.patch.object(
-            opcode_gas, "git_worktree_status", return_value=""
-        ), mock.patch.object(opcode_gas, "git_has_local_commit", return_value=True):
-            cls.estimator = opcode_gas.build_composite_estimator_artifact(
-                augmented_core_path=CORE_SOURCE,
-                operation_coverage_path=COVERAGE_SOURCE,
-                higher_layer_package=HIGHER_LAYER_SOURCE,
-                stateful_result_path=STATEFUL_SOURCE,
-            )
+        cls.estimator = json.loads(SEALED_SCHEMA_3_ESTIMATOR.read_text())
+        opcode_gas._validate_composite_estimator_artifact(cls.estimator)
 
     def test_strict_registry_loader_rejects_float_and_slot_drift(self):
         core = json.loads(CORE_SOURCE.read_text())
@@ -389,19 +412,12 @@ class CompositeEstimatorTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "measured opcode index"):
             opcode_gas.load_composite_registry(drifted, coverage)
 
-    def test_artifact_is_deterministic_and_binds_every_exact_source(self):
-        with mock.patch.object(opcode_gas, "git_head", return_value="f" * 40), mock.patch.object(
-            opcode_gas, "git_worktree_status", return_value=""
-        ), mock.patch.object(opcode_gas, "git_has_local_commit", return_value=True):
-            repeated = opcode_gas.build_composite_estimator_artifact(
-                augmented_core_path=CORE_SOURCE,
-                operation_coverage_path=COVERAGE_SOURCE,
-                higher_layer_package=HIGHER_LAYER_SOURCE,
-                stateful_result_path=STATEFUL_SOURCE,
-            )
-
-        self.assertEqual(repeated, self.estimator)
-        self.assertEqual(self.estimator["implementation_revision"], "f" * 40)
+    def test_sealed_schema_3_artifact_remains_valid_and_binds_every_exact_source(self):
+        opcode_gas._validate_composite_estimator_artifact(self.estimator)
+        self.assertEqual(
+            self.estimator["implementation_revision"],
+            "e59ed1f62926ccf399178fce0d2c396b5d130d0d",
+        )
         self.assertEqual(
             self.estimator["source_artifacts"]["augmented_core"]["file_sha256"],
             opcode_gas.sha256_file(CORE_SOURCE),
@@ -438,6 +454,15 @@ class CompositeEstimatorTests(unittest.TestCase):
                 )
             ),
         )
+
+    def test_sealed_schema_3_estimator_rejects_schema_4_trace_join(self):
+        trace = _complete_trace()
+        trace["schema_version"] = 4
+
+        with self.assertRaisesRegex(
+            ValueError, "composite proposal trace schema version differs"
+        ):
+            opcode_gas.estimate_composite_trace(self.estimator, trace)
 
     def test_complete_typed_trace_emits_prediction_before_report_and_ape_after_join(self):
         trace = _complete_trace(
@@ -1020,7 +1045,13 @@ class CompositeEstimatorTests(unittest.TestCase):
                 estimator_status + " M experiments/opcode-gas/opcode_gas.py\n"
             )
 
-    def test_seal_is_create_only_and_verify_rejects_tamper(self):
+    def test_schema_3_document_validates_but_new_sealing_rejects_schema_4_source(self):
+        opcode_gas._validate_composite_estimator_artifact(self.estimator)
+        tampered = copy.deepcopy(self.estimator)
+        tampered["fixed_costs"]["tx_base"] = "1"
+        with self.assertRaisesRegex(ValueError, "artifact SHA256"):
+            opcode_gas._validate_composite_estimator_artifact(tampered)
+
         with tempfile.TemporaryDirectory() as temporary:
             out_root = pathlib.Path(temporary) / "estimators"
             pointer = pathlib.Path(temporary) / "estimator-path"
@@ -1030,8 +1061,10 @@ class CompositeEstimatorTests(unittest.TestCase):
                 opcode_gas, "git_worktree_status", return_value=""
             ), mock.patch.object(
                 opcode_gas, "git_has_local_commit", return_value=True
+            ), self.assertRaisesRegex(
+                ValueError, "composite trace schema version differs from source"
             ):
-                sealed = opcode_gas.seal_composite_estimator(
+                opcode_gas.seal_composite_estimator(
                     augmented_core_path=CORE_SOURCE,
                     operation_coverage_path=COVERAGE_SOURCE,
                     higher_layer_package=HIGHER_LAYER_SOURCE,
@@ -1039,28 +1072,8 @@ class CompositeEstimatorTests(unittest.TestCase):
                     out_root=out_root,
                     estimator_path_file=pointer,
                 )
-                verified = opcode_gas.verify_composite_estimator(sealed)
-                self.assertEqual(
-                    verified["artifact_sha256"], self.estimator["artifact_sha256"]
-                )
-                with self.assertRaisesRegex(ValueError, "already exists"):
-                    opcode_gas.seal_composite_estimator(
-                        augmented_core_path=CORE_SOURCE,
-                        operation_coverage_path=COVERAGE_SOURCE,
-                        higher_layer_package=HIGHER_LAYER_SOURCE,
-                        stateful_result_path=STATEFUL_SOURCE,
-                        out_root=out_root,
-                        estimator_path_file=pointer,
-                    )
-
-                artifact_path = sealed / "estimator.json"
-                artifact = json.loads(artifact_path.read_text())
-                artifact["fixed_costs"]["tx_base"] = "1"
-                artifact_path.write_text(json.dumps(artifact, sort_keys=True) + "\n")
-                with self.assertRaisesRegex(
-                    ValueError, "canonical JSON|artifact SHA256"
-                ):
-                    opcode_gas.verify_composite_estimator(sealed)
+            self.assertFalse(out_root.exists())
+            self.assertFalse(pointer.exists())
 
     def test_seal_rejects_source_and_handoff_overlap_before_writing(self):
         stateful_before = {
@@ -1093,6 +1106,7 @@ class CompositeEstimatorTests(unittest.TestCase):
                     opcode_gas, "git_worktree_status", return_value=""
                 ), mock.patch.object(
                     opcode_gas, "git_has_local_commit", return_value=True
+                ), _legacy_schema_3_trace_source(
                 ), self.assertRaisesRegex(ValueError, "overlaps"):
                     opcode_gas.seal_composite_estimator(
                         augmented_core_path=CORE_SOURCE,
@@ -1122,6 +1136,7 @@ class CompositeEstimatorTests(unittest.TestCase):
                 opcode_gas, "git_worktree_status", return_value=""
             ), mock.patch.object(
                 opcode_gas, "git_has_local_commit", return_value=True
+            ), _legacy_schema_3_trace_source(
             ), mock.patch.object(
                 opcode_gas,
                 "write_run_path_file",
@@ -1158,6 +1173,7 @@ class CompositeEstimatorTests(unittest.TestCase):
                     opcode_gas, "git_worktree_status", return_value=""
                 ), mock.patch.object(
                     opcode_gas, "git_has_local_commit", return_value=True
+                ), _legacy_schema_3_trace_source(
                 ), mock.patch.object(
                     opcode_gas,
                     "write_run_path_file",

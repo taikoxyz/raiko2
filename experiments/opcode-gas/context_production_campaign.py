@@ -3314,8 +3314,9 @@ def fit_production_context_run(
 
 
 # Portable production-context result sealing.  The sealed directory carries
-# every numerical source needed to replay the fit; no guest execution, run
-# directory, or checkout is consulted by the verifier.
+# every numerical source needed to replay the fit; no guest execution or run
+# directory is consulted.  Source-code provenance is checked against the clean
+# exact implementation checkout recorded by the calibration identity.
 
 
 def _read_bounded_regular_file(
@@ -3336,8 +3337,13 @@ def _read_bounded_regular_file(
         raise ValueError(f"{label} is missing or is not a regular file") from error
     try:
         opened = os.fstat(descriptor)
-        if not stat.S_ISREG(opened.st_mode) or not 0 < opened.st_size <= limit:
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink <= 0
+            or not 0 < opened.st_size <= limit
+        ):
             raise ValueError(f"{label} exceeds the frozen size limit")
+        opened_snapshot = _immutable_regular_file_snapshot(opened)
         chunks = []
         remaining = opened.st_size
         while remaining:
@@ -3349,10 +3355,10 @@ def _read_bounded_regular_file(
         if os.read(descriptor, 1):
             raise ValueError(f"{label} changed while it was read")
         closed = os.fstat(descriptor)
-        if (opened.st_dev, opened.st_ino, opened.st_size) != (
-            closed.st_dev,
-            closed.st_ino,
-            closed.st_size,
+        if (
+            not stat.S_ISREG(closed.st_mode)
+            or closed.st_nlink <= 0
+            or _immutable_regular_file_snapshot(closed) != opened_snapshot
         ):
             raise ValueError(f"{label} changed while it was read")
         return b"".join(chunks)
@@ -3378,8 +3384,13 @@ def _sha256_bounded_regular_file(
         raise ValueError(f"{label} is missing or is not a regular file") from error
     try:
         opened = os.fstat(descriptor)
-        if not stat.S_ISREG(opened.st_mode) or not 0 < opened.st_size <= limit:
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink <= 0
+            or not 0 < opened.st_size <= limit
+        ):
             raise ValueError(f"{label} exceeds the frozen size limit")
+        opened_snapshot = _immutable_regular_file_snapshot(opened)
         digest = hashlib.sha256()
         remaining = opened.st_size
         while remaining:
@@ -3391,15 +3402,27 @@ def _sha256_bounded_regular_file(
         if os.read(descriptor, 1):
             raise ValueError(f"{label} changed while it was read")
         closed = os.fstat(descriptor)
-        if (opened.st_dev, opened.st_ino, opened.st_size) != (
-            closed.st_dev,
-            closed.st_ino,
-            closed.st_size,
+        if (
+            not stat.S_ISREG(closed.st_mode)
+            or closed.st_nlink <= 0
+            or _immutable_regular_file_snapshot(closed) != opened_snapshot
         ):
             raise ValueError(f"{label} changed while it was read")
         return digest.hexdigest()
     finally:
         os.close(descriptor)
+
+
+def _immutable_regular_file_snapshot(status: os.stat_result) -> tuple[int, ...]:
+    return (
+        status.st_dev,
+        status.st_ino,
+        status.st_mode,
+        status.st_nlink,
+        status.st_size,
+        status.st_mtime_ns,
+        status.st_ctime_ns,
+    )
 
 
 def _load_canonical_json_bytes(raw: bytes, *, label: str) -> dict[str, Any]:
@@ -3650,7 +3673,10 @@ def _source_code_hashes(
 ) -> dict[str, Any]:
     if _GIT_REVISION_RE.fullmatch(implementation_revision or "") is None:
         raise ValueError("production context source revision differs")
-    root = pathlib.Path(repo_root).resolve(strict=True)
+    try:
+        root = pathlib.Path(repo_root).resolve(strict=True)
+    except OSError as error:
+        raise ValueError("production context source repository is unavailable") from error
     files = {}
     for relative in PRODUCTION_CONTEXT_SEAL_SOURCE_PATHS:
         path = root / relative
@@ -3660,10 +3686,8 @@ def _source_code_hashes(
             raise ValueError("production context source code is missing") from error
         if not resolved.is_relative_to(root):
             raise ValueError("production context source code escapes the repository")
-        files[relative] = sha256_bytes(
-            _read_bounded_regular_file(
-                path, 32 * 1024 * 1024, label="production context source code"
-            )
+        files[relative] = _sha256_bounded_regular_file(
+            path, 32 * 1024 * 1024, label="production context source code"
         )
     return {
         "schema_version": 1,
@@ -3890,8 +3914,9 @@ def _subtotal_model_from_source_bundles(
 
 
 def _validate_source_code_hashes(
-    payload: Mapping[str, Any], implementation_revision: str
+    payload: Mapping[str, Any], calibration_identity: Mapping[str, Any]
 ) -> dict[str, Any]:
+    implementation_revision = calibration_identity.get("implementation_revision")
     if (
         not isinstance(payload, Mapping)
         or set(payload) != {
@@ -3911,7 +3936,12 @@ def _validate_source_code_hashes(
         )
     ):
         raise ValueError("production context source-code hash identity differs")
-    return dict(payload)
+    _require_current_implementation_revision(implementation_revision)
+    repo_root = pathlib.Path(__file__).resolve().parents[2]
+    expected = _source_code_hashes(repo_root, implementation_revision)
+    if canonical_json(payload) != canonical_json(expected):
+        raise ValueError("production context source-code hashes differ from checkout")
+    return dict(expected)
 
 
 def _validate_portable_calibration_identity(
@@ -4429,7 +4459,7 @@ def seal_production_context_result(
 
 
 def verify_production_context_result(directory: pathlib.Path) -> dict[str, Any]:
-    """Replay a sealed result using only its bounded flat directory."""
+    """Replay from bounded sealed inputs plus their clean exact source checkout."""
     directory = pathlib.Path(directory)
     raw = _read_result_directory(directory)
     documents = {
@@ -4463,7 +4493,7 @@ def verify_production_context_result(directory: pathlib.Path) -> dict[str, Any]:
     if canonical_json(model_report) != canonical_json(documents["model-report.json"]):
         raise ValueError("production context result model report differs from exact replay")
     _validate_source_code_hashes(
-        documents["source-code-sha256s.json"], identity["implementation_revision"]
+        documents["source-code-sha256s.json"], identity
     )
     file_sha256s = {
         name: sha256_bytes(raw[name])

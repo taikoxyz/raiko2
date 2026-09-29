@@ -2536,7 +2536,7 @@ class ProductionContextSealTests(unittest.TestCase):
         candidate.rename(renamed)
         return renamed
 
-    def test_seal_is_create_only_and_replay_uses_only_the_result_directory(self):
+    def test_seal_is_create_only_and_replay_uses_result_plus_source_checkout(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             _manifest, run, revision = self._build_run(root)
@@ -2577,9 +2577,13 @@ class ProductionContextSealTests(unittest.TestCase):
             )
             run.rename(root / "removed-run")
             with mock.patch.object(
+                production,
+                "_require_current_implementation_revision",
+                return_value=revision,
+            ), mock.patch.object(
                 production.subprocess,
                 "run",
-                side_effect=AssertionError("portable replay invoked a subprocess"),
+                side_effect=AssertionError("portable replay invoked an unexpected subprocess"),
             ):
                 replay = production.verify_production_context_result(result_dir)
             self.assertEqual(replay["result_id"], sealed["result_id"])
@@ -2600,6 +2604,71 @@ class ProductionContextSealTests(unittest.TestCase):
             )
             self.assertFalse((root / ("a" * 24)).exists())
             self.assertEqual([path for path in root.iterdir() if path.is_dir()], [])
+
+    def test_bounded_readers_reject_same_size_in_place_mutation(self):
+        real_read = os.read
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            for helper in (
+                production._read_bounded_regular_file,
+                production._sha256_bounded_regular_file,
+            ):
+                with self.subTest(helper=helper.__name__):
+                    path = root / f"{helper.__name__}.bin"
+                    path.write_bytes(b"a" * (1024 * 1024 + 16))
+                    before = path.stat()
+                    mutated = False
+
+                    def mutate_after_first_chunk(descriptor, size):
+                        nonlocal mutated
+                        chunk = real_read(descriptor, size)
+                        if not mutated:
+                            mutated = True
+                            with path.open("r+b") as target:
+                                target.seek(-1, os.SEEK_END)
+                                target.write(b"b")
+                                target.flush()
+                                os.fsync(target.fileno())
+                            os.utime(
+                                path,
+                                ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000_000),
+                            )
+                        return chunk
+
+                    with mock.patch.object(
+                        production.os, "read", side_effect=mutate_after_first_chunk
+                    ), self.assertRaisesRegex(ValueError, "changed while it was read"):
+                        helper(path, 2 * 1024 * 1024, label="mutating test file")
+
+    def test_source_code_hashing_rejects_unavailable_and_unsafe_paths(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            revision = "1" * 40
+            with mock.patch.object(
+                production, "PRODUCTION_CONTEXT_SEAL_SOURCE_PATHS", ("source.py",)
+            ):
+                with self.assertRaisesRegex(ValueError, "repository is unavailable"):
+                    production._source_code_hashes(root / "missing", revision)
+                with self.assertRaisesRegex(ValueError, "source code is missing"):
+                    production._source_code_hashes(root, revision)
+
+                target = root / "target.py"
+                target.write_text("source")
+                source = root / "source.py"
+                source.symlink_to(target)
+                with self.assertRaisesRegex(ValueError, "not a regular file"):
+                    production._source_code_hashes(root, revision)
+
+                source.unlink()
+                source.mkdir()
+                with self.assertRaisesRegex(ValueError, "size limit"):
+                    production._source_code_hashes(root, revision)
+
+                source.rmdir()
+                with source.open("wb") as oversized:
+                    oversized.truncate(32 * 1024 * 1024 + 1)
+                with self.assertRaisesRegex(ValueError, "size limit"):
+                    production._source_code_hashes(root, revision)
 
     def test_replay_rejects_extra_symlink_fifo_and_oversize_members(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -2693,6 +2762,18 @@ class ProductionContextSealTests(unittest.TestCase):
                 ),
                 "source-forgery": lambda path: self._mutate_source_bundle(path),
                 "discovery-promotion": lambda path: self._mutate_discovery_bundle(path),
+                "source-code-digest-forgery": lambda path: self._mutate_source_code_hashes(
+                    path, revision=None
+                ),
+                "source-code-missing-key": lambda path: self._mutate_source_code_keys(
+                    path, extra=False
+                ),
+                "source-code-extra-key": lambda path: self._mutate_source_code_keys(
+                    path, extra=True
+                ),
+                "source-code-revision-forgery": lambda path: self._mutate_source_code_hashes(
+                    path, revision="f" * 40
+                ),
             }
             for label, mutation in caller_resealed_mutations.items():
                 candidate = root / f"resealed-{label}"
@@ -2701,7 +2782,16 @@ class ProductionContextSealTests(unittest.TestCase):
                     member.chmod(0o600)
                 mutation(candidate)
                 candidate = self._reseal_result_directory(candidate)
-                with self.subTest(label=label), self.assertRaises(ValueError):
+                def require_sealed_revision(recorded):
+                    if recorded != revision:
+                        raise ValueError("production context implementation revision differs")
+                    return recorded
+
+                with self.subTest(label=label), mock.patch.object(
+                    production,
+                    "_require_current_implementation_revision",
+                    side_effect=require_sealed_revision,
+                ), self.assertRaises(ValueError):
                     production.verify_production_context_result(candidate)
 
     @staticmethod
@@ -2719,6 +2809,32 @@ class ProductionContextSealTests(unittest.TestCase):
         payload["identity_sha256"] = production.sha256_bytes(
             production.canonical_json(payload)
         )
+        path.write_bytes(production.canonical_json(payload) + b"\n")
+
+    @classmethod
+    def _mutate_source_code_hashes(cls, candidate, revision):
+        if revision is not None:
+            cls._mutate_calibration_identity(
+                candidate,
+                lambda payload: payload.update({"implementation_revision": revision}),
+            )
+        path = candidate / "source-code-sha256s.json"
+        payload = json.loads(path.read_bytes())
+        if revision is not None:
+            payload["implementation_revision"] = revision
+        payload["files"] = {
+            source_path: "f" * 64 for source_path in payload["files"]
+        }
+        path.write_bytes(production.canonical_json(payload) + b"\n")
+
+    @classmethod
+    def _mutate_source_code_keys(cls, candidate, extra):
+        path = candidate / "source-code-sha256s.json"
+        payload = json.loads(path.read_bytes())
+        if extra:
+            payload["files"]["extra.py"] = "f" * 64
+        else:
+            payload["files"].pop(next(iter(payload["files"])))
         path.write_bytes(production.canonical_json(payload) + b"\n")
 
     @classmethod

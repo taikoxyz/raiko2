@@ -23,12 +23,14 @@ limit. Every other member has a frozen per-file limit. Reads reject missing or e
 symlinks, FIFOs and other non-regular files, oversize members, duplicate JSON fields, binary
 floats, non-canonical encodings, path traversal, and changed-during-read files.
 
-The verifier uses only the sealed flat directory. It reconstructs and validates every fixture,
-row, and raw evidence identity; reconstructs the V5 subtotal model from the embedded pinned
-coverage/registry and higher-layer bundles (including common event dispatch); refits all exact
-matrices, coefficients, predictions, gates, and model choices; preserves accepted, partial, and
-rejected family outcomes; and recomputes source, file, result, and directory identities without
-SP1 or subprocess execution.
+The verifier takes every numerical input from the sealed flat directory. It additionally requires
+the current Git HEAD to be the recorded clean implementation revision and recomputes every frozen
+source-code digest from the actual bounded, no-follow regular file. It reconstructs and validates
+every fixture, row, and raw evidence identity; reconstructs the V5 subtotal model from the embedded
+pinned coverage/registry and higher-layer bundles (including common event dispatch); refits all
+exact matrices, coefficients, predictions, gates, and model choices; preserves accepted, partial,
+and rejected family outcomes; and recomputes source, file, result, and directory identities without
+SP1 execution.
 
 Publication writes mode-0444 members to a private same-directory temporary directory, fsyncs the
 files and directory, and publishes with `renameat2(RENAME_NOREPLACE)`. It fails closed when that
@@ -97,3 +99,31 @@ fixed two issues before commit: source-run/source-artifact reads inherited unbou
 and the publication lock could follow a symlink. Those paths now use bounded `O_NOFOLLOW` regular
 file reads/hashing and a checked `O_NOFOLLOW` lock. The post-fix narrow and complete test results are
 the final results recorded above.
+
+## Review Round 1
+
+Review found that portable verification accepted the persisted source-code digest strings without
+joining them to the actual implementation checkout, and that same-size in-place mutation could
+escape the bounded readers' original device/inode/size comparison. The follow-up fix requires the
+existing clean exact-HEAD policy, binds the source document revision to the calibration identity,
+recomputes the exact frozen source map, and compares every digest. Both bounded helpers now compare
+device, inode, full mode/type, link count, size, nanosecond mtime, and nanosecond ctime before and
+after reading.
+
+RED evidence:
+
+- Both deterministic first-chunk same-size mutation cases returned without error: `2 failed`.
+- A caller-resealed digest-only forgery and jointly resealed `ffff...` calibration/source/result
+  forgery both verified: `2 failed, 15 subtests passed in 169.70s`.
+
+Focused GREEN evidence:
+
+- Same-size read/hash mutation, unsafe/unavailable source paths, and exact clean-revision policy:
+  `3 passed, 2 subtests passed in 0.23s`.
+- End-to-end inventory/tamper suite, including digest-only, missing-key, extra-key, and jointly
+  resealed `ffff...` forgeries: `1 passed, 19 subtests passed in 361.48s`.
+- Narrow complete-source seal and source-checkout replay: `1 passed, 44 deselected in 202.74s`.
+- Non-artifact suite: `40 passed, 5 deselected, 75 subtests passed in 1.09s`.
+- Complete test file: `2 failed, 43 passed, 94 subtests passed in 595.43s`. The only failures are
+  the same two documented local sealed-helper fingerprint mismatches at
+  `context_opcode_campaign.py:4484`; the production check remains strict.

@@ -71,7 +71,7 @@ are exact-resume operations over that immutable identity:
 ```
 
 After the fit terminal exists at the exact clean calibration revision, seal it into a new
-content-addressed directory and replay that directory without SP1:
+content-addressed directory and replay it without SP1 from that same clean, exact source revision:
 
 ```bash
 ~/.venv/bin/python experiments/opcode-gas/opcode_gas.py \
@@ -85,8 +85,10 @@ content-addressed directory and replay that directory without SP1:
 ```
 
 Sealing is create-only and publishes exactly ten bounded regular files through a same-directory
-temporary directory. Replay reads only that flat result directory, reconstructs every fixture and
-row identity, recomputes V5 subtotals (including event dispatch), refits every exact matrix,
+temporary directory. Replay reads numerical inputs only from that flat result directory, but also
+requires the current Git HEAD to be the recorded clean implementation revision and recomputes every
+frozen source-code digest from bounded, no-follow regular-file reads. It reconstructs every fixture
+and row identity, recomputes V5 subtotals (including event dispatch), refits every exact matrix,
 coefficient, prediction, gate, and model choice, and preserves accepted, partial, and rejected raw
 evidence. The discovery result defines only the feature vocabulary and candidate function shapes:
 none of its numeric coefficients, the historical `body_scale`, or a cross-ELF scale is a

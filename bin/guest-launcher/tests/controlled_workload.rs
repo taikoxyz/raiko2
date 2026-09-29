@@ -430,6 +430,11 @@ fn controlled_block_row_id_binds_every_semantic_field() {
         .insert("opcode:0x50".into(), 5);
     mutations.push(changed);
     let mut changed = original.clone();
+    changed
+        .expected_context_features
+        .insert("context_fixed:opcode:0x30".into(), 1);
+    mutations.push(changed);
+    let mut changed = original.clone();
     changed.expected_features.insert("tx_base".into(), 2);
     mutations.push(changed);
     let mut changed = original.clone();
@@ -451,6 +456,31 @@ fn controlled_block_row_id_binds_every_semantic_field() {
         controlled_block_row_id(&stored_id_only).unwrap(),
         original_id
     );
+}
+
+#[test]
+fn legacy_non_context_row_id_omits_empty_context_features() {
+    let source = block_row_spec();
+    let mut legacy_json = serde_json::to_value(source).expect("serialize legacy row");
+    let legacy_object = legacy_json.as_object_mut().unwrap();
+    legacy_object.remove("expected_context_features");
+    legacy_object.remove("row_id");
+    let legacy_row_id =
+        alloy_primitives::hex::encode(Sha256::digest(serde_json::to_vec(&legacy_json).unwrap()));
+    assert_eq!(
+        legacy_row_id,
+        "27daa118e7e81f17c41734961525a9a33d07bcc9cd1ebc3d45b32d5c67e5e130"
+    );
+    legacy_json
+        .as_object_mut()
+        .unwrap()
+        .insert("row_id".into(), legacy_row_id.clone().into());
+
+    let legacy: ControlledBlockRowSpec =
+        serde_json::from_value(legacy_json).expect("deserialize pre-context row JSON");
+    assert!(legacy.expected_context_features.is_empty());
+    assert_eq!(controlled_block_row_id(&legacy).unwrap(), legacy_row_id);
+    build_controlled_block_fixture(&legacy).expect("accept the preserved legacy row identity");
 }
 
 fn materialize_opcode_block_row(

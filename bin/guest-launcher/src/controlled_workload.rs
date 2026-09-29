@@ -601,12 +601,15 @@ pub fn controlled_block_row_id(spec: &ControlledBlockRowSpec) -> Result<String> 
         ]));
     }
     let mut semantics = serde_json::to_value(spec)?;
-    semantics
+    let semantics = semantics
         .as_object_mut()
-        .ok_or_else(|| anyhow::anyhow!("controlled block row must serialize as an object"))?
-        .remove("row_id");
+        .ok_or_else(|| anyhow::anyhow!("controlled block row must serialize as an object"))?;
+    semantics.remove("row_id");
+    if spec.expected_context_features.is_empty() {
+        semantics.remove("expected_context_features");
+    }
     Ok(alloy_primitives::hex::encode(Sha256::digest(
-        serde_json::to_vec(&semantics)?,
+        serde_json::to_vec(semantics)?,
     )))
 }
 

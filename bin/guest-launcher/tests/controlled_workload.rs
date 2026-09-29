@@ -1032,6 +1032,56 @@ fn context_identity_freezes_the_same_trace_that_controlled_block_validates() {
 }
 
 #[test]
+fn zero_count_control_identity_serializes_empty_context_feature_evidence() {
+    let mut source = ControlledBlockRowSpec {
+        row_id: String::new(),
+        workload_family: "context_opcode".into(),
+        split: ControlledBlockSplit::Fit,
+        block_count: 1,
+        transaction_count: 1,
+        program: ControlledProgram::ContextOpcodeLoop {
+            workload_id: "0".repeat(64),
+            repeat_index: 0,
+            opcode: ControlledContextOpcode::Address,
+            lane: ControlledLane::Control,
+            count: 0,
+            profile: ControlledContextProfile::Address {
+                address_profile: ControlledContextAddressProfile::Canonical,
+            },
+        },
+        expected_final_state_root: B256::ZERO,
+        expected_raw_gas_by_key: BTreeMap::new(),
+        expected_operation_event_count_by_key: BTreeMap::new(),
+        expected_context_features: BTreeMap::new(),
+        expected_features: BTreeMap::new(),
+        expected_diagnostics: BTreeMap::new(),
+        expected_backend_input_sha256: None,
+        expected_host_trace_sha256: None,
+    };
+    source.row_id = controlled_block_row_id(&source).unwrap();
+
+    let mut legacy_json = serde_json::to_value(&source).expect("serialize legacy-compatible row");
+    legacy_json
+        .as_object_mut()
+        .unwrap()
+        .remove("expected_context_features");
+    let legacy: ControlledBlockRowSpec =
+        serde_json::from_value(legacy_json).expect("read a legacy row with the field omitted");
+    assert!(legacy.expected_context_features.is_empty());
+
+    let bundle = freeze_controlled_context_block_fixture(&source)
+        .expect("freeze the real zero-count control identity bundle");
+    assert!(bundle.spec.expected_context_features.is_empty());
+    let json = serde_json::to_vec(&bundle).expect("serialize controlled-block-identity output");
+    let encoded: serde_json::Value =
+        serde_json::from_slice(&json).expect("parse controlled-block-identity JSON output");
+    assert_eq!(
+        encoded["spec"]["expected_context_features"],
+        serde_json::json!({})
+    );
+}
+
+#[test]
 fn context_identity_requirement_preserves_legacy_optional_identity_fields() {
     let mut spec = block_row_spec();
     spec.row_id = controlled_block_row_id(&spec).unwrap();

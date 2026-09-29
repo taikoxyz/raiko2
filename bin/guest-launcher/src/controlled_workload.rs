@@ -447,7 +447,7 @@ pub struct ControlledBlockRowSpec {
     pub expected_raw_gas_by_key: BTreeMap<String, i64>,
     #[serde(default)]
     pub expected_operation_event_count_by_key: BTreeMap<String, i64>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(default)]
     pub expected_context_features: BTreeMap<String, i64>,
     pub expected_features: BTreeMap<String, i64>,
     pub expected_diagnostics: BTreeMap<String, i64>,

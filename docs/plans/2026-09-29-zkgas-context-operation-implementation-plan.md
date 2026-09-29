@@ -2,7 +2,7 @@
 
 ## Status
 
-In progress.
+Completed as sealed discovery evidence. Production coefficient calibration is a separate successor.
 
 This milestone closes the first ordinary-operation gap after typed storage. It is intentionally
 limited to six environment and calldata opcodes that can be isolated without account-state,
@@ -27,13 +27,14 @@ controlled SP1 measurement exists for them. The production Unzen multiplier is s
 not proving-cost evidence. The existing core can contribute only its sealed `common_dispatch` and
 the measured control-opcode body.
 
-The campaign therefore produces a separate content-addressed augmentation. V1 through V4 and the
-original Osaka augmented core remain byte-for-byte immutable. Before this campaign is promoted, a
-formula-only successor to the Osaka core corrects the historical `ISZERO`/`CLZ` recovery by applying
+The campaign therefore produces a separate content-addressed discovery artifact. V1 through V4 and
+the original Osaka augmented core remain byte-for-byte immutable. Before this campaign ran, a
+formula-only successor to the Osaka core corrected the historical `ISZERO`/`CLZ` recovery by applying
 the sealed `body_scale` to their lab-basis relation slopes. That correction reuses the original raw
 rows, requires no SP1 resampling, and produces operation coverage V5. This campaign records
-provisional context models; only a later artifact with independently supported cross-ELF transport
-may derive operation coverage V6 from V5.
+provisional context models only to classify function shape and preserve failed scenarios. It does not
+derive operation coverage V6 from V5. A later production-guest controlled campaign must fit final
+coefficients independently.
 
 The context-input change must not change the legacy opcode-lab wire format, public commitment, or
 guest binary. `sp1_revm_opcode_lab.elf` retains the historical `OpcodeLabInput` contract;
@@ -48,9 +49,10 @@ The fixed legacy canary is not adaptive and may not expand its bound, refit a hi
 or execute the context ELF. It authorizes reuse only on the preserved legacy cost surface. A
 separate context ELF can introduce a different SP1 marginal-cost surface even when both guests run
 the same EVM microprogram. V1 therefore marks cross-ELF context-to-legacy cost transport
-`not_evaluated`, requires transport evidence before candidate promotion, and keeps every context
-result `candidate_eligible=false`. The campaign may still collect and seal non-candidate controlled
-evidence; it must not silently treat the legacy canary as transport proof.
+`not_evaluated` and keeps every context result `candidate_eligible=false`. No scalar bridge is
+assumed or planned: the relationship may be operation-dependent or nonlinear. The campaign may
+still collect and seal non-candidate controlled evidence; it must not silently treat the legacy
+canary as transport proof or its provisional projections as production coefficients.
 
 ## Controlled Environment
 
@@ -94,7 +96,7 @@ lanes retain two words and execute one one-byte, three-raw-gas measured instruct
 cleanup. `NOT` is forbidden as a recovery control because its sealed body is an explicit
 dispatch-only approximation rather than an independently measured body.
 
-## Parameter Recovery
+## Diagnostic Parameter Recovery
 
 Let `delta_lab` be the fitted target-minus-control marginal SP1 `proverGas` per event in the
 controlled lab-body basis, `r_t` and `r_c` the executed raw EVM gas of target and control, `s` the
@@ -108,13 +110,15 @@ b_t       = (s * delta_lab + r_c * b_c) / r_t
 event_cost = common_dispatch + raw_evm_gas * b_t
 ```
 
-The projection uses exact `Fraction` equations and canonical 80-digit `Decimal` serialization. It
-must not combine an unscaled relation slope directly with a stored production-scaled control body,
+The sealed discovery projection uses exact `Fraction` equations and canonical 80-digit `Decimal`
+serialization. It must not combine an unscaled relation slope directly with a stored
+production-scaled control body,
 subtract `common_dispatch` a second time, or apply `body_scale` again after storing `b_t`.
 However, exact arithmetic does not prove that `delta_lab` from the context ELF shares the legacy
-guest's SP1 marginal-cost scale. Until the cross-ELF bridge is supported, store the parameter basis
-as `provisional_legacy_projection_unvalidated_cross_elf_transport`; do not use `b_t` in a production
-overlay.
+guest's SP1 marginal-cost surface. Keep the parameter basis
+`provisional_legacy_projection_unvalidated_cross_elf_transport` as a historical fail-closed marker;
+do not use `b_t` in a production overlay. The accepted/rejected scenario shapes, rather than these
+absolute projected magnitudes, are the input to the successor production-guest experiment.
 
 Every required scenario for a key must pass the existing signal, repeat, fit, residual, and
 extrapolation gates. Recovered bodies across required scenarios must also pass the frozen 5%
@@ -141,10 +145,10 @@ Operation coverage V5 is derived from V4. The only semantic parameter changes ar
 production-scaled `ISZERO` and `CLZ` bodies. Because the registry is one content-addressed core,
 every measured core-owned row must update its artifact reference and provenance to the corrected
 successor; unsupported/precompile classification and side-effect ownership remain unchanged.
-A future operation coverage V6 may be derived from V5 only after an independently supported
-cross-ELF transport artifact makes the result candidate-eligible. That later step may change only
-the six rows above from `explicitly_unsupported` to measured `static_raw_gas`. Until then, V5 stays
-authoritative and all composite-overlay entrypoints must reject the provisional context result.
+Operation coverage V6 may be derived from V5 only from a new sealed production-guest controlled
+result. That successor may change only rows whose complete scenario family passes production-native
+fit and holdout gates. V5 stays authoritative and all composite-overlay entrypoints must reject this
+provisional context result permanently; no transport artifact promotes it in place.
 
 ## Implementation And Verification Order
 
@@ -156,9 +160,9 @@ authoritative and all composite-overlay entrypoints must reject the provisional 
    `context-opcode-identity` launcher stages.
 3. Add failing Python tests for manifest validation, exact fixed-footprint controls, sibling
    rejection, provisional parameter recovery, tamper rejection, V4/V5 immutability, and rejection
-   of V6/composite promotion without supported transport.
+   of V6/composite promotion from the discovery result.
 4. Implement generation, execution/resume, fitting, sealing, directory replay, V5 preservation, and
-   the candidate/transport promotion gate.
+   the permanent discovery-only promotion gate.
 5. Run focused Rust/Python checks, the complete opcode-gas suite, formatting, byte-compilation, and
    diff/path hygiene.
 6. Build the current SP1 guest artifacts and independently review the complete source and artifact
@@ -168,9 +172,27 @@ authoritative and all composite-overlay entrypoints must reject the provisional 
 8. Execute and seal the controlled campaign. If any key fails, preserve the rejected evidence and
    retain measured provisional models only for keys whose complete required scenario set passed;
    never weaken a gate after seeing results.
-9. Do not re-seal the composite estimator while cross-ELF transport remains `not_evaluated`.
-   Independently validate or replace that transport first; only a later candidate-eligible milestone
-   may replay the same two ad-hoc Mainnet proposals.
+9. Do not re-seal the composite estimator from this discovery artifact. Freeze the discovered
+   function vocabulary, fit its coefficients in a separate production-guest controlled campaign,
+   and only then derive V6 and replay the same two ad-hoc Mainnet proposals.
+
+## Successor Production Calibration Boundary
+
+Use this artifact to predeclare the next model families, not their final magnitudes:
+
+- `ADDRESS` and `CALLER`: start with constant per-execution production terms;
+- `CALLVALUE` and `TIMESTAMP`: test explicit value classes before a numeric magnitude function;
+- `CALLDATALOAD`: use calldata length plus the requested word's in-range, partial, or out-of-range
+  relation;
+- `CALLDATASIZE`: use calldata length and predeclared boundary buckets only if a single length term
+  fails.
+
+For each family, construct paired production-proposal-guest blocks or transactions with identical
+block, transaction, bytecode-footprint, state, and non-target operation ledgers. Fit only the frozen
+family parameters and validate untouched counts/context classes. Do not import the context-ELF slope,
+legacy `body_scale`, or legacy control body into the production coefficient. A count- or
+feature-correlated holdout residual returns to this operation family; only fixed residual work may
+move to transaction or block calibration.
 
 ## Deferred Families
 

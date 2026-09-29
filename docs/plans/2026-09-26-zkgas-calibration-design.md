@@ -113,6 +113,13 @@ stored_body_per_raw_gas[k] = body_scale * fitted_lab_body_per_raw_gas[k]
 stored_f_k                  = body_scale * fitted_lab_f_k
 ```
 
+That `body_scale` belongs only to the sealed historical opcode-lab lineage that measured it. It is
+not a universal conversion between arbitrary guest ELFs. A new experiment ELF may discover that an
+operation is constant, categorical, length-dependent, range-dependent, or another typed function,
+but its fitted magnitude is not inserted into the historical registry and is not transported through
+a scalar ELF-to-ELF bridge. For a newly discovered function shape, final coefficients are fitted
+independently with controlled production-guest target/control workloads.
+
 The historical higher-layer derivation preserves its original extra-scale residualization only for
 byte-exact replay. Any new composite estimator must reproject its sealed raw rows through the typed,
 production-scaled registry semantics above.
@@ -183,11 +190,12 @@ fit an intercept, scale, coefficient, feature, fallback, or threshold.
 
 ## Controlled Operation Measurement
 
-The primary operation lane is the reviewed, revm-backed SP1 opcode lab executed with the SP1
-gas-estimator engine. It is an experiment guest, not the production proposal guest. The estimator
-still executes the guest ELF; it avoids proof generation and heavy profiling. Synthetic
-direct-interpreter results are diagnostics only, while higher-layer calibration uses the production
-proposal guest.
+The primary operation-discovery lane is the reviewed, revm-backed SP1 opcode lab executed with the
+SP1 gas-estimator engine. It is an experiment guest, not the production proposal guest. The
+estimator still executes the guest ELF; it avoids proof generation and heavy profiling. Synthetic
+direct-interpreter results are diagnostics only. Historical coefficients retain their sealed
+lineage; newly discovered function families obtain final coefficients from controlled execution in
+the production proposal guest.
 
 Every formal relation binds:
 
@@ -205,6 +213,34 @@ For slope-based relations, fit the first passing frozen count prefix and then ex
 predeclared larger checkpoint. The checkpoint does not participate in fitting. A failed signal,
 determinism, rank, residual, extrapolation, or provenance gate remains explicit and cannot be
 repaired by a proposal row.
+
+### Discovery ELFs And Production Coefficients
+
+Keep historical and new experiment ELFs as separate measurement instruments:
+
+- the frozen historical opcode ELF preserves the existing measured registry and exact replay;
+- a context-aware or family-specific experiment ELF explores the smallest host-computable function
+  shape needed for operations that the historical input contract cannot express;
+- the production proposal guest independently calibrates the selected function's coefficients with
+  paired controlled blocks or transactions.
+
+Discovery evidence may select feature vocabulary and reject inadequate model families. It may not
+provide an absolute coefficient to the production registry, and no global linear relationship is
+assumed between old and new experiment ELFs. Production calibration freezes the chosen features,
+target/control envelopes, counts, fit rules, and holdouts before execution. It may fit the selected
+family parameters, but it may not reopen function selection after the production rows are visible.
+
+When a production holdout fails, route the residual by shape:
+
+- an error that grows with an operation count, value class, byte length, word count, or range belongs
+  back to that operation family;
+- an error that grows with transactions, unique state, dirty state, or blocks belongs to its owning
+  higher layer;
+- only a workload-independent residual may contribute to a fixed transaction, block, or proposal
+  term.
+
+This rule prevents a large fixed offset from hiding a systematically wrong operation model while
+still allowing approximate lower-layer functions whose remaining whole-workload error is immaterial.
 
 ## Historical Baseline And Osaka Supplement
 

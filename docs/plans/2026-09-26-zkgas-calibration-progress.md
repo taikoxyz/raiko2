@@ -64,6 +64,7 @@ Osaka execution semantics while continuing to bind the actual exported Unzen sch
 | Opcode core | Complete at partial coverage | Preserve sealed 101-plus-2 augmentation |
 | Remaining operations | Complete at frozen classification | Preserve the sealed coverage and ownership ledgers |
 | Stateful storage execution | Promoted and replayed on two ad-hoc proposals | Preserve sealed typed features while closing the remaining operation families |
+| Context-sensitive operations | Function-shape discovery sealed | Fit frozen function families directly in controlled production-guest workloads |
 | State/trie | Coarse model accepted | Preserve the sealed holdout evidence; split only after a new predeclared experiment |
 | Transaction | Declared approximation accepted and sealed | Preserve `5017` and its `0.002` materiality budget |
 | Block | Fixed base accepted and sealed | Preserve the selected round-128 fixed-cost artifact |
@@ -593,10 +594,12 @@ The implementation was split into three explicit artifacts in one calibration id
   dedicated `context-opcode-lab` and `context-opcode-identity` launcher stages.
 
 The legacy canary can authorize historical-table reuse only on the preserved legacy cost surface.
-It cannot prove that a marginal coefficient from a different context ELF shares that scale. Until
-an independent cross-ELF bridge is evaluated, the context artifact records transport status
-`not_evaluated`, requires transport evidence before candidate promotion, and remains
-`candidate_eligible=false`.
+It cannot prove that a marginal coefficient from a different context ELF shares that scale. The
+context artifact therefore records transport status `not_evaluated` and remains
+`candidate_eligible=false`. The project will not assume a scalar cross-ELF bridge: the old ELF stays
+the immutable source of its existing registry, while the context ELF is discovery evidence for
+function shape. Final coefficients for newly modeled operations will be fitted independently with
+controlled production-guest workloads.
 
 Calibration `5d3963807dc0282307b5e5f6` completed that bounded context campaign and sealed portable result
 `79dcfe2d5be2c3432987a671`:
@@ -649,19 +652,27 @@ changed. Composite resealing and proposal replay remain closed.
 
 ## Next Gate
 
-Evaluate the context-to-legacy cross-ELF transport independently of the opcode fits. The bridge must
-use predeclared common controlled workloads and may validate or reject transport; it may not tune the
-four visible context slopes after seeing them. If transport is supported, promote only the complete
-`ADDRESS` and `CALLER` keys. If it is not supported, keep the context result diagnostic and measure
-those keys directly on the destination cost surface.
+Treat the context artifact as function-shape discovery and freeze the successor production model
+before opening new rows:
 
-For the eleven failed scenarios, do not increase the repeat count beyond 2048 or weaken the gates.
-Use their sealed residual shapes to predeclare the next smallest model family: explicit context-value
-classes for `CALLVALUE`/`TIMESTAMP`, and length/range terms for calldata operations. A successor
-campaign must retain required-sibling completeness and exact event matching. Only after an
-independently reviewed transport decision and operation-family successor may the composite estimator
-be resealed and the same ad-hoc block/proposal diagnostics rerun; those diagnostics still may not
-repair coefficients.
+- `ADDRESS` and `CALLER`: constant per-execution terms;
+- `CALLVALUE` and `TIMESTAMP`: explicit value classes before any numeric magnitude function;
+- `CALLDATALOAD`: calldata length plus in-range, partial, or out-of-range word access;
+- `CALLDATASIZE`: a single length term first, with predeclared boundary buckets only if its controlled
+  production holdout rejects that shape.
+
+For each family, use paired production-proposal-guest blocks or transactions with identical
+block/transaction/state envelopes and non-target operation ledgers. Fit production-native
+coefficients directly; do not import context-ELF slopes, the historical `body_scale`, or historical
+control bodies. Required-sibling completeness and exact event matching still apply.
+
+For the eleven failed discovery scenarios, do not increase the repeat count beyond 2048 or weaken
+the old gates. Their sealed residuals justify the typed feature vocabulary above, not a more complex
+fit to the same opened data. A count- or feature-correlated production holdout error returns to its
+operation family. Only workload-independent residual may move upward into transaction or block
+offsets. After the production family result is independently reviewed, derive V6, reseal the
+composite estimator, and rerun the same ad-hoc block/proposal diagnostics; those diagnostics still
+may not repair coefficients.
 
 After this context family, close the remaining ordinary returndata/copy/LOG/EXTCODE keys before CALL
 wrappers and direct precompiles. Reuse sealed controlled evidence where its execution semantics and

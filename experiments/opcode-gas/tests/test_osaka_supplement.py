@@ -1046,7 +1046,16 @@ class OsakaRunnerTests(unittest.TestCase):
             relation_ids = next(ids for bound, ids in generated if f"max-{bound}" in str(args.fixtures))
             args.out.parent.mkdir(parents=True, exist_ok=True)
             args.out.write_text(
-                "".join(json.dumps({"relation_id": relation_id}) + "\n" for relation_id in relation_ids)
+                "".join(
+                    json.dumps(
+                        {
+                            "relation_id": relation_id,
+                            "opcode_lab_wire": "frozen_legacy_revm_v0",
+                        }
+                    )
+                    + "\n"
+                    for relation_id in relation_ids
+                )
             )
 
         def fake_fit(_manifest, rows, relation_ids, bound, *, expected_provenance):
@@ -1090,6 +1099,40 @@ class OsakaRunnerTests(unittest.TestCase):
             )
             first = opcode_gas._run_osaka_canary_rounds(**kwargs)
             second = opcode_gas._run_osaka_canary_rounds(**kwargs)
+
+            for label, marker in (("missing", None), ("wrong", "current_v1")):
+                candidate = root / f"bad-wire-{label}"
+                shutil.copytree(kwargs["output_root"], candidate)
+                decisions_path = candidate / "canary-decisions.json"
+                decisions = json.loads(decisions_path.read_text())
+                raw_path = candidate / decisions["rounds"][0]["raw_runs"]
+                rows = [json.loads(line) for line in raw_path.read_text().splitlines()]
+                for row in rows:
+                    if marker is None:
+                        row.pop("opcode_lab_wire", None)
+                    else:
+                        row["opcode_lab_wire"] = marker
+                raw_path.write_text(
+                    "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows)
+                )
+                decisions["rounds"][0]["raw_runs_sha256"] = opcode_gas.sha256_file(
+                    raw_path
+                )
+                decisions_bytes = (
+                    json.dumps(decisions, indent=2, sort_keys=True) + "\n"
+                ).encode()
+                decisions_path.write_bytes(decisions_bytes)
+                (candidate / "canary-decisions.sha256").write_text(
+                    opcode_gas.sha256_bytes(decisions_bytes) + "\n"
+                )
+                with self.assertRaisesRegex(ValueError, "opcode-lab report wire"):
+                    opcode_gas._run_osaka_canary_rounds(
+                        **{
+                            **kwargs,
+                            "output_root": candidate,
+                            "allow_execution": False,
+                        }
+                    )
 
         self.assertEqual([row["relation_id"] for row in first], list(opcode_gas.OSAKA_CANARY_RELATION_IDS))
         self.assertEqual(first, second)

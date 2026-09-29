@@ -2327,6 +2327,8 @@ def _capture_legacy_osaka_replay(
     historical_observations: list[Mapping[str, Any]],
     workload_identity_schema_version: int,
 ) -> dict[str, Any]:
+    import opcode_gas
+
     if workload_identity_schema_version not in {1, 2}:
         raise ValueError("context legacy replay workload identity schema differs")
     expected_trace_schema = 1 if workload_identity_schema_version == 1 else 3
@@ -2346,6 +2348,10 @@ def _capture_legacy_osaka_replay(
             for row in rows
         ):
             raise ValueError("context legacy replay controlled trace schema differs")
+        if workload_identity_schema_version == 2:
+            opcode_gas._validate_revm_opcode_lab_wire_rows(
+                rows, opcode_gas.REVM_OPCODE_LAB_CONTRACT_FROZEN_LEGACY
+            )
         result = json.loads(result_path.read_bytes())
         if (
             sha256_bytes(raw_path.read_bytes()) != record.get("raw_runs_sha256")
@@ -2454,6 +2460,10 @@ def _replay_legacy_osaka_evidence(
             != source_record.get("result_sha256")
         ):
             raise ValueError("context legacy Osaka replay round differs")
+        if workload_identity_schema_version == 2:
+            opcode_gas._validate_revm_opcode_lab_wire_rows(
+                rows, opcode_gas.REVM_OPCODE_LAB_CONTRACT_FROZEN_LEGACY
+            )
         subset = opcode_gas._osaka_relation_manifest(manifest, relation_ids)
         results = opcode_gas.fit_formal_relation_round(
             subset,

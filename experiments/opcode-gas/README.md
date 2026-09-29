@@ -1089,6 +1089,15 @@ SHA256, source revision, original artifact paths, and both artifact hashes. All 
 non-symlink files enter the new calibration identity. Extra, missing, replaced, or symlinked package
 entries fail before execution, and result publication may not write inside the package directory.
 
+The package's guest predates the current binary `OpcodeLabInput` serializer. Its v0 bincode wire
+encodes `bytecode` as a lowercase `0x`-prefixed string and has no storage field; sending the current
+raw-byte wire makes the frozen guest fail while reading stdin. The compatibility runner therefore
+selects the launcher's explicit `frozen_legacy_revm_v0` adapter only after the frozen
+contract/path checks pass. The adapter rejects storage inputs and binds the exact bytes sent to the
+guest to the report and controlled-trace input hash and length. Do not change the global
+`OpcodeLabInput` serializer or use the adapter for current/stateful measurements. A compatibility
+row without `opcode_lab_wire = frozen_legacy_revm_v0` is invalid.
+
 The fixed legacy canary is an authorization check, not an adaptive measurement. Never expand its
 count bounds, refit it, or substitute the context ELF after a failure. The canary proves only that
 the isolated legacy guest still authorizes reuse of the historical table. It does not prove that a

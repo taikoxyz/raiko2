@@ -1015,6 +1015,38 @@ class RunnerTests(unittest.TestCase):
         engine_index = calls[0].index("--sp1-execution-engine")
         self.assertEqual(calls[0][engine_index + 1], "gas-estimator")
 
+    def test_batch_runner_explicitly_selects_frozen_legacy_revm_wire(self):
+        calls = []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            with mock.patch.object(
+                opcode_gas.subprocess, "run", lambda cmd, check: calls.append(cmd)
+            ):
+                opcode_gas.run_guest_inputs(
+                    guest_launcher=pathlib.Path("target/release/guest-launcher"),
+                    elf_path=opcode_gas.FROZEN_LEGACY_REVM_ELF_PATH,
+                    input_paths=[tmp_path / "input.json"],
+                    reports_jsonl=tmp_path / "reports.jsonl",
+                    stage="revm-opcode-lab",
+                    frozen_legacy_revm_wire_v0=True,
+                )
+
+        self.assertIn("--frozen-legacy-revm-wire-v0", calls[0])
+
+        with tempfile.TemporaryDirectory() as tmp, self.assertRaisesRegex(
+            ValueError, "requires revm-opcode-lab"
+        ):
+            tmp_path = pathlib.Path(tmp)
+            opcode_gas.run_guest_inputs(
+                guest_launcher=pathlib.Path("target/release/guest-launcher"),
+                elf_path=pathlib.Path("crates/guests/elf/sp1_opcode_lab.elf"),
+                input_paths=[tmp_path / "input.json"],
+                reports_jsonl=tmp_path / "reports.jsonl",
+                stage="opcode-lab",
+                frozen_legacy_revm_wire_v0=True,
+            )
+
     def test_precompile_batch_keeps_standard_sp1_execution_engine(self):
         calls = []
 

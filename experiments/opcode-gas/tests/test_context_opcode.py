@@ -326,6 +326,7 @@ def rebind_legacy_replay_to_current_identity(replay, provenance):
                 row["workload_id"] = workload_id
                 row["controlled_trace"]["schema_version"] = 3
                 row["controlled_trace"]["workload_id"] = workload_id
+                row["opcode_lab_wire"] = "frozen_legacy_revm_v0"
                 row["execution_row_id"] = opcode_gas.controlled_execution_row_id(
                     workload_id,
                     backend="sp1",
@@ -1128,6 +1129,44 @@ class ContextFitTests(unittest.TestCase):
         del canary["control_relations"]["opcode:0x90"]
         with self.assertRaisesRegex(ValueError, "control relation"):
             context.validate_context_compatibility_canary(canary)
+
+    def test_compatibility_canary_rejects_resealed_legacy_wire_marker_forgery(self):
+        for label, marker in (("missing", None), ("wrong", "current_v1")):
+            with self.subTest(label=label):
+                canary = passing_production_canary()
+                replay = canary["legacy_osaka_replay"]
+                for embedded, source in zip(
+                    replay["rounds"], replay["decisions"]["rounds"]
+                ):
+                    for row in embedded["rows"]:
+                        if marker is None:
+                            row.pop("opcode_lab_wire", None)
+                        else:
+                            row["opcode_lab_wire"] = marker
+                    embedded["rows_sha256"] = context.sha256_bytes(
+                        context.canonical_json(embedded["rows"])
+                    )
+                    raw_bytes = b"".join(
+                        context.canonical_json(row) + b"\n"
+                        for row in embedded["rows"]
+                    )
+                    raw_sha256 = context.sha256_bytes(raw_bytes)
+                    embedded["source_raw_file_sha256"] = raw_sha256
+                    source["raw_runs_sha256"] = raw_sha256
+                replay["decisions_sha256"] = context.sha256_bytes(
+                    context.canonical_json(replay["decisions"])
+                )
+                canary["artifact_sha256"] = context.sha256_bytes(
+                    context.canonical_json(
+                        {
+                            key: value
+                            for key, value in canary.items()
+                            if key != "artifact_sha256"
+                        }
+                    )
+                )
+                with self.assertRaisesRegex(ValueError, "opcode-lab report wire"):
+                    context.validate_context_compatibility_canary(canary)
 
     def test_production_source_requires_complete_legacy_package_in_calibration(self):
         source = production_campaign_source(

@@ -4523,7 +4523,10 @@ def run_guest_inputs(
     input_paths: list[pathlib.Path],
     reports_jsonl: pathlib.Path,
     stage: str = "opcode-lab",
+    frozen_legacy_revm_wire_v0: bool = False,
 ) -> pathlib.Path:
+    if frozen_legacy_revm_wire_v0 and stage != "revm-opcode-lab":
+        raise ValueError("frozen legacy REVM wire requires revm-opcode-lab")
     reports_jsonl.parent.mkdir(parents=True, exist_ok=True)
     input_list_path = reports_jsonl.with_name("opcode-lab-inputs.json")
     input_list_path.write_text(
@@ -4548,6 +4551,8 @@ def run_guest_inputs(
     ]
     if stage in {"opcode-lab", "revm-opcode-lab"}:
         cmd.extend(["--sp1-execution-engine", "gas-estimator"])
+    if frozen_legacy_revm_wire_v0:
+        cmd.append("--frozen-legacy-revm-wire-v0")
     subprocess.run(cmd, check=True)
     return input_list_path
 
@@ -19867,6 +19872,22 @@ def _formal_relation_result_payload(
     }
 
 
+def _validate_revm_opcode_lab_wire_rows(
+    rows: Iterable[Mapping[str, Any]], revm_contract: str
+) -> None:
+    expected_wire = {
+        REVM_OPCODE_LAB_CONTRACT_CURRENT: None,
+        REVM_OPCODE_LAB_CONTRACT_FROZEN_LEGACY: "frozen_legacy_revm_v0",
+    }.get(revm_contract)
+    if revm_contract not in {
+        REVM_OPCODE_LAB_CONTRACT_CURRENT,
+        REVM_OPCODE_LAB_CONTRACT_FROZEN_LEGACY,
+    }:
+        raise ValueError("unknown revm opcode-lab contract")
+    if any(row.get("opcode_lab_wire") != expected_wire for row in rows):
+        raise ValueError("opcode-lab report wire differs from the selected contract")
+
+
 def validate_persisted_formal_relation_decisions(
     calibration_run: pathlib.Path,
     decisions: Mapping[str, Any],
@@ -21885,6 +21906,14 @@ def _run_osaka_canary_rounds(
             ):
                 raise ValueError("persisted Osaka canary round source differs")
             rows = list(iter_jsonl(raw_path))
+            _validate_revm_opcode_lab_wire_rows(
+                rows,
+                getattr(
+                    args,
+                    "revm_opcode_lab_contract",
+                    REVM_OPCODE_LAB_CONTRACT_CURRENT,
+                ),
+            )
             results = fit_formal_relation_round(
                 subset,
                 rows,
@@ -21932,6 +21961,9 @@ def _run_osaka_canary_rounds(
             )
             cmd_run(run_args)
             rows = list(iter_jsonl(raw_path))
+            _validate_revm_opcode_lab_wire_rows(
+                rows, run_args.revm_opcode_lab_contract
+            )
             results = fit_formal_relation_round(
                 subset,
                 rows,
@@ -26248,9 +26280,10 @@ def cmd_run(args: argparse.Namespace) -> None:
         MATCHED_CONTROL_PURPOSE,
         FORMAL_RELATION_PURPOSE,
     }
+    opcode_stage = getattr(args, "opcode_stage", "opcode-lab")
     if (
         relation_or_diagnostic
-        and args.opcode_stage != "revm-opcode-lab"
+        and opcode_stage != "revm-opcode-lab"
     ):
         raise ValueError("matched-control run requires revm-opcode-lab")
     revm_contract = getattr(
@@ -26266,7 +26299,7 @@ def cmd_run(args: argparse.Namespace) -> None:
     default_opcode_elf = pathlib.Path("crates/guests/elf/sp1_opcode_lab.elf")
     effective_opcode_elf = args.elf
     if (
-        args.opcode_stage == "revm-opcode-lab"
+        opcode_stage == "revm-opcode-lab"
         and revm_contract == REVM_OPCODE_LAB_CONTRACT_CURRENT
         and args.elf == default_opcode_elf
     ):
@@ -26298,7 +26331,7 @@ def cmd_run(args: argparse.Namespace) -> None:
     ):
         raise ValueError("frozen legacy revm opcode-lab is canary-only")
     if (
-        relation_or_diagnostic or args.opcode_stage == "revm-opcode-lab"
+        relation_or_diagnostic or opcode_stage == "revm-opcode-lab"
     ) and effective_resolved != resolve_artifact_alias(expected_revm_elf):
         raise ValueError("revm opcode-lab run requires the contract-matched ELF")
     calibration_run = _resolve_repo_path(args.calibration_run, field_name="calibration_run")
@@ -26384,7 +26417,7 @@ def cmd_run(args: argparse.Namespace) -> None:
         formal_generator_max_count = next(iter(generator_bounds))
     report_paths = []
     for kind, cases in sorted(cases_by_kind.items()):
-        stage = args.opcode_stage if kind == "opcode" else "precompile-lab"
+        stage = opcode_stage if kind == "opcode" else "precompile-lab"
         elf_path = effective_opcode_elf if kind == "opcode" else args.precompile_elf
         report_path = out.with_name(f"{out.stem}.{stage}.jsonl")
         run_guest_inputs(
@@ -26397,6 +26430,10 @@ def cmd_run(args: argparse.Namespace) -> None:
             ],
             reports_jsonl=report_path,
             stage=stage,
+            frozen_legacy_revm_wire_v0=(
+                kind == "opcode"
+                and revm_contract == REVM_OPCODE_LAB_CONTRACT_FROZEN_LEGACY
+            ),
         )
         report_paths.append(report_path)
     case_by_input = {
@@ -26407,6 +26444,8 @@ def cmd_run(args: argparse.Namespace) -> None:
         for report_path in report_paths:
             for report in iter_jsonl(report_path):
                 case = case_by_input[report["input"]]
+                if case.get("kind") == "opcode":
+                    _validate_revm_opcode_lab_wire_rows([report], revm_contract)
                 try:
                     raw_run = raw_run_from_report(case, report)
                 except ValueError as error:

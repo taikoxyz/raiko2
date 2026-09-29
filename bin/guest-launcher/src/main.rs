@@ -86,6 +86,9 @@ struct Args {
     /// and controlled production-proposal calibration blocks.
     #[arg(long, value_enum, default_value = "standard")]
     sp1_execution_engine: Sp1ExecutionEngine,
+    /// Encode opcode inputs with the immutable pre-storage REVM guest wire contract.
+    #[arg(long)]
+    frozen_legacy_revm_wire_v0: bool,
     /// Succinct network mode for SP1 remote proving.
     #[arg(long, value_enum, default_value = "reserved")]
     sp1_network_mode: CliSp1NetworkMode,
@@ -209,6 +212,8 @@ struct BenchReport {
     sp1_execution_engine: &'static str,
     sp1_gas_trace_chunk_threshold: Option<u64>,
     sp1_gas_trace_chunk_slots: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    opcode_lab_wire: Option<&'static str>,
     input: String,
     guest_input_sha256: Option<String>,
     guest_input_bincode_length: Option<usize>,
@@ -307,6 +312,7 @@ impl BenchReport {
             sp1_execution_engine: Sp1ExecutionEngine::Standard.as_str(),
             sp1_gas_trace_chunk_threshold: None,
             sp1_gas_trace_chunk_slots: None,
+            opcode_lab_wire: None,
             input,
             guest_input_sha256: None,
             guest_input_bincode_length: None,
@@ -706,6 +712,23 @@ impl Args {
         }
         Ok(())
     }
+
+    fn validate_frozen_legacy_revm_wire_v0(&self) -> Result<()> {
+        if !self.frozen_legacy_revm_wire_v0 {
+            return Ok(());
+        }
+        if self.stage != Stage::RevmOpcodeLab
+            || self.proof_type != ProofType::Sp1
+            || self.mode != Mode::Execute
+            || self.sp1_execution_engine != Sp1ExecutionEngine::GasEstimator
+            || self.effective_sp1_prover_mode() != Sp1ProverMode::Local
+        {
+            bail!(
+                "--frozen-legacy-revm-wire-v0 requires local SP1 execute, revm-opcode-lab, and the gas estimator"
+            );
+        }
+        Ok(())
+    }
 }
 
 impl From<CliSp1ProverMode> for Sp1ProverMode {
@@ -821,6 +844,13 @@ fn apply_execution_metadata(report: &mut BenchReport, execution_report: &Executi
     apply_sp1_metadata(report, &metadata);
 }
 
+fn apply_opcode_lab_wire_metadata(report: &mut BenchReport, frozen_legacy_wire_v0: bool) {
+    if frozen_legacy_wire_v0 {
+        report.opcode_lab_wire = Some("frozen_legacy_revm_v0");
+    }
+}
+
+#[cfg(test)]
 fn install_opcode_lab_input_identity(
     report: &mut BenchReport,
     input: &OpcodeLabInput,
@@ -904,6 +934,7 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
     args.validate_sp1_execution_engine()?;
+    args.validate_frozen_legacy_revm_wire_v0()?;
     args.validate_standard_guest_artifacts()?;
 
     if args.stage == Stage::ProposalTrace {
@@ -1143,15 +1174,29 @@ async fn run_opcode_lab(args: Args) -> Result<()> {
         input_path.display().to_string(),
     );
     apply_sp1_execution_engine_metadata(&mut report, args.sp1_execution_engine);
+    apply_opcode_lab_wire_metadata(&mut report, args.frozen_legacy_revm_wire_v0);
     let labels = opcode_lab_memory_labels(args.stage);
     record_memory_snapshot(&mut report, labels.start);
 
     let input = read_opcode_lab_input(&input_path)?;
-    install_opcode_lab_input_identity(&mut report, &input)?;
-    apply_controlled_opcode_trace(&mut report, args.stage, &input)?;
+    let backend_input = opcode_lab_backend_input(&input, args.frozen_legacy_revm_wire_v0)?;
+    let (guest_input_sha256, guest_input_bincode_length) =
+        opcode_lab_input_identity_from_bytes(&backend_input);
+    report.guest_input_sha256 = Some(guest_input_sha256);
+    report.guest_input_bincode_length = Some(guest_input_bincode_length);
+    if args.stage == Stage::RevmOpcodeLab {
+        install_controlled_trace(
+            &mut report,
+            controlled_workload::ControlledTrace::RevmOpcode(Box::new(
+                controlled_workload::trace_revm_opcode_workload_with_backend_input(
+                    &input,
+                    &backend_input,
+                )?,
+            )),
+        )?;
+    }
     record_memory_snapshot(&mut report, labels.after_read_input);
-    let mut stdin = SP1Stdin::new();
-    stdin.write(&input);
+    let stdin = SP1Stdin::from(&backend_input);
     record_memory_snapshot(&mut report, labels.after_stdin_write);
     let elf = fs::read(&elf_path).with_context(|| format!("read {}", elf_path.display()))?;
     record_memory_snapshot(&mut report, labels.after_load_elf);
@@ -1162,7 +1207,7 @@ async fn run_opcode_lab(args: Args) -> Result<()> {
     let (public_values, execution_report) = match args.sp1_execution_engine {
         Sp1ExecutionEngine::Standard => execute_sp1_blocking(sp1_config.prover, elf, stdin).await?,
         Sp1ExecutionEngine::GasEstimator => {
-            execute_opcode_lab_gas_estimator_blocking(elf, input).await?
+            execute_opcode_lab_gas_estimator_blocking(elf, backend_input).await?
         }
     };
     record_memory_snapshot(&mut report, labels.after_execute_run);
@@ -1212,6 +1257,7 @@ async fn run_opcode_lab_batch(args: Args) -> Result<()> {
         elf,
         inputs,
         args.stage,
+        args.frozen_legacy_revm_wire_v0,
     )
     .await?;
 
@@ -1224,6 +1270,7 @@ async fn run_opcode_lab_batch(args: Args) -> Result<()> {
             run.input_path.display().to_string(),
         );
         apply_sp1_execution_engine_metadata(&mut report, args.sp1_execution_engine);
+        apply_opcode_lab_wire_metadata(&mut report, args.frozen_legacy_revm_wire_v0);
         report.public_values = run.public_values;
         report.wall_time_ms = run.wall_time_ms;
         report.guest_input_sha256 = run.guest_input_sha256;
@@ -1982,12 +2029,61 @@ struct ContextOpcodeLabExecution {
     bundle: controlled_workload::ControlledContextOpcodeIdentityBundle,
 }
 
-fn opcode_lab_input_identity(input: &OpcodeLabInput) -> Result<(String, usize)> {
-    let encoded = bincode::serialize(input).context("serialize canonical opcode-lab input")?;
-    Ok((
-        format!("0x{}", hex::encode(Sha256::digest(&encoded))),
+#[derive(Serialize)]
+struct FrozenLegacyRevmOpcodeInputV0<'a> {
+    case: &'a str,
+    scenario: &'a str,
+    opcode: u8,
+    target_count: u64,
+    target_raw_gas: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tx_gas_limit: Option<u64>,
+    bytecode: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    generator_max_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fixed_bytecode_len: Option<u64>,
+}
+
+fn frozen_legacy_revm_wire_v0(input: &OpcodeLabInput) -> Result<Vec<u8>> {
+    if input.storage.is_some() {
+        bail!("frozen legacy REVM wire does not support storage inputs");
+    }
+    bincode::serialize(&FrozenLegacyRevmOpcodeInputV0 {
+        case: &input.case,
+        scenario: &input.scenario,
+        opcode: input.opcode,
+        target_count: input.target_count,
+        target_raw_gas: input.target_raw_gas,
+        tx_gas_limit: input.tx_gas_limit,
+        bytecode: hex::encode_prefixed(&input.bytecode),
+        generator_max_count: input.generator_max_count,
+        fixed_bytecode_len: input.fixed_bytecode_len,
+    })
+    .context("serialize frozen legacy REVM opcode input")
+}
+
+fn opcode_lab_backend_input(
+    input: &OpcodeLabInput,
+    frozen_legacy_wire_v0: bool,
+) -> Result<Vec<u8>> {
+    if frozen_legacy_wire_v0 {
+        frozen_legacy_revm_wire_v0(input)
+    } else {
+        bincode::serialize(input).context("serialize canonical opcode-lab input")
+    }
+}
+
+fn opcode_lab_input_identity_from_bytes(encoded: &[u8]) -> (String, usize) {
+    (
+        format!("0x{}", hex::encode(Sha256::digest(encoded))),
         encoded.len(),
-    ))
+    )
+}
+
+fn opcode_lab_input_identity(input: &OpcodeLabInput) -> Result<(String, usize)> {
+    let encoded = opcode_lab_backend_input(input, false)?;
+    Ok(opcode_lab_input_identity_from_bytes(&encoded))
 }
 
 fn install_controlled_trace(
@@ -2026,6 +2122,7 @@ fn install_controlled_trace(
     Ok(())
 }
 
+#[cfg(test)]
 fn apply_controlled_opcode_trace(
     report: &mut BenchReport,
     stage: Stage,
@@ -2149,16 +2246,17 @@ async fn execute_opcode_lab_batch_blocking(
     elf: Vec<u8>,
     inputs: Vec<(PathBuf, OpcodeLabInput)>,
     stage: Stage,
+    frozen_legacy_wire_v0: bool,
 ) -> Result<Vec<OpcodeLabExecution>> {
     tokio::task::spawn_blocking(move || match execution_engine {
         Sp1ExecutionEngine::Standard => match prover_mode {
             Sp1ProverMode::Mock => {
                 let prover = BlockingProverClient::builder().mock().build();
-                execute_opcode_lab_batch_local(&prover, &elf, inputs, stage)
+                execute_opcode_lab_batch_local(&prover, &elf, inputs, stage, frozen_legacy_wire_v0)
             }
             Sp1ProverMode::Local => {
                 let prover = BlockingProverClient::builder().cpu().build();
-                execute_opcode_lab_batch_local(&prover, &elf, inputs, stage)
+                execute_opcode_lab_batch_local(&prover, &elf, inputs, stage, frozen_legacy_wire_v0)
             }
             Sp1ProverMode::Network => {
                 anyhow::bail!("sp1.mode=execute does not support sp1.prover=network")
@@ -2168,7 +2266,7 @@ async fn execute_opcode_lab_batch_blocking(
             if prover_mode != Sp1ProverMode::Local {
                 anyhow::bail!("gas-estimator execution requires the local SP1 prover")
             }
-            execute_opcode_lab_batch_gas_estimator(&elf, inputs, stage)
+            execute_opcode_lab_batch_gas_estimator(&elf, inputs, stage, frozen_legacy_wire_v0)
         }
     })
     .await
@@ -2177,11 +2275,15 @@ async fn execute_opcode_lab_batch_blocking(
 
 async fn execute_opcode_lab_gas_estimator_blocking(
     elf: Vec<u8>,
-    input: OpcodeLabInput,
+    backend_input: Vec<u8>,
 ) -> Result<(sp1_sdk::SP1PublicValues, ExecutionReport)> {
     tokio::task::spawn_blocking(move || {
         let program = parse_sp1_program(&elf)?;
-        execute_opcode_lab_gas_estimator(program, &input)
+        execute_opcode_lab_gas_estimator_with_backend_input(
+            program,
+            &backend_input,
+            canonical_sp1_core_opts(),
+        )
     })
     .await
     .context("join SP1 gas-estimator opcode-lab task")?
@@ -2205,11 +2307,12 @@ fn parse_sp1_program(elf: &[u8]) -> Result<Arc<Program>> {
         .map_err(|err| anyhow::anyhow!("parse SP1 guest ELF: {err:?}"))
 }
 
-fn execute_opcode_lab_gas_estimator(
+fn execute_opcode_lab_gas_estimator_with_backend_input(
     program: Arc<Program>,
-    input: &OpcodeLabInput,
+    backend_input: &[u8],
+    opts: SP1CoreOpts,
 ) -> Result<(sp1_sdk::SP1PublicValues, ExecutionReport)> {
-    execute_opcode_lab_gas_estimator_with_opts(program, input, canonical_sp1_core_opts())
+    execute_sp1_gas_estimator_with_opts(program, SP1Stdin::from(backend_input), opts)
 }
 
 fn execute_context_opcode_lab_gas_estimator(
@@ -2253,14 +2356,14 @@ fn canonicalize_sp1_core_opts(mut opts: SP1CoreOpts) -> SP1CoreOpts {
     opts
 }
 
+#[cfg(test)]
 fn execute_opcode_lab_gas_estimator_with_opts(
     program: Arc<Program>,
     input: &OpcodeLabInput,
     opts: SP1CoreOpts,
 ) -> Result<(sp1_sdk::SP1PublicValues, ExecutionReport)> {
-    let mut stdin = SP1Stdin::new();
-    stdin.write(input);
-    execute_sp1_gas_estimator_with_opts(program, stdin, opts)
+    let backend_input = opcode_lab_backend_input(input, false)?;
+    execute_opcode_lab_gas_estimator_with_backend_input(program, &backend_input, opts)
 }
 
 fn execute_sp1_gas_estimator(
@@ -2304,21 +2407,31 @@ fn execute_opcode_lab_batch_gas_estimator(
     elf: &[u8],
     inputs: Vec<(PathBuf, OpcodeLabInput)>,
     stage: Stage,
+    frozen_legacy_wire_v0: bool,
 ) -> Result<Vec<OpcodeLabExecution>> {
     let program = parse_sp1_program(elf)?;
     let mut outputs = Vec::with_capacity(inputs.len());
     for (input_path, input) in inputs {
-        let (guest_input_sha256, guest_input_bincode_length) = opcode_lab_input_identity(&input)?;
+        let backend_input = opcode_lab_backend_input(&input, frozen_legacy_wire_v0)?;
+        let (guest_input_sha256, guest_input_bincode_length) =
+            opcode_lab_input_identity_from_bytes(&backend_input);
         let controlled_trace = if stage == Stage::RevmOpcodeLab {
             Some(controlled_workload::ControlledTrace::RevmOpcode(Box::new(
-                controlled_workload::trace_revm_opcode_workload(&input)?,
+                controlled_workload::trace_revm_opcode_workload_with_backend_input(
+                    &input,
+                    &backend_input,
+                )?,
             )))
         } else {
             None
         };
         let start = Instant::now();
         let (public_values, execution_report) =
-            execute_opcode_lab_gas_estimator(program.clone(), &input)?;
+            execute_opcode_lab_gas_estimator_with_backend_input(
+                program.clone(),
+                &backend_input,
+                canonical_sp1_core_opts(),
+            )?;
         outputs.push(OpcodeLabExecution {
             input_path,
             public_values: public_values.raw(),
@@ -2337,22 +2450,27 @@ fn execute_opcode_lab_batch_local<P>(
     elf: &[u8],
     inputs: Vec<(PathBuf, OpcodeLabInput)>,
     stage: Stage,
+    frozen_legacy_wire_v0: bool,
 ) -> Result<Vec<OpcodeLabExecution>>
 where
     P: BlockingProver<ProvingKey = SP1ProvingKey>,
 {
     let mut outputs = Vec::with_capacity(inputs.len());
     for (input_path, input) in inputs {
-        let (guest_input_sha256, guest_input_bincode_length) = opcode_lab_input_identity(&input)?;
+        let backend_input = opcode_lab_backend_input(&input, frozen_legacy_wire_v0)?;
+        let (guest_input_sha256, guest_input_bincode_length) =
+            opcode_lab_input_identity_from_bytes(&backend_input);
         let controlled_trace = if stage == Stage::RevmOpcodeLab {
             Some(controlled_workload::ControlledTrace::RevmOpcode(Box::new(
-                controlled_workload::trace_revm_opcode_workload(&input)?,
+                controlled_workload::trace_revm_opcode_workload_with_backend_input(
+                    &input,
+                    &backend_input,
+                )?,
             )))
         } else {
             None
         };
-        let mut stdin = SP1Stdin::new();
-        stdin.write(&input);
+        let stdin = SP1Stdin::from(&backend_input);
         let start = Instant::now();
         let (public_values, execution_report) = execute_sp1_local(prover, elf, stdin)?;
         outputs.push(OpcodeLabExecution {
@@ -2683,7 +2801,8 @@ mod tests {
     use clap::Parser as _;
     use raiko2_opcode_lab::opcode_anchor_public_values;
     use raiko2_primitives::{
-        ContextOpcodeLabInputV1, OpcodeLabInput, PrecompileLabInput, PrecompileLabLane,
+        ContextOpcodeLabInputV1, OpcodeLabInput, OpcodeLabStorageAccess, OpcodeLabStorageInput,
+        OpcodeLabStorageLane, OpcodeLabStorageOperation, PrecompileLabInput, PrecompileLabLane,
         ProofType as RaikoProofType, SupportedChainSpecs,
     };
     use raiko2_primitives_shasta::{GuestInput, build_proof_carry_data_from_witness_spec};
@@ -3398,6 +3517,135 @@ mod tests {
             args.elf.expect("elf path").display().to_string(),
             "crates/guests/elf/sp1_revm_opcode_lab.elf"
         );
+    }
+
+    #[test]
+    fn frozen_legacy_revm_wire_v0_reproduces_pre_storage_bincode() {
+        let input = OpcodeLabInput {
+            case: "add".into(),
+            scenario: "arithmetic".into(),
+            opcode: 0x01,
+            target_count: 4,
+            target_raw_gas: 3,
+            tx_gas_limit: Some(100_000),
+            bytecode: vec![0x60, 0x01, 0x60, 0x02, 0x01, 0x00],
+            generator_max_count: Some(8),
+            fixed_bytecode_len: Some(6),
+            storage: None,
+        };
+        let encoded = super::frozen_legacy_revm_wire_v0(&input).unwrap();
+
+        assert_eq!(encoded.len(), 95);
+        assert_eq!(
+            hex::encode(Sha256::digest(encoded)),
+            "d80b2943c9c7be6f112559c706bbcc9d21f746a1679d0f79113904b61e17b696"
+        );
+
+        let mut stateful_input = input;
+        stateful_input.storage = Some(OpcodeLabStorageInput {
+            measurement_opcode: 0x54,
+            lane: OpcodeLabStorageLane::Target,
+            slot: [0; 32],
+            original_value: [0; 32],
+            access: OpcodeLabStorageAccess::Warm,
+            operation: OpcodeLabStorageOperation::Load {
+                expected_value: [0; 32],
+            },
+        });
+        assert!(super::frozen_legacy_revm_wire_v0(&stateful_input).is_err());
+    }
+
+    #[test]
+    fn frozen_legacy_revm_wire_v0_executes_the_frozen_guest_package() {
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let elf = std::fs::read(
+            repo.join("experiments/opcode-gas/artifacts/legacy-revm-v1/sp1_revm_opcode_lab.elf"),
+        )
+        .unwrap();
+        assert_eq!(
+            hex::encode(Sha256::digest(&elf)),
+            "a4d340812a54a36ce57cdd0f197843f43f67fd9ac7450acee2ec1f6e58eb9a56"
+        );
+        let input = read_opcode_lab_input(
+            &repo.join("bin/guest-launcher/tests/fixtures/revm-opcode-lab-add-32.json"),
+        )
+        .unwrap();
+        let backend_input = super::frozen_legacy_revm_wire_v0(&input).unwrap();
+        assert_eq!(backend_input.len(), 4_707);
+        assert_eq!(
+            hex::encode(Sha256::digest(&backend_input)),
+            "b33ca86ba8b169e75fb3367212a784748b3bb6edf318108b9c9e2e859100f0cc"
+        );
+        let trace = super::controlled_workload::trace_revm_opcode_workload_with_backend_input(
+            &input,
+            &backend_input,
+        )
+        .unwrap();
+        assert_eq!(trace.backend_input_len, backend_input.len());
+        assert_eq!(
+            trace.backend_input_sha256,
+            "b33ca86ba8b169e75fb3367212a784748b3bb6edf318108b9c9e2e859100f0cc"
+        );
+
+        let (public_values, report) = super::execute_opcode_lab_gas_estimator_with_backend_input(
+            parse_sp1_program(&elf).unwrap(),
+            &backend_input,
+            canonical_sp1_core_opts(),
+        )
+        .unwrap();
+        assert_eq!(
+            public_values.raw(),
+            "0x9318bc580c9b2aa315a8649bd205867ef84a5d28fecdb187ec57ba86f409ec16"
+        );
+        assert_eq!(report.gas(), Some(1_448_066));
+        assert_eq!(report.exit_code, 0);
+    }
+
+    #[test]
+    fn frozen_legacy_revm_wire_flag_is_estimator_revm_only() {
+        let valid = Args::try_parse_from([
+            "guest-launcher",
+            "--stage",
+            "revm-opcode-lab",
+            "--proof-type",
+            "sp1",
+            "--mode",
+            "execute",
+            "--sp1-prover",
+            "local",
+            "--sp1-execution-engine",
+            "gas-estimator",
+            "--frozen-legacy-revm-wire-v0",
+            "--elf",
+            "legacy.elf",
+            "--input",
+            "input.json",
+        ])
+        .unwrap();
+        valid.validate_frozen_legacy_revm_wire_v0().unwrap();
+
+        for stage in ["opcode-lab", "context-opcode-lab"] {
+            let invalid = Args::try_parse_from([
+                "guest-launcher",
+                "--stage",
+                stage,
+                "--proof-type",
+                "sp1",
+                "--mode",
+                "execute",
+                "--sp1-prover",
+                "local",
+                "--sp1-execution-engine",
+                "gas-estimator",
+                "--frozen-legacy-revm-wire-v0",
+                "--elf",
+                "legacy.elf",
+                "--input",
+                "input.json",
+            ])
+            .unwrap();
+            assert!(invalid.validate_frozen_legacy_revm_wire_v0().is_err());
+        }
     }
 
     #[test]

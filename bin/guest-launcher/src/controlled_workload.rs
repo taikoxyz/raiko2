@@ -2829,17 +2829,24 @@ pub fn block_environment_sha256(block: &BlockEnv) -> Result<String> {
 pub fn controlled_opcode_identity(
     input: &OpcodeLabInput,
 ) -> Result<ControlledOpcodeIdentityEvidence> {
+    let backend_input = bincode::serialize(input)?;
+    controlled_opcode_identity_with_backend_input(input, &backend_input)
+}
+
+fn controlled_opcode_identity_with_backend_input(
+    input: &OpcodeLabInput,
+    backend_input: &[u8],
+) -> Result<ControlledOpcodeIdentityEvidence> {
     input
         .validate_controlled_contract()
         .map_err(anyhow::Error::msg)?;
-    let backend_input = bincode::serialize(input)?;
     let canonical_tx = build_benchmark_tx(input.execution_gas_limit(), input.storage.as_ref())?;
     let canonical_block = BlockEnv::default();
     let (transaction_envelope_sha256, access_list_sha256) = transaction_identities(&canonical_tx)?;
     Ok(ControlledOpcodeIdentityEvidence {
         schema_version: 2,
         input: input.clone(),
-        backend_input_sha256: alloy_primitives::hex::encode(Sha256::digest(&backend_input)),
+        backend_input_sha256: alloy_primitives::hex::encode(Sha256::digest(backend_input)),
         backend_input_len: backend_input.len(),
         workload_id: controlled_workload_id(&controlled_opcode_workload_spec(input))?,
         transaction_envelope_sha256,
@@ -3047,10 +3054,23 @@ fn check_opcode_semantics_with_environment(
 }
 
 pub fn trace_revm_opcode_workload(input: &OpcodeLabInput) -> Result<ControlledOpcodeTrace> {
-    let identity = controlled_opcode_identity(input)?;
+    let backend_input = bincode::serialize(input)?;
+    trace_revm_opcode_workload_with_backend_input(input, &backend_input)
+}
+
+pub fn trace_revm_opcode_workload_with_backend_input(
+    input: &OpcodeLabInput,
+    backend_input: &[u8],
+) -> Result<ControlledOpcodeTrace> {
+    let identity = controlled_opcode_identity_with_backend_input(input, backend_input)?;
     let canonical_tx = build_benchmark_tx(input.execution_gas_limit(), input.storage.as_ref())?;
     let canonical_block = BlockEnv::default();
-    let semantic_check = check_revm_opcode_semantics(input)?;
+    let semantic_check = check_opcode_semantics_with_environment(
+        input,
+        backend_input,
+        canonical_tx.clone(),
+        canonical_block.clone(),
+    )?;
     trace_opcode_workload_with_environment(
         input,
         identity.workload_id,

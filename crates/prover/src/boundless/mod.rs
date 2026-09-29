@@ -2010,6 +2010,7 @@ async fn prepare_quote_context<F, Fut>(
     stage_input: &BoundlessStageInput,
     encoded_input: &[u8],
     execution_po2: u32,
+    proposal_zkgas_warning_threshold: u64,
     execute: F,
 ) -> RaikoResult<QuoteContext>
 where
@@ -2028,9 +2029,11 @@ where
     }
     let estimate = if matches!(quote_sizing, QuoteSizing::Estimated { .. }) {
         Some(match stage_input {
-            BoundlessStageInput::Proposal(input) => {
-                estimation::estimate_proposal(input, execution_po2)?
-            }
+            BoundlessStageInput::Proposal(input) => estimation::estimate_proposal(
+                input,
+                execution_po2,
+                proposal_zkgas_warning_threshold,
+            )?,
             BoundlessStageInput::Aggregation(_) => estimation::estimate_aggregation(encoded_input)?,
         })
     } else {
@@ -2046,6 +2049,7 @@ async fn initialize_quote_lineage<Load, LoadFut, Execute, ExecuteFut>(
     stage_input: &BoundlessStageInput,
     encoded_input: &[u8],
     execution_po2: u32,
+    proposal_zkgas_warning_threshold: u64,
     load_resume: Load,
     execute: Execute,
 ) -> RaikoResult<(
@@ -2073,6 +2077,7 @@ where
                 stage_input,
                 encoded_input,
                 execution_po2,
+                proposal_zkgas_warning_threshold,
                 execute,
             )
             .await?,
@@ -2088,6 +2093,7 @@ async fn prepare_quote_context_for_attempt<F, Fut>(
     stage_input: &BoundlessStageInput,
     encoded_input: &[u8],
     execution_po2: u32,
+    proposal_zkgas_warning_threshold: u64,
     journal: &QuoteJournalContext,
     request_reuse: &RebidRequestReuse,
     current_quote: &mut Option<QuoteContext>,
@@ -2109,6 +2115,7 @@ where
         stage_input,
         encoded_input,
         execution_po2,
+        proposal_zkgas_warning_threshold,
         execute,
     )
     .await?;
@@ -5045,12 +5052,14 @@ impl BoundlessProver {
     ) -> RaikoResult<Proof> {
         let quote_sizing = self.quote_sizing(elf_type);
         let execution_po2 = self.config.execution_po2;
+        let proposal_zkgas_warning_threshold = self.config.proposal_zkgas_warning_threshold;
         let (resume_record, quote_journal, mut current_quote) = initialize_quote_lineage(
             elf_type,
             quote_sizing,
             &stage_input,
             input.as_ref(),
             execution_po2,
+            proposal_zkgas_warning_threshold,
             || async {
                 let Some(observer) = observer.as_ref() else {
                     return Ok(None);
@@ -5222,6 +5231,7 @@ impl BoundlessProver {
                     &stage_input,
                     input.as_ref(),
                     execution_po2,
+                    proposal_zkgas_warning_threshold,
                     &quote_journal,
                     &request_reuse,
                     &mut current_quote,
@@ -7507,6 +7517,41 @@ mod tests {
         std::future::ready(Ok((mcycles, journal)))
     }
 
+    fn estimable_proposal_input(block_count: usize, total_zkgas: u64) -> GuestInput {
+        let block_count_u64 = u64::try_from(block_count).expect("test block count");
+        let zkgas_per_block = total_zkgas / block_count_u64;
+        let remainder = total_zkgas % block_count_u64;
+        let mut chain_spec = ChainSpec {
+            name: "taiko_mainnet".to_string(),
+            ..Default::default()
+        };
+        chain_spec
+            .hard_forks
+            .insert(ForkId::Taiko(TaikoFork::Unzen), ForkCondition::Block(0));
+
+        GuestInput {
+            witnesses: (0..block_count)
+                .map(|index| {
+                    let mut witness = StatelessInput {
+                        chain_spec: chain_spec.clone(),
+                        ..Default::default()
+                    };
+                    witness.block.header.number = u64::try_from(index).expect("test block number");
+                    witness.block.header.timestamp =
+                        u64::try_from(index).expect("test block timestamp");
+                    witness.block.header.difficulty = U256::from(
+                        zkgas_per_block
+                            + u64::from(
+                                u64::try_from(index).expect("test witness index") < remainder,
+                            ),
+                    );
+                    witness
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
     fn linked_aggregation_input(child_count: usize) -> ShastaRisc0AggregationGuestInput {
         let mut carries = Vec::with_capacity(child_count);
         let mut parent_proposal_hash = B256::ZERO;
@@ -7569,6 +7614,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn quote_context_proposal_above_artifact_range_below_warning_threshold_skips_execution() {
+        let input = estimable_proposal_input(192, 562_107_601);
+        let encoded = bincode::serialize(&input).expect("encode proposal fixture");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let execution_calls = Arc::clone(&calls);
+
+        let context = prepare_quote_context(
+            ElfType::Batch,
+            &crate::boundless_config::QuoteSizing::Estimated { mcycles_offset: 0 },
+            &BoundlessStageInput::Proposal(Box::new(input)),
+            &encoded,
+            20,
+            1_000_000_000,
+            move || execution_result(&execution_calls, 9_999, Vec::new()),
+        )
+        .await
+        .expect("warning threshold should permit estimation beyond the artifact range");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(context.evaluated_mcycles_count, None);
+        assert_eq!(context.strategy, Some(BoundlessQuoteStrategy::Estimated));
+        assert_eq!(
+            context.model_id.as_deref(),
+            Some("risc0-zkgas-m2-c71d7a4ff237c10d")
+        );
+    }
+
+    #[tokio::test]
+    async fn quote_context_proposal_above_warning_threshold_still_skips_execution() {
+        let input = estimable_proposal_input(192, 562_107_601);
+        let encoded = bincode::serialize(&input).expect("encode proposal fixture");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let execution_calls = Arc::clone(&calls);
+
+        let context = prepare_quote_context(
+            ElfType::Batch,
+            &crate::boundless_config::QuoteSizing::Estimated { mcycles_offset: 0 },
+            &BoundlessStageInput::Proposal(Box::new(input)),
+            &encoded,
+            20,
+            500_000_000,
+            move || execution_result(&execution_calls, 2_777, B256::repeat_byte(0x57).to_vec()),
+        )
+        .await
+        .expect("proposal above warning threshold should still use estimation");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(context.quoted_mcycles_count, 3_037);
+        assert_eq!(context.evaluated_mcycles_count, None);
+        assert_eq!(context.strategy, Some(BoundlessQuoteStrategy::Estimated));
+        assert_eq!(
+            context.model_id.as_deref(),
+            Some("risc0-zkgas-m2-c71d7a4ff237c10d")
+        );
+    }
+
+    #[tokio::test]
     async fn quote_context_estimated_aggregation_has_no_child_count_gate() {
         for (child_count, expected_mcycles) in [(1, 180), (5, 900), (6, 1_080)] {
             let input = linked_aggregation_input(child_count);
@@ -7582,6 +7684,7 @@ mod tests {
                 &BoundlessStageInput::Aggregation(input),
                 &encoded,
                 20,
+                1,
                 move || execution_result(&execution_calls, 818, B256::repeat_byte(0xff).to_vec()),
             )
             .await
@@ -7609,7 +7712,7 @@ mod tests {
             &crate::boundless_config::QuoteSizing::Estimated {
                 mcycles_offset: 1_300,
             },
-            Some(Err(super::estimation::EstimateUnavailable::TotalZkGasCap)),
+            Some(Err(super::estimation::EstimateUnavailable::Numeric)),
             move || execution_result(&execution_calls, 1_455, journal),
         )
         .await
@@ -7798,7 +7901,7 @@ mod tests {
         let context = prepare_quote_context_from_estimate(
             ElfType::Batch,
             &crate::boundless_config::QuoteSizing::Estimated { mcycles_offset: 0 },
-            Some(Err(super::estimation::EstimateUnavailable::TotalZkGasCap)),
+            Some(Err(super::estimation::EstimateUnavailable::Numeric)),
             move || execution_result(&observed_calls, 1_000, B256::repeat_byte(0x52).to_vec()),
         )
         .await
@@ -7902,6 +8005,7 @@ mod tests {
                 &stage_input,
                 &encoded,
                 20,
+                1_000_000_000,
                 || std::future::ready(Ok(Some(resume))),
                 move || {
                     initialization_calls.fetch_add(1, Ordering::SeqCst);
@@ -7941,6 +8045,7 @@ mod tests {
                 &stage_input,
                 &encoded,
                 20,
+                1_000_000_000,
                 &journal,
                 &reuse,
                 &mut current_quote,
@@ -7976,6 +8081,7 @@ mod tests {
             &stage_input,
             &encoded,
             20,
+            1_000_000_000,
             || std::future::ready(Ok(Some(resume))),
             move || {
                 initialization_calls.fetch_add(1, Ordering::SeqCst);
@@ -8002,6 +8108,7 @@ mod tests {
             &stage_input,
             &encoded,
             20,
+            1_000_000_000,
             &journal,
             &same_id,
             &mut current_quote,
@@ -8028,6 +8135,7 @@ mod tests {
             &stage_input,
             &encoded,
             20,
+            1_000_000_000,
             &journal,
             &rotated,
             &mut current_quote,
@@ -8185,6 +8293,7 @@ mod tests {
             &stage_input,
             &encoded,
             20,
+            1_000_000_000,
             &journal,
             &reuse,
             &mut current_quote,
@@ -8262,6 +8371,7 @@ mod tests {
                 &stage_input,
                 &encoded,
                 20,
+                1_000_000_000,
                 &journal,
                 &rotated,
                 &mut current_quote,
@@ -8286,6 +8396,7 @@ mod tests {
             &BoundlessStageInput::Proposal(Box::new(input)),
             &encoded,
             20,
+            1_000_000_000,
             move || execution_result(&execution_calls, 1_000, B256::repeat_byte(0x55).to_vec()),
         )
         .await
@@ -8330,6 +8441,7 @@ mod tests {
             &BoundlessStageInput::Proposal(Box::new(input)),
             &encoded,
             20,
+            1_000_000_000,
             move || execution_result(&execution_calls, 1_000, B256::repeat_byte(0x56).to_vec()),
         )
         .await
@@ -8358,6 +8470,7 @@ mod tests {
             &BoundlessStageInput::Aggregation(input),
             &encoded,
             20,
+            1_000_000_000,
             move || execution_result(&execution_calls, 1_000, B256::repeat_byte(0x66).to_vec()),
         )
         .await

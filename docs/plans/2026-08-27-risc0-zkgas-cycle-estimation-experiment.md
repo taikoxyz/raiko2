@@ -11,13 +11,16 @@ cycles, change the protocol zkGas schedule, or change production quoting behavio
 > **Production-policy amendment (2026-08-31):** The experiment gates below record the original
 > conservative study design; they are not the current runtime availability contract. The shipped
 > opt-in `estimated` strategy deliberately uses exact Unzen, `execution_po2 >= 20`, non-empty
-> witnesses with non-zero zkGas, checked arithmetic, and total zkGas at or below `500_000_000`.
+> witnesses with non-zero zkGas, and checked arithmetic. Total zkGas does not gate estimation; the
+> configurable `proposal_zkgas_warning_threshold` (default `1_000_000_000`) only emits an
+> observability warning for offline sampling.
 > Network, observed block-count/zkGas rectangles, and runtime ELF/image matching do not gate it.
 > Release owners enabling `estimated` accept unmeasured cycle drift across guest pairings and
-> extrapolation outside collected rectangles; the empirical 10% budget gates concrete collected
-> observations during model publication or refresh, not every future request. Use `evaluated` when
+> extrapolation outside collected rectangles, including the committed `21.9679%` Mainnet overquote.
+> The artifact's empirical 10% check applies only within its historical 500M publication window,
+> not every runtime request. Use `evaluated` when
 > exact cycles are required. The current source of truth is the estimated-quote design spec,
-> `docs/API.md`, and the generated model artifact.
+> `docs/API.md`, effective Boundless configuration, and the generated model artifact.
 
 The decision target is the Boundless quote bucket, not the best unconstrained regression score. The
 current `raiko_agent` strategy rounds proposal estimates up to 1,000 mcycle steps with a 2,000
@@ -283,7 +286,9 @@ calibrated path.
 ### Production amendment (2026-09-02)
 
 The later Boundless implementation keeps proposal and aggregation estimation independent. Proposal
-estimation uses the packaged zkGas model and its proposal-only ten-percent publication budget.
+estimation uses the packaged zkGas coefficients; the configured proposal total-zkGas threshold is
+observability-only and never selects local execution. The artifact's historical ten-percent
+publication check is not a runtime availability rule.
 Aggregation instead applies the artifact's direct `180 * child_count` scalar to every structurally
 valid, non-empty input, without a child-count calibration allowlist or an aggregation error-budget
 gate. The current v4 API admits 1-1024 children; this is deliberate extrapolation beyond the largest

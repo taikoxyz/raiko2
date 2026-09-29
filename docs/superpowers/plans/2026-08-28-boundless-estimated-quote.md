@@ -4,7 +4,14 @@
 
 **Goal:** Add an opt-in Boundless `estimated` quote strategy that derives the RISC0 journal and cycle quote without local proposal/aggregation execution when the input satisfies the committed operating policy, while preserving one-execution local fallback and durable quote provenance.
 
-**Architecture:** A new `boundless::estimation` module owns the embedded model schema, checked estimator arithmetic, operating-policy selection, fork guard, and deterministic proposal/aggregation journal construction. `boundless/mod.rs` turns each request into a durable `QuoteContext` before submission, uses a request-scoped isolated Boundless SDK builder for estimates and fallbacks, and preserves that context for every rung sharing a request ID. Configuration continues to choose the strategy per stage; the embedded JSON is the only runtime source for coefficients, the global zkGas cap, model identity, and aggregation per-child scalar.
+**Architecture:** A new `boundless::estimation` module owns the embedded model schema, checked estimator arithmetic, fork guard, and deterministic proposal/aggregation journal construction. `boundless/mod.rs` turns each request into a durable `QuoteContext` before submission, uses a request-scoped isolated Boundless SDK builder for estimates and fallbacks, and preserves that context for every rung sharing a request ID. Configuration chooses the strategy per stage and owns the proposal total-zkGas warning threshold; the embedded JSON remains the runtime source for coefficients, calibration metadata, model identity, and aggregation per-child scalar.
+
+> **Runtime-policy amendment (2026-09-29):**
+> `prover.risc0.boundless.proposal_zkgas_warning_threshold` defaults to 1B and may be overridden per
+> network pair. Crossing it still estimates and only emits a warning for offline sampling; total
+> zkGas never selects local execution. The artifact's 500M field is historical publication metadata,
+> and the committed 21.9679% Mainnet overquote is accepted. The task steps below describe the
+> original artifact-owned policy and remain as implementation history.
 
 **Tech Stack:** Rust 2024 workspace, serde/serde_json, bincode, RISC Zero 3.0.5, boundless-market 2.0.0, Tokio, TOML configuration, Python 3.11 experiment venv for fixture diagnostics.
 
@@ -14,7 +21,7 @@
 
 - Do not change guest source or generated ELFs.
 - Do not add a public preflight flag, runtime ELF/image/version gate, or network-specific coefficient.
-- Treat malformed stage input and invalid carry linkage as direct request errors. Treat proposal operating-policy, execution-configuration, fork, zero/overflow, and aggregation numeric-overflow failures as warning-plus-one-local-execution fallback.
+- Treat malformed stage input and invalid carry linkage as direct request errors. Treat proposal execution-configuration, fork, zero/overflow, and aggregation numeric-overflow failures as warning-plus-one-local-execution fallback. A proposal above the configured zkGas warning threshold stays estimated.
 - Use `apply_patch` for repository edits. Run Python through an existing virtual environment.
 - Preserve unrelated worktree changes. Commit each coherent task only after its focused red/green checks pass.
 - Before completion, run independent adversarial review and independent behavioral verification because journal equality, request pricing, and durable rebid state are cross-crate behavior.
@@ -53,7 +60,8 @@ The artifact schema contains:
 - provenance: source revision `4f8300497aba75605b9b8568b1955faa1f7f04bc`, proposal image ID `0xd6ab71c22201c23ef512b706f2e2d720f6da1b559fb76834aa9d4e35276f6e10`, proposal ELF SHA-256 `d7a4aca3769005d30772a6a1d4c47c95f7d6692244a3b017b181935a855e6b35`, RISC0 `3.0.5`, and `min_execution_po2 = 20`;
 - generated config SHA-256, compact input-row SHA-256 `0cfbf1184483f2646eedb9833365e3f232bee9c68604ff94e2160949e8696328`, and validation fixture SHA-256 `dff36c84683011825a7372e43f846b678266f0f062515f44631922e9a7c47767`;
 - decimal proposal coefficients and scaled integer coefficients with scale `1_000_000_000_000`;
-- global proposal operating cap `max_total_zkgas = 500_000_000`; network and block count are not availability gates;
+- historical proposal publication window `max_total_zkgas = 500_000_000`; network, block count,
+  and total zkGas are not runtime availability gates;
 - exact cohort counts and documented diagnostics for Hoodi calibration and Mainnet evaluation;
 - aggregation formula `per_child_mcycles = 180` and audit-only aggregation image provenance. No child-count observation controls runtime availability.
 
@@ -172,7 +180,6 @@ git commit -m "refactor(boundless): require explicit quote strategies"
 pub(crate) enum EstimateUnavailable {
     ExecutionPo2,
     Fork,
-    TotalZkGasCap,
     ZeroZkGas,
     Numeric,
 }
@@ -186,6 +193,7 @@ pub(crate) struct EstimatedRequestMetadata {
 pub(crate) fn estimate_proposal(
     input: &GuestInput,
     execution_po2: u32,
+    proposal_zkgas_warning_threshold: u64,
 ) -> RaikoResult<Result<EstimatedRequestMetadata, EstimateUnavailable>>;
 ```
 
@@ -198,7 +206,7 @@ Build small in-memory `GuestInput` values and cover:
 - empty witnesses is a direct error;
 - a valid carry produces exactly the 32-byte `hash_shasta_subproof_input` journal after non-panicking carry validation;
 - network names and observed block-count ranges do not gate estimation;
-- total zkGas `500_000_000` estimates successfully and `500_000_001` is unavailable;
+- total zkGas above the configured warning threshold still estimates without local execution;
 - `execution_po2 >= 20` is available and a lower value is unavailable;
 - every witness must have highest active Taiko fork exactly Unzen; pre-Unzen is unavailable. Unit-test the ordered active-fork classifier with a private synthetic rank above Unzen so future Taiko enum variants cannot be accepted accidentally, without adding a production fork variant;
 - zero difficulty and checked-add/multiply/final-conversion overflow are unavailable;
@@ -218,7 +226,7 @@ Expose or reuse the shared Shasta carry-vector validation path so `hash_shasta_s
 
 **Step 3: Implement fork/policy extraction and checked integer arithmetic**
 
-Read each `witness.block.header.number`, `timestamp`, and `difficulty`; require exact Unzen and a non-empty witness list; sum non-zero `difficulty` through checked `u128` conversion/addition; require the total at or below the artifact cap; multiply and add all scaled terms with checked arithmetic; ceiling-divide by artifact scale; and convert to positive `u32`.
+Read each `witness.block.header.number`, `timestamp`, and `difficulty`; require exact Unzen and a non-empty witness list; sum non-zero `difficulty` through checked `u128` conversion/addition; multiply and add all scaled terms with checked arithmetic; ceiling-divide by artifact scale; and convert to positive `u32`. Emit observability when the total exceeds the configured warning threshold without making the estimate unavailable.
 
 **Step 4: Re-run the focused tests**
 

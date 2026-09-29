@@ -1397,17 +1397,25 @@ Operator notes:
   both stage tables are required. Each table accepts exactly `strategy = "estimated"`,
   `"evaluated"`, or `"fixed"`; `fixed` also requires a positive `mcycles` value. The removed
   `raiko_agent` value is intentionally rejected: migrate every old explicit configuration before
-  rolling out this binary. Pair-specific `rpc.pairs[*].boundless` quote fields remain optional and
-  inherit the corresponding global stage table when omitted.
+  rolling out this binary. `prover.risc0.boundless.proposal_zkgas_warning_threshold` is a positive
+  proposal-only observability threshold and defaults to `1000000000`. Exceeding it warns but never
+  changes the estimate path. Pair-specific `rpc.pairs[*].boundless` quote and threshold fields remain
+  optional and inherit the corresponding global value when omitted.
 - `evaluated` performs the exact local guest dry-run and quotes its cycle count. `fixed` still runs
   the guest locally to obtain the journal, but quotes the configured count. `estimated` derives the
   expected journal and quote from the typed input without local guest execution. The estimation step
   itself does not submit a proof; the normal Boundless request still proves the original guest and
-  input. It is an explicit auction-cost/timeout optimization. For proposals only, the approximately
-  ten-percent target is an empirical publication gate over collected observations, not a per-request
-  runtime guarantee. Aggregation has no error-budget gate. Since an in-policy request is not locally
+  input. It is an explicit auction-cost/timeout optimization. The configured proposal warning
+  threshold is neither an availability boundary nor an accuracy promise. The committed Mainnet
+  evaluation data contains a
+  `21.9679%` production-integer overquote, which is an accepted pricing/timeout mismatch. The
+  artifact's historical `500000000` publication window and ten-percent check remain calibration
+  records and do not constrain runtime admission. Aggregation has no error-budget gate. Since an
+  in-policy request is not locally
   executed first, its actual underquote or overquote is unknown and that mismatch is accepted.
-  Select `evaluated` when exact local cycles are required.
+  Existing order-acceptance monitoring covers operational underquotes. With the deployed auction
+  starting at zero, overestimation raises the maximum-price ceiling but does not itself set the paid
+  price. Select `evaluated` when exact local cycles are required.
 - Each `estimated` stage table independently accepts `mcycles_offset`, measured in millions of
   cycles. For the current legacy proposal pairing, set `batch_quote.mcycles_offset = 1300` (1.3
   billion cycles) and `aggregation_quote.mcycles_offset = 0`; a batch offset never changes aggregate
@@ -1416,17 +1424,18 @@ Operator notes:
   evaluation without the offset. Remove or reset the stage offset after publishing matching
   calibration data.
 - Proposal estimation currently supports any non-empty exact-Unzen input with
-  `execution_po2 >= 20`, non-zero zkGas in every witness, and checked total zkGas at or below
-  `500000000`. It does not gate on network name or block count; block count remains an M2 formula
+  `execution_po2 >= 20`, non-zero zkGas in every witness, and representable checked arithmetic. It
+  does not gate on network name, block count, or total zkGas; block count remains an M2 formula
   input. Combinations outside the collected sample rectangles are deliberately admitted without a
   per-request error proof. Size that acceptance concretely: the collected rectangles are
   `block_count` 155-192 and `total_zkgas` 216314230-562107601, and 192 is the pre-Unzen
   derivation-source block limit. Unzen raises that protocol limit to 768, and estimation only runs
   on exact-Unzen input, so an admitted proposal can carry up to four times the calibrated block
-  count with the global zkGas cap as the only remaining bound. Pre-Unzen, later-fork,
-  lower-`execution_po2`, zero-zkGas, over-cap, and arithmetic-overflow inputs emit a warning and
-  perform exactly one local evaluation. A malformed
-  or structurally invalid input fails directly rather than falling back.
+  count. Totals above the effective `proposal_zkgas_warning_threshold` (default `1000000000`) remain
+  estimated and emit a warning with the total, threshold, estimate, and model ID so operators can
+  select offline calibration samples. Pre-Unzen, later-fork, lower-`execution_po2`, zero-zkGas, and
+  arithmetic-overflow inputs emit a different warning and perform exactly one local evaluation. A
+  malformed or structurally invalid input fails directly rather than falling back.
 - Estimated aggregation derives the journal on the host and quotes `180 * child_count` mcycles for
   every structurally valid, non-empty input. Historical child-count observations are audit data,
   never a runtime allowlist. The v4 API accepts 1-1024 proposals, so the quote ranges from 180 to

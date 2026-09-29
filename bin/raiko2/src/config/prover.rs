@@ -3,9 +3,10 @@ use raiko2_pipeline::RunnerKind;
 use raiko2_primitives::ProofType;
 use raiko2_prover::{
     boundless_config::{
-        DEFAULT_REBID_MAX_ATTEMPTS, DEFAULT_REBID_PRICE_STEP_BPS, DEFAULT_REBID_TIMEOUT_MS,
-        DeploymentConfig, MIN_MEANINGFUL_REBID_PRICE_STEP_BPS, MIN_REBID_TIMEOUT_MS,
-        OfferParamsConfig, QuoteSizing, REBID_MAX_ATTEMPTS_LIMIT, validate_offer_spec,
+        DEFAULT_PROPOSAL_ZKGAS_WARNING_THRESHOLD, DEFAULT_REBID_MAX_ATTEMPTS,
+        DEFAULT_REBID_PRICE_STEP_BPS, DEFAULT_REBID_TIMEOUT_MS, DeploymentConfig,
+        MIN_MEANINGFUL_REBID_PRICE_STEP_BPS, MIN_REBID_TIMEOUT_MS, OfferParamsConfig, QuoteSizing,
+        REBID_MAX_ATTEMPTS_LIMIT, validate_offer_spec,
     },
     sp1_config::{
         ExecutionMode as Sp1ExecutionMode, ProverMode as Sp1ProverMode, Sp1Config, Sp1ConfigError,
@@ -513,6 +514,8 @@ const fn default_risc0_execution_po2() -> u32 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BoundlessConfig {
+    #[serde(default = "default_proposal_zkgas_warning_threshold")]
+    pub proposal_zkgas_warning_threshold: u64,
     #[serde(default = "default_boundless_offchain")]
     pub offchain: bool,
     pub rpc_url: String,
@@ -539,6 +542,7 @@ pub struct BoundlessConfig {
 impl Default for BoundlessConfig {
     fn default() -> Self {
         Self {
+            proposal_zkgas_warning_threshold: default_proposal_zkgas_warning_threshold(),
             offchain: raiko2_prover::boundless_config::BoundlessConfig::default().offchain,
             rpc_url: raiko2_prover::boundless_config::BoundlessConfig::default().rpc_url,
             signer_key: String::new(),
@@ -560,6 +564,9 @@ impl Default for BoundlessConfig {
 impl BoundlessConfig {
     /// Validate the effective Boundless config.
     pub fn validate(&self) -> Result<()> {
+        if self.proposal_zkgas_warning_threshold == 0 {
+            bail!("prover.risc0.boundless.proposal_zkgas_warning_threshold must be > 0");
+        }
         self.batch_quote
             .validate("prover.risc0.boundless.batch_quote")
             .map_err(anyhow::Error::msg)?;
@@ -608,6 +615,9 @@ impl BoundlessConfig {
     /// Merge a pair-specific Boundless override into the global default config.
     pub fn apply_pair_override(&self, pair: &BoundlessPairConfig) -> Result<Self> {
         let mut merged = self.clone();
+        if let Some(proposal_zkgas_warning_threshold) = pair.proposal_zkgas_warning_threshold {
+            merged.proposal_zkgas_warning_threshold = proposal_zkgas_warning_threshold;
+        }
         if let Some(batch_quote) = pair.batch_quote.clone() {
             merged.batch_quote = batch_quote;
         }
@@ -642,6 +652,10 @@ impl BoundlessConfig {
 
 const fn default_boundless_offchain() -> bool {
     false
+}
+
+const fn default_proposal_zkgas_warning_threshold() -> u64 {
+    DEFAULT_PROPOSAL_ZKGAS_WARNING_THRESHOLD
 }
 
 const fn default_boundless_poll_interval_ms() -> u64 {
@@ -789,6 +803,53 @@ enabled = false
         assert_eq!(
             effective.aggregation_quote,
             raiko2_prover::boundless_config::QuoteSizing::Fixed { mcycles: 200 }
+        );
+    }
+
+    #[test]
+    fn pair_omission_inherits_base_proposal_zkgas_warning_threshold() {
+        let mut config = boundless_network_config();
+        config.risc0.boundless.proposal_zkgas_warning_threshold = 900_000_000;
+
+        let effective = config
+            .risc0
+            .boundless
+            .apply_pair_override(&BoundlessPairConfig::default())
+            .expect("pair without warning override should retain base threshold");
+
+        assert_eq!(effective.proposal_zkgas_warning_threshold, 900_000_000);
+    }
+
+    #[test]
+    fn pair_overrides_proposal_zkgas_warning_threshold() {
+        let config = boundless_network_config();
+        let pair: BoundlessPairConfig =
+            toml::from_str("proposal_zkgas_warning_threshold = 750000000")
+                .expect("pair-specific proposal zkGas warning threshold should deserialize");
+
+        let effective = config
+            .risc0
+            .boundless
+            .apply_pair_override(&pair)
+            .expect("pair proposal zkGas warning threshold should apply");
+
+        assert_eq!(effective.proposal_zkgas_warning_threshold, 750_000_000);
+    }
+
+    #[test]
+    fn global_proposal_zkgas_warning_threshold_rejects_zero() {
+        let mut config = boundless_network_config();
+        config.risc0.boundless.proposal_zkgas_warning_threshold = 0;
+
+        let error = config
+            .validate()
+            .expect_err("zero proposal zkGas warning threshold must fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("proposal_zkgas_warning_threshold"),
+            "{error}"
         );
     }
 

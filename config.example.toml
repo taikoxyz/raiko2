@@ -138,7 +138,8 @@ timeout_ms = 300000
 
 [prover.risc0.boundless]
 # Global default for the `risc0/network` route. Pair-specific overrides under `rpc.pairs[*].boundless`
-# can replace `batch_quote`/`aggregation_quote`, runtime timeout/rebid fields,
+# can replace `batch_quote`/`aggregation_quote`, `proposal_zkgas_warning_threshold`, runtime
+# timeout/rebid fields,
 # and either offer param block for selected pairs.
 offchain = false
 rpc_url = "https://base-rpc.publicnode.com"
@@ -155,6 +156,10 @@ rebid_price_step_bps = 5000
 # requests share one budget); the proof task fails once it is exhausted. The default
 # allows ~5x max price at the default step.
 rebid_max_attempts = 4
+# Proposal totals above this threshold still use the fast zkGas model when batch_quote is estimated,
+# but emit a warning for offline accuracy sampling. This is an observability threshold, not an
+# execution-path, proof-validity, or model-accuracy limit. Pair-specific config may override it.
+proposal_zkgas_warning_threshold = 1000000000
 
 # EIP-1559 policy for each on-chain submitRequest transaction. This is separate from the market
 # rebid ladder above: a market attempt may replace its own transaction at the same nonce when the
@@ -202,8 +207,9 @@ order_stream_url = "https://base-mainnet.boundless.network"
 # proposals per aggregation, the estimator's multiplication/conversion fallback is unreachable;
 # keep the documented aggregation offset at zero. Existing `estimated` deployments therefore change
 # on upgrade from local evaluation to direct estimation without a config change.
-# Proposal estimates require exact Unzen, execution_po2 >= 20, non-zero per-block zkGas, and total
-# zkGas <= 500000000; network and block count do not gate availability. Raiko2 does not compare
+# Proposal estimates require exact Unzen, execution_po2 >= 20, and non-zero per-block zkGas;
+# network, block count, and total zkGas do not gate availability. Totals above
+# proposal_zkgas_warning_threshold emit a warning but remain estimated. Raiko2 does not compare
 # model provenance with the running guest ELF; selecting `estimated` accepts any release-pairing
 # cycle drift. An estimated strategy
 # may temporarily set `mcycles_offset` to compensate for measured release-pairing drift before a

@@ -153,6 +153,7 @@ pub(crate) fn boundless_prover_config(
         .expect("validated boundless config must merge cleanly");
     raiko2_prover::boundless::BoundlessConfig {
         execution_po2: config.prover.risc0.execution_po2,
+        proposal_zkgas_warning_threshold: boundless.proposal_zkgas_warning_threshold,
         offchain: boundless.offchain,
         rpc_url: boundless.rpc_url,
         signer_key: boundless.signer_key,
@@ -324,6 +325,11 @@ mod tests {
         config.prover.risc0.boundless.rebid_timeout_ms = 900_000;
         config.prover.risc0.boundless.rebid_price_step_bps = 3000;
         config.prover.risc0.boundless.rebid_max_attempts = 5;
+        config
+            .prover
+            .risc0
+            .boundless
+            .proposal_zkgas_warning_threshold = 900_000_000;
         config.rpc.pairs[0].boundless.batch_quote =
             Some(raiko2_prover::boundless::QuoteSizing::Fixed { mcycles: 5_000 });
         config.rpc.pairs[0].boundless.aggregation_quote =
@@ -333,6 +339,9 @@ mod tests {
         config.rpc.pairs[0].boundless.rebid_timeout_ms = Some(450_000);
         config.rpc.pairs[0].boundless.rebid_price_step_bps = Some(4000);
         config.rpc.pairs[0].boundless.rebid_max_attempts = Some(2);
+        config.rpc.pairs[0]
+            .boundless
+            .proposal_zkgas_warning_threshold = Some(750_000_000);
         config.rpc.pairs[0].boundless.offer_params.batch =
             Some(raiko2_prover::boundless::BoundlessOfferParams {
                 timeouts: raiko2_prover::boundless::TimeoutPolicy::PerMcycle {
@@ -399,6 +408,7 @@ mod tests {
         assert_eq!(boundless.rebid_timeout_ms, 450_000);
         assert_eq!(boundless.rebid_price_step_bps, 4000);
         assert_eq!(boundless.rebid_max_attempts, 2);
+        assert_eq!(boundless.proposal_zkgas_warning_threshold, 750_000_000);
     }
 
     #[test]

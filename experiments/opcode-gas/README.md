@@ -1141,10 +1141,15 @@ CONTEXT_CANARY="$CALIBRATION_RUN/context-compatibility"
   --out-root experiments/opcode-gas/derivations
 ```
 
-The seal command consumes only the canonical create-only adaptive run beneath the named calibration,
-live-validates that calibration and its release launcher/guest artifacts, and requires the canonical
-`$CALIBRATION_RUN/context-compatibility/compatibility-canary.json`; injected test executors are
-stamped synthetic and cannot be sealed. Schema 2 stores the compact round/decision/fit ledger in
+The execution command remains bound to the calibration's frozen implementation revision. The seal
+command is a later offline derivation: it consumes only the canonical create-only adaptive run,
+requires the frozen execution revision to remain available as a local commit, verifies the sealed
+calibration manifest/provenance and hash-bound native launcher inputs, and runs from a clean committed
+analysis checkout. The result records distinct `execution_revision` and `analysis_revision` values;
+fixing the derivation code therefore never relabels or reruns the original SP1 measurements. The seal
+also requires the canonical `$CALIBRATION_RUN/context-compatibility/compatibility-canary.json`;
+injected test executors are stamped synthetic and cannot be sealed. Schema 2 stores the compact
+round/decision/fit ledger in
 `adaptive-evidence.json` and every full formal row, including failed scenarios, in the deterministic
 `adaptive-rows.jsonl.gz` stream. `result.json` contains only the derived models, scenario reports,
 and content-addressed source descriptors; it does not duplicate the row stream or source artifacts.
@@ -1158,8 +1163,8 @@ graph. The streaming format fixes the row, compressed/uncompressed byte, executo
 limits before reading, parsing, or hashing their contents; one-sided raw/executor EOF fails
 immediately. Portable replay proves the sealed bytes, identities, exact fit graph, and deterministic
 compression are self-consistent. It does not independently reauthenticate the origin of recorded
-`prover_gas`; that authority comes from the create-only production runner plus live calibration
-validation at seal time.
+`prover_gas`; that authority comes from the create-only production runner and the immutable frozen
+calibration identity, while the later analysis revision identifies the exact sealing algorithm.
 The provisional legacy-basis projection is exact as arithmetic:
 `stored_b_t = (body_scale * delta_lab + r_control * stored_b_control) / r_target`.
 Common dispatch and identical setup/cleanup cancel in `delta_lab`; the composite prediction adds

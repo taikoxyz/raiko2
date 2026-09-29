@@ -4126,6 +4126,7 @@ def _build_context_result(
     if sha256_bytes(canonical_json(manifest)) != CONTEXT_MANIFEST_CANONICAL_SHA256:
         raise ValueError("context result manifest differs from the frozen V1 contract")
     validate_context_compatibility_canary(compatibility_canary)
+    streaming = prevalidated_scenario_reports is not None
     expected_source_identity_fields = {
         "calibration_id",
         "calibration_identity_sha256",
@@ -4145,9 +4146,10 @@ def _build_context_result(
         "operation_coverage_v5_file_sha256",
         "operation_coverage_v5_path",
     }
+    if streaming:
+        expected_source_identity_fields.add("analysis_revision")
     if set(source_identity) != expected_source_identity_fields:
         raise ValueError("context source identity field inventory differs")
-    streaming = prevalidated_scenario_reports is not None
     if streaming != (streaming_archive_sha256 is not None):
         raise ValueError("context streaming result inputs differ")
     if not streaming:
@@ -4180,6 +4182,13 @@ def _build_context_result(
         != source_identity["calibration_identity_sha256"][:24]
         or re.fullmatch(r"[0-9a-f]{40}", str(source_identity.get("execution_revision")))
         is None
+        or (
+            streaming
+            and re.fullmatch(
+                r"[0-9a-f]{40}", str(source_identity.get("analysis_revision"))
+            )
+            is None
+        )
     ):
         raise ValueError("context execution calibration identity differs")
     path_contract = {
@@ -4394,7 +4403,11 @@ def _build_context_result(
         "proposal_validated": False,
         "context_transport": copy.deepcopy(CONTEXT_TRANSPORT_STATUS),
         "execution_evidence_authority": {
-            "seal_entrypoint": "canonical_create_only_run_and_live_calibration",
+            "seal_entrypoint": (
+                "canonical_create_only_run_and_immutable_calibration_derivation"
+                if streaming
+                else "canonical_create_only_run_and_live_calibration"
+            ),
             "portable_verification_scope": (
                 "integrity_and_exact_fit_replay_not_prover_gas_reauthentication"
             ),
@@ -4950,7 +4963,7 @@ def seal_context_result(
     coverage_v5_path: pathlib.Path,
     out_root: pathlib.Path,
 ) -> pathlib.Path:
-    """Seal only a completed create-only runner ledger under its live calibration."""
+    """Seal a completed create-only ledger as a later immutable derivation."""
     import opcode_gas
 
     calibration_run = pathlib.Path(calibration_run).resolve(strict=True)
@@ -4971,9 +4984,21 @@ def seal_context_result(
         ),
     )
     opcode_gas.validate_frozen_legacy_revm_package()
-    calibration_identity = opcode_gas.validate_calibration_execution_identity(
-        calibration_run
+    calibration_identity, _calibration_declaration = (
+        opcode_gas._validated_historical_calibration_source(calibration_run)
     )
+    _frozen_manifest, frozen_identity = opcode_gas.verify_frozen_controlled_manifest(
+        calibration_run,
+        calibration_run / "controlled-manifest.toml",
+    )
+    if json.loads(canonical_json(calibration_identity)) != json.loads(
+        canonical_json(frozen_identity)
+    ):
+        raise ValueError("context source frozen manifest identity differs")
+    opcode_gas.assert_generated_paths_only(opcode_gas.git_worktree_status())
+    analysis_revision = opcode_gas.git_head()
+    if not opcode_gas.git_has_local_commit(analysis_revision):
+        raise ValueError("context analysis revision is not a local commit")
     manifest = load_context_manifest(manifest_path)
     archive_directory = tempfile.TemporaryDirectory(
         prefix="context-result-archive-"
@@ -4990,7 +5015,7 @@ def seal_context_result(
         or campaign_source.get("calibration_identity_sha256")
         != sha256_bytes(canonical_json(calibration_identity))
     ):
-        raise ValueError("context production run differs from live calibration identity")
+        raise ValueError("context production run differs from frozen calibration identity")
 
     repo_root = pathlib.Path(__file__).resolve().parents[2]
     expected_canary = (
@@ -5041,6 +5066,7 @@ def seal_context_result(
             "calibration_identity_sha256"
         ],
         "execution_revision": campaign_source["implementation_revision"],
+        "analysis_revision": analysis_revision,
         "legacy_revm_elf_sha256": campaign_source[
             "legacy_revm_elf_sha256"
         ],

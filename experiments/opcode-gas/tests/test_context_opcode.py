@@ -1821,8 +1821,24 @@ class ContextSealAndPromotionTests(unittest.TestCase):
                 return_value={},
             ), mock.patch.object(
                 opcode_gas,
-                "validate_calibration_execution_identity",
-                return_value=campaign_source["calibration_identity"],
+                "_validated_historical_calibration_source",
+                return_value=(
+                    campaign_source["calibration_identity"],
+                    {
+                        "implementation_revision": campaign_source[
+                            "implementation_revision"
+                        ]
+                    },
+                ),
+            ), mock.patch.object(
+                opcode_gas, "verify_frozen_controlled_manifest",
+                return_value=(object(), campaign_source["calibration_identity"]),
+            ), mock.patch.object(
+                opcode_gas, "assert_generated_paths_only"
+            ), mock.patch.object(
+                opcode_gas, "git_head", return_value="a" * 40
+            ), mock.patch.object(
+                opcode_gas, "git_has_local_commit", return_value=True
             ), mock.patch.object(
                 context, "_validate_context_canary_run_directory"
             ), mock.patch.object(
@@ -1858,6 +1874,9 @@ class ContextSealAndPromotionTests(unittest.TestCase):
                 adaptive_evidence = json.loads(
                     (sealed / "adaptive-evidence.json").read_bytes()
                 )
+                sealed_source_identity = json.loads(
+                    (sealed / "source-identity.json").read_bytes()
+                )
                 valid_result_bytes = (sealed / "result.json").read_bytes()
                 with (sealed / "result.json").open("r+b") as output:
                     output.truncate(
@@ -1884,13 +1903,25 @@ class ContextSealAndPromotionTests(unittest.TestCase):
                         manifest=self.manifest,
                         source_registry=self.registry,
                         compatibility_canary=canary,
-                        source_identity=source_identity,
+                        source_identity=sealed_source_identity,
                         adaptive_evidence=adaptive_evidence,
                         protected_inputs=self.protected_inputs(),
                     )
                 (sealed / "result.json").write_bytes(valid_result_bytes)
 
             self.assertEqual(verified["schema_version"], 2)
+            self.assertEqual(
+                json.loads((sealed / "source-identity.json").read_bytes())[
+                    "execution_revision"
+                ],
+                campaign_source["implementation_revision"],
+            )
+            self.assertEqual(
+                json.loads((sealed / "source-identity.json").read_bytes())[
+                    "analysis_revision"
+                ],
+                "a" * 40,
+            )
             self.assertEqual(sealed_again, sealed)
             self.assertEqual(
                 {path.name for path in sealed.iterdir()},
@@ -2130,6 +2161,11 @@ class ContextSealAndPromotionTests(unittest.TestCase):
 
     def test_sealed_directory_replays_without_guest_execution_and_rejects_tamper(self):
         payload = self.result_payload()
+        self.assertNotIn("analysis_revision", payload["source_identity"])
+        self.assertEqual(
+            payload["execution_evidence_authority"]["seal_entrypoint"],
+            "canonical_create_only_run_and_live_calibration",
+        )
         self.assertEqual(
             payload["context_transport"],
             payload["compatibility_canary"]["context_transport"],

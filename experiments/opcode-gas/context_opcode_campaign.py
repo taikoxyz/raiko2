@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import copy
 import argparse
+import gzip
 import hashlib
 import json
 import os
@@ -16,7 +17,7 @@ import subprocess
 import tempfile
 from decimal import Decimal, ROUND_HALF_EVEN, localcontext
 from fractions import Fraction
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 
 CONTEXT_OPCODES = (0x30, 0x33, 0x34, 0x35, 0x36, 0x42)
@@ -50,6 +51,35 @@ CONTEXT_RESULT_INVENTORY = {
     "compatibility-canary.json",
     "source-identity.json",
     "adaptive-evidence.json",
+}
+STREAMING_CONTEXT_RESULT_INVENTORY = {
+    "result.json",
+    "campaign-manifest.json",
+    "adaptive-rows.jsonl.gz",
+    "source-registry.json",
+    "compatibility-canary.json",
+    "source-identity.json",
+    "adaptive-evidence.json",
+}
+MAX_CONTEXT_JSONL_LINE_BYTES = 8 * 1024 * 1024
+MAX_CONTEXT_ARCHIVE_COMPRESSED_BYTES = 512 * 1024 * 1024
+MAX_CONTEXT_ARCHIVE_UNCOMPRESSED_BYTES = 2 * 1024 * 1024 * 1024
+MAX_CONTEXT_EXECUTOR_SOURCE_BYTES = 1 * 1024 * 1024 * 1024
+MAX_CONTEXT_ROUND_FIT_BYTES = 8 * 1024 * 1024
+CONTEXT_RESULT_METADATA_MAX_BYTES = {
+    "result.json": 1 * 1024 * 1024,
+    "campaign-manifest.json": 1 * 1024 * 1024,
+    "source-registry.json": 8 * 1024 * 1024,
+    "compatibility-canary.json": 128 * 1024 * 1024,
+    "source-identity.json": 8 * 1024 * 1024,
+    "adaptive-evidence.json": 16 * 1024 * 1024,
+}
+MAX_CONTEXT_RESULT_METADATA_TOTAL_BYTES = 192 * 1024 * 1024
+CONTEXT_RUN_SEAL_MAX_BYTES = {
+    "identity.json": 16 * 1024 * 1024,
+    "decisions.json": 4 * 1024 * 1024,
+    "decisions.sha256": 1024,
+    "terminal.json": 4 * 1024 * 1024,
 }
 PREFIX_PLACEMENT = "active_prefix"
 TAIL_PLACEMENT = "active_tail"
@@ -121,6 +151,113 @@ def canonical_json(value: Any) -> bytes:
 
 def sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
+
+
+def _sha256_file_streaming(path: pathlib.Path) -> str:
+    digest = hashlib.sha256()
+    with pathlib.Path(path).open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _preflight_context_archive_file(
+    path: pathlib.Path, descriptor: Any
+) -> int:
+    path = pathlib.Path(path)
+    if not isinstance(descriptor, Mapping):
+        raise ValueError("context adaptive archive descriptor differs")
+    try:
+        mode = path.stat(follow_symlinks=False).st_mode
+        actual_size = path.stat(follow_symlinks=False).st_size
+    except OSError as error:
+        raise ValueError("context adaptive archive is missing") from error
+    declared_size = descriptor.get("compressed_bytes")
+    if (
+        path.is_symlink()
+        or not stat.S_ISREG(mode)
+        or type(declared_size) is not int
+        or not 0 < declared_size <= MAX_CONTEXT_ARCHIVE_COMPRESSED_BYTES
+        or actual_size != declared_size
+    ):
+        raise ValueError("context adaptive archive compressed size differs")
+    return actual_size
+
+
+def _read_bounded_regular_file(
+    path: pathlib.Path, limit: int, *, label: str
+) -> bytes:
+    path = pathlib.Path(path)
+    try:
+        stat_result = path.stat(follow_symlinks=False)
+    except OSError as error:
+        raise ValueError(f"{label} is missing") from error
+    if (
+        path.is_symlink()
+        or not stat.S_ISREG(stat_result.st_mode)
+        or not 0 < stat_result.st_size <= limit
+    ):
+        raise ValueError(f"{label} exceeds the frozen size limit")
+    with path.open("rb") as source:
+        data = source.read(limit + 1)
+    if len(data) != stat_result.st_size or len(data) > limit:
+        raise ValueError(f"{label} changed or exceeds the frozen size limit")
+    return data
+
+
+def _iter_jsonl_bytes(
+    path: pathlib.Path, *, require_canonical: bool
+) -> Iterable[tuple[bytes, Any]]:
+    with pathlib.Path(path).open("rb") as source:
+        line_number = 0
+        while True:
+            raw = source.readline(MAX_CONTEXT_JSONL_LINE_BYTES + 1)
+            if not raw:
+                break
+            line_number += 1
+            if len(raw) > MAX_CONTEXT_JSONL_LINE_BYTES:
+                raise ValueError(
+                    f"context JSONL row exceeds the frozen size limit: {path.name}:{line_number}"
+                )
+            if not raw.endswith(b"\n"):
+                raise ValueError(
+                    f"context JSONL has a non-terminated line: {path.name}:{line_number}"
+                )
+            try:
+                value = json.loads(raw)
+            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise ValueError(
+                    f"context JSONL is invalid: {path.name}:{line_number}"
+                ) from error
+            if require_canonical and raw != canonical_json(value) + b"\n":
+                raise ValueError(
+                    f"context JSONL is noncanonical: {path.name}:{line_number}"
+                )
+            yield raw, value
+
+
+def _canonical_array_hasher() -> tuple[Any, list[bool]]:
+    digest = hashlib.sha256()
+    digest.update(b"[")
+    return digest, [True]
+
+
+def _update_canonical_array_hash(
+    state: tuple[Any, list[bool]], value: Mapping[str, Any]
+) -> None:
+    digest, first = state
+    if not first[0]:
+        digest.update(b",")
+    digest.update(canonical_json(value))
+    first[0] = False
+
+
+def _finish_canonical_array_hash(
+    state: tuple[Any, list[bool]],
+) -> str:
+    digest, _first = state
+    digest.update(b"]")
+    return digest.hexdigest()
 
 
 def _sha256(value: Any, label: str) -> str:
@@ -556,6 +693,18 @@ def fit_context_campaign_rows(
 ) -> dict[str, Any]:
     for row in rows:
         admit_context_row(manifest, row)
+    return _fit_admitted_context_rows(
+        manifest, rows, selected_scenarios=selected_scenarios
+    )
+
+
+def _fit_admitted_context_rows(
+    manifest: Mapping[str, Any],
+    rows: list[Mapping[str, Any]],
+    *,
+    selected_scenarios: list[str] | None = None,
+) -> dict[str, Any]:
+    """Fit rows whose fixture/identity/formal evidence was already admitted."""
     reports = {}
     noise_floor = Fraction(manifest["controlled_run_noise_floor"]["prover_gas"])
     allowed = (
@@ -1463,8 +1612,17 @@ def _canonical_round_rows(
 def _fit_production_rows(
     manifest: Mapping[str, Any], rows: list[Mapping[str, Any]]
 ) -> dict[str, Any]:
-    for row in rows:
-        if set(row) != {
+    projected = [_project_production_row(manifest, row) for row in rows]
+    selected = list(dict.fromkeys(row["scenario"] for row in projected))
+    return _fit_admitted_context_rows(
+        manifest, projected, selected_scenarios=selected
+    )
+
+
+def _project_production_row(
+    manifest: Mapping[str, Any], row: Mapping[str, Any]
+) -> dict[str, Any]:
+    if set(row) != {
             "scenario",
             "lane",
             "count",
@@ -1475,58 +1633,38 @@ def _fit_production_rows(
             "fixture",
             "identity",
             "formal_report",
-        }:
-            raise ValueError("context production row shape differs")
-        if (
-            row["fixture"]
-            != generate_context_fixture(
-                manifest,
-                row["scenario"],
-                row["lane"],
-                row["count"],
-                generator_bound=row["generator_bound"],
-                placement=row["placement"],
-            )
-            or type(row["repeat_index"]) is not int
-            or not 0 <= row["repeat_index"] < manifest["repeats"]
-            or row["prover_gas"]
-            != row["formal_report"].get(
-                "prover_gas", row["formal_report"].get("gas")
-            )
-        ):
-            raise ValueError("context production row fixture or metric differs")
-        _admit_executed_context_row(
-            manifest, row["fixture"], row["identity"], row["formal_report"]
+    }:
+        raise ValueError("context production row shape differs")
+    if (
+        row["fixture"]
+        != generate_context_fixture(
+            manifest,
+            row["scenario"],
+            row["lane"],
+            row["count"],
+            generator_bound=row["generator_bound"],
+            placement=row["placement"],
         )
-    projected = [
-        {
-            "scenario": row["scenario"],
-            "lane": row["lane"],
-            "count": row["count"],
-            "placement": row["placement"],
-            "repeat_index": row["repeat_index"],
-            "generator_bound": row["generator_bound"],
-            "prover_gas": row["prover_gas"],
-            "fixture": row["fixture"],
-            "identity": {
-                "schema_version": row["identity"]["identity"]["schema_version"],
-                "block_environment_sha256": row["identity"]["identity"][
-                    "block_environment_sha256"
-                ],
-            },
-            "trace": {
-                "schema_version": row["formal_report"]["controlled_trace"]["schema_version"],
-                "block_environment_sha256": row["formal_report"]["controlled_trace"][
-                    "block_environment_sha256"
-                ],
-            },
-        }
-        for row in rows
-    ]
-    selected = list(dict.fromkeys(row["scenario"] for row in rows))
-    return fit_context_campaign_rows(
-        manifest, projected, selected_scenarios=selected
+        or type(row["repeat_index"]) is not int
+        or not 0 <= row["repeat_index"] < manifest["repeats"]
+        or row["prover_gas"]
+        != row["formal_report"].get(
+            "prover_gas", row["formal_report"].get("gas")
+        )
+    ):
+        raise ValueError("context production row fixture or metric differs")
+    _admit_executed_context_row(
+        manifest, row["fixture"], row["identity"], row["formal_report"]
     )
+    return {
+        "scenario": row["scenario"],
+        "lane": row["lane"],
+        "count": row["count"],
+        "placement": row["placement"],
+        "repeat_index": row["repeat_index"],
+        "generator_bound": row["generator_bound"],
+        "prover_gas": row["prover_gas"],
+    }
 
 
 def _read_context_round(
@@ -2295,6 +2433,692 @@ def load_context_adaptive_evidence(
     unsigned["artifact_sha256"] = sha256_bytes(canonical_json(unsigned))
     evidence = unsigned
     return evidence
+
+
+def _load_context_run_seals(
+    run: pathlib.Path,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, bytes]]:
+    run = pathlib.Path(run)
+    if run.is_symlink() or not run.is_dir():
+        raise ValueError("context adaptive run must be a non-symlink directory")
+    required = {
+        "identity.json",
+        "decisions.json",
+        "decisions.sha256",
+        "rows.jsonl",
+        "terminal.json",
+    }
+    if any((run / name).is_symlink() or not (run / name).is_file() for name in required):
+        raise ValueError("context adaptive run is incomplete")
+    for name, limit in CONTEXT_RUN_SEAL_MAX_BYTES.items():
+        size = (run / name).stat(follow_symlinks=False).st_size
+        if not 0 < size <= limit:
+            raise ValueError("context adaptive run metadata exceeds the frozen size limit")
+    small = {
+        name: _read_bounded_regular_file(
+            run / name,
+            CONTEXT_RUN_SEAL_MAX_BYTES[name],
+            label="context adaptive run metadata",
+        )
+        for name in (
+            "identity.json",
+            "decisions.json",
+            "decisions.sha256",
+            "terminal.json",
+        )
+    }
+    identity = json.loads(small["identity.json"])
+    decisions = json.loads(small["decisions.json"])
+    terminal = json.loads(small["terminal.json"])
+    if (
+        small["identity.json"] != canonical_json(identity) + b"\n"
+        or small["decisions.json"] != canonical_json(decisions) + b"\n"
+        or small["terminal.json"] != canonical_json(terminal) + b"\n"
+        or small["decisions.sha256"]
+        != (sha256_bytes(small["decisions.json"]) + "\n").encode()
+        or decisions.get("identity_sha256") != sha256_bytes(canonical_json(identity))
+        or terminal.get("identity_sha256") != decisions.get("identity_sha256")
+        or terminal.get("decisions_sha256")
+        != sha256_bytes(small["decisions.json"])
+    ):
+        raise ValueError("context adaptive run identity or decision seal differs")
+    return identity, decisions, terminal, small
+
+
+def _expected_context_round_row_count(
+    manifest: Mapping[str, Any], selected: list[str], bound: int
+) -> int:
+    return len(selected) * len(_round_samples(bound)) * 2 * manifest["repeats"]
+
+
+def _stream_context_round(
+    *,
+    manifest: Mapping[str, Any],
+    raw_path: pathlib.Path,
+    executor_path: pathlib.Path | None,
+    gzip_output: gzip.GzipFile,
+    expected_row_count: int,
+    archive_digest: Any,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    projected: list[dict[str, Any]] = []
+    scenario_hashers: dict[str, Any] = {}
+    raw_digest = hashlib.sha256()
+    array_state = _canonical_array_hasher()
+    raw_iterator = _iter_jsonl_bytes(raw_path, require_canonical=True)
+    executor_iterator = (
+        _iter_jsonl_bytes(executor_path, require_canonical=False)
+        if executor_path is not None
+        else None
+    )
+    if executor_iterator is None:
+        pairs = ((raw, row, None) for raw, row in raw_iterator)
+    else:
+        sentinel = object()
+
+        def paired_rows():
+            while True:
+                raw_record = next(raw_iterator, sentinel)
+                executor_record = next(executor_iterator, sentinel)
+                if raw_record is sentinel and executor_record is sentinel:
+                    return
+                if raw_record is sentinel or executor_record is sentinel:
+                    raise ValueError(
+                        "context persisted executor report count differs"
+                    )
+                yield raw_record[0], raw_record[1], executor_record
+
+        pairs = paired_rows()
+    count = 0
+    for raw, row, executor_record in pairs:
+        count += 1
+        if executor_record is not None:
+            _executor_raw, executor_report = executor_record
+            normalized = copy.deepcopy(executor_report)
+            source_input = normalized.get("input")
+            expected_input = row.get("formal_report", {}).get("input")
+            if (
+                not isinstance(source_input, str)
+                or not isinstance(expected_input, str)
+                or not pathlib.PurePath(source_input).as_posix().endswith(
+                    expected_input
+                )
+            ):
+                raise ValueError("context persisted executor input differs")
+            normalized["input"] = expected_input
+            if normalized != row.get("formal_report"):
+                raise ValueError("context persisted executor report differs")
+        projection = _project_production_row(manifest, row)
+        projected.append(projection)
+        raw_digest.update(raw)
+        _update_canonical_array_hash(array_state, row)
+        scenario_hashers.setdefault(row["scenario"], hashlib.sha256()).update(raw)
+        archive_digest.update(raw)
+        gzip_output.write(raw)
+    if count != expected_row_count:
+        raise ValueError("context adaptive round row count differs")
+    return projected, {
+        "row_count": count,
+        "raw_rows_file_sha256": raw_digest.hexdigest(),
+        "rows_sha256": _finish_canonical_array_hash(array_state),
+        "scenario_rows_sha256": {
+            name: digest.hexdigest() for name, digest in scenario_hashers.items()
+        },
+    }
+
+
+def archive_context_adaptive_evidence(
+    run: pathlib.Path, manifest: Mapping[str, Any], archive_path: pathlib.Path
+) -> dict[str, Any]:
+    """Validate a completed run and stream all adaptive rows into canonical gzip."""
+    run = pathlib.Path(run)
+    archive_path = pathlib.Path(archive_path)
+    identity, decisions, terminal, small = _load_context_run_seals(run)
+    remaining = [scenario["name"] for scenario in manifest["scenarios"]]
+    terminal_scenario_hashes: dict[str, str] = {}
+    terminal_scenario_counts: dict[str, int] = {}
+    terminal_reports: dict[str, Mapping[str, Any]] = {}
+    compact_rounds = []
+    uncompressed_bytes = 0
+    executor_source_bytes = 0
+    for record in decisions.get("rounds", []):
+        raw_path = run / str(record.get("raw_rows"))
+        fit_path = run / str(record.get("fit"))
+        executor_path = run / str(record.get("executor_reports"))
+        if any(
+            path.is_symlink() or not path.is_file()
+            for path in (raw_path, fit_path, executor_path)
+        ):
+            raise ValueError("context persisted adaptive round differs")
+        raw_size = raw_path.stat().st_size
+        fit_size = fit_path.stat().st_size
+        executor_size = executor_path.stat().st_size
+        if (
+            raw_size <= 0
+            or raw_size
+            > MAX_CONTEXT_ARCHIVE_UNCOMPRESSED_BYTES - uncompressed_bytes
+            or not 0 < fit_size <= MAX_CONTEXT_ROUND_FIT_BYTES
+            or executor_size <= 0
+            or executor_size
+            > MAX_CONTEXT_EXECUTOR_SOURCE_BYTES - executor_source_bytes
+        ):
+            raise ValueError("context adaptive round source exceeds the frozen size limit")
+        uncompressed_bytes += raw_size
+        executor_source_bytes += executor_size
+    uncompressed_digest = hashlib.sha256()
+    archive_path.parent.mkdir(parents=True, exist_ok=True)
+    if archive_path.exists() or archive_path.is_symlink():
+        raise ValueError("context adaptive archive destination conflicts")
+    with archive_path.open("xb") as raw_output:
+        with gzip.GzipFile(
+            filename="",
+            mode="wb",
+            fileobj=raw_output,
+            compresslevel=9,
+            mtime=0,
+        ) as compressed:
+            for index, record in enumerate(decisions.get("rounds", [])):
+                bound = record.get("generator_bound")
+                selected = record.get("selected_scenarios")
+                raw_path = run / str(record.get("raw_rows"))
+                fit_path = run / str(record.get("fit"))
+                executor_path = run / str(record.get("executor_reports"))
+                fit_bytes = _read_bounded_regular_file(
+                    fit_path,
+                    MAX_CONTEXT_ROUND_FIT_BYTES,
+                    label="context adaptive round fit",
+                )
+                try:
+                    fit = json.loads(fit_bytes)
+                except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                    raise ValueError("context adaptive round fit is invalid") from error
+                if (
+                    index >= len(ADAPTIVE_ROUNDS)
+                    or bound != ADAPTIVE_ROUNDS[index]
+                    or selected != remaining
+                    or any(
+                        path.is_symlink() or not path.is_file()
+                        for path in (raw_path, fit_path, executor_path)
+                    )
+                    or _sha256_file_streaming(raw_path)
+                    != record.get("raw_rows_sha256")
+                    or fit_bytes != canonical_json(fit) + b"\n"
+                    or sha256_bytes(fit_bytes) != record.get("fit_sha256")
+                    or _sha256_file_streaming(executor_path)
+                    != record.get("executor_reports_sha256")
+                ):
+                    raise ValueError("context persisted adaptive round differs")
+                projected, row_meta = _stream_context_round(
+                    manifest=manifest,
+                    raw_path=raw_path,
+                    executor_path=executor_path,
+                    gzip_output=compressed,
+                    expected_row_count=_expected_context_round_row_count(
+                        manifest, selected, bound
+                    ),
+                    archive_digest=uncompressed_digest,
+                )
+                replay_fit = _fit_admitted_context_rows(
+                    manifest, projected, selected_scenarios=selected
+                )
+                if fit != replay_fit:
+                    raise ValueError("context adaptive round fit differs on replay")
+                next_remaining = []
+                for scenario in remaining:
+                    if fit[scenario]["status"] == "passed" or index == len(ADAPTIVE_ROUNDS) - 1:
+                        terminal_scenario_hashes[scenario] = row_meta[
+                            "scenario_rows_sha256"
+                        ][scenario]
+                        terminal_scenario_counts[scenario] = sum(
+                            1 for row in projected if row["scenario"] == scenario
+                        )
+                        terminal_reports[scenario] = fit[scenario]
+                    else:
+                        next_remaining.append(scenario)
+                if record.get("next_scenarios") != next_remaining:
+                    raise ValueError("context adaptive next-round selection differs")
+                compact_rounds.append(
+                    {
+                        "generator_bound": bound,
+                        "selected_scenarios": list(selected),
+                        "next_scenarios": next_remaining,
+                        "row_count": row_meta["row_count"],
+                        "raw_rows_file_sha256": row_meta[
+                            "raw_rows_file_sha256"
+                        ],
+                        "rows_sha256": row_meta["rows_sha256"],
+                        "fit": fit,
+                        "fit_sha256": sha256_bytes(canonical_json(fit)),
+                    }
+                )
+                remaining = next_remaining
+                if not remaining:
+                    break
+        raw_output.flush()
+        os.fsync(raw_output.fileno())
+    if remaining or len(compact_rounds) != len(decisions.get("rounds", [])):
+        archive_path.unlink(missing_ok=True)
+        raise ValueError("context adaptive evidence is not terminal")
+    if (
+        archive_path.stat().st_size > MAX_CONTEXT_ARCHIVE_COMPRESSED_BYTES
+        or uncompressed_bytes > MAX_CONTEXT_ARCHIVE_UNCOMPRESSED_BYTES
+    ):
+        archive_path.unlink(missing_ok=True)
+        raise ValueError("context adaptive archive exceeds the frozen size limit")
+
+    terminal_path = run / "rows.jsonl"
+    terminal_digest = hashlib.sha256()
+    terminal_count = 0
+    terminal_iterator = _iter_jsonl_bytes(terminal_path, require_canonical=True)
+    for scenario in (scenario["name"] for scenario in manifest["scenarios"]):
+        scenario_digest = hashlib.sha256()
+        for _index in range(terminal_scenario_counts[scenario]):
+            try:
+                raw, row = next(terminal_iterator)
+            except StopIteration as error:
+                raise ValueError("context adaptive terminal evidence differs") from error
+            if row.get("scenario") != scenario:
+                raise ValueError("context adaptive terminal row order differs")
+            scenario_digest.update(raw)
+            terminal_digest.update(raw)
+            terminal_count += 1
+        if scenario_digest.hexdigest() != terminal_scenario_hashes[scenario]:
+            raise ValueError("context adaptive terminal rows differ")
+    try:
+        next(terminal_iterator)
+    except StopIteration:
+        pass
+    else:
+        raise ValueError("context adaptive terminal row inventory differs")
+    ordered_reports = {
+        scenario["name"]: terminal_reports[scenario["name"]]
+        for scenario in manifest["scenarios"]
+    }
+    if (
+        terminal.get("status") != "complete"
+        or terminal.get("rows_sha256") != terminal_digest.hexdigest()
+        or terminal.get("scenario_reports") != ordered_reports
+    ):
+        raise ValueError("context adaptive terminal evidence differs")
+    ledger = {
+        "schema_version": 1,
+        "purpose": "context_create_only_run_ledger",
+        "identity_file_sha256": sha256_bytes(small["identity.json"]),
+        "decisions": copy.deepcopy(decisions),
+        "decisions_file_sha256": sha256_bytes(small["decisions.json"]),
+        "decisions_seal_sha256": sha256_bytes(small["decisions.sha256"]),
+        "terminal": copy.deepcopy(terminal),
+        "terminal_file_sha256": sha256_bytes(small["terminal.json"]),
+        "rows_file_sha256": terminal_digest.hexdigest(),
+        "executor_source_file_sha256s": [
+            record["executor_reports_sha256"] for record in decisions["rounds"]
+        ],
+        "portable_verification_scope": (
+            "integrity_and_exact_fit_replay_not_prover_gas_reauthentication"
+        ),
+    }
+    evidence = {
+        "schema_version": 2,
+        "purpose": "context_opcode_adaptive_evidence",
+        "identity": identity,
+        "rounds": compact_rounds,
+        "terminal": {
+            "scenario_reports": ordered_reports,
+            "row_count": terminal_count,
+            "scenario_row_counts": terminal_scenario_counts,
+            "scenario_rows_sha256": terminal_scenario_hashes,
+        },
+        "production_run_ledger": ledger,
+        "archive": {
+            "format": "gzip_jsonl",
+            "canonical_encoding": "gzip_mtime_0_filename_empty_level_9",
+            "file": "adaptive-rows.jsonl.gz",
+            "file_sha256": _sha256_file_streaming(archive_path),
+            "compressed_bytes": archive_path.stat().st_size,
+            "uncompressed_bytes": uncompressed_bytes,
+            "uncompressed_sha256": uncompressed_digest.hexdigest(),
+            "uncompressed_row_count": sum(
+                record["row_count"] for record in compact_rounds
+            ),
+        },
+    }
+    evidence["artifact_sha256"] = sha256_bytes(canonical_json(evidence))
+    return evidence
+
+
+def replay_context_adaptive_archive(
+    manifest: Mapping[str, Any],
+    evidence: Mapping[str, Any],
+    archive_path: pathlib.Path,
+    *,
+    archive_hash_verified: bool = False,
+) -> dict[str, Any]:
+    """Replay every archived row with bounded memory and verify canonical gzip."""
+    unsigned = dict(evidence)
+    artifact = unsigned.pop("artifact_sha256", None)
+    archive = evidence.get("archive")
+    rounds = evidence.get("rounds")
+    terminal = evidence.get("terminal")
+    _preflight_context_archive_file(archive_path, archive)
+    if (
+        evidence.get("schema_version") != 2
+        or evidence.get("purpose") != "context_opcode_adaptive_evidence"
+        or artifact != sha256_bytes(canonical_json(unsigned))
+        or not isinstance(archive, Mapping)
+        or archive
+        != {
+            "format": "gzip_jsonl",
+            "canonical_encoding": "gzip_mtime_0_filename_empty_level_9",
+            "file": "adaptive-rows.jsonl.gz",
+            "file_sha256": archive.get("file_sha256"),
+            "compressed_bytes": archive.get("compressed_bytes"),
+            "uncompressed_bytes": archive.get("uncompressed_bytes"),
+            "uncompressed_sha256": archive.get("uncompressed_sha256"),
+            "uncompressed_row_count": archive.get("uncompressed_row_count"),
+        }
+        or (
+            not archive_hash_verified
+            and _sha256_file_streaming(archive_path)
+            != archive.get("file_sha256")
+        )
+        or type(archive.get("compressed_bytes")) is not int
+        or not 0 < archive["compressed_bytes"] <= MAX_CONTEXT_ARCHIVE_COMPRESSED_BYTES
+        or type(archive.get("uncompressed_bytes")) is not int
+        or not 0 < archive["uncompressed_bytes"] <= MAX_CONTEXT_ARCHIVE_UNCOMPRESSED_BYTES
+        or re.fullmatch(
+            r"[0-9a-f]{64}", str(archive.get("uncompressed_sha256"))
+        )
+        is None
+        or type(archive.get("uncompressed_row_count")) is not int
+        or not 0 < archive["uncompressed_row_count"]
+        <= sum(
+            len(manifest["scenarios"])
+            * len(_round_samples(bound))
+            * 2
+            * manifest["repeats"]
+            for bound in ADAPTIVE_ROUNDS
+        )
+        or not isinstance(rounds, list)
+        or not isinstance(terminal, Mapping)
+    ):
+        raise ValueError("context adaptive archive identity differs")
+    remaining = [scenario["name"] for scenario in manifest["scenarios"]]
+    terminal_hashes: dict[str, str] = {}
+    terminal_counts: dict[str, int] = {}
+    terminal_reports: dict[str, Mapping[str, Any]] = {}
+    total_count = 0
+    total_bytes = 0
+    total_digest = hashlib.sha256()
+    with tempfile.TemporaryDirectory(prefix="context-archive-replay-") as directory:
+        replay_root = pathlib.Path(directory)
+        canonical_archive = replay_root / "adaptive-rows.jsonl.gz"
+        terminal_root = replay_root / "terminal"
+        terminal_root.mkdir()
+        with pathlib.Path(archive_path).open("rb") as raw_input, gzip.GzipFile(
+            fileobj=raw_input, mode="rb"
+        ) as decompressed, canonical_archive.open("xb") as raw_output:
+            with gzip.GzipFile(
+                filename="",
+                mode="wb",
+                fileobj=raw_output,
+                compresslevel=9,
+                mtime=0,
+            ) as recompressed:
+                for index, record in enumerate(rounds):
+                    bound = record.get("generator_bound")
+                    selected = record.get("selected_scenarios")
+                    expected_count = _expected_context_round_row_count(
+                        manifest, selected, bound
+                    )
+                    if (
+                        index >= len(ADAPTIVE_ROUNDS)
+                        or bound != ADAPTIVE_ROUNDS[index]
+                        or selected != remaining
+                        or record.get("row_count") != expected_count
+                    ):
+                        raise ValueError("context adaptive archive round differs")
+                    projected = []
+                    raw_digest = hashlib.sha256()
+                    array_state = _canonical_array_hasher()
+                    scenario_hashers: dict[str, Any] = {}
+                    expected_terminal = set(remaining) - set(
+                        record.get("next_scenarios", [])
+                    )
+                    terminal_outputs = {
+                        scenario: gzip.GzipFile(
+                            filename=str(terminal_root / f"{scenario}.jsonl.gz"),
+                            mode="wb",
+                            compresslevel=1,
+                            mtime=0,
+                        )
+                        for scenario in expected_terminal
+                    }
+                    try:
+                        for _row_index in range(expected_count):
+                            raw = decompressed.readline(
+                                MAX_CONTEXT_JSONL_LINE_BYTES + 1
+                            )
+                            if len(raw) > MAX_CONTEXT_JSONL_LINE_BYTES:
+                                raise ValueError(
+                                    "context adaptive archive row exceeds the frozen size limit"
+                                )
+                            if not raw or not raw.endswith(b"\n"):
+                                raise ValueError("context adaptive archive is truncated")
+                            if len(raw) > min(
+                                MAX_CONTEXT_ARCHIVE_UNCOMPRESSED_BYTES,
+                                archive["uncompressed_bytes"],
+                            ) - total_bytes:
+                                raise ValueError(
+                                    "context adaptive archive exceeds its declared size"
+                                )
+                            total_bytes += len(raw)
+                            try:
+                                row = json.loads(raw)
+                            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                                raise ValueError(
+                                    "context adaptive archive row is invalid"
+                                ) from error
+                            if raw != canonical_json(row) + b"\n":
+                                raise ValueError(
+                                    "context adaptive archive row is noncanonical"
+                                )
+                            projected.append(_project_production_row(manifest, row))
+                            raw_digest.update(raw)
+                            _update_canonical_array_hash(array_state, row)
+                            scenario_hashers.setdefault(
+                                row["scenario"], hashlib.sha256()
+                            ).update(raw)
+                            if row["scenario"] in terminal_outputs:
+                                terminal_outputs[row["scenario"]].write(raw)
+                            recompressed.write(raw)
+                            total_digest.update(raw)
+                    finally:
+                        for output in terminal_outputs.values():
+                            output.close()
+                    fit = _fit_admitted_context_rows(
+                        manifest, projected, selected_scenarios=selected
+                    )
+                    if (
+                        raw_digest.hexdigest()
+                        != record.get("raw_rows_file_sha256")
+                        or _finish_canonical_array_hash(array_state)
+                        != record.get("rows_sha256")
+                        or fit != record.get("fit")
+                        or sha256_bytes(canonical_json(fit))
+                        != record.get("fit_sha256")
+                    ):
+                        raise ValueError("context adaptive archive round replay differs")
+                    next_remaining = []
+                    for scenario in remaining:
+                        if fit[scenario]["status"] == "passed" or index == len(ADAPTIVE_ROUNDS) - 1:
+                            terminal_hashes[scenario] = scenario_hashers[
+                                scenario
+                            ].hexdigest()
+                            terminal_counts[scenario] = sum(
+                                1
+                                for row in projected
+                                if row["scenario"] == scenario
+                            )
+                            terminal_reports[scenario] = fit[scenario]
+                        else:
+                            next_remaining.append(scenario)
+                    if record.get("next_scenarios") != next_remaining:
+                        raise ValueError("context adaptive archive decision differs")
+                    remaining = next_remaining
+                    total_count += expected_count
+                if decompressed.read(1):
+                    raise ValueError("context adaptive archive has trailing rows")
+            raw_output.flush()
+            os.fsync(raw_output.fileno())
+        if _sha256_file_streaming(canonical_archive) != archive.get("file_sha256"):
+            raise ValueError("context adaptive archive compression is noncanonical")
+        terminal_digest = hashlib.sha256()
+        for scenario in (item["name"] for item in manifest["scenarios"]):
+            with gzip.open(
+                terminal_root / f"{scenario}.jsonl.gz", "rb"
+            ) as source:
+                for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                    terminal_digest.update(chunk)
+        if terminal_digest.hexdigest() != evidence.get(
+            "production_run_ledger", {}
+        ).get("rows_file_sha256"):
+            raise ValueError("context adaptive archive terminal rows differ")
+    ordered_reports = {
+        scenario["name"]: terminal_reports[scenario["name"]]
+        for scenario in manifest["scenarios"]
+    }
+    if (
+        remaining
+        or total_count != archive.get("uncompressed_row_count")
+        or total_bytes != archive.get("uncompressed_bytes")
+        or total_digest.hexdigest() != archive.get("uncompressed_sha256")
+        or terminal.get("scenario_reports") != ordered_reports
+        or terminal.get("scenario_row_counts") != terminal_counts
+        or terminal.get("scenario_rows_sha256") != terminal_hashes
+        or terminal.get("row_count") != sum(terminal_counts.values())
+    ):
+        raise ValueError("context adaptive archive terminal replay differs")
+    return {
+        "scenario_reports": ordered_reports,
+        "terminal_rows_sha256": terminal_digest.hexdigest(),
+    }
+
+
+def _validate_streaming_adaptive_evidence(
+    manifest: Mapping[str, Any],
+    evidence: Mapping[str, Any],
+    source_identity: Mapping[str, Any],
+) -> None:
+    unsigned = dict(evidence)
+    artifact = unsigned.pop("artifact_sha256", None)
+    identity = evidence.get("identity")
+    rounds = evidence.get("rounds")
+    ledger = evidence.get("production_run_ledger")
+    terminal = evidence.get("terminal")
+    if (
+        set(evidence)
+        != {
+            "schema_version",
+            "purpose",
+            "identity",
+            "rounds",
+            "terminal",
+            "production_run_ledger",
+            "archive",
+            "artifact_sha256",
+        }
+        or evidence.get("schema_version") != 2
+        or evidence.get("purpose") != "context_opcode_adaptive_evidence"
+        or artifact != sha256_bytes(canonical_json(unsigned))
+        or not isinstance(identity, Mapping)
+        or identity.get("schema_version") != 1
+        or identity.get("purpose") != "context_opcode_adaptive_campaign"
+        or identity.get("evidence_mode") != "production_execution"
+        or identity.get("runner_contract")
+        != "canonical_release_guest_launcher_v1"
+        or identity.get("manifest_sha256") != sha256_bytes(canonical_json(manifest))
+        or not isinstance(identity.get("source"), Mapping)
+        or not isinstance(rounds, list)
+        or not isinstance(ledger, Mapping)
+        or not isinstance(terminal, Mapping)
+    ):
+        raise ValueError("context adaptive evidence identity differs")
+    source = identity["source"]
+    _validate_production_campaign_source(source)
+    if any(
+        source.get(campaign_field) != source_identity[result_field]
+        for campaign_field, result_field in (
+            ("calibration_id", "calibration_id"),
+            ("calibration_identity_sha256", "calibration_identity_sha256"),
+            ("implementation_revision", "execution_revision"),
+            ("legacy_revm_elf_sha256", "legacy_revm_elf_sha256"),
+            ("context_elf_sha256", "context_elf_sha256"),
+            ("control_opcode_lab_elf_sha256", "control_opcode_lab_elf_sha256"),
+            ("launcher_sha256", "launcher_sha256"),
+        )
+    ):
+        raise ValueError("context adaptive evidence source differs")
+    decisions = ledger.get("decisions")
+    sealed_terminal = ledger.get("terminal")
+    if (
+        set(ledger)
+        != {
+            "schema_version",
+            "purpose",
+            "identity_file_sha256",
+            "decisions",
+            "decisions_file_sha256",
+            "decisions_seal_sha256",
+            "terminal",
+            "terminal_file_sha256",
+            "rows_file_sha256",
+            "executor_source_file_sha256s",
+            "portable_verification_scope",
+        }
+        or ledger.get("schema_version") != 1
+        or ledger.get("purpose") != "context_create_only_run_ledger"
+        or ledger.get("portable_verification_scope")
+        != "integrity_and_exact_fit_replay_not_prover_gas_reauthentication"
+        or not isinstance(decisions, Mapping)
+        or not isinstance(sealed_terminal, Mapping)
+        or ledger.get("identity_file_sha256")
+        != sha256_bytes(canonical_json(identity) + b"\n")
+        or ledger.get("decisions_file_sha256")
+        != sha256_bytes(canonical_json(decisions) + b"\n")
+        or ledger.get("decisions_seal_sha256")
+        != sha256_bytes(
+            (sha256_bytes(canonical_json(decisions) + b"\n") + "\n").encode()
+        )
+        or ledger.get("terminal_file_sha256")
+        != sha256_bytes(canonical_json(sealed_terminal) + b"\n")
+        or sealed_terminal.get("rows_sha256") != ledger.get("rows_file_sha256")
+        or sealed_terminal.get("scenario_reports")
+        != terminal.get("scenario_reports")
+        or decisions.get("identity_sha256")
+        != sha256_bytes(canonical_json(identity))
+        or sealed_terminal.get("identity_sha256")
+        != decisions.get("identity_sha256")
+        or sealed_terminal.get("decisions_sha256")
+        != ledger.get("decisions_file_sha256")
+        or not isinstance(decisions.get("rounds"), list)
+        or len(decisions["rounds"]) != len(rounds)
+        or ledger.get("executor_source_file_sha256s")
+        != [record.get("executor_reports_sha256") for record in decisions["rounds"]]
+    ):
+        raise ValueError("context production run ledger differs")
+    for decision, compact in zip(decisions["rounds"], rounds):
+        if (
+            decision.get("generator_bound") != compact.get("generator_bound")
+            or decision.get("selected_scenarios")
+            != compact.get("selected_scenarios")
+            or decision.get("next_scenarios") != compact.get("next_scenarios")
+            or decision.get("raw_rows_sha256")
+            != compact.get("raw_rows_file_sha256")
+            or decision.get("fit_sha256")
+            != sha256_bytes(canonical_json(compact.get("fit")) + b"\n")
+            or compact.get("fit_sha256")
+            != sha256_bytes(canonical_json(compact.get("fit")))
+        ):
+            raise ValueError("context production run round ledger differs")
 
 
 def synthetic_passing_compatibility_canary(
@@ -3296,6 +4120,8 @@ def _build_context_result(
     compatibility_canary: Mapping[str, Any],
     source_identity: Mapping[str, Any],
     adaptive_evidence: Mapping[str, Any],
+    prevalidated_scenario_reports: Mapping[str, Any] | None = None,
+    streaming_archive_sha256: str | None = None,
 ) -> dict[str, Any]:
     if sha256_bytes(canonical_json(manifest)) != CONTEXT_MANIFEST_CANONICAL_SHA256:
         raise ValueError("context result manifest differs from the frozen V1 contract")
@@ -3321,17 +4147,21 @@ def _build_context_result(
     }
     if set(source_identity) != expected_source_identity_fields:
         raise ValueError("context source identity field inventory differs")
-    rows = sorted(
-        (copy.deepcopy(row) for row in rows),
-        key=lambda row: (
-            row["scenario"],
-            row["generator_bound"],
-            row["placement"],
-            row["count"],
-            row["repeat_index"],
-            row["lane"],
-        ),
-    )
+    streaming = prevalidated_scenario_reports is not None
+    if streaming != (streaming_archive_sha256 is not None):
+        raise ValueError("context streaming result inputs differ")
+    if not streaming:
+        rows = sorted(
+            (copy.deepcopy(row) for row in rows),
+            key=lambda row: (
+                row["scenario"],
+                row["generator_bound"],
+                row["placement"],
+                row["count"],
+                row["repeat_index"],
+                row["lane"],
+            ),
+        )
     for field in (
         "calibration_identity_sha256",
         "legacy_revm_elf_sha256",
@@ -3459,25 +4289,35 @@ def _build_context_result(
         != registry_ref["file_sha256"]
     ):
         raise ValueError("context corrected Osaka core source differs")
-    evidence_rows, evidence_reports = validate_context_adaptive_evidence(
-        manifest, adaptive_evidence, source_identity
-    )
-    evidence_rows = sorted(
-        (copy.deepcopy(row) for row in evidence_rows),
-        key=lambda row: (
-            row["scenario"],
-            row["generator_bound"],
-            row["placement"],
-            row["count"],
-            row["repeat_index"],
-            row["lane"],
-        ),
-    )
-    if rows != evidence_rows:
-        raise ValueError("context terminal rows differ from adaptive evidence")
-    scenario_reports = _fit_any_context_rows(manifest, rows)
-    if scenario_reports != evidence_reports:
-        raise ValueError("context terminal fit differs from adaptive evidence")
+    if streaming:
+        _validate_streaming_adaptive_evidence(
+            manifest, adaptive_evidence, source_identity
+        )
+        scenario_reports = copy.deepcopy(prevalidated_scenario_reports)
+        if scenario_reports != adaptive_evidence.get("terminal", {}).get(
+            "scenario_reports"
+        ):
+            raise ValueError("context terminal fit differs from adaptive evidence")
+    else:
+        evidence_rows, evidence_reports = validate_context_adaptive_evidence(
+            manifest, adaptive_evidence, source_identity
+        )
+        evidence_rows = sorted(
+            (copy.deepcopy(row) for row in evidence_rows),
+            key=lambda row: (
+                row["scenario"],
+                row["generator_bound"],
+                row["placement"],
+                row["count"],
+                row["repeat_index"],
+                row["lane"],
+            ),
+        )
+        if rows != evidence_rows:
+            raise ValueError("context terminal rows differ from adaptive evidence")
+        scenario_reports = _fit_any_context_rows(manifest, rows)
+        if scenario_reports != evidence_reports:
+            raise ValueError("context terminal fit differs from adaptive evidence")
     selected = select_promotable_context_keys(manifest, scenario_reports)
     body_scale = fraction_from_decimal(source_registry.get("body_scale"))
     models = {}
@@ -3517,16 +4357,35 @@ def _build_context_result(
                 name: reference for name, _body, reference in scenario_evidence
             },
         }
-    files = _sealed_file_bytes(
-        manifest,
-        rows,
-        source_registry,
-        compatibility_canary,
-        source_identity,
-        adaptive_evidence,
-    )
+    if streaming:
+        files = {
+            "campaign-manifest.json": canonical_json(manifest) + b"\n",
+            "source-registry.json": (
+                json.dumps(source_registry, indent=2, sort_keys=True) + "\n"
+            ).encode(),
+            "compatibility-canary.json": canonical_json(compatibility_canary)
+            + b"\n",
+            "source-identity.json": canonical_json(source_identity) + b"\n",
+            "adaptive-evidence.json": canonical_json(adaptive_evidence) + b"\n",
+        }
+        source_files = {
+            name: sha256_bytes(data) for name, data in sorted(files.items())
+        }
+        source_files["adaptive-rows.jsonl.gz"] = streaming_archive_sha256
+    else:
+        files = _sealed_file_bytes(
+            manifest,
+            rows,
+            source_registry,
+            compatibility_canary,
+            source_identity,
+            adaptive_evidence,
+        )
+        source_files = {
+            name: sha256_bytes(data) for name, data in sorted(files.items())
+        }
     result = {
-        "schema_version": 1,
+        "schema_version": 2 if streaming else 1,
         "purpose": "context_opcode_calibration_result",
         "status": "sealed",
         "measured_model_keys": sorted(models),
@@ -3542,15 +4401,37 @@ def _build_context_result(
         },
         "parameter_formula": "stored_b_t=(body_scale*delta_lab+r_control*stored_b_control)/r_target",
         "models": models,
-        "source_files": {name: sha256_bytes(data) for name, data in sorted(files.items())},
-        "manifest": copy.deepcopy(manifest),
+        "source_files": source_files,
         "scenario_reports": copy.deepcopy(scenario_reports),
-        "rows": copy.deepcopy(rows),
-        "source_registry": copy.deepcopy(source_registry),
-        "compatibility_canary": copy.deepcopy(compatibility_canary),
-        "source_identity": copy.deepcopy(source_identity),
-        "adaptive_evidence": copy.deepcopy(adaptive_evidence),
     }
+    if streaming:
+        result["sealed_evidence"] = {
+            "manifest_sha256": sha256_bytes(canonical_json(manifest)),
+            "source_registry_artifact_sha256": source_registry[
+                "artifact_sha256"
+            ],
+            "compatibility_canary_artifact_sha256": compatibility_canary[
+                "artifact_sha256"
+            ],
+            "source_identity_sha256": sha256_bytes(
+                canonical_json(source_identity)
+            ),
+            "adaptive_evidence_artifact_sha256": adaptive_evidence[
+                "artifact_sha256"
+            ],
+            "adaptive_rows_file_sha256": streaming_archive_sha256,
+        }
+    else:
+        result.update(
+            {
+                "manifest": copy.deepcopy(manifest),
+                "rows": copy.deepcopy(rows),
+                "source_registry": copy.deepcopy(source_registry),
+                "compatibility_canary": copy.deepcopy(compatibility_canary),
+                "source_identity": copy.deepcopy(source_identity),
+                "adaptive_evidence": copy.deepcopy(adaptive_evidence),
+            }
+        )
     identity = sha256_bytes(canonical_json(result))
     result["result_identity_sha256"] = identity
     result["result_id"] = identity[:24]
@@ -3625,6 +4506,83 @@ def _replay_context_result_identity(result: Mapping[str, Any]) -> None:
             _admit_executed_context_row(
                 result["manifest"], fixture, bundle, row["formal_report"]
             )
+
+
+def _iter_gzip_context_rows(path: pathlib.Path) -> Iterable[dict[str, Any]]:
+    with pathlib.Path(path).open("rb") as raw, gzip.GzipFile(
+        fileobj=raw, mode="rb"
+    ) as source:
+        line_number = 0
+        while True:
+            line = source.readline(MAX_CONTEXT_JSONL_LINE_BYTES + 1)
+            if not line:
+                break
+            line_number += 1
+            if len(line) > MAX_CONTEXT_JSONL_LINE_BYTES:
+                raise ValueError(
+                    "context adaptive archive row exceeds the frozen size limit"
+                )
+            if not line.endswith(b"\n"):
+                raise ValueError(
+                    f"context adaptive archive has a non-terminated row: {line_number}"
+                )
+            try:
+                row = json.loads(line)
+            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise ValueError("context adaptive archive row is invalid") from error
+            if line != canonical_json(row) + b"\n":
+                raise ValueError("context adaptive archive row is noncanonical")
+            yield row
+
+
+def _replay_context_archive_identity(
+    manifest: Mapping[str, Any],
+    source_identity: Mapping[str, Any],
+    evidence: Mapping[str, Any],
+    archive_path: pathlib.Path,
+) -> None:
+    campaign_source = (
+        evidence.get("identity", {}).get("source")
+        if isinstance(evidence, Mapping)
+        else None
+    )
+    if not isinstance(source_identity, Mapping) or not isinstance(
+        campaign_source, Mapping
+    ):
+        raise ValueError("context production identity source is missing")
+    launcher = _validated_context_identity_helper(source_identity, campaign_source)
+    cache: dict[str, Mapping[str, Any]] = {}
+    with tempfile.TemporaryDirectory(prefix="context-result-identity-") as directory:
+        root = pathlib.Path(directory)
+        for row in _iter_gzip_context_rows(archive_path):
+            fixture = row.get("fixture")
+            if not isinstance(fixture, Mapping):
+                raise ValueError("context result row fixture differs")
+            fixture_sha = sha256_bytes(canonical_json(fixture))
+            bundle = cache.get(fixture_sha)
+            if bundle is None:
+                input_path = root / f"{fixture_sha}.json"
+                input_path.write_bytes(canonical_json(fixture) + b"\n")
+                bundle = _default_identity_replayer(launcher, input_path)
+                cache[fixture_sha] = bundle
+            if row.get("identity") != bundle:
+                raise ValueError("context persisted identity differs from native replay")
+            _admit_executed_context_row(
+                manifest, fixture, bundle, row["formal_report"]
+            )
+
+
+def _files_equal_streaming(left: pathlib.Path, right: pathlib.Path) -> bool:
+    if left.stat().st_size != right.stat().st_size:
+        return False
+    with left.open("rb") as left_file, right.open("rb") as right_file:
+        while True:
+            left_chunk = left_file.read(1024 * 1024)
+            right_chunk = right_file.read(1024 * 1024)
+            if left_chunk != right_chunk:
+                return False
+            if not left_chunk:
+                return True
 
 
 def _reject_context_output_overlap(
@@ -3837,6 +4795,151 @@ def _publish_context_result(
     return destination
 
 
+def _publish_streaming_context_result(
+    result: Mapping[str, Any],
+    archive_path: pathlib.Path,
+    out_root: pathlib.Path,
+    *,
+    manifest: Mapping[str, Any],
+    source_registry: Mapping[str, Any],
+    compatibility_canary: Mapping[str, Any],
+    source_identity: Mapping[str, Any],
+    adaptive_evidence: Mapping[str, Any],
+    protected_inputs: Mapping[str, pathlib.Path],
+) -> pathlib.Path:
+    _validate_result_envelope(result)
+    if result.get("schema_version") != 2:
+        raise ValueError("streaming context result schema differs")
+    if set(protected_inputs) != {
+        "calibration_run",
+        "run",
+        "manifest",
+        "compatibility_canary",
+        "corrected_core",
+        "coverage_v5",
+    }:
+        raise ValueError("context seal protected-input inventory differs")
+    archive_path = pathlib.Path(archive_path)
+    if archive_path.is_symlink() or not archive_path.is_file():
+        raise ValueError("context adaptive archive is missing")
+    _preflight_context_archive_file(
+        archive_path, adaptive_evidence.get("archive")
+    )
+    if (
+        _sha256_file_streaming(archive_path)
+        != result.get("source_files", {}).get("adaptive-rows.jsonl.gz")
+    ):
+        raise ValueError("context adaptive archive hash differs")
+    out_root = pathlib.Path(out_root)
+    repo_root = pathlib.Path(__file__).resolve().parents[2]
+    frozen_inputs = [
+        repo_root / "experiments/opcode-gas/manifests/sp1-context-opcode-v1.json",
+        repo_root / FROZEN_LEGACY_REVM_PACKAGE_PATH,
+        repo_root / source_identity["corrected_osaka_core_path"],
+        repo_root / source_identity["operation_coverage_v5_path"],
+        *protected_inputs.values(),
+    ]
+    _reject_context_output_overlap(out_root, frozen_inputs)
+    if out_root.is_symlink():
+        raise ValueError("context result output root must not be a symlink")
+    destination = out_root / result["result_id"]
+    if destination.is_symlink():
+        raise ValueError("context result destination conflicts")
+    _replay_context_archive_identity(
+        manifest,
+        source_identity,
+        adaptive_evidence,
+        archive_path,
+    )
+    small_files = {
+        "campaign-manifest.json": canonical_json(manifest) + b"\n",
+        "source-registry.json": (
+            json.dumps(source_registry, indent=2, sort_keys=True) + "\n"
+        ).encode(),
+        "compatibility-canary.json": canonical_json(compatibility_canary) + b"\n",
+        "source-identity.json": canonical_json(source_identity) + b"\n",
+        "adaptive-evidence.json": canonical_json(adaptive_evidence) + b"\n",
+    }
+    expected_hashes = {
+        name: sha256_bytes(data) for name, data in sorted(small_files.items())
+    }
+    expected_hashes["adaptive-rows.jsonl.gz"] = _sha256_file_streaming(
+        archive_path
+    )
+    if result.get("source_files") != expected_hashes:
+        raise ValueError("context result source hash graph differs")
+    small_files["result.json"] = canonical_json(result) + b"\n"
+    if (
+        any(
+            name not in CONTEXT_RESULT_METADATA_MAX_BYTES
+            or not 0 < len(data) <= CONTEXT_RESULT_METADATA_MAX_BYTES[name]
+            for name, data in small_files.items()
+        )
+        or sum(map(len, small_files.values()))
+        > MAX_CONTEXT_RESULT_METADATA_TOTAL_BYTES
+    ):
+        raise ValueError("context result metadata exceeds the frozen size limit")
+    out_root.mkdir(parents=True, exist_ok=True)
+    if destination.exists():
+        if destination.is_symlink() or not destination.is_dir():
+            raise ValueError("context result destination conflicts")
+        if {entry.name for entry in destination.iterdir()} != STREAMING_CONTEXT_RESULT_INVENTORY:
+            raise ValueError("context result destination inventory conflicts")
+        resolved_destination = destination.resolve(strict=True)
+        metadata_total = 0
+        for name in STREAMING_CONTEXT_RESULT_INVENTORY:
+            path = destination / name
+            try:
+                mode = path.stat(follow_symlinks=False).st_mode
+            except OSError as error:
+                raise ValueError("context result destination inventory conflicts") from error
+            if (
+                path.is_symlink()
+                or not stat.S_ISREG(mode)
+                or path.resolve(strict=True).parent != resolved_destination
+            ):
+                raise ValueError("context result destination inventory conflicts")
+            if name in small_files:
+                size = path.stat(follow_symlinks=False).st_size
+                limit = CONTEXT_RESULT_METADATA_MAX_BYTES.get(name)
+                if limit is None or not 0 < size <= limit:
+                    raise ValueError(
+                        "context result destination metadata exceeds the frozen size limit"
+                    )
+                metadata_total += size
+        if metadata_total > MAX_CONTEXT_RESULT_METADATA_TOTAL_BYTES:
+            raise ValueError(
+                "context result destination metadata exceeds the frozen total size limit"
+            )
+        if all(
+            (destination / name).read_bytes() == data
+            for name, data in small_files.items()
+        ) and _files_equal_streaming(
+            destination / "adaptive-rows.jsonl.gz", archive_path
+        ):
+            return destination
+        raise ValueError("same context result id has conflicting bytes")
+    temporary = pathlib.Path(tempfile.mkdtemp(prefix=".context-result-", dir=out_root))
+    try:
+        for name, data in small_files.items():
+            path = temporary / name
+            with path.open("xb") as output:
+                output.write(data)
+                output.flush()
+                os.fsync(output.fileno())
+        with archive_path.open("rb") as source, (
+            temporary / "adaptive-rows.jsonl.gz"
+        ).open("xb") as output:
+            shutil.copyfileobj(source, output, length=1024 * 1024)
+            output.flush()
+            os.fsync(output.fileno())
+        os.rename(temporary, destination)
+    finally:
+        if temporary.exists():
+            shutil.rmtree(temporary)
+    return destination
+
+
 def seal_context_result(
     *,
     manifest_path: pathlib.Path,
@@ -3872,7 +4975,13 @@ def seal_context_result(
         calibration_run
     )
     manifest = load_context_manifest(manifest_path)
-    adaptive_evidence = load_context_adaptive_evidence(run, manifest)
+    archive_directory = tempfile.TemporaryDirectory(
+        prefix="context-result-archive-"
+    )
+    archive_path = pathlib.Path(archive_directory.name) / "adaptive-rows.jsonl.gz"
+    adaptive_evidence = archive_context_adaptive_evidence(
+        run, manifest, archive_path
+    )
     campaign_source = adaptive_evidence.get("identity", {}).get("source")
     if (
         not isinstance(campaign_source, Mapping)
@@ -3962,15 +5071,27 @@ def seal_context_result(
     }
     result = _build_context_result(
         manifest=manifest,
-        rows=adaptive_evidence["terminal"]["rows"],
+        rows=[],
         source_registry=corrected_core,
         compatibility_canary=compatibility_canary,
         source_identity=source_identity,
         adaptive_evidence=adaptive_evidence,
+        prevalidated_scenario_reports=adaptive_evidence["terminal"][
+            "scenario_reports"
+        ],
+        streaming_archive_sha256=adaptive_evidence["archive"][
+            "file_sha256"
+        ],
     )
-    return _publish_context_result(
+    destination = _publish_streaming_context_result(
         result,
+        archive_path,
         out_root,
+        manifest=manifest,
+        source_registry=corrected_core,
+        compatibility_canary=compatibility_canary,
+        source_identity=source_identity,
+        adaptive_evidence=adaptive_evidence,
         protected_inputs={
             "calibration_run": calibration_run,
             "run": run,
@@ -3980,13 +5101,18 @@ def seal_context_result(
             "coverage_v5": coverage_v5_path,
         },
     )
+    archive_directory.cleanup()
+    return destination
 
 
 def verify_context_result(directory: pathlib.Path) -> dict[str, Any]:
     directory = pathlib.Path(directory)
     if directory.is_symlink() or not directory.is_dir():
         raise ValueError("context result must be a non-symlink directory")
-    if {entry.name for entry in directory.iterdir()} != CONTEXT_RESULT_INVENTORY:
+    inventory = {entry.name for entry in directory.iterdir()}
+    if inventory == STREAMING_CONTEXT_RESULT_INVENTORY:
+        return _verify_streaming_context_result(directory)
+    if inventory != CONTEXT_RESULT_INVENTORY:
         raise ValueError("context result inventory differs")
     blobs = {}
     for name in CONTEXT_RESULT_INVENTORY:
@@ -4020,6 +5146,98 @@ def verify_context_result(directory: pathlib.Path) -> dict[str, Any]:
     if replay != result:
         raise ValueError("context result replay differs")
     _replay_context_result_identity(result)
+    return result
+
+
+def _verify_streaming_context_result(directory: pathlib.Path) -> dict[str, Any]:
+    small_names = STREAMING_CONTEXT_RESULT_INVENTORY - {
+        "adaptive-rows.jsonl.gz"
+    }
+    blobs = {}
+    resolved_directory = directory.resolve(strict=True)
+    metadata_total = 0
+    for name in STREAMING_CONTEXT_RESULT_INVENTORY:
+        path = directory / name
+        try:
+            mode = path.stat(follow_symlinks=False).st_mode
+        except OSError as error:
+            raise ValueError(
+                "context result inventory contains a non-regular file"
+            ) from error
+        if (
+            path.is_symlink()
+            or not stat.S_ISREG(mode)
+            or path.resolve(strict=True).parent != resolved_directory
+        ):
+            raise ValueError("context result inventory contains a non-regular file")
+        if name in small_names:
+            size = path.stat(follow_symlinks=False).st_size
+            limit = CONTEXT_RESULT_METADATA_MAX_BYTES.get(name)
+            if limit is None or not 0 < size <= limit:
+                raise ValueError(
+                    "context result metadata exceeds the frozen size limit"
+                )
+            metadata_total += size
+    if metadata_total > MAX_CONTEXT_RESULT_METADATA_TOTAL_BYTES:
+        raise ValueError("context result metadata exceeds the frozen total size limit")
+    for name in small_names:
+        blobs[name] = (directory / name).read_bytes()
+    result = json.loads(blobs["result.json"])
+    if (
+        result.get("schema_version") != 2
+        or blobs["result.json"] != canonical_json(result) + b"\n"
+    ):
+        raise ValueError("context result JSON is noncanonical")
+    _validate_result_envelope(result)
+    if directory.name != result["result_id"]:
+        raise ValueError("context result directory identity differs")
+    adaptive_evidence = json.loads(blobs["adaptive-evidence.json"])
+    archive_descriptor = adaptive_evidence.get("archive")
+    archive_path = directory / "adaptive-rows.jsonl.gz"
+    _preflight_context_archive_file(archive_path, archive_descriptor)
+    if result.get("source_files", {}).get(
+        "adaptive-rows.jsonl.gz"
+    ) != archive_descriptor.get("file_sha256"):
+        raise ValueError("context adaptive archive hash graph differs")
+    for name, expected in result.get("source_files", {}).items():
+        actual = (
+            _sha256_file_streaming(directory / name)
+            if name == "adaptive-rows.jsonl.gz"
+            else sha256_bytes(blobs[name])
+        )
+        if actual != expected:
+            raise ValueError(f"context result {name} hash differs")
+    manifest = json.loads(blobs["campaign-manifest.json"])
+    registry = json.loads(blobs["source-registry.json"])
+    canary = json.loads(blobs["compatibility-canary.json"])
+    source_identity = json.loads(blobs["source-identity.json"])
+    _validate_streaming_adaptive_evidence(
+        manifest, adaptive_evidence, source_identity
+    )
+    replayed_evidence = replay_context_adaptive_archive(
+        manifest,
+        adaptive_evidence,
+        archive_path,
+        archive_hash_verified=True,
+    )
+    replay = _build_context_result(
+        manifest=manifest,
+        rows=[],
+        source_registry=registry,
+        compatibility_canary=canary,
+        source_identity=source_identity,
+        adaptive_evidence=adaptive_evidence,
+        prevalidated_scenario_reports=replayed_evidence["scenario_reports"],
+        streaming_archive_sha256=adaptive_evidence["archive"]["file_sha256"],
+    )
+    if replay != result:
+        raise ValueError("context result replay differs")
+    _replay_context_archive_identity(
+        manifest,
+        source_identity,
+        adaptive_evidence,
+        directory / "adaptive-rows.jsonl.gz",
+    )
     return result
 
 
@@ -4225,6 +5443,10 @@ def build_context_composite_estimator(
 
     validate_estimator_artifact(base_estimator)
     _validate_result_envelope(result)
+    if result.get("schema_version") != 1:
+        raise ValueError(
+            "streaming context results require a directory-bound transport successor"
+        )
     _require_candidate_context_transport(result)
     if result.get("status") != "sealed":
         raise ValueError("context composite requires a complete sealed context result")

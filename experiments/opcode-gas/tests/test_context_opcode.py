@@ -1,6 +1,9 @@
 import copy
 import functools
+import gzip
+import hashlib
 import importlib.util
+import io
 import json
 import pathlib
 import shutil
@@ -964,6 +967,297 @@ class ContextFitTests(unittest.TestCase):
             self.assertEqual(result["status"], "complete")
             self.assertEqual(calls, 1)
 
+    def test_completed_run_can_be_archived_and_replayed_without_reading_jsonl_whole(self):
+        manifest = context.load_context_manifest(MANIFEST_PATH)
+
+        def executor(*, fixtures, reports_jsonl, **_kwargs):
+            reports_jsonl.parent.mkdir(parents=True, exist_ok=True)
+            reports_jsonl.write_bytes(
+                b"".join(
+                    context.canonical_json(report) + b"\n"
+                    for report in context.synthetic_execution_reports(fixtures)
+                )
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            run = root / "run"
+            context.run_context_opcode_campaign(
+                manifest_path=MANIFEST_PATH,
+                run=run,
+                fixtures_root=root / "fixtures",
+                guest_launcher=ROOT / "target/release/guest-launcher",
+                elf=ROOT / "crates/guests/elf/sp1_context_opcode_lab.elf",
+                control_opcode_lab_elf=ROOT
+                / "crates/guests/elf/sp1_opcode_lab.elf",
+                executor=executor,
+                identity_replayer=context.synthetic_identity_replayer,
+                source_validator=lambda **_kwargs: {"source": "test"},
+            )
+            archive = root / "adaptive-rows.jsonl.gz"
+            original_read_bytes = pathlib.Path.read_bytes
+
+            def reject_jsonl_read_bytes(path):
+                if path.suffix == ".jsonl":
+                    raise AssertionError(f"whole JSONL read: {path.name}")
+                return original_read_bytes(path)
+
+            with mock.patch.object(
+                pathlib.Path, "read_bytes", reject_jsonl_read_bytes
+            ):
+                evidence = context.archive_context_adaptive_evidence(
+                    run, manifest, archive
+                )
+                replay = context.replay_context_adaptive_archive(
+                    manifest, evidence, archive
+                )
+
+            self.assertEqual(
+                replay["scenario_reports"], evidence["terminal"]["scenario_reports"]
+            )
+            self.assertEqual(
+                replay["terminal_rows_sha256"],
+                evidence["production_run_ledger"]["rows_file_sha256"],
+            )
+
+            first_record = evidence["production_run_ledger"]["decisions"][
+                "rounds"
+            ][0]
+            raw_path = run / first_record["raw_rows"]
+            executor_path = run / first_record["executor_reports"]
+            original_iter_jsonl = context._iter_jsonl_bytes
+
+            def executor_with_unread_tail(path, *, require_canonical):
+                yield from original_iter_jsonl(
+                    path, require_canonical=require_canonical
+                )
+                if pathlib.Path(path) == executor_path:
+                    yield b"{}\n", {}
+                    raise AssertionError("executor tail was drained")
+
+            with mock.patch.object(
+                context,
+                "_iter_jsonl_bytes",
+                side_effect=executor_with_unread_tail,
+            ), gzip.GzipFile(
+                filename="",
+                mode="wb",
+                fileobj=io.BytesIO(),
+                compresslevel=1,
+                mtime=0,
+            ) as output, self.assertRaisesRegex(
+                ValueError, "report count"
+            ):
+                context._stream_context_round(
+                    manifest=manifest,
+                    raw_path=raw_path,
+                    executor_path=executor_path,
+                    gzip_output=output,
+                    expected_row_count=context._expected_context_round_row_count(
+                        manifest,
+                        first_record["selected_scenarios"],
+                        first_record["generator_bound"],
+                    ),
+                    archive_digest=hashlib.sha256(),
+                )
+
+            bounded_archive = root / "adaptive-rows-bounded.jsonl.gz"
+            with mock.patch.object(
+                context, "MAX_CONTEXT_ARCHIVE_UNCOMPRESSED_BYTES", 1
+            ), mock.patch.object(
+                context, "_stream_context_round"
+            ) as stream_round, self.assertRaisesRegex(
+                ValueError, "size limit"
+            ):
+                context.archive_context_adaptive_evidence(
+                    run, manifest, bounded_archive
+                )
+            stream_round.assert_not_called()
+            self.assertFalse(bounded_archive.exists())
+
+            second_archive = root / "adaptive-rows-second.jsonl.gz"
+            second_evidence = context.archive_context_adaptive_evidence(
+                run, manifest, second_archive
+            )
+            self.assertEqual(archive.read_bytes(), second_archive.read_bytes())
+            self.assertEqual(evidence, second_evidence)
+
+            noncanonical = root / "adaptive-rows-noncanonical.jsonl.gz"
+            with gzip.open(archive, "rb") as source, noncanonical.open("wb") as raw:
+                with gzip.GzipFile(
+                    filename="rows.jsonl",
+                    mode="wb",
+                    fileobj=raw,
+                    compresslevel=9,
+                    mtime=1,
+                ) as output:
+                    shutil.copyfileobj(source, output)
+            forged = copy.deepcopy(evidence)
+            forged["archive"]["file_sha256"] = context._sha256_file_streaming(
+                noncanonical
+            )
+            forged["archive"]["compressed_bytes"] = noncanonical.stat().st_size
+            forged["artifact_sha256"] = context.sha256_bytes(
+                context.canonical_json(
+                    {
+                        key: value
+                        for key, value in forged.items()
+                        if key != "artifact_sha256"
+                    }
+                )
+            )
+            with self.assertRaisesRegex(ValueError, "compression is noncanonical"):
+                context.replay_context_adaptive_archive(
+                    manifest, forged, noncanonical
+                )
+
+            wrong_size = copy.deepcopy(evidence)
+            wrong_size["archive"]["uncompressed_bytes"] += 1
+            wrong_size["artifact_sha256"] = context.sha256_bytes(
+                context.canonical_json(
+                    {
+                        key: value
+                        for key, value in wrong_size.items()
+                        if key != "artifact_sha256"
+                    }
+                )
+            )
+            with self.assertRaisesRegex(ValueError, "terminal replay"):
+                context.replay_context_adaptive_archive(
+                    manifest, wrong_size, archive
+                )
+
+            declared_too_small = copy.deepcopy(evidence)
+            declared_too_small["archive"]["uncompressed_bytes"] = 1
+            declared_too_small["artifact_sha256"] = context.sha256_bytes(
+                context.canonical_json(
+                    {
+                        key: value
+                        for key, value in declared_too_small.items()
+                        if key != "artifact_sha256"
+                    }
+                )
+            )
+            with mock.patch.object(
+                context.json,
+                "loads",
+                side_effect=AssertionError("row was parsed before size rejection"),
+            ), self.assertRaisesRegex(ValueError, "declared size"):
+                context.replay_context_adaptive_archive(
+                    manifest, declared_too_small, archive
+                )
+
+            oversized = root / "adaptive-rows-oversized.jsonl.gz"
+            with oversized.open("wb") as raw:
+                with gzip.GzipFile(
+                    filename="",
+                    mode="wb",
+                    fileobj=raw,
+                    compresslevel=9,
+                    mtime=0,
+                ) as output:
+                    output.write(b" " * (context.MAX_CONTEXT_JSONL_LINE_BYTES + 1))
+                    output.write(b"\n")
+            oversized_evidence = copy.deepcopy(evidence)
+            oversized_evidence["archive"].update(
+                {
+                    "file_sha256": context._sha256_file_streaming(oversized),
+                    "compressed_bytes": oversized.stat().st_size,
+                    "uncompressed_bytes": context.MAX_CONTEXT_JSONL_LINE_BYTES + 2,
+                }
+            )
+            oversized_evidence["artifact_sha256"] = context.sha256_bytes(
+                context.canonical_json(
+                    {
+                        key: value
+                        for key, value in oversized_evidence.items()
+                        if key != "artifact_sha256"
+                    }
+                )
+            )
+            with self.assertRaisesRegex(ValueError, "size limit"):
+                context.replay_context_adaptive_archive(
+                    manifest, oversized_evidence, oversized
+                )
+
+            oversized_sparse = root / "adaptive-rows-sparse.gz"
+            with oversized_sparse.open("xb") as output:
+                output.truncate(
+                    context.MAX_CONTEXT_ARCHIVE_COMPRESSED_BYTES + 1
+                )
+            sparse_evidence = copy.deepcopy(evidence)
+            sparse_evidence["archive"]["compressed_bytes"] = (
+                context.MAX_CONTEXT_ARCHIVE_COMPRESSED_BYTES + 1
+            )
+            sparse_evidence["artifact_sha256"] = context.sha256_bytes(
+                context.canonical_json(
+                    {
+                        key: value
+                        for key, value in sparse_evidence.items()
+                        if key != "artifact_sha256"
+                    }
+                )
+            )
+            with mock.patch.object(
+                context,
+                "_sha256_file_streaming",
+                side_effect=AssertionError("oversized archive was hashed"),
+            ), self.assertRaisesRegex(ValueError, "compressed size"):
+                context.replay_context_adaptive_archive(
+                    manifest, sparse_evidence, oversized_sparse
+                )
+
+            decisions_path = run / "decisions.json"
+            decisions = json.loads(decisions_path.read_bytes())
+            fit_path = run / decisions["rounds"][0]["fit"]
+            canonical_fit = fit_path.read_bytes()
+            padded_fit = (
+                b" " * context.MAX_CONTEXT_ROUND_FIT_BYTES + canonical_fit
+            )
+            fit_path.write_bytes(padded_fit)
+            decisions["rounds"][0]["fit_sha256"] = context.sha256_bytes(
+                padded_fit
+            )
+            decisions_bytes = context.canonical_json(decisions) + b"\n"
+            decisions_path.write_bytes(decisions_bytes)
+            (run / "decisions.sha256").write_text(
+                context.sha256_bytes(decisions_bytes) + "\n"
+            )
+            terminal_path = run / "terminal.json"
+            terminal_payload = json.loads(terminal_path.read_bytes())
+            terminal_payload["decisions_sha256"] = context.sha256_bytes(
+                decisions_bytes
+            )
+            terminal_path.write_bytes(
+                context.canonical_json(terminal_payload) + b"\n"
+            )
+            with mock.patch.object(
+                pathlib.Path,
+                "read_bytes",
+                side_effect=AssertionError("oversized fit was read"),
+            ), mock.patch.object(
+                context,
+                "_sha256_file_streaming",
+                side_effect=AssertionError("oversized fit was hashed"),
+            ), self.assertRaisesRegex(ValueError, "round source.*size limit"):
+                context.archive_context_adaptive_evidence(
+                    run, manifest, root / "oversized-fit.jsonl.gz"
+                )
+
+            identity_path = run / "identity.json"
+            with identity_path.open("r+b") as output:
+                output.truncate(
+                    context.CONTEXT_RUN_SEAL_MAX_BYTES["identity.json"] + 1
+                )
+            with mock.patch.object(
+                pathlib.Path,
+                "read_bytes",
+                side_effect=AssertionError("oversized run metadata was read"),
+            ), self.assertRaisesRegex(ValueError, "metadata.*size limit"):
+                context.archive_context_adaptive_evidence(
+                    run, manifest, root / "metadata-limit.jsonl.gz"
+                )
+
     def test_adaptive_runner_recovers_each_persisted_round_phase(self):
         manifest = context.load_context_manifest(MANIFEST_PATH)
         for crash_phase in (
@@ -1450,6 +1744,189 @@ class ContextSealAndPromotionTests(unittest.TestCase):
                 self.manifest, rows, source_identity
             ),
         )
+
+    def test_public_seal_and_verify_stream_completed_run_with_compact_envelope(self):
+        source_identity = self.source_identity_payload()
+        campaign_source = production_campaign_source(source_identity)
+
+        def executor(*, fixtures, reports_jsonl, **_kwargs):
+            reports_jsonl.parent.mkdir(parents=True, exist_ok=True)
+            reports_jsonl.write_bytes(
+                b"".join(
+                    context.canonical_json(report) + b"\n"
+                    for report in context.synthetic_execution_reports(fixtures)
+                )
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            calibration = root / campaign_source["calibration_id"]
+            run = calibration / "context-campaign"
+            context.run_context_opcode_campaign(
+                manifest_path=MANIFEST_PATH,
+                run=run,
+                fixtures_root=calibration / "context-fixtures",
+                guest_launcher=ROOT / "target/release/guest-launcher",
+                elf=ROOT / "crates/guests/elf/sp1_context_opcode_lab.elf",
+                control_opcode_lab_elf=ROOT
+                / "crates/guests/elf/sp1_opcode_lab.elf",
+                executor=executor,
+                identity_replayer=context.synthetic_identity_replayer,
+                source_validator=lambda **_kwargs: campaign_source,
+            )
+            identity_path = run / "identity.json"
+            identity = json.loads(identity_path.read_bytes())
+            identity["evidence_mode"] = "production_execution"
+            identity["runner_contract"] = "canonical_release_guest_launcher_v1"
+            identity_path.write_bytes(context.canonical_json(identity) + b"\n")
+            decisions_path = run / "decisions.json"
+            decisions = json.loads(decisions_path.read_bytes())
+            decisions["identity_sha256"] = context.sha256_bytes(
+                context.canonical_json(identity)
+            )
+            decisions_bytes = context.canonical_json(decisions) + b"\n"
+            decisions_path.write_bytes(decisions_bytes)
+            (run / "decisions.sha256").write_text(
+                context.sha256_bytes(decisions_bytes) + "\n"
+            )
+            terminal_path = run / "terminal.json"
+            terminal = json.loads(terminal_path.read_bytes())
+            terminal["identity_sha256"] = decisions["identity_sha256"]
+            terminal["decisions_sha256"] = context.sha256_bytes(decisions_bytes)
+            terminal_path.write_bytes(context.canonical_json(terminal) + b"\n")
+
+            canary = passing_production_canary(source_identity=source_identity)
+            canary_path = (
+                calibration
+                / "context-compatibility"
+                / "compatibility-canary.json"
+            )
+            canary_path.parent.mkdir(parents=True)
+            canary_path.write_text(
+                json.dumps(canary, indent=2, sort_keys=True) + "\n"
+            )
+            out_root = root / "sealed"
+            original_read_bytes = pathlib.Path.read_bytes
+
+            def reject_jsonl_read_bytes(path):
+                if path.suffix == ".jsonl":
+                    raise AssertionError(f"whole JSONL read: {path.name}")
+                return original_read_bytes(path)
+
+            with mock.patch.object(
+                pathlib.Path, "read_bytes", reject_jsonl_read_bytes
+            ), mock.patch.object(
+                opcode_gas,
+                "validate_frozen_legacy_revm_package",
+                return_value={},
+            ), mock.patch.object(
+                opcode_gas,
+                "validate_calibration_execution_identity",
+                return_value=campaign_source["calibration_identity"],
+            ), mock.patch.object(
+                context, "_validate_context_canary_run_directory"
+            ), mock.patch.object(
+                context, "_replay_current_anchor_native_inputs"
+            ), mock.patch.object(
+                context, "_replay_context_archive_identity"
+            ):
+                sealed = context.seal_context_result(
+                    manifest_path=MANIFEST_PATH,
+                    calibration_run=calibration,
+                    run=run,
+                    compatibility_canary_path=canary_path,
+                    corrected_core_path=CORRECTED_REGISTRY_PATH,
+                    coverage_v5_path=ROOT
+                    / "experiments/opcode-gas/manifests/operation-coverage-v5.json",
+                    out_root=out_root,
+                )
+                verified = context.verify_context_result(sealed)
+                sealed_again = context.seal_context_result(
+                    manifest_path=MANIFEST_PATH,
+                    calibration_run=calibration,
+                    run=run,
+                    compatibility_canary_path=canary_path,
+                    corrected_core_path=CORRECTED_REGISTRY_PATH,
+                    coverage_v5_path=ROOT
+                    / "experiments/opcode-gas/manifests/operation-coverage-v5.json",
+                    out_root=out_root,
+                )
+                archive_source = root / "archive-source.jsonl.gz"
+                shutil.copyfile(
+                    sealed / "adaptive-rows.jsonl.gz", archive_source
+                )
+                adaptive_evidence = json.loads(
+                    (sealed / "adaptive-evidence.json").read_bytes()
+                )
+                valid_result_bytes = (sealed / "result.json").read_bytes()
+                with (sealed / "result.json").open("r+b") as output:
+                    output.truncate(
+                        context.CONTEXT_RESULT_METADATA_MAX_BYTES["result.json"]
+                        + 1
+                    )
+
+                def reject_oversized_destination_read(path):
+                    if pathlib.Path(path) == sealed / "result.json":
+                        raise AssertionError("oversized destination metadata was read")
+                    return original_read_bytes(path)
+
+                with mock.patch.object(
+                    pathlib.Path,
+                    "read_bytes",
+                    reject_oversized_destination_read,
+                ), self.assertRaisesRegex(
+                    ValueError, "destination metadata.*size limit"
+                ):
+                    context._publish_streaming_context_result(
+                        verified,
+                        archive_source,
+                        out_root,
+                        manifest=self.manifest,
+                        source_registry=self.registry,
+                        compatibility_canary=canary,
+                        source_identity=source_identity,
+                        adaptive_evidence=adaptive_evidence,
+                        protected_inputs=self.protected_inputs(),
+                    )
+                (sealed / "result.json").write_bytes(valid_result_bytes)
+
+            self.assertEqual(verified["schema_version"], 2)
+            self.assertEqual(sealed_again, sealed)
+            self.assertEqual(
+                {path.name for path in sealed.iterdir()},
+                context.STREAMING_CONTEXT_RESULT_INVENTORY,
+            )
+            self.assertNotIn("rows", verified)
+            self.assertNotIn("manifest", verified)
+            self.assertNotIn("source_registry", verified)
+            self.assertNotIn("compatibility_canary", verified)
+            self.assertNotIn("adaptive_evidence", verified)
+            self.assertLess((sealed / "result.json").stat().st_size, 1_000_000)
+            with (sealed / "adaptive-rows.jsonl.gz").open("ab") as output:
+                output.write(b"tamper")
+            with self.assertRaisesRegex(ValueError, "compressed size|hash differs"):
+                context.verify_context_result(sealed)
+            with (sealed / "adaptive-rows.jsonl.gz").open("r+b") as output:
+                output.truncate(
+                    context.MAX_CONTEXT_ARCHIVE_COMPRESSED_BYTES + 1
+                )
+            with mock.patch.object(
+                context,
+                "_sha256_file_streaming",
+                side_effect=AssertionError("oversized archive was hashed"),
+            ), self.assertRaisesRegex(ValueError, "compressed size"):
+                context.verify_context_result(sealed)
+            with (sealed / "result.json").open("r+b") as output:
+                output.truncate(
+                    context.CONTEXT_RESULT_METADATA_MAX_BYTES["result.json"]
+                    + 1
+                )
+            with mock.patch.object(
+                pathlib.Path,
+                "read_bytes",
+                side_effect=AssertionError("oversized metadata was read"),
+            ), self.assertRaisesRegex(ValueError, "metadata.*size limit"):
+                context.verify_context_result(sealed)
 
     def test_result_rejects_synthetic_adaptive_evidence(self):
         source_identity = self.source_identity_payload()

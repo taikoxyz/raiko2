@@ -1144,12 +1144,22 @@ CONTEXT_CANARY="$CALIBRATION_RUN/context-compatibility"
 The seal command consumes only the canonical create-only adaptive run beneath the named calibration,
 live-validates that calibration and its release launcher/guest artifacts, and requires the canonical
 `$CALIBRATION_RUN/context-compatibility/compatibility-canary.json`; injected test executors are
-stamped synthetic and cannot be sealed. The result stores every round,
-failed-only decision, terminal selection, fit, formal report, and canonical fixture identity in
-`adaptive-evidence.json`; directory replay refits and re-admits all of it without SP1 execution.
-Portable replay proves the sealed bytes, identities, and exact fit graph are self-consistent; it does
-not independently reauthenticate the origin of recorded `prover_gas`. That authority comes from the
-create-only production runner plus live calibration validation at seal time.
+stamped synthetic and cannot be sealed. Schema 2 stores the compact round/decision/fit ledger in
+`adaptive-evidence.json` and every full formal row, including failed scenarios, in the deterministic
+`adaptive-rows.jsonl.gz` stream. `result.json` contains only the derived models, scenario reports,
+and content-addressed source descriptors; it does not duplicate the row stream or source artifacts.
+Directory replay reads at most one round at a time, re-admits and refits every row, reconstructs the
+terminal selection, and replays native identities without SP1 execution.
+
+Do not replace this path with `read_bytes().splitlines()` or duplicate the rows inside the result
+envelope. The production campaign reached roughly 970 MB of uncompressed adaptive rows, and the old
+materialized replay was killed by the kernel after constructing several copies of the same object
+graph. The streaming format fixes the row, compressed/uncompressed byte, executor, fit, and metadata
+limits before reading, parsing, or hashing their contents; one-sided raw/executor EOF fails
+immediately. Portable replay proves the sealed bytes, identities, exact fit graph, and deterministic
+compression are self-consistent. It does not independently reauthenticate the origin of recorded
+`prover_gas`; that authority comes from the create-only production runner plus live calibration
+validation at seal time.
 The provisional legacy-basis projection is exact as arithmetic:
 `stored_b_t = (body_scale * delta_lab + r_control * stored_b_control) / r_target`.
 Common dispatch and identical setup/cleanup cancel in `delta_lab`; the composite prediction adds

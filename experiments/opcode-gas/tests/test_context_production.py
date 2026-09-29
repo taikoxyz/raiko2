@@ -2497,9 +2497,31 @@ class ProductionContextFitTests(unittest.TestCase):
 
 
 class ProductionContextSealTests(unittest.TestCase):
-    def test_unpatched_seal_source_check_rejects_the_local_helper_mismatch(self):
+    def test_seal_source_check_rejects_an_explicit_helper_hash_mismatch(self):
         manifest = production.load_production_context_manifest(MANIFEST)
-        with self.assertRaisesRegex(
+        discovery = ROOT / manifest.sources["discovery"]["path"]
+        source_identity = json.loads(
+            (discovery.parent / "source-identity.json").read_bytes()
+        )
+        helper = ROOT / source_identity["launcher_path"]
+        helper_mismatch = b"explicit-test-helper-hash-mismatch"
+        self.assertNotEqual(
+            production.sha256_bytes(helper_mismatch),
+            source_identity["launcher_sha256"],
+        )
+        real_read_bytes = pathlib.Path.read_bytes
+
+        def read_with_helper_mismatch(path):
+            if path == helper:
+                return helper_mismatch
+            return real_read_bytes(path)
+
+        with mock.patch.object(
+            pathlib.Path,
+            "read_bytes",
+            autospec=True,
+            side_effect=read_with_helper_mismatch,
+        ), self.assertRaisesRegex(
             ValueError, "native identity helper differs from sealed calibration"
         ):
             production.validate_production_context_sources(manifest, ROOT)

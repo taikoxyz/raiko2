@@ -1046,8 +1046,12 @@ class ProductionContextFitTests(unittest.TestCase):
     @staticmethod
     def _row(*, scenario, split, count, lane, repeat, prover_gas, target_key, control_key):
         measured = target_key if lane == "target" else control_key
-        raw = {"opcode:0x60": 9, measured: count}
-        event_counts = {"opcode:0x60": 3, measured: count}
+        raw = {"opcode:0x60": 9}
+        event_counts = {"opcode:0x60": 3}
+        if count:
+            opcode = int(measured.removeprefix("opcode:0x"), 16)
+            raw[measured] = count * production._measurement_raw_gas(opcode)
+            event_counts[measured] = count
         return {
             "row_id": production.sha256_bytes(
                 production.canonical_json(
@@ -1094,7 +1098,7 @@ class ProductionContextFitTests(unittest.TestCase):
                     increment = (
                         Decimal(count * coefficient)
                         if lane == "target"
-                        else Decimal(count * control_price)
+                        else Decimal(count * 2 * control_price)
                     )
                     for repeat in range(3):
                         rows.append(
@@ -1152,12 +1156,22 @@ class ProductionContextFitTests(unittest.TestCase):
             feature_key = production._expected_context_feature(operation, scenario)
             for count in scenario.counts(manifest):
                 for lane in ("control", "target"):
-                    raw = {
-                        "opcode:0x60": 9,
-                        scenario.key if lane == "target" else control_key: count,
-                    }
+                    measured_key = scenario.key if lane == "target" else control_key
+                    measured_opcode = (
+                        scenario.opcode if lane == "target" else operation.control_opcode
+                    )
+                    raw = {"opcode:0x60": 9}
+                    event_counts = {"opcode:0x60": 3}
+                    if count:
+                        raw[measured_key] = (
+                            count * production._measurement_raw_gas(measured_opcode)
+                        )
+                        event_counts[measured_key] = count
                     increment = Decimal(count) * (
-                        event_cost(scenario) if lane == "target" else control_price
+                        event_cost(scenario)
+                        if lane == "target"
+                        else production._measurement_raw_gas(measured_opcode)
+                        * control_price
                     )
                     for repeat in range(3):
                         row = self._row(
@@ -1171,6 +1185,9 @@ class ProductionContextFitTests(unittest.TestCase):
                             control_key=control_key,
                         )
                         row["actual_raw_gas_by_key"] = dict(raw)
+                        row["actual_operation_event_count_by_key"] = dict(
+                            event_counts
+                        )
                         row["actual_context_features"] = (
                             {feature_key: count}
                             if lane == "target" and count
@@ -1178,6 +1195,142 @@ class ProductionContextFitTests(unittest.TestCase):
                         )
                         rows.append(row)
         return rows
+
+    def _real_calldataload_rows(self):
+        rows = [
+            row
+            for row in self._complete_rows()
+            if row["scenario"].startswith("calldataload_")
+        ]
+        swap1_price = self._subtotal_model().opcode_prices["opcode:0x90"]
+        for row in rows:
+            count = row["count"]
+            common_raw = {"opcode:0x60": 9}
+            common_events = {"opcode:0x60": 3}
+            if count == 0:
+                row["actual_raw_gas_by_key"] = common_raw
+                row["actual_operation_event_count_by_key"] = common_events
+                continue
+            if row["lane"] == "target":
+                row["actual_raw_gas_by_key"] = {
+                    **common_raw,
+                    "opcode:0x35": 3 * count,
+                    "opcode:0x90": 3 * count,
+                }
+                row["actual_operation_event_count_by_key"] = {
+                    **common_events,
+                    "opcode:0x35": count,
+                    "opcode:0x90": count,
+                }
+                row["prover_gas"] = str(
+                    Decimal(row["prover_gas"]) + Decimal(3 * count) * swap1_price
+                )
+            else:
+                row["actual_raw_gas_by_key"] = {
+                    **common_raw,
+                    "opcode:0x90": 6 * count,
+                }
+                row["actual_operation_event_count_by_key"] = {
+                    **common_events,
+                    "opcode:0x90": 2 * count,
+                }
+                row["prover_gas"] = str(
+                    Decimal(row["prover_gas"]) + Decimal(3 * count) * swap1_price
+                )
+        return rows
+
+    def test_calldataload_shared_swap1_is_retained_after_measurement_subtraction(self):
+        manifest = production.load_production_context_manifest(MANIFEST)
+        result = production.fit_production_context_rows(
+            manifest,
+            self._real_calldataload_rows(),
+            self._subtotal_model(),
+            family_keys=("opcode:0x35",),
+        )["families"]["opcode:0x35"]
+        self.assertEqual(
+            result["coefficients"],
+            {"load_full": "370", "load_partial": "350", "load_zero": "330"},
+        )
+        self.assertEqual(result["status"], "accepted")
+        self.assertEqual(result["maximum_control_residual"], "0")
+
+    def test_measurement_subtraction_retains_shared_control_opcode_work(self):
+        self.assertEqual(
+            production._subtract_measurement_contribution(
+                {"opcode:0x60": 9, "opcode:0x90": 6},
+                {"opcode:0x60": 3, "opcode:0x90": 2},
+                key="opcode:0x90",
+                count=1,
+                per_event_raw_gas=3,
+            ),
+            (
+                {"opcode:0x60": 9, "opcode:0x90": 3},
+                {"opcode:0x60": 3, "opcode:0x90": 1},
+            ),
+        )
+        self.assertEqual(
+            production._subtract_measurement_contribution(
+                {"opcode:0x60": 9, "opcode:0x5f": 4},
+                {"opcode:0x60": 3, "opcode:0x5f": 2},
+                key="opcode:0x5f",
+                count=1,
+                per_event_raw_gas=2,
+            ),
+            (
+                {"opcode:0x60": 9, "opcode:0x5f": 2},
+                {"opcode:0x60": 3, "opcode:0x5f": 1},
+            ),
+        )
+        unchanged = ({"opcode:0x60": 9}, {"opcode:0x60": 3})
+        self.assertEqual(
+            production._subtract_measurement_contribution(
+                *unchanged,
+                key="opcode:0x90",
+                count=0,
+                per_event_raw_gas=3,
+            ),
+            unchanged,
+        )
+
+    def test_measurement_subtraction_rejects_malformed_aggregate_ledgers(self):
+        cases = (
+            (
+                "missing",
+                {"opcode:0x60": 9},
+                {"opcode:0x60": 3},
+            ),
+            (
+                "underflow",
+                {"opcode:0x90": 2},
+                {"opcode:0x90": 1},
+            ),
+            (
+                "non-integral",
+                {"opcode:0x90": 5},
+                {"opcode:0x90": 2},
+            ),
+            (
+                "per-event raw gas differs",
+                {"opcode:0x90": 4},
+                {"opcode:0x90": 2},
+            ),
+            (
+                "nonnegative",
+                {"opcode:0x90": -3},
+                {"opcode:0x90": 1},
+            ),
+        )
+        for expected, raw_gas, event_counts in cases:
+            with self.subTest(expected=expected), self.assertRaisesRegex(
+                ValueError, expected
+            ):
+                production._subtract_measurement_contribution(
+                    raw_gas,
+                    event_counts,
+                    key="opcode:0x90",
+                    count=1,
+                    per_event_raw_gas=3,
+                )
 
     def test_target_fit_is_independent_of_historical_control_price(self):
         manifest = production.load_production_context_manifest(MANIFEST)

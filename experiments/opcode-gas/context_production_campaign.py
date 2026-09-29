@@ -226,6 +226,19 @@ QUALITY_GATES = {
     "finite_nonnegative_coefficients_and_predictions": True,
 }
 
+_CONTEXT_MEASUREMENT_RAW_GAS = MappingProxyType(
+    {
+        0x30: 2,
+        0x33: 2,
+        0x34: 2,
+        0x35: 3,
+        0x36: 2,
+        0x42: 2,
+        0x5F: 2,
+        0x90: 3,
+    }
+)
+
 REPEAT_CONTRACT = {
     "exact_repeats": REPEATS,
     "equality_fields": [
@@ -2130,6 +2143,67 @@ def _expected_context_feature(
     raise ValueError("production context trace input kind differs")
 
 
+def _subtract_measurement_contribution(
+    raw_gas_by_key: Mapping[str, int],
+    event_count_by_key: Mapping[str, int],
+    *,
+    key: str,
+    count: int,
+    per_event_raw_gas: int,
+) -> tuple[dict[str, int], dict[str, int]]:
+    """Remove one lane's measured events while retaining same-key setup work."""
+    if not isinstance(raw_gas_by_key, Mapping) or not isinstance(
+        event_count_by_key, Mapping
+    ):
+        raise ValueError("measurement ledgers must be objects")
+    raw_gas = dict(raw_gas_by_key)
+    event_counts = dict(event_count_by_key)
+    if count == 0:
+        return raw_gas, event_counts
+    if type(count) is not int or count < 0:
+        raise ValueError("measurement count must be a nonnegative integer")
+    if type(per_event_raw_gas) is not int or per_event_raw_gas < 0:
+        raise ValueError("measurement per-event raw gas must be nonnegative")
+    if set(raw_gas) != set(event_counts):
+        raise ValueError("measurement raw-gas/event ledger keys differ")
+    if key not in raw_gas:
+        raise ValueError(f"measurement ledger key missing: {key}")
+    if any(type(value) is not int or value < 0 for value in raw_gas.values()) or any(
+        type(value) is not int or value < 0 for value in event_counts.values()
+    ):
+        raise ValueError("measurement ledger values must be nonnegative integers")
+
+    observed_raw_gas = raw_gas[key]
+    observed_events = event_counts[key]
+    measured_raw_gas = count * per_event_raw_gas
+    if observed_events < count or observed_raw_gas < measured_raw_gas:
+        raise ValueError("measurement ledger underflow")
+    quotient, remainder = divmod(observed_raw_gas, observed_events)
+    if remainder:
+        raise ValueError("measurement raw gas per event is non-integral")
+    if quotient != per_event_raw_gas:
+        raise ValueError("measurement per-event raw gas differs")
+
+    remaining_raw_gas = observed_raw_gas - measured_raw_gas
+    remaining_events = observed_events - count
+    if (remaining_raw_gas == 0) != (remaining_events == 0):
+        raise ValueError("measurement residual raw-gas/event ledger differs")
+    if remaining_events == 0:
+        raw_gas.pop(key)
+        event_counts.pop(key)
+    else:
+        raw_gas[key] = remaining_raw_gas
+        event_counts[key] = remaining_events
+    return raw_gas, event_counts
+
+
+def _measurement_raw_gas(opcode: int) -> int:
+    try:
+        return _CONTEXT_MEASUREMENT_RAW_GAS[opcode]
+    except KeyError as error:
+        raise ValueError(f"unknown context measurement opcode: 0x{opcode:02x}") from error
+
+
 def fit_production_context_rows(
     manifest: ProductionContextManifest,
     rows: Iterable[Mapping[str, Any]],
@@ -2209,18 +2283,26 @@ def _fit_production_context_rows(
                 or control["actual_context_features"] != {}
             ):
                 raise ValueError("exact context event matching differs")
-            target_non_target = dict(target["actual_raw_gas_by_key"])
-            target_non_target.pop(scenario.key, None)
-            control_non_target = dict(control["actual_raw_gas_by_key"])
-            control_non_target.pop(control_key, None)
-            target_non_target_events = dict(
-                target["actual_operation_event_count_by_key"]
+            target_non_target, target_non_target_events = (
+                _subtract_measurement_contribution(
+                    target["actual_raw_gas_by_key"],
+                    target["actual_operation_event_count_by_key"],
+                    key=scenario.key,
+                    count=count,
+                    per_event_raw_gas=_measurement_raw_gas(operation.opcode),
+                )
             )
-            target_non_target_events.pop(scenario.key, None)
-            control_non_target_events = dict(
-                control["actual_operation_event_count_by_key"]
+            control_non_target, control_non_target_events = (
+                _subtract_measurement_contribution(
+                    control["actual_raw_gas_by_key"],
+                    control["actual_operation_event_count_by_key"],
+                    key=control_key,
+                    count=count,
+                    per_event_raw_gas=_measurement_raw_gas(
+                        operation.control_opcode
+                    ),
+                )
             )
-            control_non_target_events.pop(control_key, None)
             if (
                 target_non_target != control_non_target
                 or target_non_target_events != control_non_target_events

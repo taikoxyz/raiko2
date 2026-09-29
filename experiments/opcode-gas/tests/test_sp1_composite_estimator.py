@@ -583,7 +583,7 @@ class CompositeEstimatorTests(unittest.TestCase):
         v5 = context_opcode.build_operation_coverage_v5(v4, corrected, package)
         source_identity = {
             "legacy_revm_elf_sha256": HISTORICAL_LEGACY_ELF_SHA256,
-            "legacy_revm_elf_path": "crates/guests/elf/sp1_revm_opcode_lab.elf",
+            "legacy_revm_elf_path": context_opcode.FROZEN_LEGACY_REVM_ELF_PATH,
             "context_elf_sha256": TEST_CONTEXT_ELF_SHA256,
             "context_elf_path": "crates/guests/elf/sp1_context_opcode_lab.elf",
             "control_opcode_lab_elf_sha256": HISTORICAL_CONTROL_ELF_SHA256,

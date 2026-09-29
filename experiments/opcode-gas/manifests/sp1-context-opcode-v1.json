@@ -43,7 +43,7 @@
       "opcode:0x5e:copy-32"
     ],
     "per_relation_drift_ape_max": "0.10",
-    "legacy_revm_opcode_lab_elf_path": "crates/guests/elf/sp1_revm_opcode_lab.elf",
+    "legacy_revm_opcode_lab_elf_path": "experiments/opcode-gas/artifacts/legacy-revm-v1/sp1_revm_opcode_lab.elf",
     "reuse_only_no_refit": true
   },
   "quality_gates": {

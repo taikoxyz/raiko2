@@ -2,6 +2,7 @@ import argparse
 import contextlib
 import io
 import pathlib
+import shutil
 import sys
 import tempfile
 import types
@@ -40,6 +41,12 @@ def write_execution_identity(root):
     artifact = root / "sp1-test.elf"
     artifact.write_bytes(b"test SP1 guest artifact")
     guest_artifacts = {artifact.name: opcode_gas.sha256_file(artifact)}
+    for relative in opcode_gas.FROZEN_LEGACY_REVM_PACKAGE_FILES:
+        source = ROOT / relative
+        destination = root / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, destination)
+        guest_artifacts[str(relative)] = opcode_gas.sha256_file(destination)
     guest_launcher = root / "target/release/guest-launcher"
     guest_launcher.parent.mkdir(parents=True)
     guest_launcher.write_bytes(b"test guest launcher")

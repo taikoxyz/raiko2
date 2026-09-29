@@ -1,6 +1,7 @@
 import copy
 import hashlib
 import pathlib
+import shutil
 import sys
 import tempfile
 import types
@@ -834,6 +835,12 @@ def persist_execution_identity(root, manifest, revision="a" * 40):
     guest_artifacts = {
         "crates/guests/elf/sp1_opcode_lab.elf": opcode_gas.sha256_file(guest_artifact)
     }
+    for relative in opcode_gas.FROZEN_LEGACY_REVM_PACKAGE_FILES:
+        source = ROOT / relative
+        destination = root / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, destination)
+        guest_artifacts[str(relative)] = opcode_gas.sha256_file(destination)
     guest_launcher = root / "target" / "release" / "guest-launcher"
     guest_launcher.parent.mkdir(parents=True, exist_ok=True)
     guest_launcher.write_bytes(b"test guest launcher")

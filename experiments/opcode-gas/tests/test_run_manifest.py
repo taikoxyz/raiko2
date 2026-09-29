@@ -436,6 +436,155 @@ class RunManifestTests(unittest.TestCase):
         self.assertTrue(experiment["rust_version"])
         self.assertTrue(experiment["sp1_sdk_version"])
         self.assertIn("guest_artifacts_sha256", experiment)
+        self.assertEqual(
+            {
+                str(path): experiment["guest_artifacts"][str(path)]
+                for path in opcode_gas.FROZEN_LEGACY_REVM_PACKAGE_FILES
+            },
+            {
+                str(path): digest
+                for path, digest in opcode_gas.FROZEN_LEGACY_REVM_PACKAGE_SHA256S.items()
+            },
+        )
+
+    def test_frozen_legacy_revm_package_requires_exact_inventory_and_provenance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            for relative in opcode_gas.FROZEN_LEGACY_REVM_PACKAGE_FILES:
+                source = ROOT / relative
+                destination = root / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(source.read_bytes())
+
+            with mock.patch.object(opcode_gas, "REPO_ROOT", root):
+                package = opcode_gas.validate_frozen_legacy_revm_package()
+                self.assertEqual(
+                    package,
+                    {
+                        str(path): digest
+                        for path, digest in (
+                            opcode_gas.FROZEN_LEGACY_REVM_PACKAGE_SHA256S.items()
+                        )
+                    },
+                )
+
+                provenance = root / opcode_gas.FROZEN_LEGACY_REVM_PROVENANCE_PATH
+                original = provenance.read_bytes()
+                provenance.write_text(
+                    json.dumps({"source_revision": "f" * 40}) + "\n"
+                )
+                with self.assertRaisesRegex(ValueError, "provenance|hash"):
+                    opcode_gas.validate_frozen_legacy_revm_package()
+                provenance.write_bytes(original)
+
+                extra = provenance.parent / "extra.bin"
+                extra.write_bytes(b"not frozen")
+                with self.assertRaisesRegex(ValueError, "inventory"):
+                    opcode_gas.validate_frozen_legacy_revm_package()
+                extra.unlink()
+
+                provenance.unlink()
+                provenance.symlink_to(root / opcode_gas.FROZEN_LEGACY_REVM_ELF_PATH)
+                with self.assertRaisesRegex(ValueError, "inventory|regular|symlink"):
+                    opcode_gas.validate_frozen_legacy_revm_package()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            outside = root / "outside-artifacts"
+            shutil.copytree(
+                ROOT / opcode_gas.FROZEN_LEGACY_REVM_PACKAGE_PATH,
+                outside / "legacy-revm-v1",
+            )
+            artifacts = root / "experiments/opcode-gas/artifacts"
+            artifacts.parent.mkdir(parents=True)
+            artifacts.symlink_to(outside, target_is_directory=True)
+            with mock.patch.object(opcode_gas, "REPO_ROOT", root):
+                with self.assertRaisesRegex(ValueError, "symlink|escapes"):
+                    opcode_gas.validate_frozen_legacy_revm_package()
+
+    def test_calibration_validation_rejects_coherent_frozen_package_downgrade(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            controlled = root / "controlled.toml"
+            launcher = root / "guest-launcher"
+            launcher.write_bytes(b"test guest launcher")
+            controlled.write_text(
+                'normalization_reference_key = "opcode:0x01"\n'
+                'q_formula = ["proposal_startup", "block_base", "tx_base", "native_value_transfer"]\n'
+                'bridge_key_ids = ["opcode:0x01", "proposal_startup", "block_base", "tx_base", "native_value_transfer"]\n'
+            )
+            revision = "a" * 40
+            with mock.patch.object(
+                opcode_gas, "git_worktree_status", return_value=""
+            ), mock.patch.object(opcode_gas, "git_head", return_value=revision):
+                experiment = opcode_gas.prepare_calibration(
+                    root,
+                    controlled,
+                    guest_launcher=launcher,
+                    implementation_revision=revision,
+                    complete_schedule_hash="b" * 64,
+                )
+
+            for field, value in (
+                ("schema_version", 999),
+                ("schema_version", True),
+                ("dirty_state", True),
+                ("workload_identity_schema_version", 999),
+                ("workload_identity_schema_version", True),
+                ("workload_canonicalization", "forged"),
+            ):
+                with self.subTest(unsupported_schema_field=field):
+                    changed = json.loads(json.dumps(experiment))
+                    if field in {
+                        "workload_identity_schema_version",
+                        "workload_canonicalization",
+                    }:
+                        changed["calibration_identity"][field] = value
+                        changed[field] = value
+                        changed["calibration_id"] = opcode_gas.sha256_bytes(
+                            opcode_gas.canonical_json(
+                                changed["calibration_identity"]
+                            )
+                        )[:24]
+                    else:
+                        changed[field] = value
+                    with self.assertRaisesRegex(ValueError, "schema"):
+                        opcode_gas.experiment_provenance_declaration(changed)
+
+            original_run = root / "runs" / experiment["calibration_id"]
+            identity = experiment["calibration_identity"]
+            for relative in opcode_gas.FROZEN_LEGACY_REVM_PACKAGE_FILES:
+                identity["guest_artifacts"].pop(str(relative))
+            artifacts_sha256 = opcode_gas.sha256_bytes(
+                opcode_gas.canonical_json(identity["guest_artifacts"])
+            )
+            identity["guest_artifacts_sha256"] = artifacts_sha256
+            experiment["guest_artifacts_sha256"] = artifacts_sha256
+            calibration_id = opcode_gas.sha256_bytes(
+                opcode_gas.canonical_json(identity)
+            )[:24]
+            experiment["calibration_id"] = calibration_id
+            downgraded_run = root / "runs" / calibration_id
+            original_run.rename(downgraded_run)
+            (downgraded_run / "experiment.json").write_text(
+                json.dumps(experiment, indent=2, sort_keys=True) + "\n"
+            )
+            (downgraded_run / "provenance.json").write_text(
+                json.dumps(
+                    opcode_gas.experiment_provenance_declaration(experiment),
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n"
+            )
+
+            with mock.patch.object(
+                opcode_gas, "git_worktree_status", return_value=""
+            ), mock.patch.object(opcode_gas, "git_head", return_value=revision):
+                with self.assertRaisesRegex(ValueError, "complete frozen legacy"):
+                    opcode_gas.validate_calibration_execution_identity(
+                        downgraded_run
+                    )
 
     def test_calibration_id_seals_complete_execution_identity(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1246,6 +1395,12 @@ def write_controlled_run(root, revision="a" * 40):
     guest_artifacts = {
         str(guest_artifact.relative_to(root)): opcode_gas.sha256_file(guest_artifact)
     }
+    for relative in opcode_gas.FROZEN_LEGACY_REVM_PACKAGE_FILES:
+        source = ROOT / relative
+        destination = root / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(source.read_bytes())
+        guest_artifacts[str(relative)] = opcode_gas.sha256_file(destination)
     guest_launcher = root / "target/release/guest-launcher"
     guest_launcher.parent.mkdir(parents=True)
     guest_launcher.write_bytes(b"test guest launcher")

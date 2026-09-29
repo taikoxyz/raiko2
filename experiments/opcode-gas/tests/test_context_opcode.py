@@ -545,6 +545,15 @@ def production_campaign_source(source_identity):
     guest_artifacts["crates/guests/elf/sp1_context_opcode_lab.vk.bin"] = (
         guest_artifacts["crates/guests/elf/sp1_revm_opcode_lab.vk.bin"]
     )
+    guest_artifacts[context.FROZEN_LEGACY_REVM_ELF_PATH] = (
+        legacy_revm_elf_sha256
+    )
+    guest_artifacts[context.FROZEN_LEGACY_REVM_VK_PATH] = guest_artifacts[
+        "crates/guests/elf/sp1_revm_opcode_lab.vk.bin"
+    ]
+    guest_artifacts[context.FROZEN_LEGACY_REVM_PROVENANCE_PATH] = (
+        context.FROZEN_LEGACY_REVM_PROVENANCE_SHA256
+    )
     calibration_identity["guest_artifacts_sha256"] = context.sha256_bytes(
         context.canonical_json(guest_artifacts)
     )
@@ -552,7 +561,7 @@ def production_campaign_source(source_identity):
         context_elf_sha256
         != guest_artifacts["crates/guests/elf/sp1_context_opcode_lab.elf"]
         or legacy_revm_elf_sha256
-        != guest_artifacts["crates/guests/elf/sp1_revm_opcode_lab.elf"]
+        != guest_artifacts[context.FROZEN_LEGACY_REVM_ELF_PATH]
         or source_identity["control_opcode_lab_elf_sha256"]
         != guest_artifacts["crates/guests/elf/sp1_opcode_lab.elf"]
         or source_identity["launcher_sha256"]
@@ -1120,7 +1129,7 @@ class ContextFitTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "control relation"):
             context.validate_context_compatibility_canary(canary)
 
-    def test_production_source_requires_legacy_elf_and_vk_in_calibration(self):
+    def test_production_source_requires_complete_legacy_package_in_calibration(self):
         source = production_campaign_source(
             {
                 "legacy_revm_elf_sha256": HISTORICAL_LEGACY_ELF_SHA256,
@@ -1132,19 +1141,39 @@ class ContextFitTests(unittest.TestCase):
             }
         )
         context._validate_production_campaign_source(source)
-        forged = copy.deepcopy(source)
-        artifacts = forged["calibration_identity"]["guest_artifacts"]
-        del artifacts["crates/guests/elf/sp1_revm_opcode_lab.vk.bin"]
-        forged["calibration_identity"]["guest_artifacts_sha256"] = (
-            context.sha256_bytes(context.canonical_json(artifacts))
+        for missing in (
+            context.FROZEN_LEGACY_REVM_VK_PATH,
+            context.FROZEN_LEGACY_REVM_PROVENANCE_PATH,
+        ):
+            with self.subTest(missing=missing):
+                forged = copy.deepcopy(source)
+                artifacts = forged["calibration_identity"]["guest_artifacts"]
+                del artifacts[missing]
+                forged["calibration_identity"]["guest_artifacts_sha256"] = (
+                    context.sha256_bytes(context.canonical_json(artifacts))
+                )
+                calibration_hash = context.sha256_bytes(
+                    context.canonical_json(forged["calibration_identity"])
+                )
+                forged["calibration_identity_sha256"] = calibration_hash
+                forged["calibration_id"] = calibration_hash[:24]
+                with self.assertRaisesRegex(ValueError, "calibration identity"):
+                    context._validate_production_campaign_source(forged)
+
+    def test_compatibility_canary_binds_frozen_legacy_provenance(self):
+        canary = passing_production_canary()
+        self.assertEqual(
+            canary["legacy_revm_provenance_sha256"],
+            context.FROZEN_LEGACY_REVM_PROVENANCE_SHA256,
         )
-        calibration_hash = context.sha256_bytes(
-            context.canonical_json(forged["calibration_identity"])
+        canary["legacy_revm_provenance_sha256"] = "f" * 64
+        canary["artifact_sha256"] = context.sha256_bytes(
+            context.canonical_json(
+                {key: value for key, value in canary.items() if key != "artifact_sha256"}
+            )
         )
-        forged["calibration_identity_sha256"] = calibration_hash
-        forged["calibration_id"] = calibration_hash[:24]
-        with self.assertRaisesRegex(ValueError, "calibration identity"):
-            context._validate_production_campaign_source(forged)
+        with self.assertRaisesRegex(ValueError, "legacy compatibility canary"):
+            context.validate_context_compatibility_canary(canary)
 
     def test_production_canary_rejects_legacy_workload_identity_replay(self):
         canary = passing_production_canary()
@@ -1319,7 +1348,7 @@ class ContextSealAndPromotionTests(unittest.TestCase):
     def source_identity_payload(cls):
         payload = {
             "legacy_revm_elf_sha256": HISTORICAL_LEGACY_ELF_SHA256,
-            "legacy_revm_elf_path": "crates/guests/elf/sp1_revm_opcode_lab.elf",
+            "legacy_revm_elf_path": context.FROZEN_LEGACY_REVM_ELF_PATH,
             "context_elf_sha256": TEST_CONTEXT_ELF_SHA256,
             "context_elf_path": "crates/guests/elf/sp1_context_opcode_lab.elf",
             "control_opcode_lab_elf_sha256": HISTORICAL_CONTROL_ELF_SHA256,
@@ -1662,8 +1691,6 @@ class ContextSealAndPromotionTests(unittest.TestCase):
 
     def test_result_rejects_legacy_elf_forged_outside_calibration_identity(self):
         payload = self.result_payload()
-        source_identity = copy.deepcopy(payload["source_identity"])
-        source_identity["legacy_revm_elf_sha256"] = "9" * 64
         canary = copy.deepcopy(payload["compatibility_canary"])
         canary["legacy_revm_elf_sha256"] = "9" * 64
         canary["legacy_osaka_canary"]["provenance"][
@@ -1689,16 +1716,8 @@ class ContextSealAndPromotionTests(unittest.TestCase):
                 }
             )
         )
-        context.validate_context_compatibility_canary(canary)
-        with self.assertRaisesRegex(ValueError, "adaptive evidence source"):
-            context._build_context_result(
-                manifest=self.manifest,
-                rows=payload["rows"],
-                source_registry=self.registry,
-                compatibility_canary=canary,
-                source_identity=source_identity,
-                adaptive_evidence=payload["adaptive_evidence"],
-            )
+        with self.assertRaisesRegex(ValueError, "legacy compatibility canary"):
+            context.validate_context_compatibility_canary(canary)
 
     def test_result_rejects_legacy_canary_from_another_calibration(self):
         payload = self.result_payload()
@@ -1845,6 +1864,59 @@ class ContextSealAndPromotionTests(unittest.TestCase):
             self.assertFalse(output.exists())
             self.assertEqual(context.sha256_bytes(marker.read_bytes()), before)
             self.identity_replay.assert_not_called()
+
+    def test_seal_rejects_output_inside_frozen_legacy_package_before_write(self):
+        payload = self.result_payload()
+        with tempfile.TemporaryDirectory() as directory:
+            package = pathlib.Path(directory) / "legacy-revm-v1"
+            package.mkdir()
+            marker = package / "source.bin"
+            marker.write_bytes(b"immutable\n")
+            before = context.sha256_bytes(marker.read_bytes())
+            output = package / "sealed"
+            with mock.patch.object(
+                context, "FROZEN_LEGACY_REVM_PACKAGE_PATH", package
+            ), self.assertRaisesRegex(ValueError, "overlaps"):
+                self.seal(payload, output)
+            self.assertFalse(output.exists())
+            self.assertEqual(context.sha256_bytes(marker.read_bytes()), before)
+            self.identity_replay.assert_not_called()
+
+    def test_public_seal_rejects_frozen_legacy_package_overlap_before_preflight(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            calibration = root / "calibration"
+            run = calibration / "context-campaign"
+            run.mkdir(parents=True)
+            package = root / "legacy-revm-v1"
+            package.mkdir()
+            marker = package / "source.bin"
+            marker.write_bytes(b"immutable\n")
+            before = context.sha256_bytes(marker.read_bytes())
+            output = package / "sealed"
+            with mock.patch.object(
+                context, "FROZEN_LEGACY_REVM_PACKAGE_PATH", package
+            ), mock.patch.object(
+                opcode_gas, "validate_calibration_execution_identity"
+            ) as calibration_validator, self.assertRaisesRegex(
+                ValueError, "overlaps"
+            ):
+                context.seal_context_result(
+                    manifest_path=MANIFEST_PATH,
+                    calibration_run=calibration,
+                    run=run,
+                    compatibility_canary_path=(
+                        calibration / "context-compatibility/compatibility-canary.json"
+                    ),
+                    corrected_core_path=CORRECTED_REGISTRY_PATH,
+                    coverage_v5_path=(
+                        ROOT / "experiments/opcode-gas/manifests/operation-coverage-v5.json"
+                    ),
+                    out_root=output,
+                )
+            calibration_validator.assert_not_called()
+            self.assertFalse(output.exists())
+            self.assertEqual(context.sha256_bytes(marker.read_bytes()), before)
 
     def test_public_seal_rejects_canary_source_overlap_before_preflight(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -60,6 +60,106 @@ from hierarchical_model import (
 
 
 _OPCODE_DECIMAL_CONTEXT = Context(prec=80, rounding=ROUND_HALF_EVEN, traps=[])
+FROZEN_LEGACY_REVM_PACKAGE_PATH = pathlib.Path(
+    "experiments/opcode-gas/artifacts/legacy-revm-v1"
+)
+FROZEN_LEGACY_REVM_ELF_PATH = (
+    FROZEN_LEGACY_REVM_PACKAGE_PATH / "sp1_revm_opcode_lab.elf"
+)
+FROZEN_LEGACY_REVM_VK_PATH = (
+    FROZEN_LEGACY_REVM_PACKAGE_PATH / "sp1_revm_opcode_lab.vk.bin"
+)
+FROZEN_LEGACY_REVM_PROVENANCE_PATH = (
+    FROZEN_LEGACY_REVM_PACKAGE_PATH / "provenance.json"
+)
+FROZEN_LEGACY_REVM_PACKAGE_FILES = (
+    FROZEN_LEGACY_REVM_ELF_PATH,
+    FROZEN_LEGACY_REVM_VK_PATH,
+    FROZEN_LEGACY_REVM_PROVENANCE_PATH,
+)
+FROZEN_LEGACY_REVM_PACKAGE_SHA256S = {
+    FROZEN_LEGACY_REVM_ELF_PATH: (
+        "a4d340812a54a36ce57cdd0f197843f43f67fd9ac7450acee2ec1f6e58eb9a56"
+    ),
+    FROZEN_LEGACY_REVM_VK_PATH: (
+        "d8ae782c68a7c90a24fc53cf1177d32142d831947d6bef9a0c13709ef4fe3bc2"
+    ),
+    FROZEN_LEGACY_REVM_PROVENANCE_PATH: (
+        "2ff6e3a700ad1f98c6e023ad23501e09dc5e809cc9d49afbf7e2b79951d4685d"
+    ),
+}
+FROZEN_LEGACY_REVM_PROVENANCE = {
+    "schema_version": 1,
+    "purpose": "frozen_legacy_revm_opcode_compatibility_canary",
+    "source_calibration_id": "51f71fde68f378842f872fc1",
+    "source_calibration_identity_sha256": (
+        "51f71fde68f378842f872fc1f3ecb8493fa83e8102af1761f7da21d5086ce338"
+    ),
+    "source_revision": "571dd487ffef8c3e158a376e13c9e159da7c936c",
+    "source_paths": {
+        "elf": "crates/guests/elf/sp1_revm_opcode_lab.elf",
+        "vk": "crates/guests/elf/sp1_revm_opcode_lab.vk.bin",
+    },
+    "artifacts": {
+        "sp1_revm_opcode_lab.elf": FROZEN_LEGACY_REVM_PACKAGE_SHA256S[
+            FROZEN_LEGACY_REVM_ELF_PATH
+        ],
+        "sp1_revm_opcode_lab.vk.bin": FROZEN_LEGACY_REVM_PACKAGE_SHA256S[
+            FROZEN_LEGACY_REVM_VK_PATH
+        ],
+    },
+    "contract": "immutable_historical_authorization_artifact_not_a_current_stateful_guest",
+}
+
+
+def validate_frozen_legacy_revm_package() -> dict[str, str]:
+    """Validate the exact immutable package authorizing the legacy canary."""
+    package = REPO_ROOT / FROZEN_LEGACY_REVM_PACKAGE_PATH
+    cursor = REPO_ROOT
+    for part in FROZEN_LEGACY_REVM_PACKAGE_PATH.parts:
+        cursor = cursor / part
+        if cursor.is_symlink():
+            raise ValueError("frozen legacy REVM package path contains a symlink")
+    if package.is_symlink() or not package.is_dir():
+        raise ValueError("frozen legacy REVM package must be a regular directory")
+    expected_names = {path.name for path in FROZEN_LEGACY_REVM_PACKAGE_FILES}
+    if {entry.name for entry in package.iterdir()} != expected_names:
+        raise ValueError("frozen legacy REVM package inventory differs")
+    resolved_package = package.resolve(strict=True)
+    if not resolved_package.is_relative_to(REPO_ROOT.resolve(strict=True)):
+        raise ValueError("frozen legacy REVM package escapes the repository")
+    validated = {}
+    for relative in FROZEN_LEGACY_REVM_PACKAGE_FILES:
+        path = REPO_ROOT / relative
+        try:
+            mode = path.stat(follow_symlinks=False).st_mode
+            resolved = path.resolve(strict=True)
+        except OSError as error:
+            raise ValueError("frozen legacy REVM package inventory differs") from error
+        if (
+            path.is_symlink()
+            or not stat.S_ISREG(mode)
+            or resolved.parent != resolved_package
+        ):
+            raise ValueError("frozen legacy REVM package contains a non-regular file")
+        expected = FROZEN_LEGACY_REVM_PACKAGE_SHA256S[relative]
+        if sha256_file(path) != expected:
+            raise ValueError(f"frozen legacy REVM package hash differs: {relative}")
+        validated[str(relative)] = expected
+    try:
+        provenance = json.loads(
+            (REPO_ROOT / FROZEN_LEGACY_REVM_PROVENANCE_PATH).read_bytes()
+        )
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError("frozen legacy REVM provenance is invalid") from error
+    if provenance != FROZEN_LEGACY_REVM_PROVENANCE:
+        raise ValueError("frozen legacy REVM provenance differs")
+    if (
+        provenance["source_calibration_id"]
+        != provenance["source_calibration_identity_sha256"][:24]
+    ):
+        raise ValueError("frozen legacy REVM provenance identity differs")
+    return validated
 
 
 def _isolated_decimal_context(function):
@@ -12656,6 +12756,13 @@ def experiment_provenance_declaration(
     identity = experiment.get("calibration_identity")
     if not isinstance(identity, Mapping):
         raise ValueError("calibration run has no calibration_identity")
+    schema_version = experiment.get("schema_version")
+    if (
+        type(schema_version) is not int
+        or schema_version != 1
+        or experiment.get("dirty_state") is not False
+    ):
+        raise ValueError("experiment has unsupported calibration schema")
     calibration_id = experiment.get("calibration_id")
     expected_calibration_id = sha256_bytes(canonical_json(identity))[:24]
     if calibration_id != expected_calibration_id:
@@ -12678,6 +12785,14 @@ def experiment_provenance_declaration(
         raise ValueError("experiment controlled manifest identity is inconsistent")
     if identity.get("sp1_execution_parameters") != sp1_execution_parameters():
         raise ValueError("experiment has unexpected SP1 execution parameters")
+    workload_schema_version = identity.get("workload_identity_schema_version")
+    if (
+        type(workload_schema_version) is not int
+        or workload_schema_version != 1
+        or identity.get("workload_canonicalization")
+        != "sha256(canonical_json(workload_spec))"
+    ):
+        raise ValueError("experiment has unsupported workload identity schema")
     if "version_identity" in identity:
         validate_calibration_version_identity(identity)
     return {
@@ -12717,6 +12832,14 @@ def validate_calibration_execution_identity(
         "guest_artifacts_sha256"
     ):
         raise ValueError("frozen guest artifact map digest does not match calibration identity")
+    frozen_package = validate_frozen_legacy_revm_package()
+    if any(
+        guest_artifacts.get(relative) != digest
+        for relative, digest in frozen_package.items()
+    ):
+        raise ValueError(
+            "calibration identity does not bind the complete frozen legacy REVM package"
+        )
     for relative, expected_sha256 in guest_artifacts.items():
         if (
             not isinstance(relative, str)
@@ -12779,10 +12902,19 @@ def prepare_calibration(
         raise ValueError("complete_schedule_hash must be a SHA256 digest")
     workspace = tomllib.loads((REPO_ROOT / "Cargo.toml").read_text())
     alethia_revision = workspace["workspace"]["dependencies"]["alethia-reth-chainspec"]["rev"]
+    guest_artifact_paths = {
+        path
+        for path in (REPO_ROOT / "crates/guests/elf").glob("sp1*")
+        if path.is_file()
+        and (path.name.endswith(".elf") or path.name.endswith(".vk.bin"))
+    }
+    frozen_legacy_package = validate_frozen_legacy_revm_package()
+    guest_artifact_paths.update(
+        REPO_ROOT / relative for relative in frozen_legacy_package
+    )
     guest_artifacts = {
         str(path.relative_to(REPO_ROOT)): sha256_file(path)
-        for path in sorted((REPO_ROOT / "crates/guests/elf").glob("sp1*"))
-        if path.is_file() and (path.name.endswith(".elf") or path.name.endswith(".vk.bin"))
+        for path in sorted(guest_artifact_paths)
     }
     guest_artifacts_sha256 = sha256_bytes(canonical_json(guest_artifacts))
     if not guest_launcher.is_file():

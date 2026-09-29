@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "purpose": "frozen_legacy_revm_opcode_compatibility_canary",
+  "source_calibration_id": "51f71fde68f378842f872fc1",
+  "source_calibration_identity_sha256": "51f71fde68f378842f872fc1f3ecb8493fa83e8102af1761f7da21d5086ce338",
+  "source_revision": "571dd487ffef8c3e158a376e13c9e159da7c936c",
+  "source_paths": {
+    "elf": "crates/guests/elf/sp1_revm_opcode_lab.elf",
+    "vk": "crates/guests/elf/sp1_revm_opcode_lab.vk.bin"
+  },
+  "artifacts": {
+    "sp1_revm_opcode_lab.elf": "a4d340812a54a36ce57cdd0f197843f43f67fd9ac7450acee2ec1f6e58eb9a56",
+    "sp1_revm_opcode_lab.vk.bin": "d8ae782c68a7c90a24fc53cf1177d32142d831947d6bef9a0c13709ef4fe3bc2"
+  },
+  "contract": "immutable_historical_authorization_artifact_not_a_current_stateful_guest"
+}

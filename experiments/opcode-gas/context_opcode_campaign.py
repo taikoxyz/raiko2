@@ -68,8 +68,29 @@ CONTEXT_TRANSPORT_STATUS = {
     "scope": "cross_elf_context_to_legacy_cost_transport",
     "required_before_candidate_promotion": True,
 }
+FROZEN_LEGACY_REVM_ELF_PATH = (
+    "experiments/opcode-gas/artifacts/legacy-revm-v1/sp1_revm_opcode_lab.elf"
+)
+FROZEN_LEGACY_REVM_VK_PATH = (
+    "experiments/opcode-gas/artifacts/legacy-revm-v1/sp1_revm_opcode_lab.vk.bin"
+)
+FROZEN_LEGACY_REVM_PACKAGE_PATH = (
+    "experiments/opcode-gas/artifacts/legacy-revm-v1"
+)
+FROZEN_LEGACY_REVM_PROVENANCE_PATH = (
+    "experiments/opcode-gas/artifacts/legacy-revm-v1/provenance.json"
+)
+FROZEN_LEGACY_REVM_ELF_SHA256 = (
+    "a4d340812a54a36ce57cdd0f197843f43f67fd9ac7450acee2ec1f6e58eb9a56"
+)
+FROZEN_LEGACY_REVM_VK_SHA256 = (
+    "d8ae782c68a7c90a24fc53cf1177d32142d831947d6bef9a0c13709ef4fe3bc2"
+)
+FROZEN_LEGACY_REVM_PROVENANCE_SHA256 = (
+    "2ff6e3a700ad1f98c6e023ad23501e09dc5e809cc9d49afbf7e2b79951d4685d"
+)
 CONTEXT_MANIFEST_CANONICAL_SHA256 = (
-    "92156777ab3792955b4cd8543cf26edcf6232cd78727dd3ecafb3fec7f6f9165"
+    "7f13777527e860953f81cbd3a1e1705c1ac97038338f59ed2b22f1d2c0017923"
 )
 HISTORICAL_ANCHOR_DERIVATION_SHA256 = (
     "b61fda990d258ea8dbb909572d0df8efb12adca0b14e8bb01bc8f2c437a33115"
@@ -185,7 +206,7 @@ def load_context_manifest(path: pathlib.Path) -> dict[str, Any]:
         "context_transport": CONTEXT_TRANSPORT_STATUS,
         "historical_anchor_calibration_id": "09ebb08d76d3f461086b0cf4",
         "legacy_revm_opcode_lab_elf_path": (
-            "crates/guests/elf/sp1_revm_opcode_lab.elf"
+            FROZEN_LEGACY_REVM_ELF_PATH
         ),
         "legacy_relation_drift_mape_max": "0.05",
         "legacy_relation_ids": list(OSAKA_CANARY_RELATION_IDS),
@@ -1329,18 +1350,28 @@ def _default_context_source_validator(
             "context campaign requires the release launcher and both canonical ELFs"
         )
     identity = opcode_gas.validate_calibration_execution_identity(calibration_run)
+    frozen_legacy_package = opcode_gas.validate_frozen_legacy_revm_package()
     launcher_sha256 = opcode_gas.validate_calibration_guest_launcher(identity, guest_launcher)
     elf_sha256 = opcode_gas.sha256_file(elf)
     control_elf_sha256 = opcode_gas.sha256_file(control_opcode_lab_elf)
     guest_artifacts = identity.get("guest_artifacts", {})
     legacy_revm_elf_sha256 = guest_artifacts.get(
-        "crates/guests/elf/sp1_revm_opcode_lab.elf"
+        FROZEN_LEGACY_REVM_ELF_PATH
     )
     if guest_artifacts.get(
         "crates/guests/elf/sp1_context_opcode_lab.elf"
     ) != elf_sha256 or guest_artifacts.get(
         "crates/guests/elf/sp1_opcode_lab.elf"
-    ) != control_elf_sha256 or re.fullmatch(
+    ) != control_elf_sha256 or legacy_revm_elf_sha256 != (
+        FROZEN_LEGACY_REVM_ELF_SHA256
+    ) or guest_artifacts.get(FROZEN_LEGACY_REVM_VK_PATH) != (
+        FROZEN_LEGACY_REVM_VK_SHA256
+    ) or guest_artifacts.get(FROZEN_LEGACY_REVM_PROVENANCE_PATH) != (
+        FROZEN_LEGACY_REVM_PROVENANCE_SHA256
+    ) or any(
+        guest_artifacts.get(relative) != digest
+        for relative, digest in frozen_legacy_package.items()
+    ) or re.fullmatch(
         r"[0-9a-f]{64}", str(legacy_revm_elf_sha256)
     ) is None:
         raise ValueError("context campaign ELFs differ from calibration identity")
@@ -2092,10 +2123,13 @@ def _validate_production_campaign_source(source: Mapping[str, Any]) -> None:
         else None
     )
     required_guest_artifacts = {
-        "crates/guests/elf/sp1_revm_opcode_lab.elf": source.get(
+        FROZEN_LEGACY_REVM_ELF_PATH: source.get(
             "legacy_revm_elf_sha256"
         ),
-        "crates/guests/elf/sp1_revm_opcode_lab.vk.bin": None,
+        FROZEN_LEGACY_REVM_VK_PATH: FROZEN_LEGACY_REVM_VK_SHA256,
+        FROZEN_LEGACY_REVM_PROVENANCE_PATH: (
+            FROZEN_LEGACY_REVM_PROVENANCE_SHA256
+        ),
         "crates/guests/elf/sp1_context_opcode_lab.elf": source.get(
             "context_elf_sha256"
         ),
@@ -2108,6 +2142,8 @@ def _validate_production_campaign_source(source: Mapping[str, Any]) -> None:
     if (
         set(source) != expected_fields
         or source.get("evidence_mode") != "production_execution"
+        or source.get("legacy_revm_elf_sha256")
+        != FROZEN_LEGACY_REVM_ELF_SHA256
         or not isinstance(calibration_identity, Mapping)
         or source.get("calibration_identity_sha256")
         != sha256_bytes(canonical_json(calibration_identity))
@@ -2584,6 +2620,9 @@ def _build_context_compatibility_canary(
         "legacy_revm_elf_sha256": legacy_osaka_canary.get("provenance", {}).get(
             "guest_elf_sha256"
         ),
+        "legacy_revm_provenance_sha256": (
+            FROZEN_LEGACY_REVM_PROVENANCE_SHA256
+        ),
         "context_elf_sha256": context_elf_sha256,
         "control_opcode_lab_elf_sha256": current_anchor_fit.get("elf_sha256"),
         "launcher_sha256": current_anchor_fit.get("guest_launcher_sha256"),
@@ -2639,6 +2678,10 @@ def validate_context_compatibility_canary(canary: Mapping[str, Any]) -> None:
         != "legacy_opcode_reuse_canary_with_context_binding"
         or canary.get("evidence_mode") != "production_replay"
         or canary.get("status") != "passed"
+        or canary.get("legacy_revm_elf_sha256")
+        != FROZEN_LEGACY_REVM_ELF_SHA256
+        or canary.get("legacy_revm_provenance_sha256")
+        != FROZEN_LEGACY_REVM_PROVENANCE_SHA256
         or re.fullmatch(
             r"[0-9a-f]{64}", str(canary.get("legacy_revm_elf_sha256"))
         )
@@ -2922,6 +2965,7 @@ def run_context_compatibility_canary(
         if path.is_symlink() or not path.is_file():
             raise ValueError(f"context compatibility {label} must be a regular file")
     identity = opcode_gas.validate_calibration_execution_identity(calibration_run)
+    frozen_legacy_package = opcode_gas.validate_frozen_legacy_revm_package()
     launcher_sha256 = opcode_gas.validate_calibration_guest_launcher(
         identity, guest_launcher
     )
@@ -2933,9 +2977,18 @@ def run_context_compatibility_canary(
         legacy_revm_sha, context_sha, control_sha
     )
     if (
-        not isinstance(artifacts, Mapping)
-        or artifacts.get("crates/guests/elf/sp1_revm_opcode_lab.elf")
+        legacy_revm_sha != FROZEN_LEGACY_REVM_ELF_SHA256
+        or not isinstance(artifacts, Mapping)
+        or artifacts.get(FROZEN_LEGACY_REVM_ELF_PATH)
         != legacy_revm_sha
+        or artifacts.get(FROZEN_LEGACY_REVM_VK_PATH)
+        != FROZEN_LEGACY_REVM_VK_SHA256
+        or artifacts.get(FROZEN_LEGACY_REVM_PROVENANCE_PATH)
+        != FROZEN_LEGACY_REVM_PROVENANCE_SHA256
+        or any(
+            artifacts.get(relative) != digest
+            for relative, digest in frozen_legacy_package.items()
+        )
         or artifacts.get("crates/guests/elf/sp1_context_opcode_lab.elf")
         != context_sha
         or artifacts.get("crates/guests/elf/sp1_opcode_lab.elf") != control_sha
@@ -3287,7 +3340,7 @@ def _build_context_result(
     ):
         raise ValueError("context execution calibration identity differs")
     path_contract = {
-        "legacy_revm_elf_path": "crates/guests/elf/sp1_revm_opcode_lab.elf",
+        "legacy_revm_elf_path": FROZEN_LEGACY_REVM_ELF_PATH,
         "context_elf_path": "crates/guests/elf/sp1_context_opcode_lab.elf",
         "control_opcode_lab_elf_path": "crates/guests/elf/sp1_opcode_lab.elf",
         "launcher_path": "target/release/guest-launcher",
@@ -3711,6 +3764,7 @@ def _publish_context_result(
     repo_root = pathlib.Path(__file__).resolve().parents[2]
     frozen_inputs = [
         repo_root / "experiments/opcode-gas/manifests/sp1-context-opcode-v1.json",
+        repo_root / FROZEN_LEGACY_REVM_PACKAGE_PATH,
         repo_root / result["source_identity"]["corrected_osaka_core_path"],
         repo_root / result["source_identity"]["operation_coverage_v5_path"],
         *protected_inputs.values(),
@@ -3796,8 +3850,11 @@ def seal_context_result(
             pathlib.Path(compatibility_canary_path),
             pathlib.Path(corrected_core_path),
             pathlib.Path(coverage_v5_path),
+            pathlib.Path(__file__).resolve().parents[2]
+            / FROZEN_LEGACY_REVM_PACKAGE_PATH,
         ),
     )
+    opcode_gas.validate_frozen_legacy_revm_package()
     calibration_identity = opcode_gas.validate_calibration_execution_identity(
         calibration_run
     )
@@ -3865,7 +3922,7 @@ def seal_context_result(
         "legacy_revm_elf_sha256": campaign_source[
             "legacy_revm_elf_sha256"
         ],
-        "legacy_revm_elf_path": "crates/guests/elf/sp1_revm_opcode_lab.elf",
+        "legacy_revm_elf_path": FROZEN_LEGACY_REVM_ELF_PATH,
         "context_elf_sha256": campaign_source["context_elf_sha256"],
         "context_elf_path": "crates/guests/elf/sp1_context_opcode_lab.elf",
         "control_opcode_lab_elf_sha256": campaign_source[

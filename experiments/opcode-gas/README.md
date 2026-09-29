@@ -1075,10 +1075,19 @@ Use the repository's existing experiment Python environment and run the two-part
 canary before the campaign. The context input is deliberately isolated in
 `sp1_context_opcode_lab.elf`; changing the binary input or public commitment of the legacy guest
 invalidates historical relation reuse even when its EVM bytecode and raw gas are unchanged. The
-legacy 11 relations therefore execute only on `sp1_revm_opcode_lab.elf`, while the historical
-PUSH0/SWAP1 absolute anchor probe executes only on `sp1_opcode_lab.elf`. The controlled campaign
-executes only on `sp1_context_opcode_lab.elf`. All three guests and the release launcher must belong
-to the same calibration identity.
+legacy 11 relations therefore execute only on the immutable
+`experiments/opcode-gas/artifacts/legacy-revm-v1/sp1_revm_opcode_lab.elf` imported from their
+accepted calibration revision. The current `crates/guests/elf/sp1_revm_opcode_lab.elf` remains the
+stateful laboratory guest and is not a compatibility substitute. The historical PUSH0/SWAP1
+absolute anchor probe executes only on `sp1_opcode_lab.elf`. The controlled campaign executes only
+on `sp1_context_opcode_lab.elf`. All canary/campaign guests and the release launcher must belong to
+the same calibration identity.
+
+The immutable legacy package contains exactly the historical ELF, its VK, and `provenance.json`.
+The provenance binds source calibration `51f71fde68f378842f872fc1`, its full calibration-identity
+SHA256, source revision, original artifact paths, and both artifact hashes. All three regular,
+non-symlink files enter the new calibration identity. Extra, missing, replaced, or symlinked package
+entries fail before execution, and result publication may not write inside the package directory.
 
 The fixed legacy canary is an authorization check, not an adaptive measurement. Never expand its
 count bounds, refit it, or substitute the context ELF after a failure. The canary proves only that
@@ -1100,7 +1109,7 @@ CONTEXT_CANARY="$CALIBRATION_RUN/context-compatibility"
   --historical-manifest experiments/opcode-gas/tests/fixtures/historical-core-102/controlled-manifest.toml \
   --historical-anchor-run experiments/opcode-gas/runs/09ebb08d76d3f461086b0cf4 \
   --guest-launcher target/release/guest-launcher \
-  --legacy-revm-elf crates/guests/elf/sp1_revm_opcode_lab.elf \
+  --legacy-revm-elf experiments/opcode-gas/artifacts/legacy-revm-v1/sp1_revm_opcode_lab.elf \
   --context-elf crates/guests/elf/sp1_context_opcode_lab.elf \
   --control-opcode-lab-elf crates/guests/elf/sp1_opcode_lab.elf \
   --out "$CONTEXT_CANARY"

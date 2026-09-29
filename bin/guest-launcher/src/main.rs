@@ -1831,10 +1831,17 @@ async fn run_controlled_block(args: Args) -> Result<()> {
                 .map_err(anyhow::Error::msg)
                 .context("load production SP1 proposal ELF")?
                 .to_vec();
+            let (proposal_elf_sha256, guest_launcher_sha256) =
+                sp1_proposal_gas_estimator_asset_hashes(&elf)?;
             let (public_values, execution_report) =
                 execute_sp1_guest_gas_estimator_blocking(elf, fixture.guest_input).await?;
-            report.public_values = public_values.raw();
-            apply_execution_metadata(&mut report, &execution_report);
+            finalize_sp1_proposal_gas_estimator_report(
+                &mut report,
+                public_values.raw(),
+                &execution_report,
+                proposal_elf_sha256,
+                guest_launcher_sha256,
+            )?;
         }
     }
     report.wall_time_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -2644,8 +2651,8 @@ async fn run_sp1_proposal(
                 .map_err(anyhow::Error::msg)
                 .context("load production SP1 proposal ELF")?
                 .to_vec();
-            let proposal_elf_sha256 = hex::encode(Sha256::digest(&elf));
-            let guest_launcher_sha256 = current_guest_launcher_sha256()?;
+            let (proposal_elf_sha256, guest_launcher_sha256) =
+                sp1_proposal_gas_estimator_asset_hashes(&elf)?;
             let (public_values, execution_report) =
                 execute_sp1_guest_gas_estimator_blocking(elf, input).await?;
             finalize_sp1_proposal_gas_estimator_report(
@@ -2697,6 +2704,13 @@ fn current_guest_launcher_sha256() -> Result<String> {
     let bytes = fs::read(&path)
         .with_context(|| format!("read current guest-launcher executable {}", path.display()))?;
     Ok(hex::encode(Sha256::digest(bytes)))
+}
+
+fn sp1_proposal_gas_estimator_asset_hashes(elf: &[u8]) -> Result<(String, String)> {
+    Ok((
+        hex::encode(Sha256::digest(elf)),
+        current_guest_launcher_sha256()?,
+    ))
 }
 
 fn guest_launcher_executable_path() -> Result<PathBuf> {
@@ -2851,6 +2865,7 @@ mod tests {
         read_input, read_opcode_lab_input, read_opcode_lab_input_list, risc0_padded_cycles,
         run_context_opcode_identity, run_controlled_state_holdout_trace,
         run_opcode_anchor_identity, run_revm_opcode_identity,
+        sp1_proposal_gas_estimator_asset_hashes,
         validate_proposal_gas_estimator_guest_elf_override,
     };
     use alloy_primitives::{Address, B256, hex};
@@ -4179,6 +4194,26 @@ mod tests {
         assert_eq!(serialized["exit_code"], 0);
         assert_eq!(serialized["sp1_proposal_elf_sha256"], "22".repeat(32));
         assert_eq!(serialized["guest_launcher_sha256"], "33".repeat(32));
+    }
+
+    #[test]
+    fn controlled_block_gas_estimator_provenance_hashes_assets_actually_used() {
+        let embedded_proposal_elf = b"embedded production SP1 proposal ELF";
+        let (proposal_elf_sha256, guest_launcher_sha256) =
+            sp1_proposal_gas_estimator_asset_hashes(embedded_proposal_elf)
+                .expect("hash estimator execution assets");
+
+        assert_eq!(
+            proposal_elf_sha256,
+            hex::encode(Sha256::digest(embedded_proposal_elf))
+        );
+        let executable = guest_launcher_executable_path().expect("resolve current executable");
+        assert_eq!(
+            guest_launcher_sha256,
+            hex::encode(Sha256::digest(
+                fs::read(executable).expect("read current executable")
+            ))
+        );
     }
 
     #[test]

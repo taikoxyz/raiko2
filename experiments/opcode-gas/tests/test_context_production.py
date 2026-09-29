@@ -1,4 +1,5 @@
 import copy
+import errno
 import json
 import pathlib
 import subprocess
@@ -623,6 +624,8 @@ class ProductionContextIdentityTests(unittest.TestCase):
 
     def test_standard_estimator_parity_is_identity_only_not_a_model_sample(self):
         common = {
+            "stage": "controlled-block",
+            "mode": "execute",
             "gas": 159_030_265,
             "total_instruction_count": 136_594_192,
             "total_syscall_count": 229_747,
@@ -636,12 +639,22 @@ class ProductionContextIdentityTests(unittest.TestCase):
             },
         }
         standard = {**common, "sp1_execution_engine": "standard"}
-        estimator = {**common, "sp1_execution_engine": "gas-estimator"}
+        estimator = {
+            **common,
+            "sp1_execution_engine": "gas-estimator",
+            "sp1_proposal_elf_sha256": "d" * 64,
+            "guest_launcher_sha256": "e" * 64,
+        }
         identity = production.production_context_parity_identity(
             row_id="c" * 64, standard=standard, gas_estimator=estimator
         )
         self.assertEqual(identity["kind"], "production_context_parity_v1")
         self.assertFalse(identity["model_sample"])
+        self.assertEqual(identity["standard_execution"]["mode"], "execute")
+        self.assertEqual(
+            identity["gas_estimator_assets"]["sp1_proposal_elf_sha256"],
+            "d" * 64,
+        )
         self.assertEqual(len(identity["identity_sha256"]), 64)
         drifted = copy.deepcopy(estimator)
         drifted["gas"] += 1
@@ -652,6 +665,8 @@ class ProductionContextIdentityTests(unittest.TestCase):
 
     def test_standard_estimator_parity_requires_accepted_row_bound_successes(self):
         common = {
+            "stage": "controlled-block",
+            "mode": "execute",
             "gas": 1,
             "total_instruction_count": 2,
             "total_syscall_count": 3,
@@ -668,6 +683,8 @@ class ProductionContextIdentityTests(unittest.TestCase):
         estimator = {
             **copy.deepcopy(common),
             "sp1_execution_engine": "gas-estimator",
+            "sp1_proposal_elf_sha256": "d" * 64,
+            "guest_launcher_sha256": "e" * 64,
         }
         invalid_reports = []
         wrong_row = copy.deepcopy(estimator)
@@ -717,6 +734,71 @@ class ProductionContextIdentityTests(unittest.TestCase):
                     standard=candidate_standard,
                     gas_estimator=candidate_estimator,
                 )
+
+    def test_parity_identity_validator_rejects_placeholder_extra_and_asset_drift(self):
+        common = {
+            "stage": "controlled-block",
+            "mode": "execute",
+            "gas": 1,
+            "total_instruction_count": 2,
+            "total_syscall_count": 3,
+            "public_values": "0x01",
+            "guest_input_sha256": "0x" + "a" * 64,
+            "exit_code": 0,
+            "controlled_block": {
+                "status": "accepted",
+                "row_id": "c" * 64,
+                "observation": {"host_trace_sha256": "b" * 64},
+            },
+        }
+        identity = production.production_context_parity_identity(
+            row_id="c" * 64,
+            standard={**copy.deepcopy(common), "sp1_execution_engine": "standard"},
+            gas_estimator={
+                **copy.deepcopy(common),
+                "sp1_execution_engine": "gas-estimator",
+                "sp1_proposal_elf_sha256": "d" * 64,
+                "guest_launcher_sha256": "e" * 64,
+            },
+        )
+        production.validate_production_context_parity_identity(
+            identity,
+            row_ids=("c" * 64,),
+            production_elf_sha256="d" * 64,
+            guest_launcher_sha256="e" * 64,
+        )
+        invalid = []
+        placeholder = {"kind": "production_context_parity_v1", "model_sample": False}
+        placeholder["identity_sha256"] = production.sha256_bytes(
+            production.canonical_json(placeholder)
+        )
+        invalid.append(placeholder)
+        extra = copy.deepcopy(identity)
+        extra["placeholder"] = True
+        invalid.append(extra)
+        malformed = copy.deepcopy(identity)
+        malformed["standard_execution"]["status"] = "rejected"
+        malformed["identity_sha256"] = production.sha256_bytes(
+            production.canonical_json(
+                {key: value for key, value in malformed.items() if key != "identity_sha256"}
+            )
+        )
+        invalid.append(malformed)
+        for candidate in invalid:
+            with self.subTest(candidate=candidate), self.assertRaises(ValueError):
+                production.validate_production_context_parity_identity(
+                    candidate,
+                    row_ids=("c" * 64,),
+                    production_elf_sha256="d" * 64,
+                    guest_launcher_sha256="e" * 64,
+                )
+        with self.assertRaisesRegex(ValueError, "asset join"):
+            production.validate_production_context_parity_identity(
+                identity,
+                row_ids=("c" * 64,),
+                production_elf_sha256="f" * 64,
+                guest_launcher_sha256="e" * 64,
+            )
 
 
 class ProductionContextCliTests(unittest.TestCase):
@@ -776,8 +858,39 @@ class ProductionContextCliTests(unittest.TestCase):
 
 class ProductionContextFitTests(unittest.TestCase):
     @staticmethod
-    def _parity_identity():
-        identity = {"kind": "production_context_parity_v1", "model_sample": False}
+    def _parity_identity(*, row_id, launcher, elf):
+        identity = {
+            "kind": "production_context_parity_v1",
+            "row_id": row_id,
+            "model_sample": False,
+            "standard_execution": {
+                "stage": "controlled-block",
+                "mode": "execute",
+                "engine": "standard",
+                "status": "accepted",
+                "exit_code": 0,
+            },
+            "gas_estimator_execution": {
+                "stage": "controlled-block",
+                "mode": "execute",
+                "engine": "gas-estimator",
+                "status": "accepted",
+                "exit_code": 0,
+            },
+            "gas_estimator_assets": {
+                "sp1_proposal_elf_sha256": production._sha256_file(elf),
+                "guest_launcher_sha256": production._sha256_file(launcher),
+            },
+            "equal_values": {
+                "gas": 1,
+                "total_instruction_count": 2,
+                "total_syscall_count": 3,
+                "public_values": "0x01",
+                "guest_input_sha256": "0x" + "a" * 64,
+                "host_trace_sha256": "b" * 64,
+                "exit_code": 0,
+            },
+        }
         identity["identity_sha256"] = production.sha256_bytes(
             production.canonical_json(identity)
         )
@@ -818,6 +931,8 @@ class ProductionContextFitTests(unittest.TestCase):
             "public_output": "0x1234",
             "backend_input_sha256": "a" * 64,
             "host_trace_sha256": "b" * 64,
+            "sp1_proposal_elf_sha256": "d" * 64,
+            "guest_launcher_sha256": "e" * 64,
             "actual_raw_gas_by_key": raw,
             "actual_context_features": (
                 {f"context_fixed:{target_key}": count}
@@ -887,6 +1002,8 @@ class ProductionContextFitTests(unittest.TestCase):
                     return Decimal(300) + Decimal(2) * length
                 words = Decimal((context["input_length"] + 31) // 32)
                 partial = Decimal(context["input_length"] % 32 != 0)
+                if calldatasize_model == "boundary_zero_words":
+                    return Decimal(300) + Decimal(100) * partial
                 return Decimal(300) + Decimal(20) * words + Decimal(5) * partial
             if scenario.key == "opcode:0x42":
                 return Decimal(360)
@@ -978,7 +1095,114 @@ class ProductionContextFitTests(unittest.TestCase):
         loaded = production.load_production_v5_subtotal_model(manifest, ROOT)
         self.assertEqual(set(loaded.fixed_costs), set(self._subtotal_model().fixed_costs))
         self.assertIn("opcode:0x5f", loaded.opcode_prices)
-        self.assertNotIn("opcode:0x30", loaded.opcode_prices)
+        self.assertNotIn("opcode:0x30", loaded.opcode_model_kinds)
+        self.assertEqual(len(loaded.opcode_model_kinds), 103)
+
+    def test_v5_subtotal_prices_each_structured_family_with_authoritative_predictor(self):
+        manifest = production.load_production_context_manifest(MANIFEST)
+        model = production.load_production_v5_subtotal_model(manifest, ROOT)
+        cases = {
+            "opcode:0x0a": {
+                "interpreter_raw_gas": 60,
+                "model_input": {"kind": "exp", "exponent_byte_length": 2},
+            },
+            "opcode:0x20": {
+                "interpreter_raw_gas": 36,
+                "model_input": {
+                    "kind": "keccak",
+                    "input_length": 32,
+                    "memory_growth_event": 0,
+                    "memory_evm_gas_delta": 0,
+                    "memory_4k_boundary_event": 0,
+                },
+            },
+            "opcode:0x51": {
+                "interpreter_raw_gas": 3,
+                "model_input": {
+                    "kind": "memory_access",
+                    "memory_growth_event": 0,
+                    "memory_evm_gas_delta": 0,
+                    "memory_4k_boundary_event": 0,
+                },
+            },
+            "opcode:0x52": {
+                "interpreter_raw_gas": 3,
+                "model_input": {
+                    "kind": "memory_access",
+                    "memory_growth_event": 0,
+                    "memory_evm_gas_delta": 0,
+                    "memory_4k_boundary_event": 0,
+                },
+            },
+            "opcode:0x53": {
+                "interpreter_raw_gas": 3,
+                "model_input": {
+                    "kind": "memory_access",
+                    "memory_growth_event": 0,
+                    "memory_evm_gas_delta": 0,
+                    "memory_4k_boundary_event": 0,
+                },
+            },
+            "opcode:0x5e": {
+                "interpreter_raw_gas": 6,
+                "model_input": {
+                    "kind": "memory_copy",
+                    "copy_words": 1,
+                    "memory_growth_event": 0,
+                    "memory_evm_gas_delta": 0,
+                    "memory_4k_boundary_event": 0,
+                },
+            },
+        }
+        self.assertEqual(
+            {key: model.opcode_model_kinds[key] for key in cases},
+            {
+                "opcode:0x0a": "exp",
+                "opcode:0x20": "keccak",
+                "opcode:0x51": "memory_access",
+                "opcode:0x52": "memory_access",
+                "opcode:0x53": "memory_access",
+                "opcode:0x5e": "memory_copy",
+            },
+        )
+        for key, component in cases.items():
+            opcode = int(key.removeprefix("opcode:0x"), 16)
+            row = {
+                "actual_features": {name: 0 for name in model.fixed_costs},
+                "actual_raw_gas_by_key": {key: component["interpreter_raw_gas"]},
+                "actual_typed_opcode_components_by_key": {key: [component]},
+            }
+            expected = production.predict_opcode_event(
+                model.typed_registry, production._opcode_event(opcode, component)
+            )
+            with self.subTest(key=key):
+                self.assertEqual(
+                    production.evaluate_v5_subtotal(
+                        row, model, excluded_target_key=None
+                    ),
+                    expected,
+                )
+            missing = copy.deepcopy(row)
+            missing.pop("actual_typed_opcode_components_by_key")
+            with self.assertRaisesRegex(ValueError, "missing_typed_features"):
+                production.evaluate_v5_subtotal(
+                    missing, model, excluded_target_key=None
+                )
+            mismatched = copy.deepcopy(row)
+            mismatched["actual_raw_gas_by_key"][key] += 1
+            with self.assertRaisesRegex(ValueError, "units mismatch"):
+                production.evaluate_v5_subtotal(
+                    mismatched, model, excluded_target_key=None
+                )
+        extra = {
+            "actual_features": {name: 0 for name in model.fixed_costs},
+            "actual_raw_gas_by_key": {"opcode:0x60": 3},
+            "actual_typed_opcode_components_by_key": {
+                "opcode:0x0a": [cases["opcode:0x0a"]]
+            },
+        }
+        with self.assertRaisesRegex(ValueError, "extras"):
+            production.evaluate_v5_subtotal(extra, model, excluded_target_key=None)
 
     def test_residualization_rejects_incomplete_or_contaminated_inputs(self):
         manifest = production.load_production_context_manifest(MANIFEST)
@@ -1150,6 +1374,24 @@ class ProductionContextFitTests(unittest.TestCase):
             ],
         )
 
+        zero_words = production.fit_production_context_rows(
+            manifest,
+            self._complete_rows(calldatasize_model="boundary_zero_words"),
+            self._subtotal_model(),
+            family_keys=("opcode:0x36",),
+        )["families"]["opcode:0x36"]
+        self.assertEqual(zero_words["selected_candidate"], "calldatasize_boundary")
+        self.assertEqual(
+            zero_words["coefficients"],
+            {"beta_0": "300", "beta_words": "0", "beta_partial": "100"},
+        )
+        self.assertIn(
+            "negative_coefficient",
+            zero_words["candidate_reports"]["calldatasize_length"][
+                "rejection_reasons"
+            ],
+        )
+
     def test_fit_holdout_and_sibling_gates_do_not_tune_coefficients(self):
         manifest = production.load_production_context_manifest(MANIFEST)
         baseline_rows = self._complete_rows()
@@ -1215,6 +1457,34 @@ class ProductionContextFitTests(unittest.TestCase):
         )["families"]["opcode:0x35"]
         self.assertIn("sibling_inconsistency", sibling["rejection_reasons"])
 
+        final_partial_drift = copy.deepcopy(baseline_rows)
+        for row in final_partial_drift:
+            if (
+                row["scenario"] == "calldataload_partial_31_offset_30"
+                and row["lane"] == "target"
+                and row["count"]
+            ):
+                row["prover_gas"] = str(
+                    Decimal(row["prover_gas"]) + Decimal(row["count"] * 28)
+                )
+        partial = production.fit_production_context_rows(
+            manifest,
+            final_partial_drift,
+            self._subtotal_model(),
+            family_keys=("opcode:0x35",),
+        )["families"]["opcode:0x35"]
+        self.assertEqual(partial["coefficients"]["load_partial"], "350")
+        self.assertIn("sibling_inconsistency", partial["rejection_reasons"])
+        partial_sibling = next(
+            row
+            for row in partial["sibling_decisions"]
+            if row["model_class"] == "load_partial"
+        )
+        self.assertEqual(
+            {row["split"]: row["slope"] for row in partial_sibling["diagnostic_slopes"]},
+            {"fit": "350", "final_holdout": "378"},
+        )
+
     def test_prepare_run_resume_is_create_only_and_hash_bound(self):
         manifest = production.load_production_context_manifest(MANIFEST)
         fixture = production.production_context_fixture_requests(manifest)[0]
@@ -1242,7 +1512,9 @@ class ProductionContextFitTests(unittest.TestCase):
                 trace_source=trace,
                 implementation_revision="1" * 40,
                 source_hashes={"operation_coverage_v5": "2" * 64},
-                parity_identity=self._parity_identity(),
+                parity_identity=self._parity_identity(
+                    row_id=fixture.row_id, launcher=launcher, elf=elf
+                ),
             )
             with self.assertRaisesRegex(ValueError, "already exists"):
                 production.prepare_production_context_run(
@@ -1255,14 +1527,20 @@ class ProductionContextFitTests(unittest.TestCase):
                     trace_source=trace,
                     implementation_revision="1" * 40,
                     source_hashes={"operation_coverage_v5": "2" * 64},
-                    parity_identity=self._parity_identity(),
+                    parity_identity=self._parity_identity(
+                        row_id=fixture.row_id, launcher=launcher, elf=elf
+                    ),
                 )
 
             report = {
+                "stage": "controlled-block",
+                "mode": "execute",
                 "gas": 123,
                 "public_values": "0x1234",
                 "exit_code": 0,
                 "sp1_execution_engine": "gas-estimator",
+                "sp1_proposal_elf_sha256": production._sha256_file(elf),
+                "guest_launcher_sha256": production._sha256_file(launcher),
                 "guest_input_sha256": "0x" + "a" * 64,
                 "controlled_block": {
                     "status": "accepted",
@@ -1284,13 +1562,64 @@ class ProductionContextFitTests(unittest.TestCase):
                 calls.append(_row_input["row_id"])
                 return report
 
-            production.run_production_context_campaign(run, executor=execute)
-            production.run_production_context_campaign(run, executor=execute)
+            with mock.patch.object(
+                production,
+                "_require_current_implementation_revision",
+                side_effect=ValueError("production context implementation revision differs"),
+            ), self.assertRaisesRegex(ValueError, "revision differs"):
+                production.run_production_context_campaign(run, executor=execute)
+            self.assertEqual(calls, [])
+
+            row_input = production._load_canonical_json(
+                run / "row-inputs" / f"{fixture.row_id}.json", label="test row"
+            )
+            missing_provenance = copy.deepcopy(report)
+            del missing_provenance["sp1_proposal_elf_sha256"]
+            with self.assertRaisesRegex(ValueError, "incomplete"):
+                production._normalize_execution_report(
+                    row_input,
+                    missing_provenance,
+                    production_elf_sha256=production._sha256_file(elf),
+                    guest_launcher_sha256=production._sha256_file(launcher),
+                )
+            wrong_provenance = copy.deepcopy(report)
+            wrong_provenance["guest_launcher_sha256"] = "f" * 64
+            with self.assertRaisesRegex(ValueError, "not accepted"):
+                production._normalize_execution_report(
+                    row_input,
+                    wrong_provenance,
+                    production_elf_sha256=production._sha256_file(elf),
+                    guest_launcher_sha256=production._sha256_file(launcher),
+                )
+
+            with mock.patch.object(
+                production, "_require_current_implementation_revision"
+            ):
+                production.run_production_context_campaign(run, executor=execute)
+                production.run_production_context_campaign(run, executor=execute)
             self.assertEqual(calls, [fixture.row_id])
             self.assertTrue((run / "execution-complete.json").is_file())
+            row_path = run / "rows" / f"{fixture.row_id}.json"
+            original_row = row_path.read_bytes()
+            forged = json.loads(original_row)
+            forged["guest_launcher_sha256"] = "f" * 64
+            forged_unhashed = dict(forged)
+            forged_unhashed.pop("evidence_sha256")
+            forged["evidence_sha256"] = production.sha256_bytes(
+                production.canonical_json(forged_unhashed)
+            )
+            row_path.write_bytes(production.canonical_json(forged) + b"\n")
+            with mock.patch.object(
+                production, "_require_current_implementation_revision"
+            ), self.assertRaisesRegex(ValueError, "existing row hash"):
+                production.run_production_context_campaign(run, executor=execute)
+            row_path.write_bytes(original_row)
             launcher.write_bytes(b"changed")
             with self.assertRaisesRegex(ValueError, "launcher hash"):
-                production.run_production_context_campaign(run, executor=execute)
+                with mock.patch.object(
+                    production, "_require_current_implementation_revision"
+                ):
+                    production.run_production_context_campaign(run, executor=execute)
 
     def test_subprocess_failure_preserves_rows_without_terminal(self):
         manifest = production.load_production_context_manifest(MANIFEST)
@@ -1313,7 +1642,9 @@ class ProductionContextFitTests(unittest.TestCase):
                 trace_source=files[3],
                 implementation_revision="1" * 40,
                 source_hashes={"operation_coverage_v5": "2" * 64},
-                parity_identity=self._parity_identity(),
+                parity_identity=self._parity_identity(
+                    row_id=fixtures[0].row_id, launcher=files[0], elf=files[1]
+                ),
             )
             calls = 0
 
@@ -1323,10 +1654,14 @@ class ProductionContextFitTests(unittest.TestCase):
                 if calls == 2:
                     raise subprocess.TimeoutExpired(["guest-launcher"], 10)
                 return {
+                    "stage": "controlled-block",
+                    "mode": "execute",
                     "gas": 1,
                     "public_values": "0x01",
                     "exit_code": 0,
                     "sp1_execution_engine": "gas-estimator",
+                    "sp1_proposal_elf_sha256": production._sha256_file(files[1]),
+                    "guest_launcher_sha256": production._sha256_file(files[0]),
                     "guest_input_sha256": "0x" + "a" * 64,
                     "controlled_block": {
                         "status": "accepted",
@@ -1344,11 +1679,181 @@ class ProductionContextFitTests(unittest.TestCase):
                 }
 
             with self.assertRaises(subprocess.TimeoutExpired):
-                production.run_production_context_campaign(run, executor=execute)
+                with mock.patch.object(
+                    production, "_require_current_implementation_revision"
+                ):
+                    production.run_production_context_campaign(run, executor=execute)
             self.assertEqual(len(list((run / "rows").glob("*.json"))), 1)
             self.assertFalse((run / "execution-complete.json").exists())
             self.assertFalse((run / "campaign-decisions.json").exists())
             self.assertFalse((run / "terminal.json").exists())
+
+    def test_fit_recovers_terminal_from_valid_existing_decisions(self):
+        manifest = production.load_production_context_manifest(MANIFEST)
+        fixture = production.production_context_fixture_requests(manifest)[0]
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            launcher = root / "guest-launcher"
+            elf = root / "proposal.elf"
+            vk = root / "proposal.vk"
+            trace = root / "reconstruct.rs"
+            for path in (launcher, elf, vk, trace):
+                path.write_bytes(path.name.encode())
+            run = root / "run"
+            production.prepare_production_context_run(
+                manifest=manifest,
+                row_requests=(fixture,),
+                run=run,
+                launcher=launcher,
+                production_elf=elf,
+                production_vk=vk,
+                trace_source=trace,
+                implementation_revision="1" * 40,
+                source_hashes={"operation_coverage_v5": "2" * 64},
+                parity_identity=self._parity_identity(
+                    row_id=fixture.row_id, launcher=launcher, elf=elf
+                ),
+            )
+            report = {
+                "stage": "controlled-block",
+                "mode": "execute",
+                "gas": 1,
+                "public_values": "0x01",
+                "exit_code": 0,
+                "sp1_execution_engine": "gas-estimator",
+                "sp1_proposal_elf_sha256": production._sha256_file(elf),
+                "guest_launcher_sha256": production._sha256_file(launcher),
+                "guest_input_sha256": "0x" + "a" * 64,
+                "controlled_block": {
+                    "status": "accepted",
+                    "row_id": fixture.row_id,
+                    "observation": {
+                        "backend_input_sha256": "a" * 64,
+                        "host_trace_sha256": "b" * 64,
+                        "public_output": "0x01",
+                        "actual_raw_gas_by_key": {},
+                        "actual_context_features": {},
+                        "actual_features": {},
+                        "actual_diagnostics": {},
+                    },
+                },
+            }
+            decisions = {
+                "schema_version": 1,
+                "purpose": "production_context_fit_decisions",
+                "manifest_identity_sha256": manifest.identity_sha256,
+                "families": {},
+                "all_families_accepted": True,
+            }
+            decisions["decision_sha256"] = production.sha256_bytes(
+                production.canonical_json(decisions)
+            )
+            with mock.patch.object(
+                production, "_require_current_implementation_revision"
+            ):
+                production.run_production_context_campaign(
+                    run, executor=lambda _row: report
+                )
+            with mock.patch.object(
+                production,
+                "_require_current_implementation_revision",
+                side_effect=ValueError("production context implementation revision differs"),
+            ), self.assertRaisesRegex(ValueError, "revision differs"):
+                production.fit_production_context_run(
+                    run, manifest=manifest, subtotal_model=self._subtotal_model()
+                )
+            with mock.patch.object(
+                production, "_require_current_implementation_revision"
+            ):
+                with mock.patch.object(
+                    production,
+                    "fit_production_context_rows",
+                    return_value=decisions,
+                ):
+                    first = production.fit_production_context_run(
+                        run, manifest=manifest, subtotal_model=self._subtotal_model()
+                    )
+                    (run / "terminal.json").unlink()
+                    recovered = production.fit_production_context_run(
+                        run, manifest=manifest, subtotal_model=self._subtotal_model()
+                    )
+            self.assertEqual(recovered, first)
+            self.assertTrue((run / "terminal.json").is_file())
+            tampered = json.loads((run / "campaign-decisions.json").read_text())
+            tampered["all_families_accepted"] = False
+            (run / "campaign-decisions.json").write_bytes(
+                production.canonical_json(tampered) + b"\n"
+            )
+            with mock.patch.object(
+                production, "_require_current_implementation_revision"
+            ), mock.patch.object(
+                production,
+                "fit_production_context_rows",
+                return_value=decisions,
+            ), self.assertRaisesRegex(ValueError, "existing decisions differ"):
+                production.fit_production_context_run(
+                    run, manifest=manifest, subtotal_model=self._subtotal_model()
+                )
+
+    def test_atomic_create_only_never_exposes_partial_json(self):
+        payload = {"schema_version": 1, "value": "x" * 100}
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            output = root / "result.json"
+            real_write = production.os.write
+
+            def partial_write(descriptor, data):
+                return real_write(descriptor, data[:3])
+
+            with mock.patch.object(production.os, "write", side_effect=partial_write):
+                production._write_json_create_only(output, payload)
+            self.assertEqual(output.read_bytes(), production.canonical_json(payload) + b"\n")
+            self.assertEqual(list(root.glob(".*.tmp")), [])
+
+            for failure in (
+                OSError(errno.ENOSPC, "no space"),
+                RuntimeError("injected pre-publication crash"),
+            ):
+                candidate = root / f"failure-{type(failure).__name__}.json"
+                with mock.patch.object(
+                    production.os,
+                    "write" if isinstance(failure, OSError) else "fsync",
+                    side_effect=failure,
+                ), self.assertRaises(type(failure)):
+                    production._write_json_create_only(candidate, payload)
+                self.assertFalse(candidate.exists())
+                self.assertEqual(list(root.glob(f".{candidate.name}.*.tmp")), [])
+
+    def test_resume_requires_exact_clean_implementation_revision(self):
+        recorded = "1" * 40
+
+        def completed(command, stdout):
+            return subprocess.CompletedProcess(command, 0, stdout, "")
+
+        with mock.patch.object(
+            production.subprocess,
+            "run",
+            side_effect=[
+                completed(["git", "rev-parse", "HEAD"], "2" * 40 + "\n"),
+                completed(["git", "status"], ""),
+            ],
+        ), self.assertRaisesRegex(ValueError, "revision differs"):
+            production._require_current_implementation_revision(recorded)
+        with mock.patch.object(
+            production.subprocess,
+            "run",
+            side_effect=[
+                completed(["git", "rev-parse", "HEAD"], recorded + "\n"),
+                completed(["git", "status"], " M changed.py\n"),
+            ],
+        ), self.assertRaisesRegex(ValueError, "worktree is dirty"):
+            production._require_current_implementation_revision(recorded)
+        with mock.patch.object(
+            production.subprocess,
+            "run",
+            side_effect=FileNotFoundError("git"),
+        ), self.assertRaisesRegex(ValueError, "unavailable"):
+            production._require_current_implementation_revision(recorded)
 
 
 if __name__ == "__main__":

@@ -5,17 +5,27 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import pathlib
 import re
 import stat
 import subprocess
 import tempfile
 from dataclasses import dataclass
-from decimal import Context, Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
+from decimal import (
+    Context,
+    Decimal,
+    DecimalException,
+    InvalidOperation,
+    ROUND_HALF_EVEN,
+    localcontext,
+)
 from fractions import Fraction
 from types import MappingProxyType
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
+from composite_estimator import _opcode_event, load_registry_payload
+from hierarchical_model import ModelKind, OpcodeRegistry, predict_opcode_event
 from opcode_gas import canonical_json, sha256_bytes
 
 
@@ -36,6 +46,11 @@ MODEL_SELECTION_ORDER = ("calldatasize_length", "calldatasize_boundary")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 _GIT_REVISION_RE = re.compile(r"[0-9a-f]{40}\Z")
 _DECIMAL_CONTEXT = Context(prec=80, rounding=ROUND_HALF_EVEN)
+
+
+class CandidateFitRejected(ValueError):
+    """Expected numerical rejection of one frozen model candidate."""
+
 
 SOURCES = {
     "operation_coverage_v5": {
@@ -1168,6 +1183,10 @@ def production_context_parity_identity(
     ) != "gas-estimator":
         raise ValueError("production context parity engine identity differs")
 
+    for label, report in (("standard", standard), ("gas-estimator", gas_estimator)):
+        if report.get("stage") != "controlled-block" or report.get("mode") != "execute":
+            raise ValueError(f"production context {label} parity mode identity differs")
+
     def parity_values(report: Mapping[str, Any]) -> dict[str, Any]:
         try:
             controlled_block = report["controlled_block"]
@@ -1182,7 +1201,7 @@ def production_context_parity_identity(
                 raise ValueError(
                     "production context parity evidence is not a successful execution"
                 )
-            return {
+            values = {
                 "gas": report["gas"],
                 "total_instruction_count": report["total_instruction_count"],
                 "total_syscall_count": report["total_syscall_count"],
@@ -1191,6 +1210,20 @@ def production_context_parity_identity(
                 "host_trace_sha256": controlled_block["observation"]["host_trace_sha256"],
                 "exit_code": report["exit_code"],
             }
+            if (
+                any(type(values[field]) is not int or values[field] < 0 for field in (
+                    "gas",
+                    "total_instruction_count",
+                    "total_syscall_count",
+                ))
+                or not isinstance(values["public_values"], str)
+                or re.fullmatch(r"0x[0-9a-f]+", values["public_values"]) is None
+                or re.fullmatch(r"0x[0-9a-f]{64}", values["guest_input_sha256"])
+                is None
+                or _SHA256_RE.fullmatch(values["host_trace_sha256"]) is None
+            ):
+                raise ValueError("production context parity evidence values differ")
+            return values
         except (KeyError, TypeError) as error:
             raise ValueError("production context parity evidence is incomplete") from error
 
@@ -1198,16 +1231,119 @@ def production_context_parity_identity(
     estimator_values = parity_values(gas_estimator)
     if canonical_json(standard_values) != canonical_json(estimator_values):
         raise ValueError("production context standard/gas-estimator parity mismatch")
+    proposal_elf_sha256 = gas_estimator.get("sp1_proposal_elf_sha256")
+    guest_launcher_sha256 = gas_estimator.get("guest_launcher_sha256")
+    if (
+        _SHA256_RE.fullmatch(proposal_elf_sha256 or "") is None
+        or _SHA256_RE.fullmatch(guest_launcher_sha256 or "") is None
+    ):
+        raise ValueError("production context parity estimator provenance differs")
     identity = {
         "kind": "production_context_parity_v1",
         "row_id": row_id,
         "model_sample": False,
-        "standard_execution_engine": "standard",
-        "gas_estimator_execution_engine": "gas-estimator",
+        "standard_execution": {
+            "stage": "controlled-block",
+            "mode": "execute",
+            "engine": "standard",
+            "status": "accepted",
+            "exit_code": 0,
+        },
+        "gas_estimator_execution": {
+            "stage": "controlled-block",
+            "mode": "execute",
+            "engine": "gas-estimator",
+            "status": "accepted",
+            "exit_code": 0,
+        },
+        "gas_estimator_assets": {
+            "sp1_proposal_elf_sha256": proposal_elf_sha256,
+            "guest_launcher_sha256": guest_launcher_sha256,
+        },
         "equal_values": standard_values,
     }
     identity["identity_sha256"] = sha256_bytes(canonical_json(identity))
     return identity
+
+
+def validate_production_context_parity_identity(
+    identity: Mapping[str, Any],
+    *,
+    row_ids: Iterable[str],
+    production_elf_sha256: str,
+    guest_launcher_sha256: str,
+) -> dict[str, Any]:
+    """Validate the complete row-bound parity identity and its execution assets."""
+    expected_keys = {
+        "kind",
+        "row_id",
+        "model_sample",
+        "standard_execution",
+        "gas_estimator_execution",
+        "gas_estimator_assets",
+        "equal_values",
+        "identity_sha256",
+    }
+    if not isinstance(identity, Mapping) or set(identity) != expected_keys:
+        raise ValueError("production context parity identity schema differs")
+    row_id = identity.get("row_id")
+    if _SHA256_RE.fullmatch(row_id or "") is None or row_id not in set(row_ids):
+        raise ValueError("production context parity row binding differs")
+    if identity.get("kind") != "production_context_parity_v1" or identity.get(
+        "model_sample"
+    ) is not False:
+        raise ValueError("production context parity identity differs")
+    expected_standard = {
+        "stage": "controlled-block",
+        "mode": "execute",
+        "engine": "standard",
+        "status": "accepted",
+        "exit_code": 0,
+    }
+    expected_estimator = {**expected_standard, "engine": "gas-estimator"}
+    if identity.get("standard_execution") != expected_standard or identity.get(
+        "gas_estimator_execution"
+    ) != expected_estimator:
+        raise ValueError("production context parity execution proof differs")
+    expected_assets = {
+        "sp1_proposal_elf_sha256": production_elf_sha256,
+        "guest_launcher_sha256": guest_launcher_sha256,
+    }
+    if identity.get("gas_estimator_assets") != expected_assets:
+        raise ValueError("production context parity asset join differs")
+    equal_values = identity.get("equal_values")
+    if not isinstance(equal_values, Mapping) or set(equal_values) != {
+        "gas",
+        "total_instruction_count",
+        "total_syscall_count",
+        "public_values",
+        "guest_input_sha256",
+        "host_trace_sha256",
+        "exit_code",
+    }:
+        raise ValueError("production context parity equal-value schema differs")
+    if (
+        any(type(equal_values[field]) is not int or equal_values[field] < 0 for field in (
+            "gas",
+            "total_instruction_count",
+            "total_syscall_count",
+        ))
+        or equal_values.get("exit_code") != 0
+        or not isinstance(equal_values.get("public_values"), str)
+        or re.fullmatch(r"0x[0-9a-f]+", equal_values["public_values"]) is None
+        or re.fullmatch(r"0x[0-9a-f]{64}", equal_values.get("guest_input_sha256", ""))
+        is None
+        or _SHA256_RE.fullmatch(equal_values.get("host_trace_sha256", "")) is None
+    ):
+        raise ValueError("production context parity equal values differ")
+    claimed = identity.get("identity_sha256")
+    unhashed = dict(identity)
+    unhashed.pop("identity_sha256")
+    if _SHA256_RE.fullmatch(claimed or "") is None or sha256_bytes(
+        canonical_json(unhashed)
+    ) != claimed:
+        raise ValueError("production context parity identity hash differs")
+    return dict(identity)
 
 
 # Production-native fitting and bounded campaign execution.  These helpers are
@@ -1381,7 +1517,7 @@ def fit_exact_decimal_model(
     ]
     rank = _exact_rank(exact_matrix)
     if rank != width:
-        raise ValueError("exact model matrix is rank deficient")
+        raise CandidateFitRejected("exact model matrix is rank deficient")
     targets = [_decimal(value, label="observed model value") for value in observed]
     exact_targets = [
         _fraction(value, label="observed model value") for value in observed
@@ -1429,7 +1565,7 @@ def fit_exact_decimal_model(
             for value in exact_coefficients
         ]
         if any(value < 0 for value in coefficients):
-            raise ValueError("exact model coefficients must be nonnegative")
+            raise CandidateFitRejected("exact model coefficients must be nonnegative")
         predictions = [
             sum(
                 (feature * coefficient for feature, coefficient in zip(row, coefficients)),
@@ -1525,6 +1661,8 @@ def production_context_design_row(
 class ProductionSubtotalModel:
     fixed_costs: Mapping[str, Decimal]
     opcode_prices: Mapping[str, Decimal]
+    opcode_model_kinds: Mapping[str, str]
+    typed_registry: OpcodeRegistry | None = None
 
     @classmethod
     def from_mappings(
@@ -1553,7 +1691,54 @@ class ProductionSubtotalModel:
         }
         if any(not isinstance(key, str) or not key.startswith("opcode:0x") for key in parsed_prices):
             raise ValueError("V5 subtotal opcode price key differs")
-        return cls(MappingProxyType(parsed_fixed), MappingProxyType(parsed_prices))
+        return cls(
+            MappingProxyType(parsed_fixed),
+            MappingProxyType(parsed_prices),
+            MappingProxyType({key: ModelKind.STATIC_RAW_GAS.value for key in parsed_prices}),
+        )
+
+    @classmethod
+    def from_registry(
+        cls,
+        *,
+        fixed_costs: Mapping[str, Any],
+        registry: OpcodeRegistry,
+        measured_keys: Iterable[str],
+    ) -> "ProductionSubtotalModel":
+        expected_fixed = {
+            "proposal_startup",
+            "block_base",
+            "tx_base",
+            "native_value_transfer",
+        }
+        if set(fixed_costs) != expected_fixed:
+            raise ValueError("V5 subtotal fixed-cost inventory differs")
+        parsed_fixed = {
+            key: _decimal(value, label=f"fixed cost {key}", nonnegative=True)
+            for key, value in fixed_costs.items()
+        }
+        kinds: dict[str, str] = {}
+        static_prices: dict[str, Decimal] = {}
+        keys = tuple(measured_keys)
+        if len(keys) != 103 or len(set(keys)) != 103:
+            raise ValueError("V5 subtotal measured opcode inventory differs")
+        for key in keys:
+            if re.fullmatch(r"opcode:0x[0-9a-f]{2}", key) is None:
+                raise ValueError("V5 subtotal opcode price key differs")
+            opcode = int(key.removeprefix("opcode:0x"), 16)
+            model_id = registry.opcode_model_ids[opcode]
+            if model_id is None or model_id not in registry.models:
+                raise ValueError(f"V5 measured opcode lacks a typed model: {key}")
+            model = registry.models[model_id]
+            kinds[key] = model.kind.value
+            if model.kind is ModelKind.STATIC_RAW_GAS:
+                static_prices[key] = model.parameters["body_per_raw_gas"]
+        return cls(
+            MappingProxyType(parsed_fixed),
+            MappingProxyType(static_prices),
+            MappingProxyType(kinds),
+            registry,
+        )
 
 
 def evaluate_v5_subtotal(
@@ -1573,6 +1758,23 @@ def evaluate_v5_subtotal(
         if excluded_target_key is not None and excluded_target_key in subtotal_keys:
             raise ValueError("target context work was accidentally included in K")
         raise ValueError("V5 subtotal keys must be derived, not supplied")
+    typed_components = row.get("actual_typed_opcode_components_by_key", {})
+    if not isinstance(typed_components, Mapping):
+        raise ValueError("V5 subtotal typed opcode components differ")
+    structured_positive = {
+        key
+        for key, units in raw_gas.items()
+        if key != excluded_target_key
+        and units
+        and model.opcode_model_kinds.get(key) not in {
+            None,
+            ModelKind.STATIC_RAW_GAS.value,
+        }
+    }
+    if set(typed_components) != structured_positive:
+        if set(typed_components) - structured_positive:
+            raise ValueError("V5 subtotal typed opcode components contain extras")
+        raise ValueError("missing_typed_features for known structured V5 work")
     with localcontext(_DECIMAL_CONTEXT):
         subtotal = Decimal(0)
         for key, price in model.fixed_costs.items():
@@ -1585,15 +1787,43 @@ def evaluate_v5_subtotal(
                 raise ValueError("V5 subtotal raw gas must be nonnegative integers")
             if key == excluded_target_key:
                 continue
-            price = model.opcode_prices.get(key)
+            kind = model.opcode_model_kinds.get(key)
             # A zero raw-gas subtotal term is exactly zero independently of a
             # coefficient.  This admits terminal STOP while still rejecting
             # any positive unpriced non-target work.
-            if price is None and units == 0:
+            if kind is None and units == 0:
                 continue
-            if price is None:
+            if kind is None:
                 raise ValueError(f"unpriced non-target work in V5 subtotal: {key}")
-            subtotal += Decimal(units) * price
+            if kind == ModelKind.STATIC_RAW_GAS.value:
+                subtotal += Decimal(units) * model.opcode_prices[key]
+                continue
+            if model.typed_registry is None:
+                raise ValueError("missing_typed_features for known structured V5 work")
+            opcode = int(key.removeprefix("opcode:0x"), 16)
+            components = typed_components[key]
+            if not isinstance(components, Sequence) or isinstance(
+                components, (str, bytes)
+            ) or not components:
+                raise ValueError("missing_typed_features for known structured V5 work")
+            observed_units = 0
+            for component in components:
+                if not isinstance(component, Mapping):
+                    raise ValueError("V5 structured opcode component differs")
+                interpreter_raw_gas = component.get("interpreter_raw_gas")
+                if type(interpreter_raw_gas) is not int or interpreter_raw_gas < 0:
+                    raise ValueError("V5 structured opcode component raw gas differs")
+                observed_units += interpreter_raw_gas
+                event = _opcode_event(opcode, component)
+                actual_model_id = model.typed_registry.opcode_model_ids[event.opcode]
+                if (
+                    actual_model_id is None
+                    or model.typed_registry.models[actual_model_id].kind.value != kind
+                ):
+                    raise ValueError("V5 structured opcode component model differs")
+                subtotal += predict_opcode_event(model.typed_registry, event)
+            if observed_units != units:
+                raise ValueError("V5 structured opcode component units mismatch")
     return subtotal
 
 
@@ -1647,7 +1877,12 @@ def _normalized_fit_row(row: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError("production fit count differs")
     if type(row["repeat_index"]) is not int or row["repeat_index"] not in range(REPEATS):
         raise ValueError("production fit repeat index differs")
-    for field in ("backend_input_sha256", "host_trace_sha256"):
+    for field in (
+        "backend_input_sha256",
+        "host_trace_sha256",
+        "sp1_proposal_elf_sha256",
+        "guest_launcher_sha256",
+    ):
         if _SHA256_RE.fullmatch(row[field]) is None:
             raise ValueError(f"production fit {field} differs")
     normalized = dict(row)
@@ -1806,6 +2041,8 @@ def fit_production_context_rows(
                     "public_output",
                     "backend_input_sha256",
                     "host_trace_sha256",
+                    "sp1_proposal_elf_sha256",
+                    "guest_launcher_sha256",
                     "actual_raw_gas_by_key",
                     "actual_context_features",
                     "actual_features",
@@ -1882,9 +2119,44 @@ def fit_production_context_rows(
                     design.append(tuple(Decimal(count) * value for value in features))
                     observed.append(residual_rows[(scenario.name, count)]["observed"])
                     fit_row_labels.append({"scenario": scenario.name, "count": count})
-            fit = fit_exact_decimal_model(
-                matrix=design, observed=observed, terms=candidate.terms
-            )
+            try:
+                fit = fit_exact_decimal_model(
+                    matrix=design, observed=observed, terms=candidate.terms
+                )
+            except (CandidateFitRejected, DecimalException) as error:
+                message = str(error)
+                if isinstance(error, DecimalException):
+                    rejection = "nonfinite_coefficient"
+                elif "rank deficient" in message:
+                    rejection = "rank_deficient"
+                elif "nonnegative" in message:
+                    rejection = "negative_coefficient"
+                elif "finite" in message:
+                    rejection = "nonfinite_coefficient"
+                else:  # pragma: no cover - only explicit numerical reasons are admitted.
+                    raise
+                candidate_reports[candidate_name] = {
+                    "terms": list(candidate.terms),
+                    "design_matrix": [
+                        [_decimal_text(value) for value in row] for row in design
+                    ],
+                    "observed": [_decimal_text(value) for value in observed],
+                    "rank": _exact_rank(
+                        [
+                            [_fraction(value, label="design matrix value") for value in row]
+                            for row in design
+                        ]
+                    ),
+                    "fit_rows": fit_row_labels,
+                    "selection_rows": [],
+                    "rejection_reasons": [rejection],
+                    "candidate_fit_error": message,
+                    "status": "rejected",
+                }
+                selection_decisions.append(
+                    {"candidate": candidate_name, "status": "rejected"}
+                )
+                continue
             reasons = _candidate_gate_reasons(fit, observed)
             coefficients = {
                 term: _decimal(value, label=f"coefficient {term}", nonnegative=True)
@@ -1946,7 +2218,30 @@ def fit_production_context_rows(
         reasons = []
         if selected_candidate is None:
             reasons.append("no_candidate_passed")
-            fallback_name = candidate_names[0]
+            fallback_name = next(
+                (
+                    name
+                    for name in reversed(candidate_names)
+                    if "coefficients" in candidate_reports[name]
+                ),
+                None,
+            )
+            if fallback_name is None:
+                family_results[key] = {
+                    "status": "rejected",
+                    "selected_candidate": None,
+                    "coefficients": {},
+                    "candidate_reports": candidate_reports,
+                    "selection_decisions": selection_decisions,
+                    "sibling_decisions": [],
+                    "rows": [],
+                    "selection_rows": [],
+                    "final_holdout_rows": [],
+                    "final_holdout_mape": "0",
+                    "maximum_control_residual": "0",
+                    "rejection_reasons": ["no_candidate_passed"],
+                }
+                continue
             selected_candidate = manifest.model_candidate(fallback_name)
             selected_fit = candidate_reports[fallback_name]
             selected_rows = candidate_reports[fallback_name]["selection_rows"]
@@ -1972,49 +2267,29 @@ def fit_production_context_rows(
         ):
             reasons.append("control_contamination")
 
-        class_slopes: dict[tuple[str, tuple[Decimal, ...]], list[Decimal]] = {}
-        for scenario in fit_scenarios:
+        class_slopes: dict[
+            tuple[str, tuple[Decimal, ...]], list[tuple[str, str, Decimal]]
+        ] = {}
+        for scenario in (*fit_scenarios, *final_scenarios):
+            counts = scenario.counts(manifest)
             numerator = sum(
                 (
                     Decimal(count) * residual_rows[(scenario.name, count)]["observed"]
-                    for count in manifest.fit_counts
+                    for count in counts
                     if count
                 ),
                 Decimal(0),
             )
             denominator = sum(
-                (Decimal(count * count) for count in manifest.fit_counts if count),
+                (Decimal(count * count) for count in counts if count),
                 Decimal(0),
             )
             sibling_key = (
                 scenario.model_class,
                 production_context_design_row(selected_candidate, scenario),
             )
-            class_slopes.setdefault(sibling_key, []).append(numerator / denominator)
-        sibling_decisions = []
-        for (model_class, feature_vector), slopes in sorted(class_slopes.items()):
-            passed = True
-            relative_difference = Decimal(0)
-            if len(slopes) > 1:
-                maximum = max(abs(value) for value in slopes)
-                relative_difference = (
-                    (max(slopes) - min(slopes)) / maximum if maximum else Decimal(0)
-                )
-                passed = relative_difference <= Decimal(
-                    QUALITY_GATES["sibling_slope_relative_difference_max"]
-                )
-                if not passed:
-                    reasons.append("sibling_inconsistency")
-            sibling_decisions.append(
-                {
-                    "model_class": model_class,
-                    "feature_vector": [
-                        _decimal_text(value) for value in feature_vector
-                    ],
-                    "diagnostic_slopes": [_decimal_text(value) for value in slopes],
-                    "relative_difference": _decimal_text(relative_difference),
-                    "status": "accepted" if passed else "rejected",
-                }
+            class_slopes.setdefault(sibling_key, []).append(
+                (scenario.name, scenario.split, numerator / denominator)
             )
 
         final_rows = []
@@ -2065,6 +2340,39 @@ def fit_production_context_rows(
         )
         if family_mape > Decimal(QUALITY_GATES["final_scenario_family_mape_max"]):
             reasons.append("final_holdout_mape")
+        sibling_decisions = []
+        for (model_class, feature_vector), slope_rows in sorted(class_slopes.items()):
+            slopes = [row[2] for row in slope_rows]
+            passed = True
+            relative_difference = Decimal(0)
+            if len(slopes) > 1:
+                maximum = max(abs(value) for value in slopes)
+                relative_difference = (
+                    (max(slopes) - min(slopes)) / maximum if maximum else Decimal(0)
+                )
+                passed = relative_difference <= Decimal(
+                    QUALITY_GATES["sibling_slope_relative_difference_max"]
+                )
+                if not passed:
+                    reasons.append("sibling_inconsistency")
+            sibling_decisions.append(
+                {
+                    "model_class": model_class,
+                    "feature_vector": [
+                        _decimal_text(value) for value in feature_vector
+                    ],
+                    "diagnostic_slopes": [
+                        {
+                            "scenario": scenario_name,
+                            "split": split,
+                            "slope": _decimal_text(slope),
+                        }
+                        for scenario_name, split, slope in slope_rows
+                    ],
+                    "relative_difference": _decimal_text(relative_difference),
+                    "status": "accepted" if passed else "rejected",
+                }
+            )
         row_decisions = []
         for scenario in (*fit_scenarios, *selection_scenarios, *final_scenarios):
             features = production_context_design_row(selected_candidate, scenario)
@@ -2127,7 +2435,7 @@ def fit_production_context_rows(
 def load_production_v5_subtotal_model(
     manifest: ProductionContextManifest, repo_root: pathlib.Path
 ) -> ProductionSubtotalModel:
-    """Load production-scaled V5 prices while excluding unsupported context targets."""
+    """Load the complete authoritative 103-opcode V5 typed registry."""
     repo_root = repo_root.resolve(strict=True)
     _, coverage = _load_pinned_json(
         repo_root, manifest.sources["operation_coverage_v5"], "operation_coverage_v5"
@@ -2138,18 +2446,22 @@ def load_production_v5_subtotal_model(
     fixed_costs = higher.get("fixed_costs")
     if not isinstance(fixed_costs, Mapping):
         raise ValueError("pinned higher-layer fixed costs differ")
-    target_keys = set(manifest.keys)
-    opcode_prices: dict[str, Any] = {}
+    measured_keys: list[str] = []
     artifact_cache: dict[str, Mapping[str, Any]] = {}
+    registry_payload: Mapping[str, Any] | None = None
     for row in coverage.get("execution_coverage", ()):
         if not isinstance(row, Mapping) or row.get("component") != "opcode":
             continue
         key = row.get("key")
-        if key in target_keys or row.get("model_status") != "measured":
+        if row.get("model_status") != "measured":
             continue
         reference = row.get("artifact_ref")
-        if not isinstance(reference, Mapping):
-            continue
+        if (
+            not isinstance(key, str)
+            or not isinstance(reference, Mapping)
+            or reference.get("model_id") != key
+        ):
+            raise ValueError("V5 measured opcode reference differs")
         relative = _require_relative_path(reference.get("path"), "V5 model path")
         artifact = artifact_cache.get(relative)
         if artifact is None:
@@ -2164,25 +2476,67 @@ def load_production_v5_subtotal_model(
                 artifact, reference["artifact_sha256"], "V5 model artifact"
             )
             artifact_cache[relative] = artifact
-        model = artifact.get("registry", {}).get("models", {}).get(key)
+        artifact_registry = artifact.get("registry")
+        if not isinstance(artifact_registry, Mapping):
+            raise ValueError("V5 model artifact registry differs")
+        if registry_payload is None:
+            registry_payload = artifact_registry
+        elif canonical_json(artifact_registry) != canonical_json(registry_payload):
+            raise ValueError("V5 measured opcodes reference different registries")
+        model = artifact_registry.get("models", {}).get(key)
         if (
-            isinstance(model, Mapping)
-            and model.get("kind") == "static_raw_gas"
-            and isinstance(model.get("parameters"), Mapping)
+            not isinstance(model, Mapping)
+            or model.get("kind") != reference.get("model_kind")
         ):
-            opcode_prices[key] = model["parameters"].get("body_per_raw_gas")
-    return ProductionSubtotalModel.from_mappings(
-        fixed_costs=fixed_costs, opcode_prices=opcode_prices
+            raise ValueError("V5 measured opcode model reference differs")
+        measured_keys.append(key)
+    if registry_payload is None:
+        raise ValueError("V5 subtotal registry is missing")
+    return ProductionSubtotalModel.from_registry(
+        fixed_costs=fixed_costs,
+        registry=load_registry_payload(registry_payload),
+        measured_keys=measured_keys,
     )
 
 
 def _write_json_create_only(path: pathlib.Path, payload: Mapping[str, Any]) -> None:
+    """Durably publish canonical JSON without exposing a partial final file."""
     path.parent.mkdir(parents=True, exist_ok=True)
+    data = canonical_json(payload) + b"\n"
+    descriptor = None
+    temporary: pathlib.Path | None = None
     try:
-        with path.open("xb") as output:
-            output.write(canonical_json(payload) + b"\n")
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+        )
+        temporary = pathlib.Path(temporary_name)
+        offset = 0
+        while offset < len(data):
+            written = os.write(descriptor, data[offset:])
+            if written <= 0:
+                raise OSError("atomic JSON write made no progress")
+            offset += written
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = None
+        os.link(temporary, path)
+        temporary.unlink()
+        temporary = None
+        directory_descriptor = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
     except FileExistsError as error:
         raise ValueError(f"create-only output already exists: {path}") from error
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def _load_canonical_json(path: pathlib.Path, *, label: str) -> dict[str, Any]:
@@ -2222,14 +2576,6 @@ def prepare_production_context_run(
 ) -> pathlib.Path:
     if _GIT_REVISION_RE.fullmatch(implementation_revision) is None:
         raise ValueError("production context implementation revision differs")
-    parity_unhashed = dict(parity_identity)
-    parity_claimed = parity_unhashed.pop("identity_sha256", None)
-    if (
-        parity_identity.get("model_sample") is not False
-        or _SHA256_RE.fullmatch(parity_claimed or "") is None
-        or sha256_bytes(canonical_json(parity_unhashed)) != parity_claimed
-    ):
-        raise ValueError("production context parity identity differs")
     if not source_hashes or any(
         not isinstance(key, str) or _SHA256_RE.fullmatch(value) is None
         for key, value in source_hashes.items()
@@ -2246,6 +2592,15 @@ def prepare_production_context_run(
         if not path.is_file() or path.is_symlink():
             raise ValueError(f"production context {key} is not a regular file")
         asset_identity[key] = {"basename": path.name, "sha256": _sha256_file(path)}
+    row_ids = [request.row_id for request in row_requests]
+    if len(row_ids) != len(set(row_ids)):
+        raise ValueError("duplicate production context prepared row")
+    validated_parity = validate_production_context_parity_identity(
+        parity_identity,
+        row_ids=row_ids,
+        production_elf_sha256=asset_identity["production_elf"]["sha256"],
+        guest_launcher_sha256=asset_identity["launcher"]["sha256"],
+    )
     run = pathlib.Path(run)
     try:
         run.mkdir(parents=True, exist_ok=False)
@@ -2254,11 +2609,7 @@ def prepare_production_context_run(
     (run / "row-inputs").mkdir()
     (run / "rows").mkdir()
     row_entries = []
-    seen = set()
     for request in row_requests:
-        if request.row_id in seen:
-            raise ValueError("duplicate production context prepared row")
-        seen.add(request.row_id)
         payload = {
             "row_id": request.row_id,
             "workload_id": request.workload_id,
@@ -2287,7 +2638,7 @@ def prepare_production_context_run(
         "implementation_revision": implementation_revision,
         "source_hashes": dict(sorted(source_hashes.items())),
         "assets": asset_identity,
-        "parity_identity": dict(parity_identity),
+        "parity_identity": validated_parity,
         "rows": row_entries,
     }
     identity["identity_sha256"] = sha256_bytes(canonical_json(identity))
@@ -2313,6 +2664,39 @@ def _resolve_run_asset(
     return path
 
 
+def _require_current_implementation_revision(recorded_revision: Any) -> str:
+    """Require an available, clean repository at the exact prepared revision."""
+    if not isinstance(recorded_revision, str) or _GIT_REVISION_RE.fullmatch(
+        recorded_revision
+    ) is None:
+        raise ValueError("production context implementation revision differs")
+    repo_root = pathlib.Path(__file__).resolve().parents[2]
+    try:
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo_root,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        ).stdout.strip()
+        dirty = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=no"],
+            cwd=repo_root,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        ).stdout
+    except (OSError, subprocess.SubprocessError) as error:
+        raise ValueError("production context implementation revision is unavailable") from error
+    if _GIT_REVISION_RE.fullmatch(head) is None or head != recorded_revision:
+        raise ValueError("production context implementation revision differs")
+    if dirty:
+        raise ValueError("production context implementation worktree is dirty")
+    return head
+
+
 def _validate_run_identity(
     run: pathlib.Path,
     *,
@@ -2324,6 +2708,20 @@ def _validate_run_identity(
     identity = _load_canonical_json(
         run / "calibration-identity.json", label="production context run identity"
     )
+    if set(identity) != {
+        "schema_version",
+        "purpose",
+        "manifest_identity_sha256",
+        "implementation_revision",
+        "source_hashes",
+        "assets",
+        "parity_identity",
+        "rows",
+        "identity_sha256",
+    } or identity.get("schema_version") != 1 or identity.get(
+        "purpose"
+    ) != "production_context_run_identity":
+        raise ValueError("production context run identity schema differs")
     claimed = identity.get("identity_sha256")
     unhashed = dict(identity)
     unhashed.pop("identity_sha256", None)
@@ -2331,6 +2729,20 @@ def _validate_run_identity(
         canonical_json(unhashed)
     ) != claimed:
         raise ValueError("production context run identity hash differs")
+    _require_current_implementation_revision(identity.get("implementation_revision"))
+    rows = identity.get("rows")
+    assets = identity.get("assets")
+    if not isinstance(rows, list) or not isinstance(assets, Mapping):
+        raise ValueError("production context run identity inventory differs")
+    try:
+        validate_production_context_parity_identity(
+            identity["parity_identity"],
+            row_ids=(entry["row_id"] for entry in rows),
+            production_elf_sha256=assets["production_elf"]["sha256"],
+            guest_launcher_sha256=assets["launcher"]["sha256"],
+        )
+    except (KeyError, TypeError) as error:
+        raise ValueError("production context run parity join differs") from error
     resolved = {
         role: _resolve_run_asset(run, identity, role, supplied)
         for role, supplied in {
@@ -2364,7 +2776,11 @@ def _validate_prepared_row_input(
 
 
 def _normalize_execution_report(
-    row_input: Mapping[str, Any], report: Mapping[str, Any]
+    row_input: Mapping[str, Any],
+    report: Mapping[str, Any],
+    *,
+    production_elf_sha256: str,
+    guest_launcher_sha256: str,
 ) -> dict[str, Any]:
     _reject_forbidden_fit_fields(report, "execution report")
     try:
@@ -2372,12 +2788,16 @@ def _normalize_execution_report(
         observation = controlled["observation"]
         guest_input_sha256 = report["guest_input_sha256"].removeprefix("0x")
         if (
-            report["sp1_execution_engine"] != "gas-estimator"
+            report["stage"] != "controlled-block"
+            or report["mode"] != "execute"
+            or report["sp1_execution_engine"] != "gas-estimator"
             or report["exit_code"] != 0
             or controlled["status"] != "accepted"
             or controlled["row_id"] != row_input["row_id"]
             or observation["backend_input_sha256"] != guest_input_sha256
             or observation["public_output"].lower() != report["public_values"].lower()
+            or report["sp1_proposal_elf_sha256"] != production_elf_sha256
+            or report["guest_launcher_sha256"] != guest_launcher_sha256
         ):
             raise ValueError("production context execution report is not accepted")
         normalized = {
@@ -2394,6 +2814,8 @@ def _normalize_execution_report(
             "public_output": report["public_values"],
             "backend_input_sha256": observation["backend_input_sha256"],
             "host_trace_sha256": observation["host_trace_sha256"],
+            "sp1_proposal_elf_sha256": report["sp1_proposal_elf_sha256"],
+            "guest_launcher_sha256": report["guest_launcher_sha256"],
             "actual_raw_gas_by_key": observation["actual_raw_gas_by_key"],
             "actual_context_features": observation["actual_context_features"],
             "actual_features": observation["actual_features"],
@@ -2482,8 +2904,14 @@ def run_production_context_campaign(
                 or sha256_bytes(canonical_json(unhashed)) != claimed
                 or evidence.get("row_id") != entry["row_id"]
                 or evidence.get("input_sha256") != entry["input_sha256"]
+                or evidence.get("sp1_proposal_elf_sha256")
+                != identity["assets"]["production_elf"]["sha256"]
+                or evidence.get("guest_launcher_sha256")
+                != identity["assets"]["launcher"]["sha256"]
             ):
                 raise ValueError("production context existing row hash differs")
+            _reject_forbidden_fit_fields(evidence, "existing execution row")
+            _normalized_fit_row(evidence)
         else:
             report = (
                 executor(row_input)
@@ -2492,7 +2920,12 @@ def run_production_context_campaign(
                     row_input, launcher=assets["launcher"], run=run
                 )
             )
-            evidence = _normalize_execution_report(row_input, report)
+            evidence = _normalize_execution_report(
+                row_input,
+                report,
+                production_elf_sha256=identity["assets"]["production_elf"]["sha256"],
+                guest_launcher_sha256=identity["assets"]["launcher"]["sha256"],
+            )
             _write_json_create_only(output_path, evidence)
         row_hashes.append(
             {"row_id": entry["row_id"], "evidence_sha256": evidence["evidence_sha256"]}
@@ -2564,11 +2997,32 @@ def fit_production_context_run(
             or _SHA256_RE.fullmatch(row_claimed or "") is None
             or sha256_bytes(canonical_json(row_unhashed)) != row_claimed
             or row.get("input_sha256") != entry["input_sha256"]
+            or row.get("sp1_proposal_elf_sha256")
+            != identity["assets"]["production_elf"]["sha256"]
+            or row.get("guest_launcher_sha256")
+            != identity["assets"]["launcher"]["sha256"]
         ):
             raise ValueError("production context completed row hash differs")
+        _reject_forbidden_fit_fields(row, "completed execution row")
+        _normalized_fit_row(row)
         rows.append(row)
-    decisions = fit_production_context_rows(manifest, rows, subtotal_model)
-    _write_json_create_only(run / "campaign-decisions.json", decisions)
+    recomputed_decisions = fit_production_context_rows(manifest, rows, subtotal_model)
+    decisions_path = run / "campaign-decisions.json"
+    if decisions_path.exists():
+        decisions = _load_canonical_json(
+            decisions_path, label="production context campaign decisions"
+        )
+        decision_unhashed = dict(decisions)
+        decision_claimed = decision_unhashed.pop("decision_sha256", None)
+        if (
+            _SHA256_RE.fullmatch(decision_claimed or "") is None
+            or sha256_bytes(canonical_json(decision_unhashed)) != decision_claimed
+            or canonical_json(decisions) != canonical_json(recomputed_decisions)
+        ):
+            raise ValueError("production context existing decisions differ")
+    else:
+        decisions = recomputed_decisions
+        _write_json_create_only(decisions_path, decisions)
     terminal = {
         "schema_version": 1,
         "status": (
@@ -2578,5 +3032,13 @@ def fit_production_context_run(
         "decision_sha256": decisions["decision_sha256"],
     }
     terminal["terminal_sha256"] = sha256_bytes(canonical_json(terminal))
-    _write_json_create_only(run / "terminal.json", terminal)
+    terminal_path = run / "terminal.json"
+    if terminal_path.exists():
+        existing_terminal = _load_canonical_json(
+            terminal_path, label="production context fit terminal"
+        )
+        if canonical_json(existing_terminal) != canonical_json(terminal):
+            raise ValueError("production context existing fit terminal differs")
+    else:
+        _write_json_create_only(terminal_path, terminal)
     return terminal

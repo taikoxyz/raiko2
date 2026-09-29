@@ -83,6 +83,10 @@ VERSION_IDENTITY = {
     "timestamp_semantics": "strictly_post_unzen_activation",
 }
 
+PRODUCTION_SCHEDULE_SHA256 = (
+    "b27c29fb5fe482de4b3e22784de0cc6c49a5f1f0160ec8a6eaa6997869864927"
+)
+
 FIT_EQUATIONS = {
     "target_observed": "Y_s(n) = [P_s(n) - P_s(0)] - [K_s(n) - K_s(0)]",
     "target_predicted": "Y_hat_s(n) = n * f_s(context_features)",
@@ -105,6 +109,35 @@ QUALITY_GATES = {
     "final_scenario_family_mape_max": "0.05",
     "sibling_slope_relative_difference_max": "0.05",
     "finite_nonnegative_coefficients_and_predictions": True,
+}
+
+REPEAT_CONTRACT = {
+    "exact_repeats": REPEATS,
+    "equality_fields": [
+        "prover_gas",
+        "public_output",
+        "backend_input_sha256",
+        "host_trace_sha256",
+    ],
+    "mismatch_outcome": "reject_scenario",
+}
+
+FAMILY_PROMOTION_CONTRACT = {
+    "required_evidence": "all_required_scenarios_classes_and_gates",
+    "required_gates": [
+        "exact_event_matching",
+        "control_lane_contamination",
+        "repeat",
+        "signal",
+        "fit",
+        "count_holdout",
+        "extrapolation",
+        "scenario_holdout",
+    ],
+    "partial_application": "forbidden",
+    "failed_family_status": "explicit_gap",
+    "final_holdout_parameter_influence": "forbidden",
+    "final_holdout_model_switching": "forbidden",
 }
 
 
@@ -213,6 +246,113 @@ def _canonical_scenarios() -> list[dict[str, Any]]:
     return rows
 
 
+def _operation(
+    mnemonic: str,
+    key: str,
+    opcode: int,
+    trace_input_kind: str,
+    control_opcode: int,
+    candidate_ids: tuple[str, ...],
+    required_scenario_ids: tuple[str, ...],
+    diagnostic_scenario_ids: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    return {
+        "mnemonic": mnemonic,
+        "key": key,
+        "opcode": opcode,
+        "production_schedule": VERSION_IDENTITY["production_schedule"],
+        "production_schedule_sha256": PRODUCTION_SCHEDULE_SHA256,
+        "component_kind": "opcode",
+        "trace_selector_ref": "opcode_raw_gas_execution",
+        "transaction_scope_selector_ref": "non_anchor_started_transaction",
+        "pricing_basis": "raw_gas_slope",
+        "dispatch_status": "not_applicable",
+        "spawned": False,
+        "trace_input_kind": trace_input_kind,
+        "control_opcode": control_opcode,
+        "candidate_ids": list(candidate_ids),
+        "required_scenario_ids": list(required_scenario_ids),
+        "diagnostic_scenario_ids": list(diagnostic_scenario_ids),
+    }
+
+
+def _canonical_operations() -> list[dict[str, Any]]:
+    return [
+        _operation(
+            "ADDRESS",
+            "opcode:0x30",
+            0x30,
+            "context_fixed",
+            0x5F,
+            ("address_constant",),
+            ("address_canonical", "address_alternate"),
+        ),
+        _operation(
+            "CALLER",
+            "opcode:0x33",
+            0x33,
+            "context_fixed",
+            0x5F,
+            ("caller_constant",),
+            ("caller_canonical", "caller_alternate"),
+        ),
+        _operation(
+            "CALLVALUE",
+            "opcode:0x34",
+            0x34,
+            "context_value",
+            0x5F,
+            ("callvalue_classes",),
+            (
+                "callvalue_zero",
+                "callvalue_nonzero_7",
+                "callvalue_nonzero_4294967297",
+            ),
+        ),
+        _operation(
+            "CALLDATALOAD",
+            "opcode:0x35",
+            0x35,
+            "calldata_load",
+            0x90,
+            ("calldataload_access_classes",),
+            (
+                "calldataload_empty_offset_0",
+                "calldataload_full_32_offset_0",
+                "calldataload_partial_33_offset_17",
+                "calldataload_out_of_range_4_offset_64",
+                "calldataload_partial_31_offset_30",
+                "calldataload_full_96_offset_32",
+            ),
+        ),
+        _operation(
+            "CALLDATASIZE",
+            "opcode:0x36",
+            0x36,
+            "calldata_size",
+            0x5F,
+            ("calldatasize_length", "calldatasize_boundary"),
+            tuple(
+                f"calldatasize_{length}"
+                for length in (0, 1, 31, 32, 33, 64, 2, 63, 65, 96, 15, 47, 127, 255)
+            ),
+        ),
+        _operation(
+            "TIMESTAMP",
+            "opcode:0x42",
+            0x42,
+            "context_value",
+            0x5F,
+            ("timestamp_nonzero",),
+            (
+                "timestamp_post_unzen_delta_17",
+                "timestamp_post_unzen_delta_86400",
+            ),
+            ("timestamp_zero_unreachable",),
+        ),
+    ]
+
+
 def canonical_production_context_manifest_payload() -> dict[str, Any]:
     return {
         "schema_version": SCHEMA_VERSION,
@@ -226,8 +366,13 @@ def canonical_production_context_manifest_payload() -> dict[str, Any]:
         "version_identity": dict(VERSION_IDENTITY),
         "fit_equations": dict(FIT_EQUATIONS),
         "quality_gates": dict(QUALITY_GATES),
+        "repeat_contract": json.loads(canonical_json(REPEAT_CONTRACT)),
+        "family_promotion_contract": json.loads(
+            canonical_json(FAMILY_PROMOTION_CONTRACT)
+        ),
         "model_selection_order": list(MODEL_SELECTION_ORDER),
         "model_candidates": json.loads(canonical_json(MODEL_CANDIDATES)),
+        "operations": _canonical_operations(),
         "scenarios": _canonical_scenarios(),
     }
 
@@ -269,6 +414,80 @@ class ProductionContextModelCandidate:
 
 
 @dataclass(frozen=True)
+class ProductionContextOperation:
+    mnemonic: str
+    key: str
+    opcode: int
+    production_schedule: str
+    production_schedule_sha256: str
+    component_kind: str
+    trace_selector_ref: str
+    transaction_scope_selector_ref: str
+    pricing_basis: str
+    dispatch_status: str
+    spawned: bool
+    trace_input_kind: str
+    control_opcode: int
+    candidate_ids: tuple[str, ...]
+    required_scenario_ids: tuple[str, ...]
+    diagnostic_scenario_ids: tuple[str, ...]
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "ProductionContextOperation":
+        fields = {
+            "mnemonic",
+            "key",
+            "opcode",
+            "production_schedule",
+            "production_schedule_sha256",
+            "component_kind",
+            "trace_selector_ref",
+            "transaction_scope_selector_ref",
+            "pricing_basis",
+            "dispatch_status",
+            "spawned",
+            "trace_input_kind",
+            "control_opcode",
+            "candidate_ids",
+            "required_scenario_ids",
+            "diagnostic_scenario_ids",
+        }
+        if not isinstance(value, Mapping) or set(value) != fields:
+            raise ValueError("production context operation fields differ")
+        sequence_fields = (
+            "candidate_ids",
+            "required_scenario_ids",
+            "diagnostic_scenario_ids",
+        )
+        if any(
+            not isinstance(value[field], list)
+            or len(value[field]) != len(set(value[field]))
+            for field in sequence_fields
+        ):
+            raise ValueError("production context operation references must be unique lists")
+        return cls(
+            mnemonic=value["mnemonic"],
+            key=value["key"],
+            opcode=value["opcode"],
+            production_schedule=value["production_schedule"],
+            production_schedule_sha256=value["production_schedule_sha256"],
+            component_kind=value["component_kind"],
+            trace_selector_ref=value["trace_selector_ref"],
+            transaction_scope_selector_ref=value[
+                "transaction_scope_selector_ref"
+            ],
+            pricing_basis=value["pricing_basis"],
+            dispatch_status=value["dispatch_status"],
+            spawned=value["spawned"],
+            trace_input_kind=value["trace_input_kind"],
+            control_opcode=value["control_opcode"],
+            candidate_ids=tuple(value["candidate_ids"]),
+            required_scenario_ids=tuple(value["required_scenario_ids"]),
+            diagnostic_scenario_ids=tuple(value["diagnostic_scenario_ids"]),
+        )
+
+
+@dataclass(frozen=True)
 class ProductionContextScenario:
     name: str
     key: str
@@ -289,6 +508,91 @@ class ProductionContextScenario:
         raise ValueError(f"unknown production context split: {self.split}")
 
 
+def _validate_internal_joins(
+    *,
+    keys: tuple[str, ...],
+    production_schedule: str,
+    repeats: int,
+    repeat_contract: Mapping[str, Any],
+    candidates: tuple[ProductionContextModelCandidate, ...],
+    operations: tuple[ProductionContextOperation, ...],
+    scenarios: tuple[ProductionContextScenario, ...],
+) -> None:
+    if repeat_contract.get("exact_repeats") != repeats:
+        raise ValueError("production context repeat contract differs")
+    if tuple(operation.key for operation in operations) != keys:
+        raise ValueError("production context operation key inventory differs")
+    if len({operation.mnemonic for operation in operations}) != len(operations):
+        raise ValueError("production context operation mnemonic inventory differs")
+
+    candidate_by_name = {candidate.name: candidate for candidate in candidates}
+    scenario_by_name = {scenario.name: scenario for scenario in scenarios}
+    if len(candidate_by_name) != len(candidates):
+        raise ValueError("production context model candidate IDs differ")
+    if len(scenario_by_name) != len(scenarios):
+        raise ValueError("production context scenario IDs differ")
+
+    assigned_candidates: list[str] = []
+    assigned_scenarios: list[str] = []
+    for operation in operations:
+        if (
+            operation.key != f"opcode:0x{operation.opcode:02x}"
+            or operation.production_schedule != production_schedule
+            or operation.production_schedule_sha256
+            != PRODUCTION_SCHEDULE_SHA256
+            or operation.component_kind != "opcode"
+            or operation.trace_selector_ref != "opcode_raw_gas_execution"
+            or operation.transaction_scope_selector_ref
+            != "non_anchor_started_transaction"
+            or operation.pricing_basis != "raw_gas_slope"
+            or operation.dispatch_status != "not_applicable"
+            or operation.spawned is not False
+            or operation.trace_input_kind
+            not in {"context_fixed", "context_value", "calldata_load", "calldata_size"}
+        ):
+            raise ValueError("production context operation trace identity differs")
+        if not operation.candidate_ids or not operation.required_scenario_ids:
+            raise ValueError("production context operation evidence is incomplete")
+        if set(operation.required_scenario_ids) & set(
+            operation.diagnostic_scenario_ids
+        ):
+            raise ValueError("production context required and diagnostic scenarios overlap")
+        for candidate_id in operation.candidate_ids:
+            candidate = candidate_by_name.get(candidate_id)
+            if candidate is None or candidate.key != operation.key:
+                raise ValueError("production context operation model join differs")
+            assigned_candidates.append(candidate_id)
+        for scenario_id in operation.required_scenario_ids:
+            scenario = scenario_by_name.get(scenario_id)
+            if (
+                scenario is None
+                or scenario.key != operation.key
+                or scenario.opcode != operation.opcode
+                or scenario.control_opcode != operation.control_opcode
+                or scenario.split == "unreachable"
+                or scenario.reachability != "measured"
+            ):
+                raise ValueError("production context required scenario join differs")
+            assigned_scenarios.append(scenario_id)
+        for scenario_id in operation.diagnostic_scenario_ids:
+            scenario = scenario_by_name.get(scenario_id)
+            if (
+                scenario is None
+                or scenario.key != operation.key
+                or scenario.opcode != operation.opcode
+                or scenario.control_opcode != operation.control_opcode
+                or scenario.split != "unreachable"
+                or scenario.reachability != "unreachable_under_version_identity"
+            ):
+                raise ValueError("production context diagnostic scenario join differs")
+            assigned_scenarios.append(scenario_id)
+
+    if assigned_candidates != [candidate.name for candidate in candidates]:
+        raise ValueError("production context operation candidate ownership differs")
+    if sorted(assigned_scenarios) != sorted(scenario_by_name):
+        raise ValueError("production context operation scenario ownership differs")
+
+
 @dataclass(frozen=True)
 class ProductionContextManifest:
     schema_version: int
@@ -302,8 +606,11 @@ class ProductionContextManifest:
     version_identity: Mapping[str, Any]
     fit_equations: Mapping[str, str]
     quality_gates: Mapping[str, Any]
+    repeat_contract: Mapping[str, Any]
+    family_promotion_contract: Mapping[str, Any]
     model_selection_order: tuple[str, ...]
     model_candidates: tuple[ProductionContextModelCandidate, ...]
+    operations: tuple[ProductionContextOperation, ...]
     scenarios: tuple[ProductionContextScenario, ...]
     identity_sha256: str
 
@@ -319,11 +626,53 @@ class ProductionContextManifest:
                 return candidate
         raise ValueError(f"undeclared production context model candidate: {name}")
 
+    def operation(self, key: str) -> ProductionContextOperation:
+        for operation in self.operations:
+            if operation.key == key:
+                return operation
+        raise ValueError(f"undeclared production context operation: {key}")
+
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "ProductionContextManifest":
         if not isinstance(value, Mapping):
             raise ValueError("production context manifest must be an object")
         _reject_binary_floats(value)
+        try:
+            candidates = tuple(
+                ProductionContextModelCandidate.from_mapping(row)
+                for row in value["model_candidates"]
+            )
+            operations = tuple(
+                ProductionContextOperation.from_mapping(row)
+                for row in value["operations"]
+            )
+            scenarios = tuple(
+                ProductionContextScenario(
+                    name=row["name"],
+                    key=row["key"],
+                    opcode=row["opcode"],
+                    control_opcode=row["control_opcode"],
+                    split=row["split"],
+                    model_class=row["model_class"],
+                    context=MappingProxyType(dict(row["context"])),
+                    reachability=row["reachability"],
+                )
+                for row in value["scenarios"]
+            )
+            _validate_internal_joins(
+                keys=tuple(value["keys"]),
+                production_schedule=value["version_identity"][
+                    "production_schedule"
+                ],
+                repeats=value["repeats"],
+                repeat_contract=value["repeat_contract"],
+                candidates=candidates,
+                operations=operations,
+                scenarios=scenarios,
+            )
+        except (KeyError, TypeError) as error:
+            raise ValueError("production context manifest structure differs") from error
+
         expected = canonical_production_context_manifest_payload()
         if canonical_json(value) != canonical_json(expected):
             raise ValueError("production context manifest differs from the frozen contract")
@@ -335,20 +684,6 @@ class ProductionContextManifest:
         for field in ("launcher_path", "production_elf_path", "production_vk_path", "trace_schema_source"):
             _require_relative_path(value["execution"][field], f"execution.{field}")
 
-        candidates = tuple(ProductionContextModelCandidate.from_mapping(row) for row in value["model_candidates"])
-        scenarios = tuple(
-            ProductionContextScenario(
-                name=row["name"],
-                key=row["key"],
-                opcode=row["opcode"],
-                control_opcode=row["control_opcode"],
-                split=row["split"],
-                model_class=row["model_class"],
-                context=MappingProxyType(dict(row["context"])),
-                reachability=row["reachability"],
-            )
-            for row in value["scenarios"]
-        )
         return cls(
             schema_version=value["schema_version"],
             purpose=value["purpose"],
@@ -361,8 +696,13 @@ class ProductionContextManifest:
             version_identity=MappingProxyType(dict(value["version_identity"])),
             fit_equations=MappingProxyType(dict(value["fit_equations"])),
             quality_gates=MappingProxyType(dict(value["quality_gates"])),
+            repeat_contract=MappingProxyType(dict(value["repeat_contract"])),
+            family_promotion_contract=MappingProxyType(
+                dict(value["family_promotion_contract"])
+            ),
             model_selection_order=tuple(value["model_selection_order"]),
             model_candidates=candidates,
+            operations=operations,
             scenarios=scenarios,
             identity_sha256=sha256_bytes(canonical_json(value)),
         )
@@ -447,11 +787,51 @@ def _validate_content_address(payload: Mapping[str, Any], expected: str, name: s
         raise ValueError(f"pinned {name} content identity is invalid")
 
 
+def _validate_operation_coverage_join(
+    manifest: ProductionContextManifest, coverage: Mapping[str, Any]
+) -> None:
+    coverage_rows = coverage.get("execution_coverage")
+    if not isinstance(coverage_rows, list):
+        raise ValueError("pinned operation coverage rows differ")
+    rows_by_key = {
+        row.get("key"): row
+        for row in coverage_rows
+        if isinstance(row, Mapping) and row.get("key") in manifest.keys
+    }
+    if len(rows_by_key) != len(manifest.operations):
+        raise ValueError("pinned operation coverage inventory differs")
+    for operation in manifest.operations:
+        row = rows_by_key.get(operation.key)
+        if (
+            row is None
+            or row.get("component") != operation.component_kind
+            or row.get("identifier") != f"0x{operation.opcode:02x}"
+            or row.get("name") != operation.mnemonic.lower()
+            or row.get("trace_selector_ref") != operation.trace_selector_ref
+            or row.get("transaction_scope_selector_ref")
+            != operation.transaction_scope_selector_ref
+        ):
+            raise ValueError("pinned operation coverage join differs")
+        schedule_evidence = [
+            evidence
+            for evidence in row.get("source_evidence", ())
+            if isinstance(evidence, Mapping)
+            and evidence.get("kind") == "exported_unzen_schedule_entry"
+        ]
+        if (
+            len(schedule_evidence) != 1
+            or schedule_evidence[0].get("schedule_sha256")
+            != operation.production_schedule_sha256
+        ):
+            raise ValueError("pinned operation schedule identity differs")
+
+
 def validate_production_context_sources(manifest: ProductionContextManifest, repo_root: pathlib.Path) -> dict[str, str]:
     validated: dict[str, str] = {}
     coverage_source = manifest.sources["operation_coverage_v5"]
     _, coverage = _load_pinned_json(repo_root, coverage_source, "operation_coverage_v5")
     _validate_content_address(coverage, coverage_source["artifact_sha256"], "operation_coverage_v5")
+    _validate_operation_coverage_join(manifest, coverage)
     validated["operation_coverage_v5"] = coverage_source["file_sha256"]
 
     higher_source = manifest.sources["higher_layer"]
@@ -478,6 +858,11 @@ def validate_production_context_sources(manifest: ProductionContextManifest, rep
     if discovery_path.read_bytes() != canonical_json(discovery) + b"\n":
         raise ValueError("pinned discovery source is not canonical JSON")
     _validate_content_address(discovery, discovery_source["artifact_sha256"], "discovery")
+    from context_opcode_campaign import verify_context_result
+
+    verified_discovery = verify_context_result(discovery_path.parent)
+    if canonical_json(verified_discovery) != canonical_json(discovery):
+        raise ValueError("pinned discovery result differs from sealed directory replay")
     if (
         discovery.get("result_identity_sha256") != discovery_source["result_identity_sha256"]
         or discovery.get("candidate_eligible") is not False

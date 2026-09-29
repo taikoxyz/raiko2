@@ -18,6 +18,99 @@ MANIFEST = OPCODE_GAS / "manifests" / "sp1-context-production-v1.json"
 
 
 class ProductionContextManifestTests(unittest.TestCase):
+    def test_operation_inventory_binds_trace_schedule_candidates_and_scenarios(self):
+        manifest = production.load_production_context_manifest(MANIFEST)
+
+        self.assertEqual(
+            tuple(
+                (
+                    operation.mnemonic,
+                    operation.key,
+                    operation.opcode,
+                    operation.production_schedule,
+                    operation.trace_input_kind,
+                    operation.control_opcode,
+                )
+                for operation in manifest.operations
+            ),
+            (
+                ("ADDRESS", "opcode:0x30", 0x30, "UNZEN_ZK_GAS_SCHEDULE", "context_fixed", 0x5F),
+                ("CALLER", "opcode:0x33", 0x33, "UNZEN_ZK_GAS_SCHEDULE", "context_fixed", 0x5F),
+                ("CALLVALUE", "opcode:0x34", 0x34, "UNZEN_ZK_GAS_SCHEDULE", "context_value", 0x5F),
+                ("CALLDATALOAD", "opcode:0x35", 0x35, "UNZEN_ZK_GAS_SCHEDULE", "calldata_load", 0x90),
+                ("CALLDATASIZE", "opcode:0x36", 0x36, "UNZEN_ZK_GAS_SCHEDULE", "calldata_size", 0x5F),
+                ("TIMESTAMP", "opcode:0x42", 0x42, "UNZEN_ZK_GAS_SCHEDULE", "context_value", 0x5F),
+            ),
+        )
+        for operation in manifest.operations:
+            self.assertEqual(
+                operation.production_schedule_sha256,
+                "b27c29fb5fe482de4b3e22784de0cc6c49a5f1f0160ec8a6eaa6997869864927",
+            )
+            self.assertEqual(operation.component_kind, "opcode")
+            self.assertEqual(operation.trace_selector_ref, "opcode_raw_gas_execution")
+            self.assertEqual(
+                operation.transaction_scope_selector_ref,
+                "non_anchor_started_transaction",
+            )
+            self.assertEqual(operation.pricing_basis, "raw_gas_slope")
+            self.assertEqual(operation.dispatch_status, "not_applicable")
+            self.assertFalse(operation.spawned)
+
+        timestamp = manifest.operation("opcode:0x42")
+        self.assertEqual(
+            timestamp.required_scenario_ids,
+            (
+                "timestamp_post_unzen_delta_17",
+                "timestamp_post_unzen_delta_86400",
+            ),
+        )
+        self.assertEqual(
+            timestamp.diagnostic_scenario_ids,
+            ("timestamp_zero_unreachable",),
+        )
+        self.assertEqual(
+            manifest.operation("opcode:0x36").candidate_ids,
+            ("calldatasize_length", "calldatasize_boundary"),
+        )
+
+    def test_repeat_and_family_promotion_contracts_are_machine_readable(self):
+        manifest = production.load_production_context_manifest(MANIFEST)
+
+        self.assertEqual(
+            dict(manifest.repeat_contract),
+            {
+                "exact_repeats": 3,
+                "equality_fields": [
+                    "prover_gas",
+                    "public_output",
+                    "backend_input_sha256",
+                    "host_trace_sha256",
+                ],
+                "mismatch_outcome": "reject_scenario",
+            },
+        )
+        self.assertEqual(
+            dict(manifest.family_promotion_contract),
+            {
+                "required_evidence": "all_required_scenarios_classes_and_gates",
+                "required_gates": [
+                    "exact_event_matching",
+                    "control_lane_contamination",
+                    "repeat",
+                    "signal",
+                    "fit",
+                    "count_holdout",
+                    "extrapolation",
+                    "scenario_holdout",
+                ],
+                "partial_application": "forbidden",
+                "failed_family_status": "explicit_gap",
+                "final_holdout_parameter_influence": "forbidden",
+                "final_holdout_model_switching": "forbidden",
+            },
+        )
+
     def test_manifest_freezes_inventory_splits_counts_and_repeats(self):
         manifest = production.load_production_context_manifest(MANIFEST)
 
@@ -243,6 +336,50 @@ class ProductionContextManifestTests(unittest.TestCase):
         payload["model_candidates"][0]["discovery_coefficient"] = "71.4"
         mutations.append(payload)
 
+        payload = production.canonical_production_context_manifest_payload()
+        payload["operations"].pop()
+        mutations.append(payload)
+
+        for field, value in (
+            ("key", "opcode:0x31"),
+            ("opcode", 0x31),
+            ("mnemonic", "BALANCE"),
+            ("production_schedule", "caller_selected"),
+            ("production_schedule_sha256", "0" * 64),
+            ("trace_selector_ref", "untyped"),
+            ("trace_input_kind", "static_raw_gas"),
+            ("control_opcode", 0x50),
+        ):
+            payload = production.canonical_production_context_manifest_payload()
+            payload["operations"][0][field] = value
+            mutations.append(payload)
+
+        payload = production.canonical_production_context_manifest_payload()
+        payload["operations"][0]["candidate_ids"] = []
+        mutations.append(payload)
+
+        payload = production.canonical_production_context_manifest_payload()
+        payload["operations"][0]["required_scenario_ids"] = []
+        mutations.append(payload)
+
+        payload = production.canonical_production_context_manifest_payload()
+        payload["operations"][0]["diagnostic_scenario_ids"] = [
+            payload["operations"][0]["required_scenario_ids"][0]
+        ]
+        mutations.append(payload)
+
+        payload = production.canonical_production_context_manifest_payload()
+        payload["repeat_contract"]["equality_fields"].remove("host_trace_sha256")
+        mutations.append(payload)
+
+        payload = production.canonical_production_context_manifest_payload()
+        payload["family_promotion_contract"]["partial_application"] = "allowed"
+        mutations.append(payload)
+
+        payload = production.canonical_production_context_manifest_payload()
+        payload["family_promotion_contract"]["final_holdout_model_switching"] = "allowed"
+        mutations.append(payload)
+
         for payload in mutations:
             with self.subTest(payload=payload), self.assertRaises(ValueError):
                 production.ProductionContextManifest.from_mapping(payload)
@@ -259,6 +396,42 @@ class ProductionContextManifestTests(unittest.TestCase):
             path.write_text('{"schema_version":1,"schema_version":1}')
             with self.assertRaisesRegex(ValueError, "duplicate JSON field"):
                 production.load_production_context_manifest(path)
+
+    def _linked_source_view(self, directory):
+        root = pathlib.Path(directory)
+        manifest = production.load_production_context_manifest(MANIFEST)
+        relative_files = {
+            manifest.sources["operation_coverage_v5"]["path"],
+            manifest.sources["higher_layer"]["path"],
+            manifest.sources["higher_layer"]["directory_identity_path"],
+        }
+        discovery_result = ROOT / manifest.sources["discovery"]["path"]
+        relative_files.update(
+            str(path.relative_to(ROOT)) for path in discovery_result.parent.iterdir()
+        )
+        for relative in relative_files:
+            source = ROOT / relative
+            destination = root / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.hardlink_to(source)
+        return root, manifest, discovery_result
+
+    def test_source_validation_rejects_missing_discovery_sibling(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
+            root, manifest, discovery_result = self._linked_source_view(directory)
+            (root / discovery_result.parent.relative_to(ROOT) / "source-identity.json").unlink()
+            with self.assertRaisesRegex(ValueError, "inventory"):
+                production.validate_production_context_sources(manifest, root)
+
+    def test_source_validation_rejects_tampered_discovery_sibling(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
+            root, manifest, discovery_result = self._linked_source_view(directory)
+            sibling = root / discovery_result.parent.relative_to(ROOT) / "source-identity.json"
+            original = sibling.read_bytes()
+            sibling.unlink()
+            sibling.write_bytes(original + b" ")
+            with self.assertRaisesRegex(ValueError, "hash differs"):
+                production.validate_production_context_sources(manifest, root)
 
 
 class ProductionContextIdentityTests(unittest.TestCase):

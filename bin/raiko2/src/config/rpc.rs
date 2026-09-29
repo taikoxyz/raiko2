@@ -111,7 +111,7 @@ pub struct ResolvedNetworkPair {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct BoundlessPairConfig {
-    pub proposal_max_total_zkgas: Option<u64>,
+    pub proposal_zkgas_warning_threshold: Option<u64>,
     pub batch_quote: Option<QuoteSizing>,
     pub aggregation_quote: Option<QuoteSizing>,
     pub poll_interval_ms: Option<u64>,
@@ -125,8 +125,8 @@ pub struct BoundlessPairConfig {
 impl BoundlessPairConfig {
     /// Validate the optional pair-specific Boundless overrides.
     pub fn validate(&self, pair_key: &str) -> Result<()> {
-        if matches!(self.proposal_max_total_zkgas, Some(0)) {
-            bail!("{pair_key}: boundless.proposal_max_total_zkgas must be > 0");
+        if matches!(self.proposal_zkgas_warning_threshold, Some(0)) {
+            bail!("{pair_key}: boundless.proposal_zkgas_warning_threshold must be > 0");
         }
         if let Some(q) = &self.batch_quote {
             q.validate(&format!("{pair_key}: boundless.batch_quote"))
@@ -464,18 +464,20 @@ mod tests {
     }
 
     #[test]
-    fn boundless_pair_config_rejects_zero_proposal_zkgas_boundary() {
+    fn boundless_pair_config_rejects_zero_proposal_zkgas_warning_threshold() {
         let config = BoundlessPairConfig {
-            proposal_max_total_zkgas: Some(0),
+            proposal_zkgas_warning_threshold: Some(0),
             ..Default::default()
         };
 
         let error = config
             .validate("taiko_hoodi/hoodi")
-            .expect_err("zero proposal zkGas boundary must fail");
+            .expect_err("zero proposal zkGas warning threshold must fail");
 
         assert!(
-            error.to_string().contains("proposal_max_total_zkgas"),
+            error
+                .to_string()
+                .contains("proposal_zkgas_warning_threshold"),
             "{error}"
         );
     }

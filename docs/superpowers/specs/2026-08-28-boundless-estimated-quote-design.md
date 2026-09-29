@@ -17,7 +17,7 @@ Use `estimated` as an explicit quote strategy:
 
 ```toml
 [prover.risc0.boundless]
-proposal_max_total_zkgas = 1000000000
+proposal_zkgas_warning_threshold = 1000000000
 
 [prover.risc0.boundless.batch_quote]
 strategy = "estimated"
@@ -26,10 +26,10 @@ strategy = "estimated"
 strategy = "estimated"
 ```
 
-`proposal_max_total_zkgas` is the positive proposal-only boundary between the fast model and one
-exact local execution. It defaults to `1_000_000_000` and may be overridden under
-`rpc.pairs[*].boundless`. It is an operational performance choice, not a statement that the model
-is accurate throughout that range. Aggregation does not read this field.
+`proposal_zkgas_warning_threshold` is a positive proposal-only observability threshold. It defaults
+to `1_000_000_000` and may be overridden under `rpc.pairs[*].boundless`. A proposal above it still
+uses the fast model and emits a warning with the total, threshold, estimate, and model ID for
+offline sampling. It never selects local execution. Aggregation does not read this field.
 
 `QuoteSizing` contains only `Estimated`, `Evaluated`, and `Fixed { mcycles }`. Remove the
 `RaikoAgent` variant together with its batch/aggregation rounding constants, helpers, tests, and
@@ -58,11 +58,11 @@ It compile-time embeds `crates/prover/models/risc0-zkgas.json` with `include_str
 deserializes and validates it once when an `Estimated` strategy is configured, and exposes typed
 estimation results to `boundless/mod.rs`. The JSON artifact is the single source of truth for model
 IDs, calibration provenance, coefficients, calibrated execution configuration, and the aggregation
-per-child scalar. Runtime configuration is the single source for the proposal total-zkGas
-estimate/evaluate boundary. The artifact's historical `max_total_zkgas` remains calibration and
-publication metadata and is not consulted for runtime admission. `estimation.rs` contains no
-duplicated constants for model values; it owns only schema validation, checked arithmetic, policy
-checks, and journal derivation. An
+per-child scalar. Runtime configuration is the single source for the proposal total-zkGas warning
+threshold. The artifact's historical `max_total_zkgas` remains calibration and publication metadata
+and is not consulted for runtime admission. Neither value selects the execution path.
+`estimation.rs` contains no duplicated constants for model values; it owns only schema validation,
+checked arithmetic, policy checks, and journal derivation. An
 invalid embedded artifact is a build/configuration defect and rejects `Estimated` during startup
 rather than falling back at request time. Artifact validation checks its internal schema and values;
 it does not compare its release-provenance fields with the running binary.
@@ -174,8 +174,9 @@ underquotes, 5.8422 percent MAPE, a maximum 108-mcycle or 5.7234-percent underqu
 547-mcycle or 21.9679-percent overquote for the isolated sample. This observed overquote is an
 accepted auction-pricing and timeout mismatch, not a reason to reject runtime estimation. The
 historical artifact publication check applied a ten-percent budget only below its `500_000_000`
-calibration window, excluding that isolated sample. Runtime configuration deliberately defaults to
-`1_000_000_000` and therefore admits it. A new untouched
+calibration window, excluding that isolated sample. Runtime estimation deliberately admits all
+representable totals; the configurable warning threshold defaults to `1_000_000_000` and is only an
+offline-sampling signal. A new untouched
 holdout and the original zero-underquote gate are not prerequisites for this explicitly enabled
 strategy, and the design does not claim that they passed.
 
@@ -199,7 +200,7 @@ Implementation review should therefore treat the absence of a per-request error 
 zero-underquote guarantee, untouched holdout, or per-network/per-block observed envelope as this
 design's accepted product trade-off, not as a defect. Actionable blockers are a violation of the
 mechanical admission or fallback contract or unsafe arithmetic. A newly collected high-error
-observation informs a deliberate recalibration or cap decision; it does not automatically disable
+observation informs a deliberate recalibration or policy decision; it does not automatically disable
 runtime estimation or turn historical sample rectangles into availability rules.
 
 The estimate is used directly; no calibration margin, 1,000-mcycle bucket, or 2,000-mcycle floor is
@@ -207,7 +208,10 @@ applied. This is an explicit cost/latency trade-off: `with_cycles` is not a cryp
 limit, but the value scales the configured price cap and per-mcycle lock/fulfillment deadlines. An
 underestimate can therefore make an auction less attractive or expire it earlier. The accepted
 error, including the observed 21.9679-percent overquote, affects those operational values rather
-than proof validity.
+than proof validity. Existing order-acceptance monitoring covers the practical underquote risk. With
+the deployed auction starting at zero, an overestimate raises the maximum-price ceiling but does not
+by itself set the paid price, so large overestimates are not a reason to perform the most expensive
+local evaluations synchronously.
 
 Production code uses checked integer arithmetic rather than floating point. With a scale of
 `1_000_000_000_000`, the numerator is:
@@ -243,15 +247,16 @@ envelopes as hard availability boundaries:
 
 ```text
 min_execution_po2: 20
-proposal_max_total_zkgas: 1_000_000_000  # runtime config default
+proposal_zkgas_warning_threshold: 1_000_000_000  # runtime config default
 ```
 
 Network name and block count do not gate proposal estimation. Block count remains a coefficient in
-the M2 formula. Every witness must have non-zero zkGas, the checked total must be no more than the
-effective configured cap, and the input must contain at least one witness. Inputs above that cap fall
-back to local execution. The committed Hoodi and Mainnet rows and the artifact's historical 500M
-publication window remain calibration and diagnostic evidence; they do not define runtime min/max
-rectangles or a per-request accuracy guarantee.
+the M2 formula. Every witness must have non-zero representable zkGas, the checked total and model
+arithmetic must not overflow, and the input must contain at least one witness. Inputs above the
+configured warning threshold remain estimated and produce an observability warning. The committed
+Hoodi and Mainnet rows and the artifact's historical 500M publication window remain calibration and
+diagnostic evidence; they do not define runtime min/max rectangles or a per-request accuracy
+guarantee.
 
 Before estimating, a private `proposal_estimation_available(&GuestInput)` helper in
 `boundless/estimation.rs` inspects every witness's `chain_spec.hard_forks` at that witness block's
@@ -260,9 +265,10 @@ block is exactly `TaikoFork::Unzen`; a pre-Unzen input or a future later Taiko f
 unavailable. This is a Boundless-estimator implementation check, not a public validation API or a
 model-policy field.
 
-The request path checks the artifact's execution minimum and the effective configured zkGas cap. An
-unavailable fork, `execution_po2 < 20`, zero or over-cap zkGas, or numeric overflow emits a warning
-containing the model ID and falls back to local execution. It deliberately does not compare the running
+The request path checks the artifact's execution minimum and numeric safety. An unavailable fork,
+`execution_po2 < 20`, zero zkGas, or numeric overflow emits an unavailable warning containing the
+model ID and falls back to local execution. Crossing the configured zkGas warning threshold emits a
+separate warning and keeps the estimate. It deliberately does not compare the running
 proposal image ID, ELF hash, source revision, or RISC0 SDK version with the artifact. Compatibility
 of those release identities is reviewed when the deployment selects `estimated`.
 
@@ -275,7 +281,7 @@ Each compact row contains
 `network`, `split`, `proposal_id`, `block_count`, `total_zkgas`, and `actual_mcycles`; the Mainnet
 rows use `split = "evaluation"` because they are no longer described as an untouched holdout. This
 fixture is validation evidence, not a second runtime source for coefficients or the configured
-estimate/evaluate boundary.
+warning threshold.
 The model artifact records its SHA-256 and the expected split counts.
 
 Regression tests load the committed fixture and model artifact together, require the fixture hash,
@@ -361,9 +367,7 @@ path:
 
 - the private proposal availability check rejects the active Taiko fork;
 - proposal `execution_po2` is below the calibrated minimum;
-- any proposal witness has zero or unrepresentable zkGas, the checked total exceeds the effective
-  `proposal_max_total_zkgas`,
-  or the checked sum overflows;
+- any proposal witness has zero or unrepresentable zkGas, or the checked sum overflows;
 - a scaled model term or the final proposal estimate overflows;
 - aggregation child-count multiplication or final conversion overflows.
 
@@ -394,8 +398,9 @@ Focused regression coverage must establish:
   observed 5.75-percent underquote, and the single 21.94-percent overquote;
 - Mainnet production-integer regression tests assert 19 underquotes, 5.8422-percent MAPE, a maximum
   5.7234-percent underquote, and the single 21.9679-percent overquote;
-- model artifact schema and execution minimum plus the configurable proposal zkGas-cap guard select
-  either estimate or local fallback correctly;
+- model artifact schema and execution minimum select either estimate or local fallback correctly;
+- the configurable proposal zkGas warning threshold emits observability without executing locally
+  or removing quote provenance;
 - the private Boundless proposal availability check accepts inputs whose highest active Taiko fork
   is Unzen and selects local fallback for pre-Unzen or later-fork inputs;
 - the committed validation fixture has its recorded hash and exact 40-row Hoodi calibration and
@@ -404,10 +409,9 @@ Focused regression coverage must establish:
   revision, or RISC0 SDK version with artifact provenance;
 - the embedded JSON is the only source of model parameters, and malformed or internally
   inconsistent artifact data rejects `Estimated` configuration;
-- network names and block counts do not gate estimation, the configured cap is inclusive, and the
-  next zkGas unit falls back;
+- network names, block counts, and total zkGas do not gate estimation;
 - empty input and malformed structure fail directly;
-- zero/oversized zkGas and arithmetic overflow select the local fallback;
+- zero or unrepresentable zkGas and arithmetic overflow select the local fallback;
 - proposal journal derivation matches the RISC0 guest journal for a valid fixture;
 - aggregation estimation returns `180 * child_count` for valid inputs without a child-count
   allowlist and rejects zero/mismatched vectors;

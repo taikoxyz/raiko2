@@ -9,10 +9,11 @@ Keep collection, policy review, and packaging separate.
 
 1. Read `experiments/risc0-zkgas/README.md`; use its finite collector with the proposal guest in
    `execute` mode only. Never prove or submit to Boundless.
-2. Review split coverage and runtime policy separately. The runtime estimate/evaluate boundary is
-   `prover.risc0.boundless.proposal_max_total_zkgas`, defaults to `1_000_000_000`, and may be
-   overridden per network pair. It is a deliberate product decision, not an inferred calibration
-   envelope. The model artifact's historical `max_total_zkgas` is packaging metadata only.
+2. Review split coverage and runtime policy separately. The runtime observability threshold is
+   `prover.risc0.boundless.proposal_zkgas_warning_threshold`, defaults to `1_000_000_000`, and may
+   be overridden per network pair. Totals above it still use estimation and emit a warning for
+   offline sampling; it is not an estimate/evaluate boundary. The model artifact's historical
+   `max_total_zkgas` is packaging metadata only.
 3. Pass an existing Python 3.11+ venv as the recipe's `PYTHON_BIN` environment variable. Run
    `just --show update-risc0-zkgas-model` and
    `"$PYTHON_BIN" scripts/modeling/risc0_zkgas_model.py --help`; do not invoke the script through its
@@ -35,11 +36,12 @@ Keep collection, policy review, and packaging separate.
 
 Review proposal estimation against the accepted approximation contract: an implementation is
 eligible when it matches the documented mechanical admission and fallback rules. The product
-accepts estimated/local cycle mismatch, underquotes, overquotes, and configured-cap network or
-block-count combinations outside collected sample rectangles. The committed Mainnet diagnostics
-include a 21.9679-percent production-integer overquote, which is accepted for runtime quoting. The
+accepts estimated/local cycle mismatch, underquotes, overquotes, requests above the warning
+threshold, and network or block-count combinations outside collected sample rectangles. The
+committed Mainnet diagnostics include a 21.9679-percent production-integer overquote, which is
+accepted for runtime quoting. The
 historical ten-percent packaging check is not a proof of per-request accuracy and does not control
-runtime admission. New high-error observations inform deliberate recalibration or cap decisions;
+runtime admission. New high-error observations inform deliberate recalibration or policy decisions;
 they do not automatically disable estimation. Use `evaluated` when exact local cycles are required.
 
 The legacy `risc0-zkgas-m2-v1` ID is a schema-v1 historical record. The current schema-v3 generator

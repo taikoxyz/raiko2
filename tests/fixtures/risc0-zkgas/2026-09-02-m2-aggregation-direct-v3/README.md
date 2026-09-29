@@ -30,6 +30,6 @@ timeout drift. Use `evaluated` when the exact cycle count for the running guest 
 
 Across all 140 proposal rows the samples span `block_count` 155-192 and `total_zkgas`
 216314230-562107601, at 1.16-2.93 million zkGas per block. Runtime proposal availability is
-deliberately wider than these ranges and uses the effective configured
-`proposal_max_total_zkgas` rather than this historical publication window or the observed sample
-rectangle.
+deliberately wider than these ranges. The effective configured
+`proposal_zkgas_warning_threshold` only emits an observability warning; neither it, this historical
+publication window, nor the observed sample rectangle gates estimation.

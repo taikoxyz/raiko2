@@ -44,8 +44,6 @@ pub fn validate_estimation_model() -> Result<(), String> {
 pub(crate) enum EstimateUnavailable {
     ExecutionPo2,
     Fork,
-    /// Proposal total zkGas exceeded the configured estimate/local-evaluation boundary.
-    TotalZkGasCap,
     ZeroZkGas,
     Numeric,
 }
@@ -60,7 +58,7 @@ pub(crate) struct EstimatedRequestMetadata {
 pub(crate) fn estimate_proposal(
     input: &GuestInput,
     execution_po2: u32,
-    proposal_max_total_zkgas: u64,
+    proposal_zkgas_warning_threshold: u64,
 ) -> RaikoResult<Result<EstimatedRequestMetadata, EstimateUnavailable>> {
     if input.witnesses.is_empty() {
         return Err(RaikoError::InvalidRequestConfig(
@@ -104,14 +102,19 @@ pub(crate) fn estimate_proposal(
     if total_zkgas == 0 {
         return Ok(Err(EstimateUnavailable::ZeroZkGas));
     }
-    if total_zkgas > u128::from(proposal_max_total_zkgas) {
-        return Ok(Err(EstimateUnavailable::TotalZkGasCap));
-    }
-
     let mcycles = match estimate_mcycles(&proposal.coefficients.scaled, total_zkgas, block_count) {
         Ok(mcycles) => mcycles,
         Err(unavailable) => return Ok(Err(unavailable)),
     };
+    if total_zkgas > u128::from(proposal_zkgas_warning_threshold) {
+        tracing::warn!(
+            total_zkgas = %total_zkgas,
+            proposal_zkgas_warning_threshold,
+            estimated_mcycles = mcycles,
+            model_id = %model.0.model_id,
+            "Boundless proposal zkGas exceeds the estimation warning threshold; continuing with estimated quote"
+        );
+    }
     Ok(Ok(EstimatedRequestMetadata {
         model_id: model.0.model_id.clone(),
         mcycles,
@@ -909,27 +912,24 @@ mod tests {
     }
 
     #[test]
-    fn proposal_estimation_accepts_the_configured_zkgas_cap() {
+    fn proposal_estimation_accepts_the_configured_zkgas_warning_threshold() {
         let input = proposal_input("taiko_mainnet", 200, 1_000_000_000);
 
         assert!(proposal_result(&input).is_ok());
     }
 
     #[test]
-    fn proposal_estimation_uses_configured_cap_instead_of_artifact_calibration_range() {
+    fn proposal_estimation_uses_warning_threshold_instead_of_artifact_calibration_range() {
         let input = proposal_input("taiko_mainnet", 200, 562_107_601);
 
         assert!(proposal_result(&input).is_ok());
     }
 
     #[test]
-    fn proposal_estimation_rejects_zkgas_above_the_configured_cap() {
+    fn proposal_estimation_continues_above_the_configured_warning_threshold() {
         let input = proposal_input("taiko_mainnet", 200, 1_000_000_001);
 
-        assert_eq!(
-            proposal_result(&input),
-            Err(EstimateUnavailable::TotalZkGasCap)
-        );
+        assert!(proposal_result(&input).is_ok());
     }
 
     #[test]

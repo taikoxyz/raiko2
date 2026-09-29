@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 const STAKE_TOKEN_DECIMALS: u8 = 18;
 const DEFAULT_RISC0_EXECUTION_PO2: u32 = 20;
-pub const DEFAULT_PROPOSAL_MAX_TOTAL_ZKGAS: u64 = 1_000_000_000;
+pub const DEFAULT_PROPOSAL_ZKGAS_WARNING_THRESHOLD: u64 = 1_000_000_000;
 pub const DEFAULT_REBID_TIMEOUT_MS: u64 = 300_000;
 /// Minimum accepted rebid timeout. Config validation rejects anything lower, and the runtime clamps
 /// the effective no-lock delay to this floor, so this is the single source of truth for both.
@@ -225,8 +225,8 @@ impl QuoteSizing {
 pub struct BoundlessConfig {
     #[serde(default = "default_execution_po2")]
     pub execution_po2: u32,
-    #[serde(default = "default_proposal_max_total_zkgas")]
-    pub proposal_max_total_zkgas: u64,
+    #[serde(default = "default_proposal_zkgas_warning_threshold")]
+    pub proposal_zkgas_warning_threshold: u64,
     #[serde(default)]
     pub offchain: bool,
     pub rpc_url: String,
@@ -254,7 +254,7 @@ impl Default for BoundlessConfig {
     fn default() -> Self {
         Self {
             execution_po2: default_execution_po2(),
-            proposal_max_total_zkgas: default_proposal_max_total_zkgas(),
+            proposal_zkgas_warning_threshold: default_proposal_zkgas_warning_threshold(),
             offchain: false,
             rpc_url: "https://base-rpc.publicnode.com".to_string(),
             signer_key: String::new(),
@@ -284,8 +284,8 @@ const fn default_execution_po2() -> u32 {
     DEFAULT_RISC0_EXECUTION_PO2
 }
 
-const fn default_proposal_max_total_zkgas() -> u64 {
-    DEFAULT_PROPOSAL_MAX_TOTAL_ZKGAS
+const fn default_proposal_zkgas_warning_threshold() -> u64 {
+    DEFAULT_PROPOSAL_ZKGAS_WARNING_THRESHOLD
 }
 
 const fn default_poll_interval_ms() -> u64 {
@@ -551,7 +551,7 @@ mod tests {
         assert_eq!(config.rebid_timeout_ms, DEFAULT_REBID_TIMEOUT_MS);
         assert_eq!(config.rebid_price_step_bps, DEFAULT_REBID_PRICE_STEP_BPS);
         assert_eq!(config.rebid_max_attempts, DEFAULT_REBID_MAX_ATTEMPTS);
-        assert_eq!(config.proposal_max_total_zkgas, 1_000_000_000);
+        assert_eq!(config.proposal_zkgas_warning_threshold, 1_000_000_000);
         assert_eq!(config.batch_quote, QuoteSizing::Evaluated);
         assert_eq!(config.aggregation_quote, QuoteSizing::Evaluated);
     }

@@ -2010,7 +2010,7 @@ async fn prepare_quote_context<F, Fut>(
     stage_input: &BoundlessStageInput,
     encoded_input: &[u8],
     execution_po2: u32,
-    proposal_max_total_zkgas: u64,
+    proposal_zkgas_warning_threshold: u64,
     execute: F,
 ) -> RaikoResult<QuoteContext>
 where
@@ -2029,9 +2029,11 @@ where
     }
     let estimate = if matches!(quote_sizing, QuoteSizing::Estimated { .. }) {
         Some(match stage_input {
-            BoundlessStageInput::Proposal(input) => {
-                estimation::estimate_proposal(input, execution_po2, proposal_max_total_zkgas)?
-            }
+            BoundlessStageInput::Proposal(input) => estimation::estimate_proposal(
+                input,
+                execution_po2,
+                proposal_zkgas_warning_threshold,
+            )?,
             BoundlessStageInput::Aggregation(_) => estimation::estimate_aggregation(encoded_input)?,
         })
     } else {
@@ -2047,7 +2049,7 @@ async fn initialize_quote_lineage<Load, LoadFut, Execute, ExecuteFut>(
     stage_input: &BoundlessStageInput,
     encoded_input: &[u8],
     execution_po2: u32,
-    proposal_max_total_zkgas: u64,
+    proposal_zkgas_warning_threshold: u64,
     load_resume: Load,
     execute: Execute,
 ) -> RaikoResult<(
@@ -2075,7 +2077,7 @@ where
                 stage_input,
                 encoded_input,
                 execution_po2,
-                proposal_max_total_zkgas,
+                proposal_zkgas_warning_threshold,
                 execute,
             )
             .await?,
@@ -2091,7 +2093,7 @@ async fn prepare_quote_context_for_attempt<F, Fut>(
     stage_input: &BoundlessStageInput,
     encoded_input: &[u8],
     execution_po2: u32,
-    proposal_max_total_zkgas: u64,
+    proposal_zkgas_warning_threshold: u64,
     journal: &QuoteJournalContext,
     request_reuse: &RebidRequestReuse,
     current_quote: &mut Option<QuoteContext>,
@@ -2113,7 +2115,7 @@ where
         stage_input,
         encoded_input,
         execution_po2,
-        proposal_max_total_zkgas,
+        proposal_zkgas_warning_threshold,
         execute,
     )
     .await?;
@@ -5050,14 +5052,14 @@ impl BoundlessProver {
     ) -> RaikoResult<Proof> {
         let quote_sizing = self.quote_sizing(elf_type);
         let execution_po2 = self.config.execution_po2;
-        let proposal_max_total_zkgas = self.config.proposal_max_total_zkgas;
+        let proposal_zkgas_warning_threshold = self.config.proposal_zkgas_warning_threshold;
         let (resume_record, quote_journal, mut current_quote) = initialize_quote_lineage(
             elf_type,
             quote_sizing,
             &stage_input,
             input.as_ref(),
             execution_po2,
-            proposal_max_total_zkgas,
+            proposal_zkgas_warning_threshold,
             || async {
                 let Some(observer) = observer.as_ref() else {
                     return Ok(None);
@@ -5229,7 +5231,7 @@ impl BoundlessProver {
                     &stage_input,
                     input.as_ref(),
                     execution_po2,
-                    proposal_max_total_zkgas,
+                    proposal_zkgas_warning_threshold,
                     &quote_journal,
                     &request_reuse,
                     &mut current_quote,
@@ -7612,7 +7614,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn quote_context_proposal_above_artifact_range_below_configured_cap_skips_execution() {
+    async fn quote_context_proposal_above_artifact_range_below_warning_threshold_skips_execution() {
         let input = estimable_proposal_input(192, 562_107_601);
         let encoded = bincode::serialize(&input).expect("encode proposal fixture");
         let calls = Arc::new(AtomicUsize::new(0));
@@ -7628,7 +7630,7 @@ mod tests {
             move || execution_result(&execution_calls, 9_999, Vec::new()),
         )
         .await
-        .expect("configured boundary should permit estimation beyond the artifact range");
+        .expect("warning threshold should permit estimation beyond the artifact range");
 
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         assert_eq!(context.evaluated_mcycles_count, None);
@@ -7640,12 +7642,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn quote_context_proposal_above_configured_cap_executes_once() {
+    async fn quote_context_proposal_above_warning_threshold_still_skips_execution() {
         let input = estimable_proposal_input(192, 562_107_601);
         let encoded = bincode::serialize(&input).expect("encode proposal fixture");
         let calls = Arc::new(AtomicUsize::new(0));
         let execution_calls = Arc::clone(&calls);
-        let executed_journal = B256::repeat_byte(0x57).to_vec();
 
         let context = prepare_quote_context(
             ElfType::Batch,
@@ -7654,17 +7655,19 @@ mod tests {
             &encoded,
             20,
             500_000_000,
-            move || execution_result(&execution_calls, 2_777, executed_journal),
+            move || execution_result(&execution_calls, 2_777, B256::repeat_byte(0x57).to_vec()),
         )
         .await
-        .expect("proposal above configured boundary should fall back to local evaluation");
+        .expect("proposal above warning threshold should still use estimation");
 
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-        assert_eq!(context.quoted_mcycles_count, 2_777);
-        assert_eq!(context.evaluated_mcycles_count, Some(2_777));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(context.quoted_mcycles_count, 3_037);
+        assert_eq!(context.evaluated_mcycles_count, None);
         assert_eq!(context.strategy, Some(BoundlessQuoteStrategy::Estimated));
-        assert_eq!(context.model_id, None);
-        assert_eq!(context.journal, B256::repeat_byte(0x57).to_vec());
+        assert_eq!(
+            context.model_id.as_deref(),
+            Some("risc0-zkgas-m2-c71d7a4ff237c10d")
+        );
     }
 
     #[tokio::test]
@@ -7709,7 +7712,7 @@ mod tests {
             &crate::boundless_config::QuoteSizing::Estimated {
                 mcycles_offset: 1_300,
             },
-            Some(Err(super::estimation::EstimateUnavailable::TotalZkGasCap)),
+            Some(Err(super::estimation::EstimateUnavailable::Numeric)),
             move || execution_result(&execution_calls, 1_455, journal),
         )
         .await
@@ -7898,7 +7901,7 @@ mod tests {
         let context = prepare_quote_context_from_estimate(
             ElfType::Batch,
             &crate::boundless_config::QuoteSizing::Estimated { mcycles_offset: 0 },
-            Some(Err(super::estimation::EstimateUnavailable::TotalZkGasCap)),
+            Some(Err(super::estimation::EstimateUnavailable::Numeric)),
             move || execution_result(&observed_calls, 1_000, B256::repeat_byte(0x52).to_vec()),
         )
         .await

@@ -152,8 +152,9 @@ any resulting cycle-estimate drift, while `evaluated` remains the exact-cycle op
 
 The generator deterministically refits M2 from the Hoodi fit rows and retains the historical
 ten-percent check inside the artifact's recorded `500_000_000` publication window. This is
-calibration/package evidence only: runtime admission is controlled independently by the configured
-`proposal_max_total_zkgas`, defaults to `1_000_000_000`, and explicitly accepts the committed
+calibration/package evidence only. The configured
+`proposal_zkgas_warning_threshold` defaults to `1_000_000_000`; crossing it emits an observability
+warning but does not change runtime admission. Runtime estimation explicitly accepts the committed
 Mainnet sample whose production-integer overquote is `21.9679%`. The generator writes
 `crates/prover/models/risc0-zkgas.json`.
 Its `raw_input_rows_sha256` is SHA-256 over the canonical `hoodi-fit.jsonl` bytes followed by the
@@ -190,7 +191,8 @@ config and runtime artifact. Reusing that ID for different coefficients, inputs,
 rejected even when the output paths differ.
 The runtime artifact remains the single source for coefficients and calibrated minimum
 `execution_po2`. Boundless configuration is the single source for the runtime proposal total-zkGas
-estimate/evaluate boundary; the artifact's `max_total_zkgas` is historical publication metadata.
+warning threshold; the artifact's `max_total_zkgas` is historical publication metadata. Neither
+value is an estimate/evaluate boundary.
 
 ## Unit tests
 

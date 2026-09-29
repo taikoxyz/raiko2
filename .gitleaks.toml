@@ -1,0 +1,14 @@
+[extend]
+useDefault = true
+
+[[rules]]
+id = "generic-api-key"
+
+[[rules.allowlists]]
+description = "Generated opcode trace access-list SHA-256 digests"
+condition = "AND"
+paths = ['''^experiments/opcode-gas/derivations/[0-9a-f]{24}/rows\.jsonl$''']
+# The generator hashes the serialized EVM access list; these are not credentials.
+# Match only this field, so other secrets on the same JSONL row remain detectable.
+regexTarget = "match"
+regexes = ['''^access_list_sha256"\s*:\s*"[0-9a-f]{64}"$''']

@@ -44,7 +44,7 @@ pub fn validate_estimation_model() -> Result<(), String> {
 pub(crate) enum EstimateUnavailable {
     ExecutionPo2,
     Fork,
-    /// Proposal total zkGas exceeded the artifact's `max_total_zkgas` operating cap.
+    /// Proposal total zkGas exceeded the configured estimate/local-evaluation boundary.
     TotalZkGasCap,
     ZeroZkGas,
     Numeric,
@@ -60,6 +60,7 @@ pub(crate) struct EstimatedRequestMetadata {
 pub(crate) fn estimate_proposal(
     input: &GuestInput,
     execution_po2: u32,
+    proposal_max_total_zkgas: u64,
 ) -> RaikoResult<Result<EstimatedRequestMetadata, EstimateUnavailable>> {
     if input.witnesses.is_empty() {
         return Err(RaikoError::InvalidRequestConfig(
@@ -103,7 +104,7 @@ pub(crate) fn estimate_proposal(
     if total_zkgas == 0 {
         return Ok(Err(EstimateUnavailable::ZeroZkGas));
     }
-    if total_zkgas > u128::from(proposal.max_total_zkgas) {
+    if total_zkgas > u128::from(proposal_max_total_zkgas) {
         return Ok(Err(EstimateUnavailable::TotalZkGasCap));
     }
 
@@ -622,7 +623,7 @@ mod tests {
     fn proposal_result(
         input: &GuestInput,
     ) -> Result<super::EstimatedRequestMetadata, EstimateUnavailable> {
-        estimate_proposal(input, 20).expect("structurally valid proposal input")
+        estimate_proposal(input, 20, 1_000_000_000).expect("structurally valid proposal input")
     }
 
     fn aggregation_carries_with_count(count: usize) -> Vec<ProofCarryData> {
@@ -873,7 +874,7 @@ mod tests {
 
     #[test]
     fn proposal_empty_witnesses_are_a_direct_error() {
-        assert!(estimate_proposal(&GuestInput::default(), 20).is_err());
+        assert!(estimate_proposal(&GuestInput::default(), 20, 1_000_000_000).is_err());
     }
 
     #[test]
@@ -881,7 +882,7 @@ mod tests {
         let mut input = proposal_input("taiko_hoodi", 155, 369_558_586);
         input.proof_carry_data.transition_input.transition.timestamp = 1_u64 << 48;
 
-        assert!(estimate_proposal(&input, 20).is_err());
+        assert!(estimate_proposal(&input, 20, 1_000_000_000).is_err());
     }
 
     #[test]
@@ -908,15 +909,22 @@ mod tests {
     }
 
     #[test]
-    fn proposal_estimation_accepts_the_global_zkgas_cap() {
-        let input = proposal_input("taiko_mainnet", 200, 500_000_000);
+    fn proposal_estimation_accepts_the_configured_zkgas_cap() {
+        let input = proposal_input("taiko_mainnet", 200, 1_000_000_000);
 
         assert!(proposal_result(&input).is_ok());
     }
 
     #[test]
-    fn proposal_estimation_rejects_zkgas_above_the_global_cap() {
-        let input = proposal_input("taiko_mainnet", 200, 500_000_001);
+    fn proposal_estimation_uses_configured_cap_instead_of_artifact_calibration_range() {
+        let input = proposal_input("taiko_mainnet", 200, 562_107_601);
+
+        assert!(proposal_result(&input).is_ok());
+    }
+
+    #[test]
+    fn proposal_estimation_rejects_zkgas_above_the_configured_cap() {
+        let input = proposal_input("taiko_mainnet", 200, 1_000_000_001);
 
         assert_eq!(
             proposal_result(&input),
@@ -929,11 +937,19 @@ mod tests {
         let input = proposal_input("taiko_hoodi", 155, 369_558_586);
 
         assert_eq!(
-            estimate_proposal(&input, 19).unwrap(),
+            estimate_proposal(&input, 19, 1_000_000_000).unwrap(),
             Err(EstimateUnavailable::ExecutionPo2)
         );
-        assert!(estimate_proposal(&input, 20).unwrap().is_ok());
-        assert!(estimate_proposal(&input, 21).unwrap().is_ok());
+        assert!(
+            estimate_proposal(&input, 20, 1_000_000_000)
+                .unwrap()
+                .is_ok()
+        );
+        assert!(
+            estimate_proposal(&input, 21, 1_000_000_000)
+                .unwrap()
+                .is_ok()
+        );
     }
 
     #[test]

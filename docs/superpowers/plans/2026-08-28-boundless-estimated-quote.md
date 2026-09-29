@@ -4,7 +4,12 @@
 
 **Goal:** Add an opt-in Boundless `estimated` quote strategy that derives the RISC0 journal and cycle quote without local proposal/aggregation execution when the input satisfies the committed operating policy, while preserving one-execution local fallback and durable quote provenance.
 
-**Architecture:** A new `boundless::estimation` module owns the embedded model schema, checked estimator arithmetic, operating-policy selection, fork guard, and deterministic proposal/aggregation journal construction. `boundless/mod.rs` turns each request into a durable `QuoteContext` before submission, uses a request-scoped isolated Boundless SDK builder for estimates and fallbacks, and preserves that context for every rung sharing a request ID. Configuration continues to choose the strategy per stage; the embedded JSON is the only runtime source for coefficients, the global zkGas cap, model identity, and aggregation per-child scalar.
+**Architecture:** A new `boundless::estimation` module owns the embedded model schema, checked estimator arithmetic, fork guard, and deterministic proposal/aggregation journal construction. `boundless/mod.rs` turns each request into a durable `QuoteContext` before submission, uses a request-scoped isolated Boundless SDK builder for estimates and fallbacks, and preserves that context for every rung sharing a request ID. Configuration chooses the strategy per stage and owns the proposal total-zkGas estimate/evaluate boundary; the embedded JSON remains the runtime source for coefficients, calibration metadata, model identity, and aggregation per-child scalar.
+
+> **Runtime-policy amendment (2026-09-29):** `prover.risc0.boundless.proposal_max_total_zkgas`
+> supersedes the artifact's historical 500M field as the runtime boundary, defaults to 1B, and may
+> be overridden per network pair. The committed 21.9679% Mainnet overquote is accepted. The task
+> steps below describe the original artifact-owned policy and remain as implementation history.
 
 **Tech Stack:** Rust 2024 workspace, serde/serde_json, bincode, RISC Zero 3.0.5, boundless-market 2.0.0, Tokio, TOML configuration, Python 3.11 experiment venv for fixture diagnostics.
 

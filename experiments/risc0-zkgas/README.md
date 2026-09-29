@@ -137,23 +137,24 @@ only by `scripts/modeling/risc0_zkgas_model.py` through the stable `just` recipe
 `tests/fixtures/risc0-zkgas/2026-09-02-m2-aggregation-direct-v3/` contains the current compact, reviewable
 production inputs:
 80 Hoodi fit rows in `hoodi-fit.jsonl`, the 40 Hoodi calibration plus 20 Mainnet evaluation rows in
-`validation.jsonl`, and manual provenance/global-cap policy in `config.json`. Every row retains only
+`validation.jsonl`, and manual provenance/calibration policy in `config.json`. Every row retains only
 the network, split, proposal ID, block count, total zkGas, and actual mcycles. Mainnet rows are
 labeled `evaluation` because Mainnet influenced the production model choice.
 The prior fixture directories remain unchanged as audit records. The schema-v3 generator rejects
 the historical schema-v1 and schema-v2 configs. The current fixture keeps the v2 proposal rows and
-global-cap policy while removing aggregation child-count calibration as a runtime gate; the
-aggregation artifact now contains only the direct per-child scalar and audit provenance.
+historical publication window while removing aggregation child-count calibration as a runtime gate;
+the aggregation artifact now contains only the direct per-child scalar and audit provenance.
 
 The v2 sample rows were collected with proposal ELF SHA-256 `d7a4aca3769005d30772a6a1d4c47c95f7d6692244a3b017b181935a855e6b35`.
 That identity predates the proposal ELF rebuilt by #242 and differs from the v0.6.0 release guest.
 The runtime does not compare these identities: a release selecting `estimated` explicitly accepts
 any resulting cycle-estimate drift, while `evaluated` remains the exact-cycle option.
 
-The generator deterministically refits M2 from the Hoodi fit rows and requires every concrete
-collected observation admitted by the global cap to remain within the 10% absolute-error budget
-before publishing a refresh. This empirical gate is not a per-request guarantee for future
-unobserved network or block-count combinations. The generator writes
+The generator deterministically refits M2 from the Hoodi fit rows and retains the historical
+ten-percent check inside the artifact's recorded `500_000_000` publication window. This is
+calibration/package evidence only: runtime admission is controlled independently by the configured
+`proposal_max_total_zkgas`, defaults to `1_000_000_000`, and explicitly accepts the committed
+Mainnet sample whose production-integer overquote is `21.9679%`. The generator writes
 `crates/prover/models/risc0-zkgas.json`.
 Its `raw_input_rows_sha256` is SHA-256 over the canonical `hoodi-fit.jsonl` bytes followed by the
 canonical `validation.jsonl` bytes, so a refresh never requires copying a hash by hand. The artifact
@@ -187,8 +188,9 @@ start from a new fixture directory and set the input config's
 model ID to `risc0-zkgas-m2-auto`; the generator writes a content-addressed ID into both the fixture
 config and runtime artifact. Reusing that ID for different coefficients, inputs, or provenance is
 rejected even when the output paths differ.
-The runtime artifact remains the single source for coefficients and the proposal operating policy,
-including the calibrated minimum `execution_po2` and global total-zkGas cap.
+The runtime artifact remains the single source for coefficients and calibrated minimum
+`execution_po2`. Boundless configuration is the single source for the runtime proposal total-zkGas
+estimate/evaluate boundary; the artifact's `max_total_zkgas` is historical publication metadata.
 
 ## Unit tests
 

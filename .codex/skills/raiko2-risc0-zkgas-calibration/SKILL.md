@@ -9,9 +9,10 @@ Keep collection, policy review, and packaging separate.
 
 1. Read `experiments/risc0-zkgas/README.md`; use its finite collector with the proposal guest in
    `execute` mode only. Never prove or submit to Boundless.
-2. Review split coverage and the proposal operating policy explicitly. The runtime policy is a
-   global total-zkGas cap, independent of network and block count; changing that cap is a deliberate
-   product decision, not an inferred calibration envelope.
+2. Review split coverage and runtime policy separately. The runtime estimate/evaluate boundary is
+   `prover.risc0.boundless.proposal_max_total_zkgas`, defaults to `1_000_000_000`, and may be
+   overridden per network pair. It is a deliberate product decision, not an inferred calibration
+   envelope. The model artifact's historical `max_total_zkgas` is packaging metadata only.
 3. Pass an existing Python 3.11+ venv as the recipe's `PYTHON_BIN` environment variable. Run
    `just --show update-risc0-zkgas-model` and
    `"$PYTHON_BIN" scripts/modeling/risc0_zkgas_model.py --help`; do not invoke the script through its
@@ -22,8 +23,8 @@ Keep collection, policy review, and packaging separate.
    provenance drift; never combine different guest or build cohorts.
 5. Inspect the compact fixture/config diff, then run `just test-risc0-zkgas-model` and
    `just check-risc0-zkgas-model <new-fixture-dir> crates/prover/models/risc0-zkgas.json` with the same
-   interpreter. A proposal observation admitted by the configured global cap that exceeds the 10%
-   error budget must stop the refresh.
+   interpreter. The generator's ten-percent check applies only inside the artifact's recorded
+   historical publication window; it does not gate runtime availability.
 6. When promoting a new model, update every explicit audit pin in the Python and Rust fixture tests;
    the default fixture directory in the generator and `justfile`; `config.example.toml`;
    `docs/API.md`; `docs/operations.md`; `experiments/risc0-zkgas/README.md`; the Boundless estimated
@@ -34,13 +35,12 @@ Keep collection, policy review, and packaging separate.
 
 Review proposal estimation against the accepted approximation contract: an implementation is
 eligible when it matches the documented mechanical admission and fallback rules. The product
-accepts estimated/local cycle mismatch, underquotes, overquotes, and in-cap network or block-count
-combinations outside collected sample rectangles. The ten-percent budget gates concrete proposal
-observations during model publication or refresh; it is not a proof of per-request accuracy. A
-concrete newly collected in-policy proposal observation beyond that budget requires re-evaluating
-the model, cap, or strategy. A theoretical future mismatch, lack of an untouched holdout, or lack
-of observed rectangles does not change runtime availability. Use `evaluated` when exact local
-cycles are required.
+accepts estimated/local cycle mismatch, underquotes, overquotes, and configured-cap network or
+block-count combinations outside collected sample rectangles. The committed Mainnet diagnostics
+include a 21.9679-percent production-integer overquote, which is accepted for runtime quoting. The
+historical ten-percent packaging check is not a proof of per-request accuracy and does not control
+runtime admission. New high-error observations inform deliberate recalibration or cap decisions;
+they do not automatically disable estimation. Use `evaluated` when exact local cycles are required.
 
 The legacy `risc0-zkgas-m2-v1` ID is a schema-v1 historical record. The current schema-v3 generator
 and runtime parser reject schema-v1 and schema-v2 artifacts. Every schema-v3 artifact or calibration

@@ -1256,15 +1256,20 @@ set both SGX lane timeouts. Use the independent `prover.sgx.timeout_ms` and
   `batch_quote.mcycles_offset = 1300` (1.3 billion cycles) while
   `aggregation_quote.mcycles_offset = 0`. The removed `raiko_agent` value is rejected and must be
   migrated explicitly.
-  `rpc.pairs[*].boundless` may override either table for one `(network, l1_network)` pair; an omitted
-  pair field inherits the corresponding required global table.
+  `prover.risc0.boundless.proposal_max_total_zkgas` is the proposal-only boundary between the fast
+  model and one exact local evaluation. It must be positive and defaults to `1000000000` when
+  omitted. `rpc.pairs[*].boundless` may override this boundary or either quote table for one
+  `(network, l1_network)` pair; an omitted pair field inherits the corresponding global value.
 - `estimated` is an opt-in request-pricing path. For a supported proposal it derives the journal
   from the typed guest input and estimates cycles without executing the guest locally. The
   estimation step itself does not submit a proof; the normal Boundless request still proves the
-  original guest program and input. For proposals only, the approximately ten-percent target is an
-  empirical model-publication gate over collected observations admitted by the global cap, not a
-  hard accuracy guarantee for each future request. Aggregation has no corresponding error-budget
-  gate. An in-policy request is not locally executed first, so its actual underquote or overquote is
+  original guest program and input. The runtime cap is an operator-controlled performance boundary,
+  not a claim that every admitted prediction meets a particular error percentage. The committed
+  Mainnet evaluation set includes a `21.9679%` production-integer overquote, and that mismatch is
+  explicitly acceptable for auction pricing and timeout estimation. The artifact's historical
+  `500000000` publication window and ten-percent check remain calibration records; they do not
+  constrain the configured runtime boundary. Aggregation has no corresponding error-budget gate.
+  An in-policy request is not locally executed first, so its actual underquote or overquote is
   unknown and that mismatch is an accepted cost/timeout trade-off. Use `evaluated` when an exact
   local cycle count is required. When the proposal is outside the model policy, raiko2 emits a
   warning and performs exactly one local execution, using that actual cycle count and journal.
@@ -1276,13 +1281,15 @@ set both SGX lane timeouts. Use the independent `prover.sgx.timeout_ms` and
   applies. Remove or reset the offset to `0` after publishing a matching calibration.
 - The current proposal model admits any non-empty exact-Unzen input when `execution_po2 >= 20`,
   every witness has non-zero zkGas in `block.header.difficulty`, and their checked sum is at most
-  `500000000`. Network names and block counts do not gate estimation; block count remains an M2
+  the effective `proposal_max_total_zkgas` (default `1000000000`). Network names and block counts do
+  not gate estimation; block count remains an M2
   formula input, and combinations outside the collected sample rectangles are deliberately admitted
   without a per-request error proof. The collected rectangles are `block_count` 155-192 and
   `total_zkgas` 216314230-562107601; 192 is the pre-Unzen derivation-source block limit while the
-  Unzen limit is 768, so an admitted proposal can carry up to four times the calibrated block count
-  and the cap is the only remaining bound. Pre-Unzen, later-fork, lower-`execution_po2`, zero-zkGas,
-  over-cap, and arithmetic overflow inputs use the warning-plus-local fallback.
+  Unzen limit is 768, so an admitted proposal can carry up to four times the calibrated block count.
+  The configured cap is the only remaining size boundary and deliberately permits extrapolation.
+  Pre-Unzen, later-fork, lower-`execution_po2`, zero-zkGas, over-cap, and arithmetic overflow inputs
+  use the warning-plus-local fallback.
 - Estimated aggregation derives the journal on the host and quotes `180 * child_count` mcycles for
   every structurally valid, non-empty input. Child count and historical observations do not gate
   runtime availability. The current v4 API admits 1-1024 proposals, so this deliberately

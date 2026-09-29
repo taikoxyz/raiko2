@@ -13,6 +13,7 @@ import pathlib
 import re
 import shutil
 import stat
+import struct
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -86,6 +87,26 @@ PRODUCTION_CONTEXT_SEAL_SOURCE_PATHS = (
     "experiments/opcode-gas/composite_estimator.py",
     "experiments/opcode-gas/hierarchical_model.py",
 )
+_INOTIFY_MODIFY = 0x00000002
+_INOTIFY_ATTRIB = 0x00000004
+_INOTIFY_CLOSE_WRITE = 0x00000008
+_INOTIFY_UNMOUNT = 0x00002000
+_INOTIFY_Q_OVERFLOW = 0x00004000
+_INOTIFY_IGNORED = 0x00008000
+_INOTIFY_DELETE_SELF = 0x00000400
+_INOTIFY_MOVE_SELF = 0x00000800
+_INOTIFY_DONT_FOLLOW = 0x02000000
+_INOTIFY_REJECT_MASK = (
+    _INOTIFY_MODIFY
+    | _INOTIFY_ATTRIB
+    | _INOTIFY_CLOSE_WRITE
+    | _INOTIFY_UNMOUNT
+    | _INOTIFY_Q_OVERFLOW
+    | _INOTIFY_IGNORED
+    | _INOTIFY_DELETE_SELF
+    | _INOTIFY_MOVE_SELF
+)
+_INOTIFY_EVENT = struct.Struct("iIII")
 
 
 class CandidateFitRejected(ValueError):
@@ -3319,6 +3340,111 @@ def fit_production_context_run(
 # exact implementation checkout recorded by the calibration identity.
 
 
+def _establish_linux_mutation_watch(
+    path: pathlib.Path, *, label: str
+) -> tuple[int, int]:
+    libc = ctypes.CDLL(None, use_errno=True)
+    initialize = getattr(libc, "inotify_init1", None)
+    add_watch = getattr(libc, "inotify_add_watch", None)
+    if initialize is None or add_watch is None:
+        raise ValueError(f"{label} mutation watch is unavailable")
+    initialize.argtypes = [ctypes.c_int]
+    initialize.restype = ctypes.c_int
+    add_watch.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_uint32]
+    add_watch.restype = ctypes.c_int
+    watcher = initialize(os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0))
+    if watcher < 0:
+        error_number = ctypes.get_errno()
+        raise ValueError(f"{label} mutation watch is unavailable") from OSError(
+            error_number, os.strerror(error_number)
+        )
+    try:
+        watch_id = add_watch(
+            watcher,
+            os.fsencode(path),
+            _INOTIFY_REJECT_MASK | _INOTIFY_DONT_FOLLOW,
+        )
+        if watch_id < 0:
+            error_number = ctypes.get_errno()
+            raise ValueError(f"{label} mutation watch is unavailable") from OSError(
+                error_number, os.strerror(error_number)
+            )
+        return watcher, watch_id
+    except BaseException:
+        os.close(watcher)
+        raise
+
+
+def _drain_linux_mutation_watch(
+    watcher: int, *, label: str
+) -> list[tuple[int, int]]:
+    events = []
+    while True:
+        try:
+            chunk = os.read(watcher, 64 * 1024)
+        except BlockingIOError:
+            break
+        except OSError as error:
+            if error.errno in {errno.EAGAIN, errno.EWOULDBLOCK}:
+                break
+            raise ValueError(f"{label} mutation watch is unavailable") from error
+        if not chunk:
+            raise ValueError(f"{label} mutation watch is unavailable")
+        offset = 0
+        while offset < len(chunk):
+            if len(chunk) - offset < _INOTIFY_EVENT.size:
+                raise ValueError(f"{label} mutation watch is unavailable")
+            watch_id, mask, _cookie, name_length = _INOTIFY_EVENT.unpack_from(
+                chunk, offset
+            )
+            event_size = _INOTIFY_EVENT.size + name_length
+            if event_size > len(chunk) - offset:
+                raise ValueError(f"{label} mutation watch is unavailable")
+            events.append((watch_id, mask))
+            offset += event_size
+    return events
+
+
+def _remove_linux_mutation_watch(watcher: int, watch_id: int) -> None:
+    libc = ctypes.CDLL(None, use_errno=True)
+    remove_watch = getattr(libc, "inotify_rm_watch", None)
+    if remove_watch is None:
+        raise OSError(errno.ENOSYS, "inotify_rm_watch is unavailable")
+    remove_watch.argtypes = [ctypes.c_int, ctypes.c_int]
+    remove_watch.restype = ctypes.c_int
+    if remove_watch(watcher, watch_id) != 0:
+        error_number = ctypes.get_errno()
+        raise OSError(error_number, os.strerror(error_number))
+
+
+def _finish_linux_mutation_watch(
+    watcher: int, watch_id: int, *, label: str
+) -> None:
+    try:
+        events = _drain_linux_mutation_watch(watcher, label=label)
+    except (OSError, ValueError) as error:
+        raise ValueError(f"{label} mutation watch is unavailable") from error
+    if any(
+        event_watch_id not in {watch_id, -1}
+        or mask & _INOTIFY_REJECT_MASK
+        or mask != 0
+        for event_watch_id, mask in events
+    ):
+        raise ValueError(f"{label} changed while it was read")
+    try:
+        _remove_linux_mutation_watch(watcher, watch_id)
+    except (OSError, ValueError) as error:
+        raise ValueError(f"{label} mutation watch is unavailable") from error
+    try:
+        final_events = _drain_linux_mutation_watch(watcher, label=label)
+    except (OSError, ValueError) as error:
+        raise ValueError(f"{label} mutation watch is unavailable") from error
+    if final_events != [(watch_id, _INOTIFY_IGNORED)]:
+        if any(mask & _INOTIFY_REJECT_MASK for _, mask in final_events):
+            raise ValueError(f"{label} changed while it was read")
+        raise ValueError(f"{label} mutation watch is unavailable")
+
+
 def _read_bounded_regular_file(
     path: pathlib.Path, limit: int, *, label: str
 ) -> bytes:
@@ -3331,11 +3457,13 @@ def _read_bounded_regular_file(
         | getattr(os, "O_NOFOLLOW", 0)
         | getattr(os, "O_NONBLOCK", 0)
     )
+    watcher, watch_id = _establish_linux_mutation_watch(path, label=label)
+    descriptor = None
     try:
-        descriptor = os.open(path, flags)
-    except OSError as error:
-        raise ValueError(f"{label} is missing or is not a regular file") from error
-    try:
+        try:
+            descriptor = os.open(path, flags)
+        except OSError as error:
+            raise ValueError(f"{label} is missing or is not a regular file") from error
         opened = os.fstat(descriptor)
         if (
             not stat.S_ISREG(opened.st_mode)
@@ -3359,9 +3487,14 @@ def _read_bounded_regular_file(
             label=label,
             expected=first,
         )
+        _finish_linux_mutation_watch(watcher, watch_id, label=label)
         return first
     finally:
-        os.close(descriptor)
+        try:
+            if descriptor is not None:
+                os.close(descriptor)
+        finally:
+            os.close(watcher)
 
 
 def _sha256_bounded_regular_file(
@@ -3376,11 +3509,13 @@ def _sha256_bounded_regular_file(
         | getattr(os, "O_NOFOLLOW", 0)
         | getattr(os, "O_NONBLOCK", 0)
     )
+    watcher, watch_id = _establish_linux_mutation_watch(path, label=label)
+    descriptor = None
     try:
-        descriptor = os.open(path, flags)
-    except OSError as error:
-        raise ValueError(f"{label} is missing or is not a regular file") from error
-    try:
+        try:
+            descriptor = os.open(path, flags)
+        except OSError as error:
+            raise ValueError(f"{label} is missing or is not a regular file") from error
         opened = os.fstat(descriptor)
         if (
             not stat.S_ISREG(opened.st_mode)
@@ -3406,9 +3541,14 @@ def _sha256_bounded_regular_file(
         )
         if first != second:
             raise ValueError(f"{label} changed while it was read")
+        _finish_linux_mutation_watch(watcher, watch_id, label=label)
         return first
     finally:
-        os.close(descriptor)
+        try:
+            if descriptor is not None:
+                os.close(descriptor)
+        finally:
+            os.close(watcher)
 
 
 def _immutable_regular_file_snapshot(status: os.stat_result) -> tuple[int, ...]:

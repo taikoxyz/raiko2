@@ -87,12 +87,13 @@ content-addressed directory and replay it without SP1 from that same clean, exac
 Sealing is create-only and publishes exactly ten bounded regular files through a same-directory
 temporary directory. Replay reads numerical inputs only from that flat result directory, but also
 requires the current Git HEAD to be the recorded clean implementation revision and recomputes every
-frozen source-code digest from bounded, no-follow regular-file reads. It reconstructs every fixture
-and row identity, recomputes V5 subtotals (including event dispatch), refits every exact matrix,
-coefficient, prediction, gate, and model choice, and preserves accepted, partial, and rejected raw
-evidence. The discovery result defines only the feature vocabulary and candidate function shapes:
-none of its numeric coefficients, the historical `body_scale`, or a cross-ELF scale is a
-production-model input.
+frozen source-code digest from bounded, no-follow regular-file reads. Those reads fail closed unless
+the Linux kernel can establish and check an exact-path inotify mutation watch for their full
+duration. Replay reconstructs every fixture and row identity, recomputes V5 subtotals (including
+event dispatch), refits every exact matrix, coefficient, prediction, gate, and model choice, and
+preserves accepted, partial, and rejected raw evidence. The discovery result defines only the
+feature vocabulary and candidate function shapes: none of its numeric coefficients, the historical
+`body_scale`, or a cross-ELF scale is a production-model input.
 
 ### Synthetic Four-Anchor Ratio Probe
 

@@ -153,3 +153,34 @@ GREEN evidence:
 - Complete test file: `2 failed, 45 passed, 104 subtests passed in 428.54s`. The only failures are
   the same two documented local sealed-helper fingerprint mismatches at
   `context_opcode_campaign.py:4484`; the production check remains strict.
+
+## Review Round 3
+
+Review demonstrated that two passes can agree after a persistent mutation of a region that pass
+one has not read yet. Both bounded helpers now require a Linux exact-path inotify watch established
+before opening the file with `IN_DONT_FOLLOW`. The watch covers modify, attribute, close-write,
+self-move, self-delete, unmount, ignored/invalidation, and queue-overflow events. After the existing
+two stat-checked passes, verification drains the nonblocking watch, rejects every subscribed event
+or overflow, explicitly removes the watch, and requires the kernel's ignored acknowledgement.
+Setup, read, remove, invalidation, acknowledgement, or syscall unavailability fails closed; there is
+no fallback. The watcher and data descriptor are closed on every path.
+
+RED evidence:
+
+- Persistent first-pass unread-half mutation with frozen observed timestamps was accepted on all
+  repeated attempts: `16 failed` (eight per helper).
+
+GREEN evidence:
+
+- Repeated persistent mutations plus watch setup/read/overflow/invalidation/remove and cleanup
+  coverage: `6 passed, 31 subtests passed in 0.60s` after the final nested descriptor-cleanup
+  correction.
+- All bounded-reader mutation/failure cases: included in the final focused result above; the
+  earlier pre-cleanup checkpoint was `4 passed, 28 subtests passed in 0.57s`.
+- End-to-end inventory/tamper suite: `1 passed, 19 subtests passed in 214.26s`.
+- Narrow complete-source seal and replay: `1 passed in 143.74s`.
+- Non-artifact suite: `45 passed, 5 deselected, 104 subtests passed in 3.40s`.
+- Complete test file after the final cleanup correction: `2 failed, 48 passed, 123 subtests passed
+  in 496.81s`. The only failures are
+  the same two documented local sealed-helper fingerprint mismatches at
+  `context_opcode_campaign.py:4484`; the production check remains strict.

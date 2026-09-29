@@ -2609,62 +2609,52 @@ class ProductionContextSealTests(unittest.TestCase):
     def test_bounded_readers_reject_same_size_in_place_mutation(self):
         real_read = os.read
         real_fstat = os.fstat
-        real_lseek = os.lseek
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             for helper in (
                 production._read_bounded_regular_file,
                 production._sha256_bounded_regular_file,
             ):
-                with self.subTest(helper=helper.__name__):
-                    path = root / f"{helper.__name__}.bin"
-                    path.write_bytes(b"a" * (1024 * 1024 + 16))
-                    mutated = False
-                    frozen_times = {}
+                for attempt in range(8):
+                    with self.subTest(helper=helper.__name__, attempt=attempt):
+                        path = root / f"{helper.__name__}-{attempt}.bin"
+                        path.write_bytes(b"a" * (1024 * 1024 + 16))
+                        mutated = False
+                        frozen_times = {}
 
-                    def mutate_after_first_chunk(descriptor, size):
-                        nonlocal mutated
-                        chunk = real_read(descriptor, size)
-                        if not mutated:
-                            mutated = True
-                            with path.open("r+b") as target:
-                                target.seek(-1, os.SEEK_END)
-                                target.write(b"b")
-                                target.flush()
-                                os.fsync(target.fileno())
-                        return chunk
+                        def mutate_after_first_chunk(descriptor, size):
+                            nonlocal mutated
+                            chunk = real_read(descriptor, size)
+                            if not mutated:
+                                mutated = True
+                                with path.open("r+b") as target:
+                                    target.seek(-1, os.SEEK_END)
+                                    target.write(b"b")
+                                    target.flush()
+                                    os.fsync(target.fileno())
+                            return chunk
 
-                    def restore_before_second_pass(descriptor, offset, whence):
-                        with path.open("r+b") as target:
-                            target.seek(-1, os.SEEK_END)
-                            target.write(b"a")
-                            target.flush()
-                            os.fsync(target.fileno())
-                        return real_lseek(descriptor, offset, whence)
+                        def stable_timestamps(descriptor):
+                            current = real_fstat(descriptor)
+                            mtime_ns, ctime_ns = frozen_times.setdefault(
+                                descriptor, (current.st_mtime_ns, current.st_ctime_ns)
+                            )
+                            return types.SimpleNamespace(
+                                st_dev=current.st_dev,
+                                st_ino=current.st_ino,
+                                st_mode=current.st_mode,
+                                st_nlink=current.st_nlink,
+                                st_size=current.st_size,
+                                st_mtime_ns=mtime_ns,
+                                st_ctime_ns=ctime_ns,
+                            )
 
-                    def stable_timestamps(descriptor):
-                        current = real_fstat(descriptor)
-                        mtime_ns, ctime_ns = frozen_times.setdefault(
-                            descriptor, (current.st_mtime_ns, current.st_ctime_ns)
-                        )
-                        return types.SimpleNamespace(
-                            st_dev=current.st_dev,
-                            st_ino=current.st_ino,
-                            st_mode=current.st_mode,
-                            st_nlink=current.st_nlink,
-                            st_size=current.st_size,
-                            st_mtime_ns=mtime_ns,
-                            st_ctime_ns=ctime_ns,
-                        )
-
-                    with mock.patch.object(
-                        production.os, "read", side_effect=mutate_after_first_chunk
-                    ), mock.patch.object(
-                        production.os, "lseek", side_effect=restore_before_second_pass
-                    ), mock.patch.object(
-                        production.os, "fstat", side_effect=stable_timestamps
-                    ), self.assertRaisesRegex(ValueError, "changed while it was read"):
-                        helper(path, 2 * 1024 * 1024, label="mutating test file")
+                        with mock.patch.object(
+                            production.os, "read", side_effect=mutate_after_first_chunk
+                        ), mock.patch.object(
+                            production.os, "fstat", side_effect=stable_timestamps
+                        ), self.assertRaisesRegex(ValueError, "changed while it was read"):
+                            helper(path, 2 * 1024 * 1024, label="mutating test file")
 
     def test_bounded_readers_reject_truncated_grown_and_shrunk_files(self):
         real_read = os.read
@@ -2739,6 +2729,83 @@ class ProductionContextSealTests(unittest.TestCase):
                     production.os, "read", side_effect=fail_second_pass
                 ), self.assertRaisesRegex(ValueError, "reread is unavailable"):
                     helper(path, 1024, label="second-pass failure test file")
+
+    def test_mutation_watch_setup_failure_closes_descriptor(self):
+        watcher = os.open("/dev/null", os.O_RDONLY)
+        libc = mock.Mock()
+        libc.inotify_init1 = mock.Mock(return_value=watcher)
+        libc.inotify_add_watch = mock.Mock(return_value=-1)
+        ctypes_errno = errno.ENOSPC
+        try:
+            with mock.patch.object(
+                production.ctypes, "CDLL", return_value=libc
+            ), mock.patch.object(
+                production.ctypes, "get_errno", return_value=ctypes_errno
+            ), self.assertRaisesRegex(ValueError, "watch is unavailable"):
+                production._establish_linux_mutation_watch(
+                    pathlib.Path("unwatchable"), label="watch setup test file"
+                )
+            with self.assertRaises(OSError):
+                os.fstat(watcher)
+        finally:
+            try:
+                os.close(watcher)
+            except OSError:
+                pass
+
+    def test_mutation_watch_rejects_read_overflow_invalidation_and_remove_failure(self):
+        watch_id = 17
+        cases = (
+            ("read", OSError("watch read failed")),
+            ("overflow", [(-1, 0x00004000)]),
+            ("invalidation", [(watch_id, 0x00008000)]),
+        )
+        for label, outcome in cases:
+            with self.subTest(failure=label), mock.patch.object(
+                production,
+                "_drain_linux_mutation_watch",
+                side_effect=outcome if isinstance(outcome, OSError) else None,
+                return_value=None if isinstance(outcome, OSError) else outcome,
+            ), self.assertRaises(ValueError):
+                production._finish_linux_mutation_watch(99, watch_id, label="watch test file")
+
+        with mock.patch.object(
+            production, "_drain_linux_mutation_watch", return_value=[]
+        ), mock.patch.object(
+            production,
+            "_remove_linux_mutation_watch",
+            side_effect=OSError("watch remove failed"),
+        ), self.assertRaisesRegex(ValueError, "watch is unavailable"):
+            production._finish_linux_mutation_watch(99, watch_id, label="watch test file")
+
+    def test_bounded_readers_close_watch_after_check_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            for helper in (
+                production._read_bounded_regular_file,
+                production._sha256_bounded_regular_file,
+            ):
+                path = root / f"{helper.__name__}.bin"
+                path.write_bytes(b"bounded source")
+                watcher = os.open("/dev/null", os.O_RDONLY)
+                try:
+                    with self.subTest(helper=helper.__name__), mock.patch.object(
+                        production,
+                        "_establish_linux_mutation_watch",
+                        return_value=(watcher, 19),
+                    ), mock.patch.object(
+                        production,
+                        "_finish_linux_mutation_watch",
+                        side_effect=ValueError("mutation watch failed"),
+                    ), self.assertRaisesRegex(ValueError, "mutation watch failed"):
+                        helper(path, 1024, label="watch cleanup test file")
+                    with self.assertRaises(OSError):
+                        os.fstat(watcher)
+                finally:
+                    try:
+                        os.close(watcher)
+                    except OSError:
+                        pass
 
     def test_source_code_hashing_rejects_unavailable_and_unsafe_paths(self):
         with tempfile.TemporaryDirectory() as directory:

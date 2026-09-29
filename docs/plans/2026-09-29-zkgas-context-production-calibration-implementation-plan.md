@@ -50,6 +50,10 @@ like typed storage, rather than rewriting the immutable historical opcode regist
   non-target operation ledger. Only the declared measurement instruction differs.
 - Counts are frozen at fit `[0, 1, 2, 4, 8, 16]`, count holdout `32`, and extrapolation checkpoint
   `64`. Every executed row has exactly three repeats. There is no adaptive count expansion.
+- The canonical inventory is exactly 846 rows: 15 fit scenarios at six counts, four model-selection
+  scenarios at three counts, and 13 final-holdout scenarios at three counts, each with two lanes and
+  three repeats. The parity row is exactly `address_canonical`, fit, count 1, target, repeat 0; no
+  selection or final-holdout row may be opened for parity.
 - The final scenario holdout is never used to choose a model, coefficient, threshold, bucket, or
   fallback. `CALLDATASIZE` has a separate predeclared model-selection split before the final
   holdout.
@@ -116,8 +120,8 @@ instructions interpreted by the runner.
 | --- | --- | --- | --- |
 | `ADDRESS` | canonical controlled contract address | none | alternate controlled contract address |
 | `CALLER` | canonical deterministic signer | none | alternate deterministic signer |
-| `CALLVALUE` | `0`, `7` | none | `4_294_967_297` for the nonzero class |
-| `CALLDATALOAD` | empty/offset 0, 32 bytes/offset 0, 33 bytes/offset 17, 4 bytes/offset 64 | none | 31 bytes/offset 30, 96 bytes/offset 32 |
+| `CALLVALUE` | `0`, `7` | none | zero with one byte of non-model calldata, `4_294_967_297` for the nonzero class |
+| `CALLDATALOAD` | empty/offset 0, 32 bytes/offset 0, 33 bytes/offset 17, 4 bytes/offset 64 | none | empty/offset 1, 96 bytes/offset 128, 31 bytes/offset 30, 96 bytes/offset 32 |
 | `CALLDATASIZE` | lengths `0, 1, 31, 32, 33, 64` | lengths `2, 63, 65, 96` | lengths `15, 47, 127, 255` |
 | `TIMESTAMP` | post-Unzen timestamp delta `17` | none | post-Unzen timestamp delta `86_400` |
 
@@ -125,6 +129,9 @@ Fit contexts run counts `0, 1, 2, 4, 8, 16`. Selection and final-holdout context
 64`; the zero row establishes the context-specific intercept without fitting it into the operation
 cost. The alternate address/caller profiles, transaction values, calldata, and timestamps are
 resolved by the Rust builder and bound into the workload identity and backend-input hash.
+The zero-value CALLVALUE holdout changes only its explicitly declared calldata length, which is not
+a CALLVALUE model term. The two zero-class CALLDATALOAD holdouts independently cover empty input and
+nonempty fully out-of-range input.
 
 `TIMESTAMP=0` cannot occur in a valid post-Unzen production block. The result records it as
 `unreachable_under_version_identity`, not measured, zero-priced, or inferred from the discovery

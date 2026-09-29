@@ -681,6 +681,7 @@ fn context_opcode_pairs_change_only_the_measurement_instruction_and_feature() {
             ControlledContextProfile::CallValue {
                 value: 7,
                 value_class: ContextValueClass::Nonzero,
+                input_length: 0,
             },
             "context_value:opcode:0x34:value_class:nonzero",
         ),
@@ -876,10 +877,46 @@ fn context_profiles_bind_source_builder_environment_and_positive_value_state() {
         ControlledContextProfile::CallValue {
             value: 4_294_967_297,
             value_class: ContextValueClass::Nonzero,
+            input_length: 0,
         },
     );
     assert_eq!(
         positive.actual_context_features["context_value:opcode:0x34:value_class:nonzero"],
+        1
+    );
+
+    let (_, zero_empty_observation, zero_empty_shape) = materialize_context_block_row(
+        ControlledContextOpcode::CallValue,
+        ControlledLane::Target,
+        1,
+        ControlledContextProfile::CallValue {
+            value: 0,
+            value_class: ContextValueClass::Zero,
+            input_length: 0,
+        },
+    );
+    let (_, zero_holdout_observation, zero_holdout_shape) = materialize_context_block_row(
+        ControlledContextOpcode::CallValue,
+        ControlledLane::Target,
+        1,
+        ControlledContextProfile::CallValue {
+            value: 0,
+            value_class: ContextValueClass::Zero,
+            input_length: 1,
+        },
+    );
+    assert_ne!(
+        zero_empty_observation.backend_input_sha256,
+        zero_holdout_observation.backend_input_sha256
+    );
+    assert_eq!(zero_empty_shape.1, 0);
+    assert_eq!(zero_holdout_shape.1, 1);
+    assert_eq!(
+        zero_empty_observation.actual_context_features,
+        zero_holdout_observation.actual_context_features
+    );
+    assert_eq!(
+        zero_holdout_observation.actual_context_features["context_value:opcode:0x34:value_class:zero"],
         1
     );
 

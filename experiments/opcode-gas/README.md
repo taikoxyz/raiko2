@@ -37,6 +37,12 @@ cargo build -r -p guest-launcher --features sp1-sdk/profiling
 The production-guest context campaign has a frozen manifest for `ADDRESS`, `CALLER`, `CALLVALUE`,
 `CALLDATALOAD`, `CALLDATASIZE`, and `TIMESTAMP`. Its implemented CLI covers manifest generation,
 preparation, bounded execution/resume, fitting, create-only result sealing, and portable replay.
+The canonical inventory is 846 rows. Zero-class promotion is gated by dedicated count-32/count-64
+final scenarios for zero-value `CALLVALUE`, empty `CALLDATALOAD`, and nonempty out-of-range
+`CALLDATALOAD`. The zero-value holdout uses one byte of explicitly declared non-model calldata so it
+has a distinct backend input while remaining in the `value_class=zero` model. The standard versus
+gas-estimator parity authority is frozen to `address_canonical`, fit, count 1, target, repeat 0; a
+selection or final-holdout row cannot be used for parity.
 
 Generate the canonical manifest into a new path, or validate the tracked manifest and all sealed
 source identities it pins:

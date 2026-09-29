@@ -10,7 +10,7 @@ import sys
 import tempfile
 import types
 import unittest
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from unittest import mock
 
 
@@ -140,6 +140,16 @@ class ProductionContextManifestTests(unittest.TestCase):
         self.assertEqual(manifest.fit_counts, (0, 1, 2, 4, 8, 16))
         self.assertEqual(manifest.validation_counts, (0, 32, 64))
         self.assertEqual(manifest.repeats, 3)
+        self.assertEqual(
+            manifest.execution["parity_row"],
+            {
+                "scenario": "address_canonical",
+                "split": "fit",
+                "count": 1,
+                "lane": "target",
+                "repeat_index": 0,
+            },
+        )
         by_split = {
             split: tuple(row.name for row in manifest.scenarios if row.split == split)
             for split in ("fit", "model_selection", "final_holdout", "unreachable")
@@ -173,7 +183,10 @@ class ProductionContextManifestTests(unittest.TestCase):
                 "final_holdout": (
                     "address_alternate",
                     "caller_alternate",
+                    "callvalue_zero_calldata_1",
                     "callvalue_nonzero_4294967297",
+                    "calldataload_empty_offset_1",
+                    "calldataload_out_of_range_96_offset_128",
                     "calldataload_partial_31_offset_30",
                     "calldataload_full_96_offset_32",
                     "calldatasize_15",
@@ -186,9 +199,34 @@ class ProductionContextManifestTests(unittest.TestCase):
             },
         )
         rows = production.production_context_row_specs(manifest)
-        self.assertEqual(len(rows), 792)
+        self.assertEqual(len(rows), 846)
         self.assertEqual(len({row.row_id for row in rows}), len(rows))
         self.assertEqual({row.repeat_index for row in rows}, {0, 1, 2})
+
+        callvalue = manifest.operation("opcode:0x34")
+        self.assertEqual(
+            callvalue.required_scenario_ids,
+            (
+                "callvalue_zero",
+                "callvalue_nonzero_7",
+                "callvalue_zero_calldata_1",
+                "callvalue_nonzero_4294967297",
+            ),
+        )
+        calldataload = manifest.operation("opcode:0x35")
+        self.assertEqual(
+            calldataload.required_scenario_ids,
+            (
+                "calldataload_empty_offset_0",
+                "calldataload_full_32_offset_0",
+                "calldataload_partial_33_offset_17",
+                "calldataload_out_of_range_4_offset_64",
+                "calldataload_empty_offset_1",
+                "calldataload_out_of_range_96_offset_128",
+                "calldataload_partial_31_offset_30",
+                "calldataload_full_96_offset_32",
+            ),
+        )
 
     def test_manifest_freezes_models_formulas_and_gates(self):
         manifest = production.load_production_context_manifest(MANIFEST)
@@ -277,7 +315,7 @@ class ProductionContextManifestTests(unittest.TestCase):
         ]
         self.assertEqual(
             {(row.context["input_length"], row.context["offset"]) for row in zero},
-            {(0, 0), (4, 64)},
+            {(0, 0), (4, 64), (0, 1), (96, 128)},
         )
 
     def test_sources_bind_exact_sealed_artifacts_and_execution_surfaces(self):
@@ -302,6 +340,13 @@ class ProductionContextManifestTests(unittest.TestCase):
                 "trace_schema_source": "crates/zkgas-trace/src/reconstruct.rs",
                 "trace_schema_version": 4,
                 "trace_source_binding": "sha256_at_clean_prepare",
+                "parity_row": {
+                    "scenario": "address_canonical",
+                    "split": "fit",
+                    "count": 1,
+                    "lane": "target",
+                    "repeat_index": 0,
+                },
             },
         )
         self.assertEqual(
@@ -490,7 +535,7 @@ class ProductionContextIdentityTests(unittest.TestCase):
     def test_fixture_requests_bind_every_row_to_the_structured_rust_builder(self):
         manifest = production.load_production_context_manifest(MANIFEST)
         fixtures = production.production_context_fixture_requests(manifest)
-        self.assertEqual(len(fixtures), 792)
+        self.assertEqual(len(fixtures), 846)
         self.assertEqual(
             [fixture.row_id for fixture in fixtures],
             [row.row_id for row in production.production_context_row_specs(manifest)],
@@ -522,7 +567,34 @@ class ProductionContextIdentityTests(unittest.TestCase):
         by_scenario = {fixture.scenario: fixture for fixture in fixtures if fixture.lane == "target" and fixture.count in {0, 1} and fixture.repeat_index == 0}
         self.assertEqual(by_scenario["address_alternate"].builder_input["program"]["profile"], {"kind": "address", "address_profile": "alternate"})
         self.assertEqual(by_scenario["caller_alternate"].builder_input["program"]["profile"], {"kind": "caller", "caller_profile": "alternate"})
-        self.assertEqual(by_scenario["callvalue_nonzero_4294967297"].builder_input["program"]["profile"], {"kind": "callvalue", "value": 4_294_967_297, "value_class": "nonzero"})
+        self.assertEqual(by_scenario["callvalue_nonzero_4294967297"].builder_input["program"]["profile"], {"kind": "callvalue", "value": 4_294_967_297, "value_class": "nonzero", "input_length": 0})
+        self.assertEqual(
+            by_scenario["callvalue_zero_calldata_1"].builder_input["program"]["profile"],
+            {
+                "kind": "callvalue",
+                "value": 0,
+                "value_class": "zero",
+                "input_length": 1,
+            },
+        )
+        self.assertEqual(
+            by_scenario["calldataload_empty_offset_1"].builder_input["program"]["profile"],
+            {
+                "kind": "calldataload",
+                "input_length": 0,
+                "offset": 1,
+                "access_class": "zero",
+            },
+        )
+        self.assertEqual(
+            by_scenario["calldataload_out_of_range_96_offset_128"].builder_input["program"]["profile"],
+            {
+                "kind": "calldataload",
+                "input_length": 96,
+                "offset": 128,
+                "access_class": "zero",
+            },
+        )
         self.assertEqual(by_scenario["calldataload_partial_31_offset_30"].builder_input["program"]["profile"], {"kind": "calldataload", "input_length": 31, "offset": 30, "access_class": "partial"})
         self.assertEqual(by_scenario["calldatasize_255"].builder_input["program"]["profile"], {"kind": "calldatasize", "input_length": 255})
         self.assertEqual(by_scenario["timestamp_post_unzen_delta_86400"].builder_input["program"]["profile"], {"kind": "timestamp", "timestamp_delta": 86_400, "value_class": "nonzero"})
@@ -881,10 +953,24 @@ class ProductionContextFitTests(unittest.TestCase):
         )
 
     @staticmethod
+    def _parity_fixture(manifest):
+        contract = production.PARITY_ROW_CONTRACT
+        return next(
+            fixture
+            for fixture in production.production_context_fixture_requests(manifest)
+            if fixture.scenario == contract["scenario"]
+            and fixture.split == contract["split"]
+            and fixture.count == contract["count"]
+            and fixture.lane == contract["lane"]
+            and fixture.repeat_index == contract["repeat_index"]
+        )
+
+    @staticmethod
     def _parity_identity(*, row_id, launcher, elf):
         identity = {
             "kind": "production_context_parity_v1",
             "row_id": row_id,
+            "row_contract": dict(production.PARITY_ROW_CONTRACT),
             "model_sample": False,
             "standard_execution": {
                 "stage": "controlled-block",
@@ -1546,6 +1632,21 @@ class ProductionContextFitTests(unittest.TestCase):
             "calldatasize_length",
         )
         self.assertEqual(
+            set(length["families"]["opcode:0x36"]["candidate_reports"]),
+            {"calldatasize_length", "calldatasize_boundary"},
+        )
+        self.assertEqual(
+            length["families"]["opcode:0x36"]["selection_decisions"],
+            [
+                {"candidate": "calldatasize_length", "status": "accepted"},
+                {"candidate": "calldatasize_boundary", "status": "rejected"},
+            ],
+        )
+        self.assertTrue(
+            length["families"]["opcode:0x36"]["candidate_reports"]
+            ["calldatasize_boundary"]["fit_rows"]
+        )
+        self.assertEqual(
             length["families"]["opcode:0x36"]["coefficients"],
             {"beta_0": "300", "beta_length": "2"},
         )
@@ -1585,6 +1686,25 @@ class ProductionContextFitTests(unittest.TestCase):
                 "rejection_reasons"
             ],
         )
+
+    def test_fit_decisions_are_independent_of_ambient_decimal_precision(self):
+        manifest = production.load_production_context_manifest(MANIFEST)
+        rows = self._complete_rows(calldatasize_model="boundary")
+        encoded = []
+        for precision in (6, 28, 80):
+            with localcontext() as decimal_context:
+                decimal_context.prec = precision
+                encoded.append(
+                    production.canonical_json(
+                        production.fit_production_context_rows(
+                            manifest,
+                            rows,
+                            self._subtotal_model(),
+                        )
+                    )
+                )
+        self.assertEqual(encoded[0], encoded[1])
+        self.assertEqual(encoded[1], encoded[2])
 
     def test_fit_holdout_and_sibling_gates_do_not_tune_coefficients(self):
         manifest = production.load_production_context_manifest(MANIFEST)
@@ -1682,7 +1802,7 @@ class ProductionContextFitTests(unittest.TestCase):
     def test_prepare_run_resume_is_create_only_and_hash_bound(self):
         manifest = production.load_production_context_manifest(MANIFEST)
         fixture = self._frozen_fixture(
-            production.production_context_fixture_requests(manifest)[0]
+            self._parity_fixture(manifest)
         )
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -1914,9 +2034,52 @@ class ProductionContextFitTests(unittest.TestCase):
                 ):
                     production.run_production_context_campaign(run, executor=execute)
 
+    def test_prepare_rejects_holdout_row_as_parity_authority(self):
+        manifest = production.load_production_context_manifest(MANIFEST)
+        final_fixture = next(
+            fixture
+            for fixture in production.production_context_fixture_requests(manifest)
+            if fixture.scenario == "address_alternate"
+            and fixture.count == 32
+            and fixture.lane == "target"
+            and fixture.repeat_index == 0
+        )
+        final_fixture = self._frozen_fixture(final_fixture)
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            launcher = root / "guest-launcher"
+            elf = root / "proposal.elf"
+            vk = root / "proposal.vk"
+            trace = root / "reconstruct.rs"
+            for path, value in (
+                (launcher, b"launcher"),
+                (elf, b"elf"),
+                (vk, b"vk"),
+                (trace, b"trace"),
+            ):
+                path.write_bytes(value)
+            with self.assertRaisesRegex(ValueError, "parity row semantics"):
+                production.prepare_production_context_run(
+                    manifest=manifest,
+                    row_requests=(final_fixture,),
+                    run=root / "run",
+                    launcher=launcher,
+                    production_elf=elf,
+                    production_vk=vk,
+                    trace_source=trace,
+                    implementation_revision="1" * 40,
+                    source_hashes={"operation_coverage_v5": "2" * 64},
+                    parity_identity=self._parity_identity(
+                        row_id=final_fixture.row_id,
+                        launcher=launcher,
+                        elf=elf,
+                    ),
+                )
+            self.assertFalse((root / "run").exists())
+
     def test_run_and_fit_reject_rehashed_frozen_observation_substitution(self):
         manifest = production.load_production_context_manifest(MANIFEST)
-        source = production.production_context_fixture_requests(manifest)[0]
+        source = self._parity_fixture(manifest)
         builder = copy.deepcopy(source.builder_input)
         builder.update(
             {
@@ -2067,9 +2230,11 @@ class ProductionContextFitTests(unittest.TestCase):
 
     def test_subprocess_failure_preserves_rows_without_terminal(self):
         manifest = production.load_production_context_manifest(MANIFEST)
-        fixtures = tuple(
-            self._frozen_fixture(fixture)
-            for fixture in production.production_context_fixture_requests(manifest)[:2]
+        all_fixtures = production.production_context_fixture_requests(manifest)
+        parity_fixture = self._parity_fixture(manifest)
+        fixtures = (
+            self._frozen_fixture(parity_fixture),
+            self._frozen_fixture(next(row for row in all_fixtures if row != parity_fixture)),
         )
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -2140,7 +2305,7 @@ class ProductionContextFitTests(unittest.TestCase):
     def test_fit_recovers_terminal_from_valid_existing_decisions(self):
         manifest = production.load_production_context_manifest(MANIFEST)
         fixture = self._frozen_fixture(
-            production.production_context_fixture_requests(manifest)[0]
+            self._parity_fixture(manifest)
         )
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -2429,8 +2594,20 @@ class ProductionContextSealTests(unittest.TestCase):
             )
             evidence_rows.append(evidence)
         revision = "1" * 40
+        parity_row = next(
+            row
+            for row in evidence_rows
+            if {
+                "scenario": row["scenario"],
+                "split": row["split"],
+                "count": row["count"],
+                "lane": row["lane"],
+                "repeat_index": row["repeat_index"],
+            }
+            == production.PARITY_ROW_CONTRACT
+        )
         parity = fit_helpers._parity_identity(
-            row_id=entries[0]["row_id"], launcher=launcher, elf=elf
+            row_id=parity_row["row_id"], launcher=launcher, elf=elf
         )
         identity = {
             "schema_version": 1,

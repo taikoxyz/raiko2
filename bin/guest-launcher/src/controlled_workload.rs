@@ -396,6 +396,7 @@ pub enum ControlledContextProfile {
     CallValue {
         value: u64,
         value_class: ContextValueClass,
+        input_length: u64,
     },
     #[serde(rename = "calldataload")]
     CalldataLoad {
@@ -1791,7 +1792,11 @@ fn controlled_context_parameters(
         }
         (
             ControlledContextOpcode::CallValue,
-            ControlledContextProfile::CallValue { value, value_class },
+            ControlledContextProfile::CallValue {
+                value,
+                value_class,
+                input_length,
+            },
         ) => {
             let expected_class = if *value == 0 {
                 ContextValueClass::Zero
@@ -1801,7 +1806,14 @@ fn controlled_context_parameters(
             if *value_class != expected_class {
                 bail!("CALLVALUE profile value class differs from its value");
             }
+            if *input_length > CONTROLLED_CONTEXT_MAX_CALLDATA_LENGTH {
+                bail!("CALLVALUE input length is outside the frozen 0..=255 range");
+            }
             parameters.value = *value;
+            parameters.input = (0..usize::try_from(*input_length)?)
+                .map(|index| u8::try_from(index % 251).expect("modulo 251 fits u8"))
+                .collect::<Vec<_>>()
+                .into();
         }
         (
             ControlledContextOpcode::CalldataLoad,

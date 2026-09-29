@@ -152,7 +152,16 @@ EXECUTION = {
     "trace_schema_source": "crates/zkgas-trace/src/reconstruct.rs",
     "trace_schema_version": 4,
     "trace_source_binding": "sha256_at_clean_prepare",
+    "parity_row": {
+        "scenario": "address_canonical",
+        "split": "fit",
+        "count": 1,
+        "lane": "target",
+        "repeat_index": 0,
+    },
 }
+
+PARITY_ROW_CONTRACT = EXECUTION["parity_row"]
 
 VERSION_IDENTITY = {
     "taiko_fork": "Unzen",
@@ -310,7 +319,10 @@ def _canonical_scenarios() -> list[dict[str, Any]]:
         [
             _scenario("address_alternate", "opcode:0x30", 0x30, 0x5F, "final_holdout", "address_constant", {"address_profile": "alternate"}),
             _scenario("caller_alternate", "opcode:0x33", 0x33, 0x5F, "final_holdout", "caller_constant", {"caller_profile": "alternate"}),
+            _scenario("callvalue_zero_calldata_1", "opcode:0x34", 0x34, 0x5F, "final_holdout", "callvalue_zero", {"value": "0", "value_class": "zero", "input_length": 1}),
             _scenario("callvalue_nonzero_4294967297", "opcode:0x34", 0x34, 0x5F, "final_holdout", "callvalue_nonzero", {"value": "4294967297", "value_class": "nonzero"}),
+            _scenario("calldataload_empty_offset_1", "opcode:0x35", 0x35, 0x90, "final_holdout", "load_zero", {"input_length": 0, "offset": 1, "access_class": "zero"}),
+            _scenario("calldataload_out_of_range_96_offset_128", "opcode:0x35", 0x35, 0x90, "final_holdout", "load_zero", {"input_length": 96, "offset": 128, "access_class": "zero"}),
             _scenario("calldataload_partial_31_offset_30", "opcode:0x35", 0x35, 0x90, "final_holdout", "load_partial", {"input_length": 31, "offset": 30, "access_class": "partial"}),
             _scenario("calldataload_full_96_offset_32", "opcode:0x35", 0x35, 0x90, "final_holdout", "load_full", {"input_length": 96, "offset": 32, "access_class": "full"}),
         ]
@@ -388,6 +400,7 @@ def _canonical_operations() -> list[dict[str, Any]]:
             (
                 "callvalue_zero",
                 "callvalue_nonzero_7",
+                "callvalue_zero_calldata_1",
                 "callvalue_nonzero_4294967297",
             ),
         ),
@@ -403,6 +416,8 @@ def _canonical_operations() -> list[dict[str, Any]]:
                 "calldataload_full_32_offset_0",
                 "calldataload_partial_33_offset_17",
                 "calldataload_out_of_range_4_offset_64",
+                "calldataload_empty_offset_1",
+                "calldataload_out_of_range_96_offset_128",
                 "calldataload_partial_31_offset_30",
                 "calldataload_full_96_offset_32",
             ),
@@ -1065,6 +1080,7 @@ def _production_context_builder_profile(
             "kind": "callvalue",
             "value": int(context["value"]),
             "value_class": context["value_class"],
+            "input_length": context.get("input_length", 0),
         }
     if scenario.opcode == 0x35:
         return {
@@ -1309,6 +1325,7 @@ def production_context_parity_identity(
     identity = {
         "kind": "production_context_parity_v1",
         "row_id": row_id,
+        "row_contract": dict(PARITY_ROW_CONTRACT),
         "model_sample": False,
         "standard_execution": {
             "stage": "controlled-block",
@@ -1346,6 +1363,7 @@ def validate_production_context_parity_identity(
     expected_keys = {
         "kind",
         "row_id",
+        "row_contract",
         "model_sample",
         "standard_execution",
         "gas_estimator_execution",
@@ -1362,6 +1380,8 @@ def validate_production_context_parity_identity(
         "model_sample"
     ) is not False:
         raise ValueError("production context parity identity differs")
+    if identity.get("row_contract") != PARITY_ROW_CONTRACT:
+        raise ValueError("production context parity row semantics differ")
     expected_standard = {
         "stage": "controlled-block",
         "mode": "execute",
@@ -1413,6 +1433,7 @@ def validate_production_context_parity_identity(
     ) != claimed:
         raise ValueError("production context parity identity hash differs")
     if prepared_row is not None:
+        _validate_parity_prepared_row_semantics(prepared_row)
         builder = prepared_row.get("builder_input")
         if not isinstance(builder, Mapping):
             raise ValueError("production context parity prepared row evidence join differs")
@@ -1425,6 +1446,28 @@ def validate_production_context_parity_identity(
         ):
             raise ValueError("production context parity prepared row evidence join differs")
     return dict(identity)
+
+
+def _validate_parity_prepared_row_semantics(
+    prepared_row: Mapping[str, Any],
+) -> None:
+    builder = prepared_row.get("builder_input")
+    program = builder.get("program") if isinstance(builder, Mapping) else None
+    actual = {
+        "scenario": prepared_row.get("scenario"),
+        "split": prepared_row.get("split"),
+        "count": prepared_row.get("count"),
+        "lane": prepared_row.get("lane"),
+        "repeat_index": prepared_row.get("repeat_index"),
+    }
+    if (
+        actual != PARITY_ROW_CONTRACT
+        or not isinstance(program, Mapping)
+        or program.get("opcode") != "address"
+        or program.get("profile")
+        != {"kind": "address", "address_profile": "canonical"}
+    ):
+        raise ValueError("production context parity row semantics differ")
 
 
 # Production-native fitting and bounded campaign execution.  These helpers are
@@ -2081,6 +2124,22 @@ def fit_production_context_rows(
     family_keys: Sequence[str] = KEYS,
 ) -> dict[str, Any]:
     """Residualize and fit production rows without consulting a control coefficient."""
+    with localcontext(_DECIMAL_CONTEXT):
+        return _fit_production_context_rows(
+            manifest,
+            rows,
+            subtotal_model,
+            family_keys=family_keys,
+        )
+
+
+def _fit_production_context_rows(
+    manifest: ProductionContextManifest,
+    rows: Iterable[Mapping[str, Any]],
+    subtotal_model: ProductionSubtotalModel,
+    *,
+    family_keys: Sequence[str] = KEYS,
+) -> dict[str, Any]:
     raw_rows = list(rows)
     _reject_forbidden_fit_fields(raw_rows)
     if any(not isinstance(row, Mapping) for row in raw_rows):
@@ -2334,8 +2393,6 @@ def fit_production_context_rows(
                 selected_candidate = candidate
                 selected_fit = fit
                 selected_rows = selection_rows
-                if selection_scenarios:
-                    break
         reasons = []
         if selected_candidate is None:
             reasons.append("no_candidate_passed")

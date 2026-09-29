@@ -25789,6 +25789,32 @@ def cmd_fit_context_production(args: argparse.Namespace) -> None:
     print(f"production context fit {terminal['status']}")
 
 
+def cmd_seal_context_production_result(args: argparse.Namespace) -> None:
+    from context_production_campaign import seal_production_context_result
+
+    result = seal_production_context_result(
+        run=args.run,
+        manifest_path=args.manifest,
+        out_root=args.out_root,
+        repo_root=REPO_ROOT,
+        **_context_production_assets(args),
+    )
+    print(
+        f"sealed production context result {result['result_id']} "
+        f"at {result['directory']}"
+    )
+
+
+def cmd_verify_context_production_result(args: argparse.Namespace) -> None:
+    from context_production_campaign import verify_production_context_result
+
+    result = verify_production_context_result(args.result)
+    print(
+        f"verified production context result {result['result_id']} "
+        f"({result['result_status']})"
+    )
+
+
 def _add_context_production_asset_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--guest-launcher",
@@ -25861,6 +25887,23 @@ def build_parser() -> argparse.ArgumentParser:
     context_fit.add_argument("--run", type=pathlib.Path, required=True)
     _add_context_production_asset_arguments(context_fit)
     context_fit.set_defaults(func=cmd_fit_context_production)
+
+    context_seal = subcommands.add_parser(
+        "seal-context-production-result",
+        help="seal a create-only portable production context result",
+    )
+    context_seal.add_argument("--manifest", type=pathlib.Path, required=True)
+    context_seal.add_argument("--run", type=pathlib.Path, required=True)
+    context_seal.add_argument("--out-root", type=pathlib.Path, required=True)
+    _add_context_production_asset_arguments(context_seal)
+    context_seal.set_defaults(func=cmd_seal_context_production_result)
+
+    context_verify = subcommands.add_parser(
+        "verify-context-production-result",
+        help="replay a sealed production context result without SP1",
+    )
+    context_verify.add_argument("--result", type=pathlib.Path, required=True)
+    context_verify.set_defaults(func=cmd_verify_context_production_result)
 
     higher_prepare = subcommands.add_parser(
         "prepare-higher-layer-calibration",

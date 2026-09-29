@@ -35,9 +35,8 @@ cargo build -r -p guest-launcher --features sp1-sdk/profiling
 ### Production Context Campaign Contract
 
 The production-guest context campaign has a frozen manifest for `ADDRESS`, `CALLER`, `CALLVALUE`,
-`CALLDATALOAD`, `CALLDATASIZE`, and `TIMESTAMP`. At this stage the CLI exposes only manifest
-generation and validation; preparation, execution, fitting, result verification, and sealing are
-not registered until those operations have executable implementations.
+`CALLDATALOAD`, `CALLDATASIZE`, and `TIMESTAMP`. Its implemented CLI covers manifest generation,
+preparation, bounded execution/resume, fitting, create-only result sealing, and portable replay.
 
 Generate the canonical manifest into a new path, or validate the tracked manifest and all sealed
 source identities it pins:
@@ -53,10 +52,45 @@ source identities it pins:
 
 Generation is create-only and will not replace an existing file. Validation checks the exact V5
 operation coverage, sealed higher-layer calibration, and sealed context discovery result, while
-the manifest requires launcher, production ELF/VK, trace source, and clean implementation revision
-identities to be captured when a future prepare operation is implemented. The discovery result
-defines only the feature vocabulary and candidate function shapes: none of its numeric
-coefficients, the historical `body_scale`, or a cross-ELF scale is a production-model input.
+the prepare command captures the launcher, production ELF/VK, trace source, clean implementation
+revision, parity identity, and every canonical fixture identity in a new run directory. Run and fit
+are exact-resume operations over that immutable identity:
+
+```bash
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py \
+  prepare-context-production \
+  --manifest experiments/opcode-gas/manifests/sp1-context-production-v1.json \
+  --parity-identity /path/to/reviewed-parity-identity.json \
+  --out /path/to/new-context-run
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py \
+  run-context-production --run /path/to/new-context-run
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py \
+  fit-context-production \
+  --manifest experiments/opcode-gas/manifests/sp1-context-production-v1.json \
+  --run /path/to/new-context-run
+```
+
+After the fit terminal exists at the exact clean calibration revision, seal it into a new
+content-addressed directory and replay that directory without SP1:
+
+```bash
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py \
+  seal-context-production-result \
+  --manifest experiments/opcode-gas/manifests/sp1-context-production-v1.json \
+  --run /path/to/context-run \
+  --out-root experiments/opcode-gas/derivations
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py \
+  verify-context-production-result \
+  --result experiments/opcode-gas/derivations/<result-id>
+```
+
+Sealing is create-only and publishes exactly ten bounded regular files through a same-directory
+temporary directory. Replay reads only that flat result directory, reconstructs every fixture and
+row identity, recomputes V5 subtotals (including event dispatch), refits every exact matrix,
+coefficient, prediction, gate, and model choice, and preserves accepted, partial, and rejected raw
+evidence. The discovery result defines only the feature vocabulary and candidate function shapes:
+none of its numeric coefficients, the historical `body_scale`, or a cross-ELF scale is a
+production-model input.
 
 ### Synthetic Four-Anchor Ratio Probe
 

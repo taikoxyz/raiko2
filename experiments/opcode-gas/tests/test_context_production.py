@@ -1,7 +1,10 @@
 import copy
 import errno
 import json
+import os
 import pathlib
+import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -15,6 +18,7 @@ OPCODE_GAS = ROOT / "experiments" / "opcode-gas"
 sys.path.insert(0, str(OPCODE_GAS))
 
 import context_production_campaign as production
+import context_opcode_campaign as discovery_campaign
 
 
 MANIFEST = OPCODE_GAS / "manifests" / "sp1-context-production-v1.json"
@@ -821,13 +825,10 @@ class ProductionContextCliTests(unittest.TestCase):
             "resume-context-production",
             "run-context-production",
             "fit-context-production",
-        ):
-            self.assertIn(live, completed.stdout)
-        for future in (
             "verify-context-production-result",
             "seal-context-production-result",
         ):
-            self.assertNotIn(future, completed.stdout)
+            self.assertIn(live, completed.stdout)
 
     def test_generate_is_create_only_and_validate_prints_identity(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -2305,6 +2306,454 @@ class ProductionContextFitTests(unittest.TestCase):
             side_effect=FileNotFoundError("git"),
         ), self.assertRaisesRegex(ValueError, "unavailable"):
             production._require_current_implementation_revision(recorded)
+
+
+class ProductionContextSealTests(unittest.TestCase):
+    def test_unpatched_seal_source_check_rejects_the_local_helper_mismatch(self):
+        manifest = production.load_production_context_manifest(MANIFEST)
+        with self.assertRaisesRegex(
+            ValueError, "native identity helper differs from sealed calibration"
+        ):
+            production.validate_production_context_sources(manifest, ROOT)
+
+    def _build_run(self, root):
+        manifest = production.load_production_context_manifest(MANIFEST)
+        fit_helpers = ProductionContextFitTests()
+        rows_by_identity = {
+            (
+                row["scenario"],
+                row["count"],
+                row["lane"],
+                row["repeat_index"],
+            ): row
+            for row in fit_helpers._complete_rows()
+        }
+        launcher = root / "guest-launcher"
+        elf = root / "proposal.elf"
+        vk = root / "proposal.vk"
+        trace = root / "reconstruct.rs"
+        for path, data in (
+            (launcher, b"launcher"),
+            (elf, b"elf"),
+            (vk, b"vk"),
+            (trace, b"trace"),
+        ):
+            path.write_bytes(data)
+        run = root / "run"
+        (run / "row-inputs").mkdir(parents=True)
+        (run / "rows").mkdir()
+        entries = []
+        evidence_rows = []
+        for request in production.production_context_fixture_requests(manifest):
+            measured = copy.deepcopy(
+                rows_by_identity[
+                    (
+                        request.scenario,
+                        request.count,
+                        request.lane,
+                        request.repeat_index,
+                    )
+                ]
+            )
+            builder = copy.deepcopy(request.builder_input)
+            builder.update(
+                {
+                    "expected_final_state_root": "0x" + "0" * 64,
+                    "expected_raw_gas_by_key": measured["actual_raw_gas_by_key"],
+                    "expected_operation_event_count_by_key": measured[
+                        "actual_operation_event_count_by_key"
+                    ],
+                    "expected_context_features": measured[
+                        "actual_context_features"
+                    ],
+                    "expected_features": measured["actual_features"],
+                    "expected_diagnostics": measured["actual_diagnostics"],
+                    "expected_backend_input_sha256": measured[
+                        "backend_input_sha256"
+                    ],
+                    "expected_host_trace_sha256": measured["host_trace_sha256"],
+                }
+            )
+            row_input = {
+                "row_id": request.row_id,
+                "workload_id": request.workload_id,
+                "scenario": request.scenario,
+                "split": request.split,
+                "count": request.count,
+                "lane": request.lane,
+                "repeat_index": request.repeat_index,
+                "builder_input": builder,
+            }
+            row_input["input_sha256"] = production.sha256_bytes(
+                production.canonical_json(row_input)
+            )
+            input_path = run / "row-inputs" / f"{request.row_id}.json"
+            input_path.write_bytes(production.canonical_json(row_input) + b"\n")
+            entries.append(
+                {
+                    "row_id": request.row_id,
+                    "path": f"row-inputs/{request.row_id}.json",
+                    "input_sha256": row_input["input_sha256"],
+                }
+            )
+            evidence = {
+                "row_id": request.row_id,
+                "input_sha256": row_input["input_sha256"],
+                "workload_id": request.workload_id,
+                "scenario": request.scenario,
+                "split": request.split,
+                "count": request.count,
+                "lane": request.lane,
+                "repeat_index": request.repeat_index,
+                "prover_gas": measured["prover_gas"],
+                "public_output": measured["public_output"],
+                "backend_input_sha256": measured["backend_input_sha256"],
+                "host_trace_sha256": measured["host_trace_sha256"],
+                "sp1_proposal_elf_sha256": production._sha256_file(elf),
+                "guest_launcher_sha256": production._sha256_file(launcher),
+                "actual_final_state_root": builder["expected_final_state_root"],
+                "actual_raw_gas_by_key": measured["actual_raw_gas_by_key"],
+                "actual_operation_event_count_by_key": measured[
+                    "actual_operation_event_count_by_key"
+                ],
+                "actual_context_features": measured["actual_context_features"],
+                "actual_features": measured["actual_features"],
+                "actual_diagnostics": measured["actual_diagnostics"],
+            }
+            evidence["evidence_sha256"] = production.sha256_bytes(
+                production.canonical_json(evidence)
+            )
+            (run / "rows" / f"{request.row_id}.json").write_bytes(
+                production.canonical_json(evidence) + b"\n"
+            )
+            evidence_rows.append(evidence)
+        revision = "1" * 40
+        parity = fit_helpers._parity_identity(
+            row_id=entries[0]["row_id"], launcher=launcher, elf=elf
+        )
+        identity = {
+            "schema_version": 1,
+            "purpose": "production_context_run_identity",
+            "manifest_identity_sha256": manifest.identity_sha256,
+            "implementation_revision": revision,
+            "source_hashes": {
+                name: source["file_sha256"]
+                for name, source in manifest.sources.items()
+            },
+            "assets": {
+                "launcher": {
+                    "basename": launcher.name,
+                    "sha256": production._sha256_file(launcher),
+                },
+                "production_elf": {
+                    "basename": elf.name,
+                    "sha256": production._sha256_file(elf),
+                },
+                "production_vk": {
+                    "basename": vk.name,
+                    "sha256": production._sha256_file(vk),
+                },
+                "trace_source": {
+                    "basename": trace.name,
+                    "sha256": production._sha256_file(trace),
+                },
+            },
+            "parity_identity": parity,
+            "rows": entries,
+        }
+        identity["identity_sha256"] = production.sha256_bytes(
+            production.canonical_json(identity)
+        )
+        (run / "calibration-identity.json").write_bytes(
+            production.canonical_json(identity) + b"\n"
+        )
+        completion = {
+            "schema_version": 1,
+            "status": "execution_complete",
+            "identity_sha256": identity["identity_sha256"],
+            "row_hashes": [
+                {
+                    "row_id": row["row_id"],
+                    "evidence_sha256": row["evidence_sha256"],
+                }
+                for row in evidence_rows
+            ],
+        }
+        completion["terminal_sha256"] = production.sha256_bytes(
+            production.canonical_json(completion)
+        )
+        (run / "execution-complete.json").write_bytes(
+            production.canonical_json(completion) + b"\n"
+        )
+        subtotal = production.load_production_v5_subtotal_model(manifest, ROOT)
+        decisions = production.fit_production_context_rows(
+            manifest, evidence_rows, subtotal
+        )
+        (run / "campaign-decisions.json").write_bytes(
+            production.canonical_json(decisions) + b"\n"
+        )
+        terminal = {
+            "schema_version": 1,
+            "status": "accepted" if decisions["all_families_accepted"] else "rejected",
+            "identity_sha256": identity["identity_sha256"],
+            "decision_sha256": decisions["decision_sha256"],
+        }
+        terminal["terminal_sha256"] = production.sha256_bytes(
+            production.canonical_json(terminal)
+        )
+        (run / "terminal.json").write_bytes(
+            production.canonical_json(terminal) + b"\n"
+        )
+        return manifest, run, revision
+
+    @staticmethod
+    def _reseal_result_directory(candidate):
+        result_path = candidate / "result.json"
+        result = json.loads(result_path.read_bytes())
+        calibration = json.loads((candidate / "calibration-identity.json").read_bytes())
+        result["result_identity"]["calibration_identity_sha256"] = calibration[
+            "identity_sha256"
+        ]
+        result["result_identity"]["implementation_revision"] = calibration[
+            "implementation_revision"
+        ]
+        result["result_identity"]["file_sha256s"] = {
+            name: production.sha256_bytes((candidate / name).read_bytes())
+            for name in production.PRODUCTION_CONTEXT_RESULT_INVENTORY
+            if name != "result.json"
+        }
+        identity = production.sha256_bytes(
+            production.canonical_json(result["result_identity"])
+        )
+        result["result_identity_sha256"] = identity
+        result["result_id"] = identity[:24]
+        result.pop("artifact_sha256")
+        result["artifact_sha256"] = production.sha256_bytes(
+            production.canonical_json(result)
+        )
+        result_path.write_bytes(production.canonical_json(result) + b"\n")
+        renamed = candidate.with_name(identity[:24])
+        candidate.rename(renamed)
+        return renamed
+
+    def test_seal_is_create_only_and_replay_uses_only_the_result_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            _manifest, run, revision = self._build_run(root)
+            with self.assertRaisesRegex(ValueError, "overlap"):
+                production.seal_production_context_result(
+                    run=run,
+                    manifest_path=MANIFEST,
+                    out_root=run / "result",
+                    repo_root=ROOT,
+                )
+            out_root = root / "results"
+            with mock.patch.object(
+                production,
+                "_require_current_implementation_revision",
+                return_value=revision,
+            ), mock.patch.object(
+                discovery_campaign,
+                "_validated_context_identity_helper",
+                return_value=ROOT / "target/release/guest-launcher",
+            ):
+                sealed = production.seal_production_context_result(
+                    run=run,
+                    manifest_path=MANIFEST,
+                    out_root=out_root,
+                    repo_root=ROOT,
+                )
+            result_dir = pathlib.Path(sealed["directory"])
+            sealed_files = {
+                path.name: path.read_bytes() for path in result_dir.iterdir()
+            }
+            with self.assertRaisesRegex(ValueError, "already exists"):
+                production._publish_production_context_result(
+                    out_root, sealed["result_id"], sealed_files
+                )
+            self.assertEqual(
+                {path.name for path in result_dir.iterdir()},
+                production.PRODUCTION_CONTEXT_RESULT_INVENTORY,
+            )
+            run.rename(root / "removed-run")
+            with mock.patch.object(
+                production.subprocess,
+                "run",
+                side_effect=AssertionError("portable replay invoked a subprocess"),
+            ):
+                replay = production.verify_production_context_result(result_dir)
+            self.assertEqual(replay["result_id"], sealed["result_id"])
+            self.assertEqual(replay["family_statuses"], sealed["family_statuses"])
+
+    def test_atomic_publication_cleans_up_after_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            files = {
+                name: b"{}\n"
+                for name in production.PRODUCTION_CONTEXT_RESULT_INVENTORY
+            }
+            with mock.patch.object(
+                production.os, "write", side_effect=OSError("injected write failure")
+            ), self.assertRaises(OSError):
+                production._publish_production_context_result(
+                    root, "a" * 24, files
+            )
+            self.assertFalse((root / ("a" * 24)).exists())
+            self.assertEqual([path for path in root.iterdir() if path.is_dir()], [])
+
+    def test_replay_rejects_extra_symlink_fifo_and_oversize_members(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            _manifest, run, revision = self._build_run(root)
+            with mock.patch.object(
+                production,
+                "_require_current_implementation_revision",
+                return_value=revision,
+            ), mock.patch.object(
+                discovery_campaign,
+                "_validated_context_identity_helper",
+                return_value=ROOT / "target/release/guest-launcher",
+            ):
+                sealed = production.seal_production_context_result(
+                    run=run,
+                    manifest_path=MANIFEST,
+                    out_root=root / "results",
+                    repo_root=ROOT,
+                )
+            original = pathlib.Path(sealed["directory"])
+            for label, mutation in (
+                ("extra", lambda path: (path / "extra.json").write_text("{}")),
+                ("missing", lambda path: (path / "model-report.json").unlink()),
+                (
+                    "symlink",
+                    lambda path: (
+                        (path / "result.json").unlink(),
+                        (path / "result.json").symlink_to("model-report.json"),
+                    ),
+                ),
+                (
+                    "fifo",
+                    lambda path: (
+                        (path / "result.json").unlink(),
+                        os.mkfifo(path / "result.json"),
+                    ),
+                ),
+                (
+                    "oversize",
+                    lambda path: (path / "result.json").write_bytes(
+                        b"x" * (production.PRODUCTION_CONTEXT_RESULT_LIMITS["result.json"] + 1)
+                    ),
+                ),
+            ):
+                candidate = root / label
+                shutil.copytree(original, candidate)
+                for member in candidate.iterdir():
+                    member.chmod(0o600)
+                mutation(candidate)
+                with self.subTest(label=label), self.assertRaises(ValueError):
+                    production.verify_production_context_result(candidate)
+
+            def mutate_rows(candidate, transform):
+                path = candidate / "rows.jsonl"
+                lines = path.read_bytes().splitlines(keepends=True)
+                path.write_bytes(b"".join(transform(lines)))
+
+            caller_resealed_mutations = {
+                "row-deleted": lambda path: mutate_rows(path, lambda lines: lines[:-1]),
+                "row-reordered": lambda path: mutate_rows(
+                    path, lambda lines: [lines[1], lines[0], *lines[2:]]
+                ),
+                "row-duplicated": lambda path: mutate_rows(
+                    path, lambda lines: [*lines, lines[-1]]
+                ),
+                "model": lambda path: self._mutate_json(
+                    path / "model-report.json",
+                    lambda payload: payload["families"]["opcode:0x30"][
+                        "coefficients"
+                    ].update({"address_constant": "999"}),
+                ),
+                "gate": lambda path: self._mutate_json(
+                    path / "campaign-decisions.json",
+                    lambda payload: payload["families"]["opcode:0x30"][
+                        "rejection_reasons"
+                    ].append("forged_gate"),
+                ),
+                "source-path-traversal": lambda path: self._mutate_json(
+                    path / "source-coverage-v5.json",
+                    lambda payload: payload.update({"source_path": "../coverage.json"}),
+                ),
+                "row-path-traversal": lambda path: self._mutate_calibration_identity(
+                    path, lambda payload: payload["rows"][0].update({"path": "../row.json"})
+                ),
+                "wrong-revision": lambda path: self._mutate_calibration_identity(
+                    path,
+                    lambda payload: payload.update(
+                        {"implementation_revision": "2" * 40}
+                    ),
+                ),
+                "source-forgery": lambda path: self._mutate_source_bundle(path),
+                "discovery-promotion": lambda path: self._mutate_discovery_bundle(path),
+            }
+            for label, mutation in caller_resealed_mutations.items():
+                candidate = root / f"resealed-{label}"
+                shutil.copytree(original, candidate)
+                for member in candidate.iterdir():
+                    member.chmod(0o600)
+                mutation(candidate)
+                candidate = self._reseal_result_directory(candidate)
+                with self.subTest(label=label), self.assertRaises(ValueError):
+                    production.verify_production_context_result(candidate)
+
+    @staticmethod
+    def _mutate_json(path, mutation):
+        payload = json.loads(path.read_bytes())
+        mutation(payload)
+        path.write_bytes(production.canonical_json(payload) + b"\n")
+
+    @classmethod
+    def _mutate_calibration_identity(cls, candidate, mutation):
+        path = candidate / "calibration-identity.json"
+        payload = json.loads(path.read_bytes())
+        mutation(payload)
+        payload.pop("identity_sha256")
+        payload["identity_sha256"] = production.sha256_bytes(
+            production.canonical_json(payload)
+        )
+        path.write_bytes(production.canonical_json(payload) + b"\n")
+
+    @classmethod
+    def _mutate_source_bundle(cls, candidate):
+        path = candidate / "source-coverage-v5.json"
+        bundle = json.loads(path.read_bytes())
+        source = json.loads(bundle["source_json"])
+        source["status"] = "caller_resealed"
+        unsigned = dict(source)
+        unsigned.pop("artifact_sha256")
+        source["artifact_sha256"] = production.sha256_bytes(
+            production.canonical_json(unsigned)
+        )
+        raw = production.canonical_json(source) + b"\n"
+        bundle["source_json"] = raw.decode()
+        bundle["source_file_sha256"] = production.sha256_bytes(raw)
+        bundle["source_artifact_sha256"] = source["artifact_sha256"]
+        path.write_bytes(production.canonical_json(bundle) + b"\n")
+
+    @classmethod
+    def _mutate_discovery_bundle(cls, candidate):
+        path = candidate / "source-discovery.json"
+        bundle = json.loads(path.read_bytes())
+        source = json.loads(bundle["source_json"])
+        source["candidate_eligible"] = True
+        unsigned = dict(source)
+        unsigned.pop("artifact_sha256")
+        source["artifact_sha256"] = production.sha256_bytes(
+            production.canonical_json(unsigned)
+        )
+        raw = production.canonical_json(source) + b"\n"
+        bundle["source_json"] = raw.decode()
+        bundle["source_file_sha256"] = production.sha256_bytes(raw)
+        bundle["source_artifact_sha256"] = source["artifact_sha256"]
+        path.write_bytes(production.canonical_json(bundle) + b"\n")
 
 
 if __name__ == "__main__":

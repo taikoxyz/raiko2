@@ -3,11 +3,15 @@
 
 from __future__ import annotations
 
+import ctypes
+import errno
+import fcntl
 import hashlib
 import json
 import os
 import pathlib
 import re
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -46,6 +50,42 @@ MODEL_SELECTION_ORDER = ("calldatasize_length", "calldatasize_boundary")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 _GIT_REVISION_RE = re.compile(r"[0-9a-f]{40}\Z")
 _DECIMAL_CONTEXT = Context(prec=80, rounding=ROUND_HALF_EVEN)
+
+PRODUCTION_CONTEXT_RESULT_INVENTORY = frozenset(
+    {
+        "result.json",
+        "campaign-manifest.json",
+        "calibration-identity.json",
+        "rows.jsonl",
+        "campaign-decisions.json",
+        "model-report.json",
+        "source-coverage-v5.json",
+        "source-higher-layer.json",
+        "source-discovery.json",
+        "source-code-sha256s.json",
+    }
+)
+PRODUCTION_CONTEXT_RESULT_LIMITS = MappingProxyType(
+    {
+        "result.json": 2 * 1024 * 1024,
+        "campaign-manifest.json": 2 * 1024 * 1024,
+        "calibration-identity.json": 16 * 1024 * 1024,
+        "rows.jsonl": 256 * 1024 * 1024,
+        "campaign-decisions.json": 64 * 1024 * 1024,
+        "model-report.json": 64 * 1024 * 1024,
+        "source-coverage-v5.json": 32 * 1024 * 1024,
+        "source-higher-layer.json": 8 * 1024 * 1024,
+        "source-discovery.json": 8 * 1024 * 1024,
+        "source-code-sha256s.json": 2 * 1024 * 1024,
+    }
+)
+PRODUCTION_CONTEXT_RESULT_MAX_JSONL_LINE_BYTES = 2 * 1024 * 1024
+PRODUCTION_CONTEXT_SEAL_SOURCE_PATHS = (
+    "experiments/opcode-gas/context_production_campaign.py",
+    "experiments/opcode-gas/opcode_gas.py",
+    "experiments/opcode-gas/composite_estimator.py",
+    "experiments/opcode-gas/hierarchical_model.py",
+)
 
 
 class CandidateFitRejected(ValueError):
@@ -798,10 +838,13 @@ def _load_pinned_json(repo_root: pathlib.Path, source: Mapping[str, Any], name: 
         raise ValueError(f"pinned {name} source is missing") from error
     if path.is_symlink() or not stat.S_ISREG(mode) or not resolved.is_relative_to(root):
         raise ValueError(f"pinned {name} source is not a repository regular file")
-    if _sha256_file(path) != source["file_sha256"]:
+    raw = _read_bounded_regular_file(
+        path, 32 * 1024 * 1024, label=f"pinned {name} source"
+    )
+    if sha256_bytes(raw) != source["file_sha256"]:
         raise ValueError(f"pinned {name} source bytes differ")
     try:
-        payload = json.loads(path.read_bytes(), object_pairs_hook=_reject_duplicate_fields, parse_float=_reject_json_float, parse_constant=_reject_json_float)
+        payload = json.loads(raw, object_pairs_hook=_reject_duplicate_fields, parse_float=_reject_json_float, parse_constant=_reject_json_float)
     except (json.JSONDecodeError, ValueError) as error:
         raise ValueError(f"pinned {name} source JSON is invalid") from error
     if not isinstance(payload, dict):
@@ -886,7 +929,9 @@ def validate_production_context_sources(manifest: ProductionContextManifest, rep
 
     discovery_source = manifest.sources["discovery"]
     discovery_path, discovery = _load_pinned_json(repo_root, discovery_source, "discovery")
-    if discovery_path.read_bytes() != canonical_json(discovery) + b"\n":
+    if _read_bounded_regular_file(
+        discovery_path, 8 * 1024 * 1024, label="pinned discovery source"
+    ) != canonical_json(discovery) + b"\n":
         raise ValueError("pinned discovery source is not canonical JSON")
     _validate_content_address(discovery, discovery_source["artifact_sha256"], "discovery")
     from context_opcode_campaign import verify_context_result
@@ -2594,9 +2639,15 @@ def _write_json_create_only(path: pathlib.Path, payload: Mapping[str, Any]) -> N
                 pass
 
 
-def _load_canonical_json(path: pathlib.Path, *, label: str) -> dict[str, Any]:
+def _load_canonical_json(
+    path: pathlib.Path, *, label: str, max_bytes: int | None = None
+) -> dict[str, Any]:
     try:
-        raw = path.read_bytes()
+        raw = (
+            path.read_bytes()
+            if max_bytes is None
+            else _read_bounded_regular_file(path, max_bytes, label=label)
+        )
         payload = json.loads(
             raw,
             object_pairs_hook=_reject_duplicate_fields,
@@ -2724,7 +2775,15 @@ def _resolve_run_asset(
     path = pathlib.Path(supplied) if supplied is not None else run.parent / asset["basename"]
     if not path.is_file() or path.is_symlink() or path.name != asset["basename"]:
         raise ValueError(f"production context {role} path differs")
-    if _sha256_file(path) != asset["sha256"]:
+    size_limits = {
+        "launcher": 256 * 1024 * 1024,
+        "production_elf": 256 * 1024 * 1024,
+        "production_vk": 16 * 1024 * 1024,
+        "trace_source": 16 * 1024 * 1024,
+    }
+    if _sha256_bounded_regular_file(
+        path, size_limits[role], label=f"production context {role}"
+    ) != asset["sha256"]:
         label = "launcher hash" if role == "launcher" else f"{role} hash"
         raise ValueError(f"production context {label} differs")
     return path
@@ -2772,7 +2831,9 @@ def _validate_run_identity(
     trace_source: pathlib.Path | None = None,
 ) -> tuple[dict[str, Any], dict[str, pathlib.Path]]:
     identity = _load_canonical_json(
-        run / "calibration-identity.json", label="production context run identity"
+        run / "calibration-identity.json",
+        label="production context run identity",
+        max_bytes=PRODUCTION_CONTEXT_RESULT_LIMITS["calibration-identity.json"],
     )
     if set(identity) != {
         "schema_version",
@@ -2898,7 +2959,11 @@ def _validate_prepared_row_input(
     expected_path = f"row-inputs/{entry['row_id']}.json"
     if entry["path"] != expected_path or _SHA256_RE.fullmatch(entry["row_id"]) is None:
         raise ValueError("production context prepared row path differs")
-    payload = _load_canonical_json(run / expected_path, label="prepared row input")
+    payload = _load_canonical_json(
+        run / expected_path,
+        label="prepared row input",
+        max_bytes=PRODUCTION_CONTEXT_RESULT_MAX_JSONL_LINE_BYTES,
+    )
     unhashed = dict(payload)
     claimed = unhashed.pop("input_sha256", None)
     if (
@@ -3173,7 +3238,9 @@ def fit_production_context_run(
     if identity.get("manifest_identity_sha256") != manifest.identity_sha256:
         raise ValueError("production context fit manifest identity differs")
     completion = _load_canonical_json(
-        run / "execution-complete.json", label="production context execution terminal"
+        run / "execution-complete.json",
+        label="production context execution terminal",
+        max_bytes=2 * 1024 * 1024,
     )
     completion_unhashed = dict(completion)
     completion_claimed = completion_unhashed.pop("terminal_sha256", None)
@@ -3244,3 +3311,1178 @@ def fit_production_context_run(
     else:
         _write_json_create_only(terminal_path, terminal)
     return terminal
+
+
+# Portable production-context result sealing.  The sealed directory carries
+# every numerical source needed to replay the fit; no guest execution, run
+# directory, or checkout is consulted by the verifier.
+
+
+def _read_bounded_regular_file(
+    path: pathlib.Path, limit: int, *, label: str
+) -> bytes:
+    path = pathlib.Path(path)
+    if type(limit) is not int or limit <= 0:
+        raise ValueError(f"{label} has an invalid size limit")
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise ValueError(f"{label} is missing or is not a regular file") from error
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or not 0 < opened.st_size <= limit:
+            raise ValueError(f"{label} exceeds the frozen size limit")
+        chunks = []
+        remaining = opened.st_size
+        while remaining:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                raise ValueError(f"{label} changed while it was read")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            raise ValueError(f"{label} changed while it was read")
+        closed = os.fstat(descriptor)
+        if (opened.st_dev, opened.st_ino, opened.st_size) != (
+            closed.st_dev,
+            closed.st_ino,
+            closed.st_size,
+        ):
+            raise ValueError(f"{label} changed while it was read")
+        return b"".join(chunks)
+    finally:
+        os.close(descriptor)
+
+
+def _sha256_bounded_regular_file(
+    path: pathlib.Path, limit: int, *, label: str
+) -> str:
+    path = pathlib.Path(path)
+    if type(limit) is not int or limit <= 0:
+        raise ValueError(f"{label} has an invalid size limit")
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise ValueError(f"{label} is missing or is not a regular file") from error
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or not 0 < opened.st_size <= limit:
+            raise ValueError(f"{label} exceeds the frozen size limit")
+        digest = hashlib.sha256()
+        remaining = opened.st_size
+        while remaining:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                raise ValueError(f"{label} changed while it was read")
+            digest.update(chunk)
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            raise ValueError(f"{label} changed while it was read")
+        closed = os.fstat(descriptor)
+        if (opened.st_dev, opened.st_ino, opened.st_size) != (
+            closed.st_dev,
+            closed.st_ino,
+            closed.st_size,
+        ):
+            raise ValueError(f"{label} changed while it was read")
+        return digest.hexdigest()
+    finally:
+        os.close(descriptor)
+
+
+def _load_canonical_json_bytes(raw: bytes, *, label: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(
+            raw,
+            object_pairs_hook=_reject_duplicate_fields,
+            parse_float=_reject_json_float,
+            parse_constant=_reject_json_float,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        raise ValueError(f"{label} is invalid JSON") from error
+    if not isinstance(payload, dict) or raw != canonical_json(payload) + b"\n":
+        raise ValueError(f"{label} is not canonical JSON")
+    return payload
+
+
+def _load_embedded_json(value: Any, *, label: str) -> tuple[bytes, dict[str, Any]]:
+    if not isinstance(value, str):
+        raise ValueError(f"{label} bytes differ")
+    raw = value.encode("utf-8")
+    try:
+        payload = json.loads(
+            raw,
+            object_pairs_hook=_reject_duplicate_fields,
+            parse_float=_reject_json_float,
+            parse_constant=_reject_json_float,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        raise ValueError(f"{label} is invalid JSON") from error
+    if not isinstance(payload, dict):
+        raise ValueError(f"{label} must be a JSON object")
+    return raw, payload
+
+
+def _canonical_jsonl_bytes(rows: Sequence[Mapping[str, Any]]) -> bytes:
+    data = bytearray()
+    for row in rows:
+        encoded = canonical_json(row) + b"\n"
+        if len(encoded) > PRODUCTION_CONTEXT_RESULT_MAX_JSONL_LINE_BYTES:
+            raise ValueError("production context row exceeds the frozen size limit")
+        if len(data) + len(encoded) > PRODUCTION_CONTEXT_RESULT_LIMITS["rows.jsonl"]:
+            raise ValueError("production context row ledger exceeds the frozen size limit")
+        data.extend(encoded)
+    if not data:
+        raise ValueError("production context row ledger is empty")
+    return bytes(data)
+
+
+def _load_canonical_rows(path: pathlib.Path) -> tuple[bytes, list[dict[str, Any]]]:
+    raw = _read_bounded_regular_file(
+        path,
+        PRODUCTION_CONTEXT_RESULT_LIMITS["rows.jsonl"],
+        label="production context result row ledger",
+    )
+    rows: list[dict[str, Any]] = []
+    offset = 0
+    for line_number, line in enumerate(raw.splitlines(keepends=True), start=1):
+        offset += len(line)
+        if (
+            len(line) > PRODUCTION_CONTEXT_RESULT_MAX_JSONL_LINE_BYTES
+            or not line.endswith(b"\n")
+        ):
+            raise ValueError(
+                f"production context result row {line_number} exceeds the frozen size limit"
+            )
+        rows.append(
+            _load_canonical_json_bytes(
+                line, label=f"production context result row {line_number}"
+            )
+        )
+    if offset != len(raw) or raw != _canonical_jsonl_bytes(rows):
+        raise ValueError("production context result row ledger is not canonical JSONL")
+    return raw, rows
+
+
+def _read_source_json(
+    repo_root: pathlib.Path,
+    relative: str,
+    *,
+    label: str,
+    limit: int,
+) -> tuple[bytes, dict[str, Any]]:
+    relative = _require_relative_path(relative, f"{label} path")
+    root = pathlib.Path(repo_root).resolve(strict=True)
+    path = root / relative
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError as error:
+        raise ValueError(f"{label} is missing") from error
+    if not resolved.is_relative_to(root):
+        raise ValueError(f"{label} escapes the repository")
+    raw = _read_bounded_regular_file(path, limit, label=label)
+    try:
+        payload = json.loads(
+            raw,
+            object_pairs_hook=_reject_duplicate_fields,
+            parse_float=_reject_json_float,
+            parse_constant=_reject_json_float,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        raise ValueError(f"{label} is invalid JSON") from error
+    if not isinstance(payload, dict):
+        raise ValueError(f"{label} must be a JSON object")
+    return raw, payload
+
+
+def _coverage_source_bundle(
+    manifest: ProductionContextManifest, repo_root: pathlib.Path
+) -> dict[str, Any]:
+    source = manifest.sources["operation_coverage_v5"]
+    raw, coverage = _read_source_json(
+        repo_root,
+        source["path"],
+        label="production context V5 coverage source",
+        limit=PRODUCTION_CONTEXT_RESULT_LIMITS["source-coverage-v5.json"],
+    )
+    if sha256_bytes(raw) != source["file_sha256"]:
+        raise ValueError("production context V5 coverage source bytes differ")
+    _validate_content_address(coverage, source["artifact_sha256"], "operation_coverage_v5")
+    _validate_operation_coverage_join(manifest, coverage)
+    references: dict[str, str] = {}
+    for row in coverage.get("execution_coverage", ()):
+        if not isinstance(row, Mapping) or row.get("model_status") != "measured":
+            continue
+        reference = row.get("artifact_ref")
+        if not isinstance(reference, Mapping):
+            raise ValueError("V5 measured opcode source reference differs")
+        relative = _require_relative_path(reference.get("path"), "V5 model path")
+        artifact_sha256 = reference.get("artifact_sha256")
+        if _SHA256_RE.fullmatch(artifact_sha256 or "") is None:
+            raise ValueError("V5 model artifact identity differs")
+        previous = references.setdefault(relative, artifact_sha256)
+        if previous != artifact_sha256:
+            raise ValueError("V5 model artifact references conflict")
+    artifacts = []
+    for relative, artifact_sha256 in sorted(references.items()):
+        artifact_raw, artifact = _read_source_json(
+            repo_root,
+            relative,
+            label="production context V5 model artifact",
+            limit=16 * 1024 * 1024,
+        )
+        _validate_content_address(artifact, artifact_sha256, "V5 model artifact")
+        artifacts.append(
+            {
+                "path": relative,
+                "file_sha256": sha256_bytes(artifact_raw),
+                "artifact_sha256": artifact_sha256,
+                "source_json": artifact_raw.decode("utf-8"),
+            }
+        )
+    if not artifacts:
+        raise ValueError("production context V5 model artifacts are missing")
+    return {
+        "schema_version": 1,
+        "purpose": "production_context_v5_coverage_source_bundle",
+        "source_path": source["path"],
+        "source_file_sha256": source["file_sha256"],
+        "source_artifact_sha256": source["artifact_sha256"],
+        "source_json": raw.decode("utf-8"),
+        "referenced_artifacts": artifacts,
+    }
+
+
+def _higher_layer_source_bundle(
+    manifest: ProductionContextManifest, repo_root: pathlib.Path
+) -> dict[str, Any]:
+    source = manifest.sources["higher_layer"]
+    raw, payload = _read_source_json(
+        repo_root,
+        source["path"],
+        label="production context higher-layer source",
+        limit=PRODUCTION_CONTEXT_RESULT_LIMITS["source-higher-layer.json"],
+    )
+    identity_raw, identity = _read_source_json(
+        repo_root,
+        source["directory_identity_path"],
+        label="production context higher-layer directory identity",
+        limit=2 * 1024 * 1024,
+    )
+    if (
+        sha256_bytes(raw) != source["file_sha256"]
+        or payload.get("identity_sha256") != source["model_identity_sha256"]
+        or sha256_bytes(identity_raw) != source["directory_identity_file_sha256"]
+        or identity.get("identity_sha256") != source["directory_identity_sha256"]
+        or sha256_bytes(canonical_json(identity.get("identity")))
+        != identity.get("identity_sha256")
+        or identity.get("identity", {}).get("file_sha256s", {}).get(
+            pathlib.PurePosixPath(source["path"]).name
+        )
+        != source["file_sha256"]
+    ):
+        raise ValueError("production context higher-layer source identity differs")
+    return {
+        "schema_version": 1,
+        "purpose": "production_context_higher_layer_source_bundle",
+        "source_path": source["path"],
+        "source_file_sha256": source["file_sha256"],
+        "model_identity_sha256": source["model_identity_sha256"],
+        "source_json": raw.decode("utf-8"),
+        "directory_identity_path": source["directory_identity_path"],
+        "directory_identity_file_sha256": source[
+            "directory_identity_file_sha256"
+        ],
+        "directory_identity_sha256": source["directory_identity_sha256"],
+        "directory_identity_json": identity_raw.decode("utf-8"),
+    }
+
+
+def _discovery_source_bundle(
+    manifest: ProductionContextManifest, repo_root: pathlib.Path
+) -> dict[str, Any]:
+    source = manifest.sources["discovery"]
+    raw, payload = _read_source_json(
+        repo_root,
+        source["path"],
+        label="production context discovery source",
+        limit=PRODUCTION_CONTEXT_RESULT_LIMITS["source-discovery.json"],
+    )
+    if (
+        sha256_bytes(raw) != source["file_sha256"]
+        or raw != canonical_json(payload) + b"\n"
+    ):
+        raise ValueError("production context discovery source bytes differ")
+    _validate_content_address(payload, source["artifact_sha256"], "discovery")
+    if (
+        payload.get("result_identity_sha256") != source["result_identity_sha256"]
+        or payload.get("candidate_eligible") is not False
+        or source.get("numeric_parameter_authority") is not False
+        or source.get("use") != "function_shape_and_feature_vocabulary_only"
+    ):
+        raise ValueError("production context discovery source authority differs")
+    return {
+        "schema_version": 1,
+        "purpose": "production_context_discovery_source_bundle",
+        "source_path": source["path"],
+        "source_file_sha256": source["file_sha256"],
+        "source_artifact_sha256": source["artifact_sha256"],
+        "result_identity_sha256": source["result_identity_sha256"],
+        "numeric_parameter_authority": False,
+        "source_json": raw.decode("utf-8"),
+    }
+
+
+def _source_code_hashes(
+    repo_root: pathlib.Path, implementation_revision: str
+) -> dict[str, Any]:
+    if _GIT_REVISION_RE.fullmatch(implementation_revision or "") is None:
+        raise ValueError("production context source revision differs")
+    root = pathlib.Path(repo_root).resolve(strict=True)
+    files = {}
+    for relative in PRODUCTION_CONTEXT_SEAL_SOURCE_PATHS:
+        path = root / relative
+        try:
+            resolved = path.resolve(strict=True)
+        except OSError as error:
+            raise ValueError("production context source code is missing") from error
+        if not resolved.is_relative_to(root):
+            raise ValueError("production context source code escapes the repository")
+        files[relative] = sha256_bytes(
+            _read_bounded_regular_file(
+                path, 32 * 1024 * 1024, label="production context source code"
+            )
+        )
+    return {
+        "schema_version": 1,
+        "purpose": "production_context_sealing_source_hashes",
+        "implementation_revision": implementation_revision,
+        "files": files,
+    }
+
+
+def _validate_coverage_bundle(
+    manifest: ProductionContextManifest, bundle: Mapping[str, Any]
+) -> tuple[dict[str, Any], dict[str, Mapping[str, Any]]]:
+    source = manifest.sources["operation_coverage_v5"]
+    expected_fields = {
+        "schema_version",
+        "purpose",
+        "source_path",
+        "source_file_sha256",
+        "source_artifact_sha256",
+        "source_json",
+        "referenced_artifacts",
+    }
+    if (
+        not isinstance(bundle, Mapping)
+        or set(bundle) != expected_fields
+        or bundle.get("schema_version") != 1
+        or bundle.get("purpose")
+        != "production_context_v5_coverage_source_bundle"
+        or bundle.get("source_path") != source["path"]
+        or bundle.get("source_file_sha256") != source["file_sha256"]
+        or bundle.get("source_artifact_sha256") != source["artifact_sha256"]
+        or not isinstance(bundle.get("source_json"), str)
+        or not isinstance(bundle.get("referenced_artifacts"), list)
+    ):
+        raise ValueError("production context V5 source bundle differs")
+    coverage_raw, coverage = _load_embedded_json(
+        bundle["source_json"], label="production context V5 coverage source"
+    )
+    if sha256_bytes(coverage_raw) != source["file_sha256"]:
+        raise ValueError("production context V5 coverage source hash differs")
+    _validate_content_address(coverage, source["artifact_sha256"], "operation_coverage_v5")
+    _validate_operation_coverage_join(manifest, coverage)
+    artifacts: dict[str, Mapping[str, Any]] = {}
+    for entry in bundle["referenced_artifacts"]:
+        if not isinstance(entry, Mapping) or set(entry) != {
+            "path",
+            "file_sha256",
+            "artifact_sha256",
+            "source_json",
+        }:
+            raise ValueError("production context V5 referenced artifact differs")
+        relative = _require_relative_path(entry["path"], "V5 referenced artifact path")
+        artifact_raw, payload = _load_embedded_json(
+            entry.get("source_json"), label="production context V5 model artifact"
+        )
+        if (
+            relative in artifacts
+            or _SHA256_RE.fullmatch(entry.get("file_sha256") or "") is None
+            or _SHA256_RE.fullmatch(entry.get("artifact_sha256") or "") is None
+            or sha256_bytes(artifact_raw) != entry.get("file_sha256")
+        ):
+            raise ValueError("production context V5 referenced artifact differs")
+        _validate_content_address(payload, entry["artifact_sha256"], "V5 model artifact")
+        artifacts[relative] = payload
+    expected_references = {
+        row["artifact_ref"]["path"]: row["artifact_ref"]["artifact_sha256"]
+        for row in coverage.get("execution_coverage", ())
+        if isinstance(row, Mapping) and row.get("model_status") == "measured"
+    }
+    if set(artifacts) != set(expected_references):
+        raise ValueError("production context V5 referenced artifact inventory differs")
+    for entry in bundle["referenced_artifacts"]:
+        if entry["artifact_sha256"] != expected_references[entry["path"]]:
+            raise ValueError("production context V5 referenced artifact identity differs")
+    return coverage, artifacts
+
+
+def _validate_higher_bundle(
+    manifest: ProductionContextManifest, bundle: Mapping[str, Any]
+) -> dict[str, Any]:
+    source = manifest.sources["higher_layer"]
+    expected_fields = {
+        "schema_version",
+        "purpose",
+        "source_path",
+        "source_file_sha256",
+        "model_identity_sha256",
+        "source_json",
+        "directory_identity_path",
+        "directory_identity_file_sha256",
+        "directory_identity_sha256",
+        "directory_identity_json",
+    }
+    if (
+        not isinstance(bundle, Mapping)
+        or set(bundle) != expected_fields
+        or bundle.get("schema_version") != 1
+        or bundle.get("purpose")
+        != "production_context_higher_layer_source_bundle"
+        or bundle.get("source_path") != source["path"]
+        or bundle.get("source_file_sha256") != source["file_sha256"]
+        or bundle.get("model_identity_sha256") != source["model_identity_sha256"]
+        or bundle.get("directory_identity_path")
+        != source["directory_identity_path"]
+        or bundle.get("directory_identity_file_sha256")
+        != source["directory_identity_file_sha256"]
+        or bundle.get("directory_identity_sha256")
+        != source["directory_identity_sha256"]
+        or not isinstance(bundle.get("source_json"), str)
+        or not isinstance(bundle.get("directory_identity_json"), str)
+    ):
+        raise ValueError("production context higher-layer source bundle differs")
+    source_raw, payload = _load_embedded_json(
+        bundle["source_json"], label="production context higher-layer source"
+    )
+    identity_raw, identity = _load_embedded_json(
+        bundle["directory_identity_json"],
+        label="production context higher-layer directory identity",
+    )
+    if (
+        sha256_bytes(source_raw) != source["file_sha256"]
+        or sha256_bytes(identity_raw) != source["directory_identity_file_sha256"]
+        or payload.get("identity_sha256") != source["model_identity_sha256"]
+        or identity.get("identity_sha256") != source["directory_identity_sha256"]
+        or sha256_bytes(canonical_json(identity.get("identity")))
+        != identity.get("identity_sha256")
+        or identity.get("identity", {}).get("file_sha256s", {}).get(
+            pathlib.PurePosixPath(source["path"]).name
+        )
+        != source["file_sha256"]
+    ):
+        raise ValueError("production context higher-layer source identity differs")
+    return payload
+
+
+def _validate_discovery_bundle(
+    manifest: ProductionContextManifest, bundle: Mapping[str, Any]
+) -> dict[str, Any]:
+    source = manifest.sources["discovery"]
+    expected_fields = {
+        "schema_version",
+        "purpose",
+        "source_path",
+        "source_file_sha256",
+        "source_artifact_sha256",
+        "result_identity_sha256",
+        "numeric_parameter_authority",
+        "source_json",
+    }
+    if (
+        not isinstance(bundle, Mapping)
+        or set(bundle) != expected_fields
+        or bundle.get("schema_version") != 1
+        or bundle.get("purpose")
+        != "production_context_discovery_source_bundle"
+        or bundle.get("source_path") != source["path"]
+        or bundle.get("source_file_sha256") != source["file_sha256"]
+        or bundle.get("source_artifact_sha256") != source["artifact_sha256"]
+        or bundle.get("result_identity_sha256")
+        != source["result_identity_sha256"]
+        or bundle.get("numeric_parameter_authority") is not False
+        or not isinstance(bundle.get("source_json"), str)
+    ):
+        raise ValueError("production context discovery source bundle differs")
+    source_raw, payload = _load_embedded_json(
+        bundle["source_json"], label="production context discovery source"
+    )
+    if (
+        sha256_bytes(source_raw) != source["file_sha256"]
+        or source_raw != canonical_json(payload) + b"\n"
+    ):
+        raise ValueError("production context discovery source hash differs")
+    _validate_content_address(payload, source["artifact_sha256"], "discovery")
+    if (
+        payload.get("result_identity_sha256") != source["result_identity_sha256"]
+        or payload.get("candidate_eligible") is not False
+    ):
+        raise ValueError("production context discovery promotion is forbidden")
+    return payload
+
+
+def _subtotal_model_from_source_bundles(
+    manifest: ProductionContextManifest,
+    coverage_bundle: Mapping[str, Any],
+    higher_bundle: Mapping[str, Any],
+) -> ProductionSubtotalModel:
+    coverage, artifacts = _validate_coverage_bundle(manifest, coverage_bundle)
+    higher = _validate_higher_bundle(manifest, higher_bundle)
+    fixed_costs = higher.get("fixed_costs")
+    measured_keys = []
+    registry_payload = None
+    for row in coverage.get("execution_coverage", ()):
+        if not isinstance(row, Mapping) or row.get("model_status") != "measured":
+            continue
+        key = row.get("key")
+        reference = row.get("artifact_ref")
+        if not isinstance(key, str) or not isinstance(reference, Mapping):
+            raise ValueError("production context V5 measured source differs")
+        artifact = artifacts.get(reference.get("path"))
+        if not isinstance(artifact, Mapping):
+            raise ValueError("production context V5 model artifact is missing")
+        candidate_registry = artifact.get("registry")
+        if not isinstance(candidate_registry, Mapping):
+            raise ValueError("production context V5 model registry differs")
+        if registry_payload is None:
+            registry_payload = candidate_registry
+        elif canonical_json(registry_payload) != canonical_json(candidate_registry):
+            raise ValueError("production context V5 registries differ")
+        model = candidate_registry.get("models", {}).get(key)
+        if (
+            not isinstance(model, Mapping)
+            or model.get("kind") != reference.get("model_kind")
+            or reference.get("model_id") != key
+        ):
+            raise ValueError("production context V5 model join differs")
+        measured_keys.append(key)
+    if not isinstance(fixed_costs, Mapping) or not isinstance(registry_payload, Mapping):
+        raise ValueError("production context subtotal sources are incomplete")
+    return ProductionSubtotalModel.from_registry(
+        fixed_costs=fixed_costs,
+        registry=load_registry_payload(registry_payload),
+        measured_keys=measured_keys,
+    )
+
+
+def _validate_source_code_hashes(
+    payload: Mapping[str, Any], implementation_revision: str
+) -> dict[str, Any]:
+    if (
+        not isinstance(payload, Mapping)
+        or set(payload) != {
+            "schema_version",
+            "purpose",
+            "implementation_revision",
+            "files",
+        }
+        or payload.get("schema_version") != 1
+        or payload.get("purpose") != "production_context_sealing_source_hashes"
+        or payload.get("implementation_revision") != implementation_revision
+        or not isinstance(payload.get("files"), Mapping)
+        or set(payload["files"]) != set(PRODUCTION_CONTEXT_SEAL_SOURCE_PATHS)
+        or any(
+            _SHA256_RE.fullmatch(digest or "") is None
+            for digest in payload["files"].values()
+        )
+    ):
+        raise ValueError("production context source-code hash identity differs")
+    return dict(payload)
+
+
+def _validate_portable_calibration_identity(
+    manifest: ProductionContextManifest, identity: Mapping[str, Any]
+) -> None:
+    expected_fields = {
+        "schema_version",
+        "purpose",
+        "manifest_identity_sha256",
+        "implementation_revision",
+        "source_hashes",
+        "assets",
+        "parity_identity",
+        "rows",
+        "identity_sha256",
+    }
+    unhashed = dict(identity) if isinstance(identity, Mapping) else {}
+    claimed = unhashed.pop("identity_sha256", None)
+    expected_source_hashes = {
+        name: source["file_sha256"] for name, source in manifest.sources.items()
+    }
+    assets = identity.get("assets") if isinstance(identity, Mapping) else None
+    if (
+        not isinstance(identity, Mapping)
+        or set(identity) != expected_fields
+        or identity.get("schema_version") != 1
+        or identity.get("purpose") != "production_context_run_identity"
+        or identity.get("manifest_identity_sha256") != manifest.identity_sha256
+        or _GIT_REVISION_RE.fullmatch(identity.get("implementation_revision") or "")
+        is None
+        or identity.get("source_hashes") != expected_source_hashes
+        or not isinstance(assets, Mapping)
+        or set(assets) != {"launcher", "production_elf", "production_vk", "trace_source"}
+        or any(
+            not isinstance(asset, Mapping)
+            or set(asset) != {"basename", "sha256"}
+            or pathlib.PurePosixPath(asset.get("basename", "")).name
+            != asset.get("basename")
+            or _SHA256_RE.fullmatch(asset.get("sha256") or "") is None
+            for asset in assets.values()
+        )
+        or _SHA256_RE.fullmatch(claimed or "") is None
+        or sha256_bytes(canonical_json(unhashed)) != claimed
+        or not isinstance(identity.get("rows"), list)
+    ):
+        raise ValueError("production context sealed calibration identity differs")
+
+
+def _reconstruct_portable_row_input(
+    manifest: ProductionContextManifest,
+    evidence: Mapping[str, Any],
+) -> dict[str, Any]:
+    request_by_id = {
+        request.row_id: request
+        for request in production_context_fixture_requests(manifest)
+    }
+    request = request_by_id.get(evidence.get("row_id"))
+    if request is None:
+        raise ValueError("production context result row ID differs")
+    builder = json.loads(canonical_json(request.builder_input))
+    for expected, actual in _FIXTURE_EVIDENCE_FIELDS.items():
+        if actual not in evidence:
+            raise ValueError("production context result row evidence is incomplete")
+        builder[expected] = evidence[actual]
+    row_input = {
+        "row_id": request.row_id,
+        "workload_id": request.workload_id,
+        "scenario": request.scenario,
+        "split": request.split,
+        "count": request.count,
+        "lane": request.lane,
+        "repeat_index": request.repeat_index,
+        "builder_input": builder,
+    }
+    row_input["input_sha256"] = sha256_bytes(canonical_json(row_input))
+    return row_input
+
+
+def _validate_portable_rows(
+    manifest: ProductionContextManifest,
+    identity: Mapping[str, Any],
+    rows: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    specs = production_context_row_specs(manifest)
+    entries = identity["rows"]
+    if len(entries) != len(specs) or len(rows) != len(specs):
+        raise ValueError("production context result row inventory differs")
+    validated = []
+    prepared_by_id = {}
+    for spec, entry, row in zip(specs, entries, rows):
+        if (
+            not isinstance(entry, Mapping)
+            or set(entry) != {"row_id", "path", "input_sha256"}
+            or entry.get("row_id") != spec.row_id
+            or entry.get("path") != f"row-inputs/{spec.row_id}.json"
+            or not isinstance(row, Mapping)
+            or row.get("row_id") != spec.row_id
+        ):
+            raise ValueError("production context result row order or identity differs")
+        row_input = _reconstruct_portable_row_input(manifest, row)
+        if (
+            row_input["input_sha256"] != entry.get("input_sha256")
+            or row.get("input_sha256") != entry.get("input_sha256")
+        ):
+            raise ValueError("production context result fixture identity differs")
+        validated_row = _validate_prepared_row_evidence(
+            row_input,
+            row,
+            production_elf_sha256=identity["assets"]["production_elf"]["sha256"],
+            guest_launcher_sha256=identity["assets"]["launcher"]["sha256"],
+        )
+        prepared_by_id[spec.row_id] = row_input
+        validated.append(validated_row)
+    parity = identity.get("parity_identity")
+    parity_row = prepared_by_id.get(parity.get("row_id")) if isinstance(parity, Mapping) else None
+    validate_production_context_parity_identity(
+        parity,
+        row_ids=(spec.row_id for spec in specs),
+        production_elf_sha256=identity["assets"]["production_elf"]["sha256"],
+        guest_launcher_sha256=identity["assets"]["launcher"]["sha256"],
+        prepared_row=parity_row,
+    )
+    return validated
+
+
+def _production_context_result_status(decisions: Mapping[str, Any]) -> str:
+    statuses = [family.get("status") for family in decisions.get("families", {}).values()]
+    if not statuses or any(status not in {"accepted", "rejected"} for status in statuses):
+        raise ValueError("production context family status inventory differs")
+    if all(status == "accepted" for status in statuses):
+        return "accepted"
+    if all(status == "rejected" for status in statuses):
+        return "rejected"
+    return "partial"
+
+
+def _production_context_model_report(
+    manifest: ProductionContextManifest, decisions: Mapping[str, Any]
+) -> dict[str, Any]:
+    statuses = {
+        key: decisions["families"][key]["status"] for key in manifest.keys
+    }
+    return {
+        "schema_version": 1,
+        "purpose": "production_context_model_report",
+        "manifest_identity_sha256": manifest.identity_sha256,
+        "decision_sha256": decisions["decision_sha256"],
+        "result_status": _production_context_result_status(decisions),
+        "family_statuses": statuses,
+        "promoted_families": [key for key in manifest.keys if statuses[key] == "accepted"],
+        "rejected_families": [key for key in manifest.keys if statuses[key] == "rejected"],
+        "families": decisions["families"],
+    }
+
+
+def _production_context_result_envelope(
+    *,
+    manifest: ProductionContextManifest,
+    identity: Mapping[str, Any],
+    file_sha256s: Mapping[str, str],
+    model_report: Mapping[str, Any],
+) -> dict[str, Any]:
+    result_identity = {
+        "schema_version": 1,
+        "purpose": "production_context_model_result_identity",
+        "manifest_identity_sha256": manifest.identity_sha256,
+        "calibration_identity_sha256": identity["identity_sha256"],
+        "implementation_revision": identity["implementation_revision"],
+        "file_sha256s": dict(sorted(file_sha256s.items())),
+    }
+    result_identity_sha256 = sha256_bytes(canonical_json(result_identity))
+    envelope = {
+        "schema_version": 1,
+        "purpose": "production_context_model_result",
+        "status": "sealed",
+        "result_status": model_report["result_status"],
+        "result_id": result_identity_sha256[:24],
+        "result_identity_sha256": result_identity_sha256,
+        "result_identity": result_identity,
+        "family_statuses": model_report["family_statuses"],
+        "promoted_families": model_report["promoted_families"],
+        "rejected_families": model_report["rejected_families"],
+        "candidate_eligible": bool(model_report["promoted_families"]),
+        "production_registry_modified": False,
+        "discovery_numeric_parameters_promoted": False,
+    }
+    envelope["artifact_sha256"] = sha256_bytes(canonical_json(envelope))
+    return envelope
+
+
+def _paths_overlap(left: pathlib.Path, right: pathlib.Path) -> bool:
+    left = pathlib.Path(left).resolve(strict=False)
+    right = pathlib.Path(right).resolve(strict=False)
+    return left == right or left.is_relative_to(right) or right.is_relative_to(left)
+
+
+def _publish_production_context_result(
+    out_root: pathlib.Path, result_id: str, files: Mapping[str, bytes]
+) -> pathlib.Path:
+    if (
+        _SHA256_RE.fullmatch(result_id + "0" * 40) is None
+        or len(result_id) != 24
+        or set(files) != PRODUCTION_CONTEXT_RESULT_INVENTORY
+        or any(
+            not isinstance(data, bytes)
+            or not 0 < len(data) <= PRODUCTION_CONTEXT_RESULT_LIMITS[name]
+            for name, data in files.items()
+        )
+    ):
+        raise ValueError("production context result publication payload differs")
+    out_root = pathlib.Path(out_root)
+    if out_root.exists() and (out_root.is_symlink() or not out_root.is_dir()):
+        raise ValueError("production context result output root is invalid")
+    out_root.mkdir(parents=True, exist_ok=True)
+    destination = out_root / result_id
+    lock_path = out_root / f".{result_id}.lock"
+    lock_descriptor = os.open(
+        lock_path,
+        os.O_CREAT
+        | os.O_RDWR
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+    )
+    temporary = None
+    try:
+        if not stat.S_ISREG(os.fstat(lock_descriptor).st_mode):
+            raise ValueError("production context result publication lock is invalid")
+        fcntl.flock(lock_descriptor, fcntl.LOCK_EX)
+        if destination.exists() or destination.is_symlink():
+            raise ValueError(
+                f"production context result directory already exists: {destination}"
+            )
+        temporary = pathlib.Path(
+            tempfile.mkdtemp(prefix=f".{result_id}.", dir=out_root)
+        )
+        for name in sorted(files):
+            path = temporary / name
+            descriptor = os.open(
+                path,
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                0o444,
+            )
+            try:
+                offset = 0
+                while offset < len(files[name]):
+                    written = os.write(descriptor, files[name][offset:])
+                    if written <= 0:
+                        raise OSError("production context result write made no progress")
+                    offset += written
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        directory_descriptor = os.open(temporary, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
+        libc = ctypes.CDLL(None, use_errno=True)
+        rename_noreplace = getattr(libc, "renameat2", None)
+        if rename_noreplace is None:
+            raise OSError(errno.ENOSYS, "renameat2 is required for create-only sealing")
+        rename_noreplace.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        rename_noreplace.restype = ctypes.c_int
+        if rename_noreplace(
+            -100,
+            os.fsencode(temporary),
+            -100,
+            os.fsencode(destination),
+            1,
+        ) != 0:
+            error_number = ctypes.get_errno()
+            if error_number == errno.EEXIST:
+                raise ValueError(
+                    f"production context result directory already exists: {destination}"
+                )
+            raise OSError(
+                error_number,
+                "atomic create-only production context publication failed",
+            )
+        temporary = None
+        parent_descriptor = os.open(out_root, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(parent_descriptor)
+        finally:
+            os.close(parent_descriptor)
+        return destination
+    finally:
+        if temporary is not None and temporary.exists():
+            shutil.rmtree(temporary)
+        os.close(lock_descriptor)
+
+
+def _read_result_directory(directory: pathlib.Path) -> dict[str, bytes]:
+    directory = pathlib.Path(directory)
+    try:
+        directory_mode = directory.stat(follow_symlinks=False).st_mode
+    except OSError as error:
+        raise ValueError("production context result directory is missing") from error
+    if directory.is_symlink() or not stat.S_ISDIR(directory_mode):
+        raise ValueError("production context result directory inventory differs")
+    try:
+        entries = list(os.scandir(directory))
+    except OSError as error:
+        raise ValueError("production context result directory is unreadable") from error
+    if {entry.name for entry in entries} != PRODUCTION_CONTEXT_RESULT_INVENTORY:
+        raise ValueError("production context result directory inventory differs")
+    raw = {}
+    for entry in entries:
+        try:
+            mode = entry.stat(follow_symlinks=False).st_mode
+        except OSError as error:
+            raise ValueError("production context result directory inventory differs") from error
+        if entry.is_symlink() or not stat.S_ISREG(mode):
+            raise ValueError("production context result directory inventory differs")
+        raw[entry.name] = _read_bounded_regular_file(
+            directory / entry.name,
+            PRODUCTION_CONTEXT_RESULT_LIMITS[entry.name],
+            label=f"production context result {entry.name}",
+        )
+    return raw
+
+
+def _validate_existing_run_for_seal(
+    run: pathlib.Path,
+    manifest: ProductionContextManifest,
+    *,
+    launcher: pathlib.Path | None,
+    production_elf: pathlib.Path | None,
+    production_vk: pathlib.Path | None,
+    trace_source: pathlib.Path | None,
+) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
+    identity, _assets = _validate_run_identity(
+        run,
+        launcher=launcher,
+        production_elf=production_elf,
+        production_vk=production_vk,
+        trace_source=trace_source,
+    )
+    _validate_portable_calibration_identity(manifest, identity)
+    if identity.get("manifest_identity_sha256") != manifest.identity_sha256:
+        raise ValueError("production context result manifest identity differs")
+    completion = _load_canonical_json(
+        run / "execution-complete.json",
+        label="production context execution terminal",
+        max_bytes=2 * 1024 * 1024,
+    )
+    completion_unhashed = dict(completion)
+    completion_claimed = completion_unhashed.pop("terminal_sha256", None)
+    expected_entries = identity["rows"]
+    if (
+        completion.get("schema_version") != 1
+        or completion.get("status") != "execution_complete"
+        or completion.get("identity_sha256") != identity["identity_sha256"]
+        or _SHA256_RE.fullmatch(completion_claimed or "") is None
+        or sha256_bytes(canonical_json(completion_unhashed)) != completion_claimed
+        or not isinstance(completion.get("row_hashes"), list)
+        or len(completion["row_hashes"]) != len(expected_entries)
+    ):
+        raise ValueError("production context execution terminal differs")
+    rows = []
+    for entry, completed in zip(expected_entries, completion["row_hashes"]):
+        row_input = _validate_prepared_row_input(run, entry)
+        row = _load_canonical_json(
+            run / "rows" / f"{entry['row_id']}.json",
+            label="production context sealed row",
+            max_bytes=PRODUCTION_CONTEXT_RESULT_MAX_JSONL_LINE_BYTES,
+        )
+        row = _validate_prepared_row_evidence(
+            row_input,
+            row,
+            production_elf_sha256=identity["assets"]["production_elf"]["sha256"],
+            guest_launcher_sha256=identity["assets"]["launcher"]["sha256"],
+        )
+        if completed != {
+            "row_id": entry["row_id"],
+            "evidence_sha256": row["evidence_sha256"],
+        }:
+            raise ValueError("production context completed row hash differs")
+        rows.append(row)
+    _validate_portable_rows(manifest, identity, rows)
+    decisions = _load_canonical_json(
+        run / "campaign-decisions.json",
+        label="production context campaign decisions",
+        max_bytes=PRODUCTION_CONTEXT_RESULT_LIMITS["campaign-decisions.json"],
+    )
+    terminal = _load_canonical_json(
+        run / "terminal.json",
+        label="production context fit terminal",
+        max_bytes=2 * 1024 * 1024,
+    )
+    terminal_unhashed = dict(terminal)
+    terminal_claimed = terminal_unhashed.pop("terminal_sha256", None)
+    if (
+        terminal.get("schema_version") != 1
+        or terminal.get("status")
+        != ("accepted" if decisions.get("all_families_accepted") else "rejected")
+        or terminal.get("identity_sha256") != identity["identity_sha256"]
+        or terminal.get("decision_sha256") != decisions.get("decision_sha256")
+        or _SHA256_RE.fullmatch(terminal_claimed or "") is None
+        or sha256_bytes(canonical_json(terminal_unhashed)) != terminal_claimed
+    ):
+        raise ValueError("production context fit terminal differs")
+    return identity, rows, decisions
+
+
+def seal_production_context_result(
+    *,
+    run: pathlib.Path,
+    manifest_path: pathlib.Path,
+    out_root: pathlib.Path,
+    repo_root: pathlib.Path,
+    launcher: pathlib.Path | None = None,
+    production_elf: pathlib.Path | None = None,
+    production_vk: pathlib.Path | None = None,
+    trace_source: pathlib.Path | None = None,
+) -> dict[str, Any]:
+    """Seal one complete run into a create-only, portable result directory."""
+    run = pathlib.Path(run)
+    manifest_path = pathlib.Path(manifest_path)
+    repo_root = pathlib.Path(repo_root).resolve(strict=True)
+    out_root_absolute = pathlib.Path(out_root).resolve(strict=False)
+    run_absolute = run.resolve(strict=False)
+    if out_root_absolute == run_absolute or out_root_absolute.is_relative_to(
+        run_absolute
+    ):
+        raise ValueError("production context source and result paths overlap")
+    manifest_bytes = _read_bounded_regular_file(
+        manifest_path,
+        PRODUCTION_CONTEXT_RESULT_LIMITS["campaign-manifest.json"],
+        label="production context campaign manifest",
+    )
+    if manifest_bytes != production_context_manifest_bytes():
+        raise ValueError("production context campaign manifest bytes differ")
+    manifest = ProductionContextManifest.from_mapping(
+        _load_canonical_json_bytes(
+            manifest_bytes, label="production context campaign manifest"
+        )
+    )
+    validate_production_context_sources(manifest, repo_root)
+    identity, rows, persisted_decisions = _validate_existing_run_for_seal(
+        run,
+        manifest,
+        launcher=launcher,
+        production_elf=production_elf,
+        production_vk=production_vk,
+        trace_source=trace_source,
+    )
+    coverage_bundle = _coverage_source_bundle(manifest, repo_root)
+    higher_bundle = _higher_layer_source_bundle(manifest, repo_root)
+    discovery_bundle = _discovery_source_bundle(manifest, repo_root)
+    _validate_discovery_bundle(manifest, discovery_bundle)
+    subtotal_model = _subtotal_model_from_source_bundles(
+        manifest, coverage_bundle, higher_bundle
+    )
+    decisions = fit_production_context_rows(manifest, rows, subtotal_model)
+    if canonical_json(decisions) != canonical_json(persisted_decisions):
+        raise ValueError("production context persisted decisions differ from replay")
+    model_report = _production_context_model_report(manifest, decisions)
+    source_code = _source_code_hashes(
+        repo_root, identity["implementation_revision"]
+    )
+    files = {
+        "campaign-manifest.json": manifest_bytes,
+        "calibration-identity.json": canonical_json(identity) + b"\n",
+        "rows.jsonl": _canonical_jsonl_bytes(rows),
+        "campaign-decisions.json": canonical_json(decisions) + b"\n",
+        "model-report.json": canonical_json(model_report) + b"\n",
+        "source-coverage-v5.json": canonical_json(coverage_bundle) + b"\n",
+        "source-higher-layer.json": canonical_json(higher_bundle) + b"\n",
+        "source-discovery.json": canonical_json(discovery_bundle) + b"\n",
+        "source-code-sha256s.json": canonical_json(source_code) + b"\n",
+    }
+    if any(
+        not 0 < len(data) <= PRODUCTION_CONTEXT_RESULT_LIMITS[name]
+        for name, data in files.items()
+    ):
+        raise ValueError("production context result member exceeds its frozen size limit")
+    file_sha256s = {name: sha256_bytes(data) for name, data in files.items()}
+    envelope = _production_context_result_envelope(
+        manifest=manifest,
+        identity=identity,
+        file_sha256s=file_sha256s,
+        model_report=model_report,
+    )
+    files["result.json"] = canonical_json(envelope) + b"\n"
+    destination = pathlib.Path(out_root).resolve(strict=False) / envelope["result_id"]
+    source_paths = [run, manifest_path]
+    for source in manifest.sources.values():
+        source_paths.append(repo_root / source["path"])
+        if "directory_identity_path" in source:
+            source_paths.append(repo_root / source["directory_identity_path"])
+    if any(_paths_overlap(destination, source) for source in source_paths):
+        raise ValueError("production context source and result paths overlap")
+    published = _publish_production_context_result(
+        out_root, envelope["result_id"], files
+    )
+    return {
+        "status": "sealed",
+        "result_status": envelope["result_status"],
+        "result_id": envelope["result_id"],
+        "directory": str(published),
+        "family_statuses": envelope["family_statuses"],
+    }
+
+
+def verify_production_context_result(directory: pathlib.Path) -> dict[str, Any]:
+    """Replay a sealed result using only its bounded flat directory."""
+    directory = pathlib.Path(directory)
+    raw = _read_result_directory(directory)
+    documents = {
+        name: _load_canonical_json_bytes(raw[name], label=f"production context {name}")
+        for name in PRODUCTION_CONTEXT_RESULT_INVENTORY
+        if name != "rows.jsonl"
+    }
+    manifest = ProductionContextManifest.from_mapping(
+        documents["campaign-manifest.json"]
+    )
+    if raw["campaign-manifest.json"] != production_context_manifest_bytes():
+        raise ValueError("production context result manifest differs")
+    identity = documents["calibration-identity.json"]
+    _validate_portable_calibration_identity(manifest, identity)
+    rows_raw, rows = _load_canonical_rows(directory / "rows.jsonl")
+    if rows_raw != raw["rows.jsonl"]:
+        raise ValueError("production context result row ledger changed during replay")
+    rows = _validate_portable_rows(manifest, identity, rows)
+    coverage_bundle = documents["source-coverage-v5.json"]
+    higher_bundle = documents["source-higher-layer.json"]
+    _validate_discovery_bundle(manifest, documents["source-discovery.json"])
+    subtotal_model = _subtotal_model_from_source_bundles(
+        manifest, coverage_bundle, higher_bundle
+    )
+    decisions = fit_production_context_rows(manifest, rows, subtotal_model)
+    if canonical_json(decisions) != canonical_json(
+        documents["campaign-decisions.json"]
+    ):
+        raise ValueError("production context result decisions differ from exact replay")
+    model_report = _production_context_model_report(manifest, decisions)
+    if canonical_json(model_report) != canonical_json(documents["model-report.json"]):
+        raise ValueError("production context result model report differs from exact replay")
+    _validate_source_code_hashes(
+        documents["source-code-sha256s.json"], identity["implementation_revision"]
+    )
+    file_sha256s = {
+        name: sha256_bytes(raw[name])
+        for name in PRODUCTION_CONTEXT_RESULT_INVENTORY
+        if name != "result.json"
+    }
+    expected = _production_context_result_envelope(
+        manifest=manifest,
+        identity=identity,
+        file_sha256s=file_sha256s,
+        model_report=model_report,
+    )
+    if canonical_json(expected) != canonical_json(documents["result.json"]):
+        raise ValueError("production context result identity differs")
+    if directory.name != expected["result_id"]:
+        raise ValueError("production context result directory name differs")
+    return {
+        "status": "sealed",
+        "result_status": expected["result_status"],
+        "result_id": expected["result_id"],
+        "family_statuses": expected["family_statuses"],
+    }

@@ -36,8 +36,9 @@ use raiko2_protocol_shasta::{
 };
 use raiko2_stateless::reconstruct_block_from_transactions_with_witness_resources;
 use raiko2_zkgas_trace::{
-    OperationComponent, OperationPhase, PricingBasis, ProposalTrace, ProposalTraceStatus,
-    TransactionDisposition, trace_shasta_proposal,
+    CalldataLoadAccessClass, ContextValueClass, OpcodeModelInput, OperationComponent,
+    OperationPhase, PricingBasis, ProposalTrace, ProposalTraceStatus, TransactionDisposition,
+    trace_shasta_proposal,
 };
 use reth_ethereum_primitives::TransactionSigned;
 use revm::{
@@ -334,8 +335,84 @@ pub enum ControlledBlockSplit {
     Diagnostic,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlledContextAddressProfile {
+    Canonical,
+    Alternate,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlledContextCallerProfile {
+    Canonical,
+    Alternate,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlledContextOpcode {
+    Address,
+    Caller,
+    #[serde(rename = "callvalue")]
+    CallValue,
+    #[serde(rename = "calldataload")]
+    CalldataLoad,
+    #[serde(rename = "calldatasize")]
+    CalldataSize,
+    Timestamp,
+}
+
+impl ControlledContextOpcode {
+    pub const fn byte(self) -> u8 {
+        match self {
+            Self::Address => 0x30,
+            Self::Caller => 0x33,
+            Self::CallValue => 0x34,
+            Self::CalldataLoad => 0x35,
+            Self::CalldataSize => 0x36,
+            Self::Timestamp => 0x42,
+        }
+    }
+
+    pub const fn control_byte(self) -> u8 {
+        match self {
+            Self::CalldataLoad => 0x90,
+            _ => 0x5f,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case", tag = "kind")]
+#[serde(deny_unknown_fields, rename_all = "snake_case", tag = "kind")]
+pub enum ControlledContextProfile {
+    Address {
+        address_profile: ControlledContextAddressProfile,
+    },
+    Caller {
+        caller_profile: ControlledContextCallerProfile,
+    },
+    #[serde(rename = "callvalue")]
+    CallValue {
+        value: u64,
+        value_class: ContextValueClass,
+    },
+    #[serde(rename = "calldataload")]
+    CalldataLoad {
+        input_length: u64,
+        offset: u64,
+        access_class: CalldataLoadAccessClass,
+    },
+    #[serde(rename = "calldatasize")]
+    CalldataSize { input_length: u64 },
+    Timestamp {
+        timestamp_delta: u64,
+        value_class: ContextValueClass,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case", tag = "kind")]
 pub enum ControlledProgram {
     Empty,
     NativeTransfer {
@@ -346,9 +423,18 @@ pub enum ControlledProgram {
         count: u64,
         scenario: String,
     },
+    ContextOpcodeLoop {
+        workload_id: String,
+        repeat_index: u32,
+        opcode: ControlledContextOpcode,
+        lane: ControlledLane,
+        count: u64,
+        profile: ControlledContextProfile,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ControlledBlockRowSpec {
     pub row_id: String,
     pub workload_family: String,
@@ -358,8 +444,14 @@ pub struct ControlledBlockRowSpec {
     pub program: ControlledProgram,
     pub expected_final_state_root: B256,
     pub expected_raw_gas_by_key: BTreeMap<String, i64>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub expected_context_features: BTreeMap<String, i64>,
     pub expected_features: BTreeMap<String, i64>,
     pub expected_diagnostics: BTreeMap<String, i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_backend_input_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_host_trace_sha256: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -376,10 +468,12 @@ pub struct ControlledBlockObservation {
     pub workload_family: String,
     pub split: ControlledBlockSplit,
     pub backend_input_sha256: String,
+    pub host_trace_sha256: String,
     pub guest_input_bincode_length: usize,
     pub public_output: B256,
     pub actual_final_state_root: B256,
     pub actual_raw_gas_by_key: BTreeMap<String, i64>,
+    pub actual_context_features: BTreeMap<String, i64>,
     pub actual_features: BTreeMap<String, i64>,
     pub actual_diagnostics: BTreeMap<String, i64>,
     pub unzen_activation_timestamp: u64,
@@ -387,6 +481,14 @@ pub struct ControlledBlockObservation {
     pub operation_phase_ownership: &'static str,
     pub system_operation_ownership: &'static str,
     pub anchor_operation_ownership: &'static str,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ControlledBlockIdentityBundle {
+    pub schema_version: u32,
+    pub fixture_spec_sha256: String,
+    pub spec: ControlledBlockRowSpec,
+    pub observation: ControlledBlockObservation,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -470,6 +572,30 @@ pub struct ControlledStateHoldoutObservation {
 }
 
 pub fn controlled_block_row_id(spec: &ControlledBlockRowSpec) -> Result<String> {
+    if let ControlledProgram::ContextOpcodeLoop {
+        workload_id,
+        repeat_index,
+        lane,
+        ..
+    } = &spec.program
+    {
+        if workload_id.len() != 64
+            || !workload_id
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            bail!("controlled context workload ID must be lowercase SHA256");
+        }
+        if *repeat_index >= 3 {
+            bail!("controlled context repeat index is outside the frozen range");
+        }
+        return sha256_json(&BTreeMap::from([
+            ("kind", Value::String("production_context_row_v1".into())),
+            ("workload_id", Value::String(workload_id.clone())),
+            ("lane", serde_json::to_value(lane)?),
+            ("repeat_index", Value::from(*repeat_index)),
+        ]));
+    }
     let mut semantics = serde_json::to_value(spec)?;
     semantics
         .as_object_mut()
@@ -611,6 +737,66 @@ fn absolute_transaction_operation_units(
         }
     }
     Ok(absolute)
+}
+
+fn absolute_context_feature_counts(trace: &ProposalTrace) -> Result<BTreeMap<String, i64>> {
+    let mut counts = BTreeMap::<String, i64>::new();
+    for block in &trace.blocks {
+        let anchor_started_indices = block
+            .transactions
+            .iter()
+            .filter(|transaction| transaction.is_anchor)
+            .filter_map(|transaction| transaction.started_tx_index)
+            .collect::<std::collections::BTreeSet<_>>();
+        for operation in &block.operations {
+            if operation.phase != OperationPhase::Transaction
+                || operation
+                    .tx_index
+                    .is_some_and(|index| anchor_started_indices.contains(&index))
+            {
+                continue;
+            }
+            let OperationComponent::Opcode {
+                opcode,
+                model_input: Some(model_input),
+                ..
+            } = &operation.component
+            else {
+                continue;
+            };
+            let key = match model_input {
+                OpcodeModelInput::ContextFixed {} => {
+                    Some(format!("context_fixed:opcode:0x{opcode:02x}"))
+                }
+                OpcodeModelInput::ContextValue { value_class } => Some(format!(
+                    "context_value:opcode:0x{opcode:02x}:value_class:{}",
+                    match value_class {
+                        ContextValueClass::Zero => "zero",
+                        ContextValueClass::Nonzero => "nonzero",
+                    }
+                )),
+                OpcodeModelInput::CalldataLoad { access_class } => Some(format!(
+                    "calldata_load:opcode:0x{opcode:02x}:access_class:{}",
+                    match access_class {
+                        CalldataLoadAccessClass::Zero => "zero",
+                        CalldataLoadAccessClass::Partial => "partial",
+                        CalldataLoadAccessClass::Full => "full",
+                    }
+                )),
+                OpcodeModelInput::CalldataSize { input_length } => Some(format!(
+                    "calldata_size:opcode:0x{opcode:02x}:input_length:{input_length}"
+                )),
+                _ => None,
+            };
+            if let Some(key) = key {
+                let count = counts.entry(key).or_default();
+                *count = count
+                    .checked_add(1)
+                    .ok_or_else(|| anyhow::anyhow!("controlled context feature count overflow"))?;
+            }
+        }
+    }
+    Ok(counts)
 }
 
 fn observe_overhead_fixture(
@@ -853,6 +1039,10 @@ enum CandidateKind {
         input: Bytes,
         fee_neutral: bool,
         gas_limit: u64,
+        signer_profile: ControlledContextCallerProfile,
+        target_profile: ControlledContextAddressProfile,
+        value: u64,
+        timestamp_delta: u64,
     },
     NativeZero,
     NativeValue(u64),
@@ -913,7 +1103,24 @@ fn anchor_tx(
 }
 
 fn controlled_candidate_signer() -> Result<PrivateKeySigner> {
-    Ok(PrivateKeySigner::from_bytes(&B256::repeat_byte(0x11))?)
+    controlled_candidate_signer_for(ControlledContextCallerProfile::Canonical)
+}
+
+fn controlled_candidate_signer_for(
+    profile: ControlledContextCallerProfile,
+) -> Result<PrivateKeySigner> {
+    let byte = match profile {
+        ControlledContextCallerProfile::Canonical => 0x11,
+        ControlledContextCallerProfile::Alternate => 0x12,
+    };
+    Ok(PrivateKeySigner::from_bytes(&B256::repeat_byte(byte))?)
+}
+
+const fn controlled_contract_address(profile: ControlledContextAddressProfile) -> Address {
+    match profile {
+        ControlledContextAddressProfile::Canonical => Address::repeat_byte(0x66),
+        ControlledContextAddressProfile::Alternate => Address::repeat_byte(0x67),
+    }
 }
 
 fn controlled_state_holdout_address(domain: &[u8], index: u64) -> Address {
@@ -935,12 +1142,18 @@ fn candidate_transactions(kind: &CandidateKind, count: u64) -> Result<Vec<Transa
         return Ok(Vec::new());
     }
     let value = match kind {
+        CandidateKind::ControlledContract { value, .. } => U256::from(*value),
         CandidateKind::NativeValue(value) | CandidateKind::NativeValueTopology { value, .. } => {
             U256::from(*value)
         }
         _ => U256::ZERO,
     };
-    let signer = controlled_candidate_signer()?;
+    let signer = match kind {
+        CandidateKind::ControlledContract { signer_profile, .. } => {
+            controlled_candidate_signer_for(*signer_profile)?
+        }
+        _ => controlled_candidate_signer()?,
+    };
     let input = match kind {
         CandidateKind::ControlledContract { input, .. } => input.clone(),
         _ => Bytes::new(),
@@ -952,7 +1165,9 @@ fn candidate_transactions(kind: &CandidateKind, count: u64) -> Result<Vec<Transa
     (0..count)
         .map(|nonce| {
             let recipient = match kind {
-                CandidateKind::ControlledContract { .. } => Address::repeat_byte(0x66),
+                CandidateKind::ControlledContract { target_profile, .. } => {
+                    controlled_contract_address(*target_profile)
+                }
                 CandidateKind::NativeValueTopology {
                     distinct_recipients,
                     ..
@@ -1278,6 +1493,21 @@ fn build_overhead_guest_input_with_topology(
             ..
         }
     );
+    let controlled_signer = match &kind {
+        CandidateKind::ControlledContract { signer_profile, .. } => {
+            controlled_candidate_signer_for(*signer_profile)?
+        }
+        _ => controlled_candidate_signer()?,
+    };
+    let timestamp_delta = match &kind {
+        CandidateKind::ControlledContract {
+            timestamp_delta, ..
+        } => *timestamp_delta,
+        _ => 1,
+    };
+    if timestamp_delta == 0 {
+        bail!("controlled block timestamp delta must be strictly post-Unzen");
+    }
     let base_fee_per_gas = 10_000_000;
     let (mut controlled_state, codes) = overhead_prestate(
         &chain_spec,
@@ -1320,7 +1550,7 @@ fn build_overhead_guest_input_with_topology(
         .expect("controlled ancestors retain full headers");
     let proposer = Address::repeat_byte(0x33);
     let fee_recipient = if fee_neutral {
-        controlled_candidate_signer()?.address()
+        controlled_signer.address()
     } else {
         proposer
     };
@@ -1335,7 +1565,8 @@ fn build_overhead_guest_input_with_topology(
     for index in 0..block_count {
         let block_number = OVERHEAD_BLOCK_NUMBER + u64::try_from(index)?;
         let block_timestamp = overhead_parent_timestamp
-            .checked_add(1 + u64::try_from(index)?)
+            .checked_add(timestamp_delta)
+            .and_then(|timestamp| timestamp.checked_add(u64::try_from(index).ok()?))
             .ok_or_else(|| anyhow::anyhow!("controlled overhead block timestamp overflow"))?;
         let transactions = if index == 0 {
             candidates.clone()
@@ -1448,7 +1679,11 @@ fn build_overhead_guest_input_with_topology(
                     id: 42u64.try_into()?,
                     proposer,
                     timestamp: overhead_parent_timestamp
-                        .checked_add(u64::try_from(block_count)?)
+                        .checked_add(timestamp_delta)
+                        .and_then(|timestamp| {
+                            timestamp
+                                .checked_add(u64::try_from(block_count.saturating_sub(1)).ok()?)
+                        })
                         .ok_or_else(|| {
                             anyhow::anyhow!("controlled overhead proposal timestamp overflow")
                         })?
@@ -1484,11 +1719,19 @@ fn build_overhead_guest_input_with_topology(
         build_proof_carry_data_from_witness_spec(&guest_input, ProofType::Sp1)?;
     guest_input.proof_carry_data.transition_input.proposal_hash =
         hash_proposal(&guest_input.taiko.proposal_event.proposal);
-    if fee_neutral
-        && controlled_state.account_balance(controlled_candidate_signer()?.address())
-            != Some(CONTROLLED_CANDIDATE_FINAL_BALANCE)
-    {
-        bail!("fee-neutral controlled sender did not finish at the frozen balance");
+    if fee_neutral {
+        let transferred_value = match &kind {
+            CandidateKind::ControlledContract { value, .. } => U256::from(*value)
+                .checked_mul(U256::from(candidate_count))
+                .ok_or_else(|| anyhow::anyhow!("controlled transferred value overflow"))?,
+            _ => U256::ZERO,
+        };
+        let expected_balance = CONTROLLED_CANDIDATE_FINAL_BALANCE
+            .checked_sub(transferred_value)
+            .ok_or_else(|| anyhow::anyhow!("controlled sender balance is below call value"))?;
+        if controlled_state.account_balance(controlled_signer.address()) != Some(expected_balance) {
+            bail!("fee-neutral controlled sender did not finish at the expected balance");
+        }
     }
     Ok(BuiltOverheadGuestInput {
         guest_input,
@@ -1510,6 +1753,170 @@ fn build_overhead_guest_input(
 const CONTROLLED_BLOCK_BYTECODE_LENGTH: usize = 256;
 const CONTROLLED_OPCODE_GAS_LIMIT: u64 = 100_000;
 const CONTROLLED_OPCODE_MAX_COUNT: u64 = 32;
+const CONTROLLED_CONTEXT_MAX_COUNT: u64 = 64;
+const CONTROLLED_CONTEXT_MAX_CALLDATA_LENGTH: u64 = 255;
+
+#[derive(Clone, Debug)]
+struct ControlledContextParameters {
+    input: Bytes,
+    signer_profile: ControlledContextCallerProfile,
+    target_profile: ControlledContextAddressProfile,
+    value: u64,
+    timestamp_delta: u64,
+    calldata_offset: Option<u64>,
+}
+
+fn controlled_context_parameters(
+    opcode: ControlledContextOpcode,
+    profile: &ControlledContextProfile,
+) -> Result<ControlledContextParameters> {
+    let mut parameters = ControlledContextParameters {
+        input: Bytes::new(),
+        signer_profile: ControlledContextCallerProfile::Canonical,
+        target_profile: ControlledContextAddressProfile::Canonical,
+        value: 0,
+        timestamp_delta: 1,
+        calldata_offset: None,
+    };
+    match (opcode, profile) {
+        (
+            ControlledContextOpcode::Address,
+            ControlledContextProfile::Address { address_profile },
+        ) => parameters.target_profile = *address_profile,
+        (ControlledContextOpcode::Caller, ControlledContextProfile::Caller { caller_profile }) => {
+            parameters.signer_profile = *caller_profile
+        }
+        (
+            ControlledContextOpcode::CallValue,
+            ControlledContextProfile::CallValue { value, value_class },
+        ) => {
+            let expected_class = if *value == 0 {
+                ContextValueClass::Zero
+            } else {
+                ContextValueClass::Nonzero
+            };
+            if *value_class != expected_class {
+                bail!("CALLVALUE profile value class differs from its value");
+            }
+            parameters.value = *value;
+        }
+        (
+            ControlledContextOpcode::CalldataLoad,
+            ControlledContextProfile::CalldataLoad {
+                input_length,
+                offset,
+                access_class,
+            },
+        ) => {
+            if *input_length > CONTROLLED_CONTEXT_MAX_CALLDATA_LENGTH {
+                bail!("CALLDATALOAD input length is outside the frozen 0..=255 range");
+            }
+            let available = input_length.saturating_sub(*offset).min(32);
+            let expected_class = match available {
+                0 => CalldataLoadAccessClass::Zero,
+                32 => CalldataLoadAccessClass::Full,
+                _ => CalldataLoadAccessClass::Partial,
+            };
+            if *access_class != expected_class {
+                bail!("CALLDATALOAD profile access class differs from length and offset");
+            }
+            let input_length = usize::try_from(*input_length)?;
+            parameters.input = (0..input_length)
+                .map(|index| u8::try_from(index % 251).expect("modulo 251 fits u8"))
+                .collect::<Vec<_>>()
+                .into();
+            parameters.calldata_offset = Some(*offset);
+        }
+        (
+            ControlledContextOpcode::CalldataSize,
+            ControlledContextProfile::CalldataSize { input_length },
+        ) => {
+            if *input_length > CONTROLLED_CONTEXT_MAX_CALLDATA_LENGTH {
+                bail!("CALLDATASIZE input length is outside the frozen 0..=255 range");
+            }
+            let input_length = usize::try_from(*input_length)?;
+            parameters.input = (0..input_length)
+                .map(|index| u8::try_from(index % 251).expect("modulo 251 fits u8"))
+                .collect::<Vec<_>>()
+                .into();
+        }
+        (
+            ControlledContextOpcode::Timestamp,
+            ControlledContextProfile::Timestamp {
+                timestamp_delta,
+                value_class,
+            },
+        ) => {
+            if *timestamp_delta == 0 || *value_class != ContextValueClass::Nonzero {
+                bail!("TIMESTAMP profile must be nonzero and strictly post-Unzen");
+            }
+            parameters.timestamp_delta = *timestamp_delta;
+        }
+        _ => bail!("controlled context opcode profile does not match opcode"),
+    }
+    Ok(parameters)
+}
+
+fn push3(code: &mut Vec<u8>, value: u64, label: &str) -> Result<()> {
+    let value = u32::try_from(value)?;
+    if value > 0x00ff_ffff {
+        bail!("controlled {label} does not fit frozen PUSH3 encoding");
+    }
+    let bytes = value.to_be_bytes();
+    code.extend([0x62, bytes[1], bytes[2], bytes[3]]);
+    Ok(())
+}
+
+fn controlled_context_bytecode(
+    opcode: ControlledContextOpcode,
+    lane: ControlledLane,
+    count: u64,
+    calldata_offset: Option<u64>,
+) -> Result<Bytes> {
+    let mut code = Vec::new();
+    push3(&mut code, count, "context opcode count")?;
+    let loop_offset = code.len();
+    code.extend([0x5b, 0x80, 0x15, 0x60, 0x00, 0x57]);
+    let done_immediate_index = loop_offset + 4;
+    if opcode == ControlledContextOpcode::CalldataLoad {
+        let offset = calldata_offset
+            .ok_or_else(|| anyhow::anyhow!("CALLDATALOAD profile is missing its offset"))?;
+        push3(&mut code, offset, "calldata offset")?;
+        code.push(0x80); // two identical setup items make target CALLDATALOAD and control SWAP1 shape-equivalent
+        code.push(match lane {
+            ControlledLane::Target => opcode.byte(),
+            ControlledLane::Control => opcode.control_byte(),
+        });
+        code.extend([0x50, 0x50]);
+    } else {
+        if calldata_offset.is_some() {
+            bail!("non-CALLDATALOAD profile unexpectedly carries an offset");
+        }
+        code.push(match lane {
+            ControlledLane::Target => opcode.byte(),
+            ControlledLane::Control => opcode.control_byte(),
+        });
+        code.push(0x50);
+    }
+    code.extend([
+        0x60,
+        0x01,
+        0x90,
+        0x03,
+        0x60,
+        u8::try_from(loop_offset)?,
+        0x56,
+    ]);
+    let done_offset = code.len();
+    code.extend([0x5b, 0x50, 0x00]);
+    code[done_immediate_index] = u8::try_from(done_offset)?;
+    if code.len() > CONTROLLED_BLOCK_BYTECODE_LENGTH {
+        bail!("controlled context bytecode exceeds frozen code-length class");
+    }
+    code.resize(CONTROLLED_BLOCK_BYTECODE_LENGTH, 0x00);
+    Ok(code.into())
+}
+
 fn controlled_opcode_bytecode(family: &str, scenario: &str, count: u64) -> Result<Bytes> {
     let count = u32::try_from(count)?;
     if count > 0x00ff_ffff {
@@ -1618,6 +2025,46 @@ fn build_controlled_block_fixture_with_topology(
                     input: Bytes::new(),
                     fee_neutral: true,
                     gas_limit: CONTROLLED_OPCODE_GAS_LIMIT,
+                    signer_profile: ControlledContextCallerProfile::Canonical,
+                    target_profile: ControlledContextAddressProfile::Canonical,
+                    value: 0,
+                    timestamp_delta: 1,
+                },
+                bytecode_length,
+            )
+        }
+        ControlledProgram::ContextOpcodeLoop {
+            opcode,
+            lane,
+            count,
+            profile,
+            ..
+        } => {
+            if *count > CONTROLLED_CONTEXT_MAX_COUNT {
+                bail!("controlled context opcode count is outside the frozen 0..=64 range");
+            }
+            if spec.workload_family != "context_opcode" {
+                bail!("controlled context opcode program requires context_opcode workload family");
+            }
+            if spec.transaction_count != 1 || spec.block_count != 1 {
+                bail!(
+                    "controlled context opcode program requires exactly one block and transaction"
+                );
+            }
+            let parameters = controlled_context_parameters(*opcode, profile)?;
+            let bytecode =
+                controlled_context_bytecode(*opcode, *lane, *count, parameters.calldata_offset)?;
+            let bytecode_length = bytecode.len();
+            (
+                CandidateKind::ControlledContract {
+                    code: bytecode,
+                    input: parameters.input,
+                    fee_neutral: true,
+                    gas_limit: CONTROLLED_OPCODE_GAS_LIMIT,
+                    signer_profile: parameters.signer_profile,
+                    target_profile: parameters.target_profile,
+                    value: parameters.value,
+                    timestamp_delta: parameters.timestamp_delta,
                 },
                 bytecode_length,
             )
@@ -1664,7 +2111,9 @@ pub fn observe_controlled_block_fixture(
             fixture.spec.row_id
         );
     }
+    let host_trace_sha256 = canonical_serde_sha256(&trace)?;
     let operation_units = absolute_transaction_operation_units(&trace)?;
+    let actual_context_features = absolute_context_feature_counts(&trace)?;
     if operation_units
         .values()
         .any(|units| units.pricing_basis != PricingBasis::RawGasSlope)
@@ -1795,6 +2244,7 @@ pub fn observe_controlled_block_fixture(
             .guest_input_sha256
             .trim_start_matches("0x")
             .to_string(),
+        host_trace_sha256,
         guest_input_bincode_length: trace.guest_input_bincode_length,
         public_output: trace
             .public_output
@@ -1808,6 +2258,7 @@ pub fn observe_controlled_block_fixture(
             .header
             .state_root,
         actual_raw_gas_by_key,
+        actual_context_features,
         actual_features,
         actual_diagnostics,
         unzen_activation_timestamp,
@@ -1828,6 +2279,34 @@ pub fn validate_controlled_block_fixture(
             fixture.spec.row_id,
             fixture.spec.expected_raw_gas_by_key,
             observation.actual_raw_gas_by_key
+        );
+    }
+    if let Some(expected) = &fixture.spec.expected_backend_input_sha256
+        && &observation.backend_input_sha256 != expected
+    {
+        bail!(
+            "controlled block row {} backend-input identity mismatch: declared={}, observed={}",
+            fixture.spec.row_id,
+            expected,
+            observation.backend_input_sha256
+        );
+    }
+    if let Some(expected) = &fixture.spec.expected_host_trace_sha256
+        && &observation.host_trace_sha256 != expected
+    {
+        bail!(
+            "controlled block row {} host-trace identity mismatch: declared={}, observed={}",
+            fixture.spec.row_id,
+            expected,
+            observation.host_trace_sha256
+        );
+    }
+    if observation.actual_context_features != fixture.spec.expected_context_features {
+        bail!(
+            "controlled block row {} context-feature mismatch: declared={:?}, observed={:?}",
+            fixture.spec.row_id,
+            fixture.spec.expected_context_features,
+            observation.actual_context_features
         );
     }
     if observation.actual_features != fixture.spec.expected_features {
@@ -1855,6 +2334,46 @@ pub fn validate_controlled_block_fixture(
         );
     }
     Ok(observation)
+}
+
+pub fn freeze_controlled_context_block_fixture(
+    source: &ControlledBlockRowSpec,
+) -> Result<ControlledBlockIdentityBundle> {
+    if !matches!(&source.program, ControlledProgram::ContextOpcodeLoop { .. }) {
+        bail!("controlled block identity accepts only structured context opcode rows");
+    }
+    if source.expected_final_state_root != B256::ZERO
+        || !source.expected_raw_gas_by_key.is_empty()
+        || !source.expected_context_features.is_empty()
+        || !source.expected_features.is_empty()
+        || !source.expected_diagnostics.is_empty()
+        || source.expected_backend_input_sha256.is_some()
+        || source.expected_host_trace_sha256.is_some()
+    {
+        bail!("controlled block identity source request must not predeclare observed evidence");
+    }
+    let fixture = build_controlled_block_fixture(source)?;
+    let observed = observe_controlled_block_fixture(&fixture)?;
+    let mut spec = source.clone();
+    spec.expected_final_state_root = observed.actual_final_state_root;
+    spec.expected_raw_gas_by_key = observed.actual_raw_gas_by_key.clone();
+    spec.expected_context_features = observed.actual_context_features.clone();
+    spec.expected_features = observed.actual_features.clone();
+    spec.expected_diagnostics = observed.actual_diagnostics.clone();
+    spec.expected_backend_input_sha256 = Some(observed.backend_input_sha256.clone());
+    spec.expected_host_trace_sha256 = Some(observed.host_trace_sha256.clone());
+    if controlled_block_row_id(&spec)? != source.row_id {
+        bail!("controlled context evidence changed the manifest-owned row identity");
+    }
+    let frozen = build_controlled_block_fixture(&spec)?;
+    let observation = validate_controlled_block_fixture(&frozen)?;
+    let fixture_spec_sha256 = canonical_serde_sha256(&spec)?;
+    Ok(ControlledBlockIdentityBundle {
+        schema_version: 1,
+        fixture_spec_sha256,
+        spec,
+        observation,
+    })
 }
 
 impl ControlledStateHoldoutPairSpec {
@@ -2252,6 +2771,10 @@ pub fn build_required_overhead_fixtures(
             input: Bytes::new(),
             fee_neutral: false,
             gas_limit: 100_000,
+            signer_profile: ControlledContextCallerProfile::Canonical,
+            target_profile: ControlledContextAddressProfile::Canonical,
+            value: 0,
+            timestamp_delta: 1,
         },
         1,
         target_count,
@@ -2570,6 +3093,13 @@ impl<CTX> Inspector<CTX, EthInterpreter> for StorageSemanticInspector {
 fn sha256_json(value: &BTreeMap<&str, Value>) -> Result<String> {
     let bytes = serde_json::to_vec(value)?;
     Ok(alloy_primitives::hex::encode(Sha256::digest(bytes)))
+}
+
+fn canonical_serde_sha256<T: Serialize>(value: &T) -> Result<String> {
+    let canonical_value = serde_json::to_value(value)?;
+    Ok(alloy_primitives::hex::encode(Sha256::digest(
+        serde_json::to_vec(&canonical_value)?,
+    )))
 }
 
 pub fn controlled_workload_id(spec: &ControlledWorkloadSpec) -> Result<String> {

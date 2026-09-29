@@ -8,6 +8,8 @@ import json
 import pathlib
 import re
 import stat
+import subprocess
+import tempfile
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Mapping
@@ -941,3 +943,254 @@ def production_context_row_specs(manifest: ProductionContextManifest) -> tuple[P
                 for repeat_index in range(manifest.repeats):
                     rows.append(ProductionContextRowSpec(scenario.name, scenario.split, count, lane, repeat_index, workload_id, production_context_row_id(workload_id=workload_id, lane=lane, repeat_index=repeat_index)))
     return tuple(rows)
+
+
+@dataclass(frozen=True)
+class ProductionContextFixtureRequest:
+    scenario: str
+    split: str
+    count: int
+    lane: str
+    repeat_index: int
+    workload_id: str
+    row_id: str
+    builder_input: Mapping[str, Any]
+
+
+_CONTEXT_OPCODE_NAMES = {
+    0x30: "address",
+    0x33: "caller",
+    0x34: "callvalue",
+    0x35: "calldataload",
+    0x36: "calldatasize",
+    0x42: "timestamp",
+}
+
+
+def _production_context_builder_profile(
+    scenario: ProductionContextScenario,
+) -> dict[str, Any]:
+    context = dict(scenario.context)
+    if scenario.opcode == 0x30:
+        return {"kind": "address", "address_profile": context["address_profile"]}
+    if scenario.opcode == 0x33:
+        return {"kind": "caller", "caller_profile": context["caller_profile"]}
+    if scenario.opcode == 0x34:
+        return {
+            "kind": "callvalue",
+            "value": int(context["value"]),
+            "value_class": context["value_class"],
+        }
+    if scenario.opcode == 0x35:
+        return {
+            "kind": "calldataload",
+            "input_length": context["input_length"],
+            "offset": context["offset"],
+            "access_class": context["access_class"],
+        }
+    if scenario.opcode == 0x36:
+        return {"kind": "calldatasize", "input_length": context["input_length"]}
+    if scenario.opcode == 0x42:
+        return {
+            "kind": "timestamp",
+            "timestamp_delta": context["timestamp_delta"],
+            "value_class": context["value_class"],
+        }
+    raise ValueError(f"unsupported production context opcode: {scenario.opcode:#x}")
+
+
+def production_context_fixture_requests(
+    manifest: ProductionContextManifest,
+) -> tuple[ProductionContextFixtureRequest, ...]:
+    requests = []
+    for row in production_context_row_specs(manifest):
+        scenario = manifest.scenario(row.scenario)
+        opcode_name = _CONTEXT_OPCODE_NAMES.get(scenario.opcode)
+        if opcode_name is None:
+            raise ValueError(f"unsupported production context opcode: {scenario.opcode:#x}")
+        builder_input = {
+            "row_id": row.row_id,
+            "workload_family": "context_opcode",
+            "split": "fit" if row.split == "fit" else "holdout",
+            "block_count": 1,
+            "transaction_count": 1,
+            "program": {
+                "kind": "context_opcode_loop",
+                "workload_id": row.workload_id,
+                "repeat_index": row.repeat_index,
+                "opcode": opcode_name,
+                "lane": row.lane,
+                "count": row.count,
+                "profile": _production_context_builder_profile(scenario),
+            },
+            "expected_final_state_root": "0x" + "00" * 32,
+            "expected_raw_gas_by_key": {},
+            "expected_context_features": {},
+            "expected_features": {},
+            "expected_diagnostics": {},
+        }
+        requests.append(
+            ProductionContextFixtureRequest(
+                scenario=row.scenario,
+                split=row.split,
+                count=row.count,
+                lane=row.lane,
+                repeat_index=row.repeat_index,
+                workload_id=row.workload_id,
+                row_id=row.row_id,
+                builder_input=builder_input,
+            )
+        )
+    return tuple(requests)
+
+
+_FIXTURE_EVIDENCE_FIELDS = {
+    "expected_final_state_root": "actual_final_state_root",
+    "expected_raw_gas_by_key": "actual_raw_gas_by_key",
+    "expected_context_features": "actual_context_features",
+    "expected_features": "actual_features",
+    "expected_diagnostics": "actual_diagnostics",
+    "expected_backend_input_sha256": "backend_input_sha256",
+    "expected_host_trace_sha256": "host_trace_sha256",
+}
+
+
+def validate_production_context_fixture_identity(
+    request: ProductionContextFixtureRequest,
+    bundle: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    if not isinstance(bundle, Mapping) or set(bundle) != {
+        "schema_version",
+        "fixture_spec_sha256",
+        "spec",
+        "observation",
+    }:
+        raise ValueError("production context fixture identity fields differ")
+    if bundle["schema_version"] != 1:
+        raise ValueError("production context fixture identity schema differs")
+    spec = bundle["spec"]
+    observation = bundle["observation"]
+    if not isinstance(spec, Mapping) or not isinstance(observation, Mapping):
+        raise ValueError("production context fixture identity payload differs")
+    source = {
+        key: value
+        for key, value in spec.items()
+        if key not in _FIXTURE_EVIDENCE_FIELDS
+    }
+    request_source = {
+        key: value
+        for key, value in request.builder_input.items()
+        if key not in _FIXTURE_EVIDENCE_FIELDS
+    }
+    if canonical_json(source) != canonical_json(request_source):
+        raise ValueError("production context fixture source mismatch")
+    if spec.get("row_id") != request.row_id or observation.get("row_id") != request.row_id:
+        raise ValueError("production context fixture row identity mismatch")
+    for declared, observed in _FIXTURE_EVIDENCE_FIELDS.items():
+        if declared not in spec or observed not in observation:
+            raise ValueError(f"production context fixture {declared} evidence is missing")
+        if canonical_json(spec[declared]) != canonical_json(observation[observed]):
+            raise ValueError(f"production context fixture {declared} mismatch")
+    for field in (
+        "fixture_spec_sha256",
+        "expected_backend_input_sha256",
+        "expected_host_trace_sha256",
+    ):
+        value = bundle[field] if field == "fixture_spec_sha256" else spec[field]
+        if not isinstance(value, str) or _SHA256_RE.fullmatch(value) is None:
+            raise ValueError(f"production context fixture {field} is not lowercase SHA256")
+    expected_spec_sha256 = sha256_bytes(canonical_json(spec))
+    if bundle["fixture_spec_sha256"] != expected_spec_sha256:
+        raise ValueError("production context fixture spec identity mismatch")
+    return bundle
+
+
+def run_production_context_fixture_identity(
+    request: ProductionContextFixtureRequest,
+    *,
+    launcher: pathlib.Path,
+    repo_root: pathlib.Path,
+) -> Mapping[str, Any]:
+    launcher = launcher.resolve()
+    repo_root = repo_root.resolve()
+    if not launcher.is_file() or not repo_root.is_dir():
+        raise ValueError("production context fixture launcher or repository root is missing")
+    with tempfile.TemporaryDirectory(prefix="raiko2-context-fixture-") as directory:
+        temporary = pathlib.Path(directory)
+        input_path = temporary / "source-row.json"
+        output_path = temporary / "identity.json"
+        input_path.write_bytes(canonical_json(request.builder_input) + b"\n")
+        subprocess.run(
+            [
+                str(launcher),
+                "--stage",
+                "controlled-block-identity",
+                "--proof-type",
+                "native",
+                "--mode",
+                "execute",
+                "--input",
+                str(input_path),
+                "--json-out",
+                str(output_path),
+            ],
+            cwd=repo_root,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        try:
+            bundle = json.loads(
+                output_path.read_text(),
+                object_pairs_hook=_reject_duplicate_fields,
+                parse_float=_reject_json_float,
+            )
+        except (OSError, json.JSONDecodeError) as error:
+            raise ValueError("production context fixture identity output is invalid") from error
+    return validate_production_context_fixture_identity(request, bundle)
+
+
+def production_context_parity_identity(
+    *,
+    row_id: str,
+    standard: Mapping[str, Any],
+    gas_estimator: Mapping[str, Any],
+) -> dict[str, Any]:
+    if _SHA256_RE.fullmatch(row_id) is None:
+        raise ValueError("production context parity row ID must be lowercase SHA256")
+    if standard.get("sp1_execution_engine") != "standard" or gas_estimator.get(
+        "sp1_execution_engine"
+    ) != "gas-estimator":
+        raise ValueError("production context parity engine identity differs")
+
+    def parity_values(report: Mapping[str, Any]) -> dict[str, Any]:
+        try:
+            return {
+                "gas": report["gas"],
+                "total_instruction_count": report["total_instruction_count"],
+                "total_syscall_count": report["total_syscall_count"],
+                "public_values": report["public_values"],
+                "guest_input_sha256": report["guest_input_sha256"],
+                "host_trace_sha256": report["controlled_block"]["observation"][
+                    "host_trace_sha256"
+                ],
+                "exit_code": report["exit_code"],
+            }
+        except (KeyError, TypeError) as error:
+            raise ValueError("production context parity evidence is incomplete") from error
+
+    standard_values = parity_values(standard)
+    estimator_values = parity_values(gas_estimator)
+    if canonical_json(standard_values) != canonical_json(estimator_values):
+        raise ValueError("production context standard/gas-estimator parity mismatch")
+    identity = {
+        "kind": "production_context_parity_v1",
+        "row_id": row_id,
+        "model_sample": False,
+        "standard_execution_engine": "standard",
+        "gas_estimator_execution_engine": "gas-estimator",
+        "equal_values": standard_values,
+    }
+    identity["identity_sha256"] = sha256_bytes(canonical_json(identity))
+    return identity

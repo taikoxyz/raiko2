@@ -3,21 +3,23 @@ mod controlled_workload;
 
 use std::collections::BTreeMap;
 
-use alloy_consensus::Transaction as _;
+use alloy_consensus::{Transaction as _, transaction::SignerRecoverable};
 use alloy_primitives::{Address, B256};
 use controlled_workload::{
-    ControlledBlockRowSpec, ControlledBlockSplit, ControlledExecutionIdentity, ControlledFootprint,
-    ControlledLane, ControlledOperationUnits, ControlledOverheadLane, ControlledProgram,
-    ControlledStateHoldoutLane, ControlledStateHoldoutPairSpec, ControlledTrace,
-    ControlledWorkloadSpec, PairedPrecompileShape, block_environment_sha256,
-    build_controlled_block_fixture,
+    ControlledBlockRowSpec, ControlledBlockSplit, ControlledContextAddressProfile,
+    ControlledContextCallerProfile, ControlledContextOpcode, ControlledContextProfile,
+    ControlledExecutionIdentity, ControlledFootprint, ControlledLane, ControlledOperationUnits,
+    ControlledOverheadLane, ControlledProgram, ControlledStateHoldoutLane,
+    ControlledStateHoldoutPairSpec, ControlledTrace, ControlledWorkloadSpec, PairedPrecompileShape,
+    block_environment_sha256, build_controlled_block_fixture,
     build_controlled_block_fixture_with_extra_prestate_account_for_test,
     build_controlled_state_holdout_fixtures, build_required_overhead_fixtures,
     check_revm_opcode_semantics, controlled_block_row_id,
     controlled_context_opcode_identity_bundle, controlled_context_opcode_workload_spec,
     controlled_execution_row_id, controlled_opcode_identity, controlled_opcode_identity_bundle,
     controlled_opcode_workload_spec, controlled_overhead_workload_id,
-    controlled_precompile_workload_spec, controlled_workload_id, observe_controlled_block_fixture,
+    controlled_precompile_workload_spec, controlled_workload_id,
+    freeze_controlled_context_block_fixture, observe_controlled_block_fixture,
     operation_units_delta, trace_precompile_workload, trace_revm_opcode_workload,
     validate_controlled_block_fixture, validate_controlled_state_holdout_fixtures,
     validate_fixed_footprint, validate_precompile_pair, validate_required_overhead_fixtures,
@@ -29,7 +31,9 @@ use raiko2_primitives::{
     chain_spec::{ForkCondition, ForkId, TaikoFork},
 };
 use raiko2_protocol_shasta::libhash::hash_proposal;
-use raiko2_zkgas_trace::{PricingBasis, ProposalTraceStatus};
+use raiko2_zkgas_trace::{
+    CalldataLoadAccessClass, ContextValueClass, PricingBasis, ProposalTraceStatus,
+};
 use revm::context::BlockEnv;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -134,6 +138,7 @@ fn block_row_spec() -> ControlledBlockRowSpec {
             ("opcode:0x80".into(), 6),
             ("opcode:0x90".into(), 3),
         ]),
+        expected_context_features: BTreeMap::new(),
         expected_features: BTreeMap::from([
             ("proposal_startup".into(), 1),
             ("block_base".into(), 1),
@@ -150,6 +155,8 @@ fn block_row_spec() -> ControlledBlockRowSpec {
             ("bytecode_length".into(), 256),
             ("touched_state_key_count".into(), 9),
         ]),
+        expected_backend_input_sha256: None,
+        expected_host_trace_sha256: None,
     }
 }
 
@@ -462,8 +469,11 @@ fn materialize_opcode_block_row(
         },
         expected_final_state_root: B256::ZERO,
         expected_raw_gas_by_key: BTreeMap::new(),
+        expected_context_features: BTreeMap::new(),
         expected_features: BTreeMap::new(),
         expected_diagnostics: BTreeMap::new(),
+        expected_backend_input_sha256: None,
+        expected_host_trace_sha256: None,
     };
     spec.row_id = controlled_block_row_id(&spec).unwrap();
     let fixture = build_controlled_block_fixture(&spec).expect("build production GuestInput");
@@ -491,6 +501,426 @@ fn materialize_opcode_block_row(
         build_controlled_block_fixture(&spec).expect("rebuild frozen production GuestInput");
     let validated = validate_controlled_block_fixture(&fixture).expect("validate frozen row");
     (spec, validated, shape)
+}
+
+fn materialize_context_block_row(
+    opcode: ControlledContextOpcode,
+    lane: ControlledLane,
+    count: u64,
+    profile: ControlledContextProfile,
+) -> (
+    ControlledBlockRowSpec,
+    controlled_workload::ControlledBlockObservation,
+    (Vec<u8>, usize, u64),
+) {
+    let mut spec = ControlledBlockRowSpec {
+        row_id: String::new(),
+        workload_family: "context_opcode".into(),
+        split: ControlledBlockSplit::Fit,
+        block_count: 1,
+        transaction_count: 1,
+        program: ControlledProgram::ContextOpcodeLoop {
+            workload_id: "a".repeat(64),
+            repeat_index: 0,
+            opcode,
+            lane,
+            count,
+            profile,
+        },
+        expected_final_state_root: B256::ZERO,
+        expected_raw_gas_by_key: BTreeMap::new(),
+        expected_context_features: BTreeMap::new(),
+        expected_features: BTreeMap::new(),
+        expected_diagnostics: BTreeMap::new(),
+        expected_backend_input_sha256: None,
+        expected_host_trace_sha256: None,
+    };
+    spec.row_id = controlled_block_row_id(&spec).unwrap();
+    let fixture = build_controlled_block_fixture(&spec).expect("build context production input");
+    let code = fixture.guest_input.witnesses[0]
+        .witness
+        .codes
+        .iter()
+        .find(|code| code.len() == 256)
+        .expect("context contract uses a 256-byte footprint")
+        .to_vec();
+    let candidate = fixture.guest_input.witnesses[0]
+        .block
+        .body
+        .transactions
+        .last()
+        .expect("context candidate transaction");
+    let shape = (code, candidate.input().len(), candidate.gas_limit());
+    let observed = observe_controlled_block_fixture(&fixture).expect("trace context fixture");
+    spec.expected_final_state_root = observed.actual_final_state_root;
+    spec.expected_raw_gas_by_key = observed.actual_raw_gas_by_key.clone();
+    spec.expected_context_features = observed.actual_context_features.clone();
+    spec.expected_features = observed.actual_features.clone();
+    spec.expected_diagnostics = observed.actual_diagnostics.clone();
+    spec.expected_backend_input_sha256 = Some(observed.backend_input_sha256.clone());
+    spec.expected_host_trace_sha256 = Some(observed.host_trace_sha256.clone());
+    spec.row_id = controlled_block_row_id(&spec).unwrap();
+    let fixture = build_controlled_block_fixture(&spec).expect("rebuild frozen context input");
+    let validated = validate_controlled_block_fixture(&fixture).expect("validate context fixture");
+    (spec, validated, shape)
+}
+
+#[test]
+fn context_opcode_program_schema_is_structured_and_rejects_mismatched_profiles() {
+    let program = ControlledProgram::ContextOpcodeLoop {
+        workload_id: "a".repeat(64),
+        repeat_index: 0,
+        opcode: ControlledContextOpcode::Address,
+        lane: ControlledLane::Target,
+        count: 1,
+        profile: ControlledContextProfile::Address {
+            address_profile: ControlledContextAddressProfile::Canonical,
+        },
+    };
+    assert_eq!(
+        serde_json::to_value(&program).unwrap(),
+        json!({
+            "kind": "context_opcode_loop",
+            "workload_id": "a".repeat(64),
+            "repeat_index": 0,
+            "opcode": "address",
+            "lane": "target",
+            "count": 1,
+            "profile": {"kind": "address", "address_profile": "canonical"},
+        })
+    );
+    assert!(
+        serde_json::from_value::<ControlledProgram>(json!({
+            "kind": "context_opcode_loop",
+            "workload_id": "a".repeat(64),
+            "repeat_index": 0,
+            "opcode": "ADDRESS free text",
+            "lane": "target",
+            "count": 1,
+            "profile": {"kind": "address", "address_profile": "canonical"},
+        }))
+        .is_err()
+    );
+
+    let mut mismatched = block_row_spec();
+    mismatched.workload_family = "context_opcode".into();
+    mismatched.program = ControlledProgram::ContextOpcodeLoop {
+        workload_id: "a".repeat(64),
+        repeat_index: 0,
+        opcode: ControlledContextOpcode::Caller,
+        lane: ControlledLane::Target,
+        count: 1,
+        profile: ControlledContextProfile::Address {
+            address_profile: ControlledContextAddressProfile::Canonical,
+        },
+    };
+    mismatched.expected_final_state_root = B256::ZERO;
+    mismatched.expected_raw_gas_by_key.clear();
+    mismatched.expected_context_features.clear();
+    mismatched.expected_features.clear();
+    mismatched.expected_diagnostics.clear();
+    mismatched.expected_backend_input_sha256 = None;
+    mismatched.expected_host_trace_sha256 = None;
+    mismatched.row_id = controlled_block_row_id(&mismatched).unwrap();
+    let error = build_controlled_block_fixture(&mismatched)
+        .expect_err("opcode/profile mismatch must fail before tracing");
+    assert!(error.to_string().contains("profile does not match"));
+
+    mismatched.program = ControlledProgram::ContextOpcodeLoop {
+        workload_id: "a".repeat(64),
+        repeat_index: 0,
+        opcode: ControlledContextOpcode::CalldataSize,
+        lane: ControlledLane::Target,
+        count: 1,
+        profile: ControlledContextProfile::CalldataSize { input_length: 256 },
+    };
+    mismatched.row_id = controlled_block_row_id(&mismatched).unwrap();
+    let error = build_controlled_block_fixture(&mismatched)
+        .expect_err("calldata beyond the frozen profiles must fail before allocation");
+    assert!(error.to_string().contains("0..=255"));
+}
+
+#[test]
+fn context_opcode_pairs_change_only_the_measurement_instruction_and_feature() {
+    let cases = [
+        (
+            ControlledContextOpcode::Address,
+            ControlledContextProfile::Address {
+                address_profile: ControlledContextAddressProfile::Canonical,
+            },
+            "context_fixed:opcode:0x30",
+        ),
+        (
+            ControlledContextOpcode::Caller,
+            ControlledContextProfile::Caller {
+                caller_profile: ControlledContextCallerProfile::Canonical,
+            },
+            "context_fixed:opcode:0x33",
+        ),
+        (
+            ControlledContextOpcode::CallValue,
+            ControlledContextProfile::CallValue {
+                value: 7,
+                value_class: ContextValueClass::Nonzero,
+            },
+            "context_value:opcode:0x34:value_class:nonzero",
+        ),
+        (
+            ControlledContextOpcode::CalldataLoad,
+            ControlledContextProfile::CalldataLoad {
+                input_length: 33,
+                offset: 17,
+                access_class: CalldataLoadAccessClass::Partial,
+            },
+            "calldata_load:opcode:0x35:access_class:partial",
+        ),
+        (
+            ControlledContextOpcode::CalldataSize,
+            ControlledContextProfile::CalldataSize { input_length: 33 },
+            "calldata_size:opcode:0x36:input_length:33",
+        ),
+        (
+            ControlledContextOpcode::Timestamp,
+            ControlledContextProfile::Timestamp {
+                timestamp_delta: 17,
+                value_class: ContextValueClass::Nonzero,
+            },
+            "context_value:opcode:0x42:value_class:nonzero",
+        ),
+    ];
+    for (opcode, profile, expected_feature) in cases {
+        let (_, target, target_shape) =
+            materialize_context_block_row(opcode, ControlledLane::Target, 1, profile.clone());
+        let (_, control, control_shape) =
+            materialize_context_block_row(opcode, ControlledLane::Control, 1, profile);
+        assert_eq!(target_shape.0.len(), 256);
+        assert_eq!(control_shape.0.len(), 256);
+        assert_eq!(target_shape.1, control_shape.1);
+        assert_eq!(target_shape.2, 100_000);
+        assert_eq!(control_shape.2, 100_000);
+        assert_eq!(target.actual_features, control.actual_features);
+        assert_eq!(target.actual_context_features[expected_feature], 1);
+        assert!(control.actual_context_features.is_empty());
+        let byte_differences = target_shape
+            .0
+            .iter()
+            .zip(&control_shape.0)
+            .filter(|(target, control)| target != control)
+            .count();
+        assert_eq!(
+            byte_differences, 1,
+            "target/control setup or cleanup drifted"
+        );
+
+        let without_measurement =
+            |mut ledger: BTreeMap<String, i64>, measured_opcode: u8, measured_raw_gas: i64| {
+                let key = format!("opcode:0x{measured_opcode:02x}");
+                let remaining = ledger[&key] - measured_raw_gas;
+                if remaining == 0 {
+                    ledger.remove(&key);
+                } else {
+                    ledger.insert(key, remaining);
+                }
+                ledger
+            };
+        let measurement_raw_gas = if opcode == ControlledContextOpcode::CalldataLoad {
+            3
+        } else {
+            2
+        };
+        let target_non_measurement = without_measurement(
+            target.actual_raw_gas_by_key.clone(),
+            opcode.byte(),
+            measurement_raw_gas,
+        );
+        let control_non_measurement = without_measurement(
+            control.actual_raw_gas_by_key.clone(),
+            opcode.control_byte(),
+            measurement_raw_gas,
+        );
+        assert_eq!(target_non_measurement, control_non_measurement);
+    }
+}
+
+#[test]
+fn context_opcode_count_bounds_keep_push3_footprint_and_zero_event_semantics() {
+    let profile = ControlledContextProfile::Address {
+        address_profile: ControlledContextAddressProfile::Canonical,
+    };
+    for (count, expected_features) in [(0, 0), (64, 64)] {
+        let (_, observation, shape) = materialize_context_block_row(
+            ControlledContextOpcode::Address,
+            ControlledLane::Target,
+            count,
+            profile.clone(),
+        );
+        assert_eq!(shape.0.len(), 256);
+        assert_eq!(shape.0[0], 0x62);
+        assert_eq!(shape.2, 100_000);
+        assert_eq!(
+            observation
+                .actual_context_features
+                .get("context_fixed:opcode:0x30")
+                .copied()
+                .unwrap_or_default(),
+            expected_features,
+        );
+    }
+}
+
+#[test]
+fn context_profiles_bind_source_builder_environment_and_positive_value_state() {
+    let (canonical_address, _, _) = materialize_context_block_row(
+        ControlledContextOpcode::Address,
+        ControlledLane::Target,
+        1,
+        ControlledContextProfile::Address {
+            address_profile: ControlledContextAddressProfile::Canonical,
+        },
+    );
+    let (alternate_address, alternate_observation, _) = materialize_context_block_row(
+        ControlledContextOpcode::Address,
+        ControlledLane::Target,
+        1,
+        ControlledContextProfile::Address {
+            address_profile: ControlledContextAddressProfile::Alternate,
+        },
+    );
+    assert_ne!(
+        canonical_address.expected_final_state_root,
+        alternate_address.expected_final_state_root
+    );
+    assert_eq!(
+        alternate_observation.actual_context_features["context_fixed:opcode:0x30"],
+        1
+    );
+
+    let canonical_caller = ControlledContextProfile::Caller {
+        caller_profile: ControlledContextCallerProfile::Canonical,
+    };
+    let alternate_caller = ControlledContextProfile::Caller {
+        caller_profile: ControlledContextCallerProfile::Alternate,
+    };
+    let caller_signer = |profile| {
+        let mut spec = ControlledBlockRowSpec {
+            row_id: String::new(),
+            workload_family: "context_opcode".into(),
+            split: ControlledBlockSplit::Holdout,
+            block_count: 1,
+            transaction_count: 1,
+            program: ControlledProgram::ContextOpcodeLoop {
+                workload_id: "b".repeat(64),
+                repeat_index: 0,
+                opcode: ControlledContextOpcode::Caller,
+                lane: ControlledLane::Target,
+                count: 1,
+                profile,
+            },
+            expected_final_state_root: B256::ZERO,
+            expected_raw_gas_by_key: BTreeMap::new(),
+            expected_context_features: BTreeMap::new(),
+            expected_features: BTreeMap::new(),
+            expected_diagnostics: BTreeMap::new(),
+            expected_backend_input_sha256: None,
+            expected_host_trace_sha256: None,
+        };
+        spec.row_id = controlled_block_row_id(&spec).unwrap();
+        let fixture = build_controlled_block_fixture(&spec).unwrap();
+        fixture.guest_input.witnesses[0].block.body.transactions[1]
+            .recover_signer()
+            .unwrap()
+    };
+    assert_ne!(
+        caller_signer(canonical_caller),
+        caller_signer(alternate_caller)
+    );
+
+    let (_, positive, _) = materialize_context_block_row(
+        ControlledContextOpcode::CallValue,
+        ControlledLane::Target,
+        1,
+        ControlledContextProfile::CallValue {
+            value: 4_294_967_297,
+            value_class: ContextValueClass::Nonzero,
+        },
+    );
+    assert_eq!(
+        positive.actual_context_features["context_value:opcode:0x34:value_class:nonzero"],
+        1
+    );
+
+    let (_, timestamp, _) = materialize_context_block_row(
+        ControlledContextOpcode::Timestamp,
+        ControlledLane::Target,
+        1,
+        ControlledContextProfile::Timestamp {
+            timestamp_delta: 86_400,
+            value_class: ContextValueClass::Nonzero,
+        },
+    );
+    assert_eq!(
+        timestamp.minimum_block_timestamp,
+        timestamp.unzen_activation_timestamp + 86_400
+    );
+}
+
+#[test]
+fn context_identity_freezes_the_same_trace_that_controlled_block_validates() {
+    let mut source = ControlledBlockRowSpec {
+        row_id: String::new(),
+        workload_family: "context_opcode".into(),
+        split: ControlledBlockSplit::Fit,
+        block_count: 1,
+        transaction_count: 1,
+        program: ControlledProgram::ContextOpcodeLoop {
+            workload_id: "c".repeat(64),
+            repeat_index: 2,
+            opcode: ControlledContextOpcode::CalldataSize,
+            lane: ControlledLane::Target,
+            count: 2,
+            profile: ControlledContextProfile::CalldataSize { input_length: 31 },
+        },
+        expected_final_state_root: B256::ZERO,
+        expected_raw_gas_by_key: BTreeMap::new(),
+        expected_context_features: BTreeMap::new(),
+        expected_features: BTreeMap::new(),
+        expected_diagnostics: BTreeMap::new(),
+        expected_backend_input_sha256: None,
+        expected_host_trace_sha256: None,
+    };
+    source.row_id = controlled_block_row_id(&source).unwrap();
+    assert_eq!(
+        source.row_id, "01f389f8270f7b9c4ba6de32edf5cc09f2c1b803bef0bb4dc62c68b1c8568dca",
+        "Rust context row identity must equal Python canonical_json identity",
+    );
+    let bundle = freeze_controlled_context_block_fixture(&source)
+        .expect("identity path freezes the host trace without SP1");
+    assert_eq!(bundle.spec.row_id, source.row_id);
+    assert_eq!(
+        bundle.spec.expected_backend_input_sha256.as_deref(),
+        Some(bundle.observation.backend_input_sha256.as_str())
+    );
+    assert_eq!(
+        bundle.spec.expected_host_trace_sha256.as_deref(),
+        Some(bundle.observation.host_trace_sha256.as_str())
+    );
+    assert_eq!(
+        bundle.spec.expected_context_features,
+        bundle.observation.actual_context_features
+    );
+    let fixture = build_controlled_block_fixture(&bundle.spec).unwrap();
+    let replay = validate_controlled_block_fixture(&fixture)
+        .expect("subsequent controlled-block preflight replays identity evidence");
+    assert_eq!(replay, bundle.observation);
+
+    let mut stale = bundle.spec;
+    stale
+        .expected_context_features
+        .insert("calldata_size:opcode:0x36:input_length:31".into(), 1);
+    let fixture = build_controlled_block_fixture(&stale).unwrap();
+    let error = validate_controlled_block_fixture(&fixture)
+        .expect_err("any declared/observed ledger mismatch must stop before SP1");
+    assert!(error.to_string().contains("context-feature mismatch"));
 }
 
 #[test]

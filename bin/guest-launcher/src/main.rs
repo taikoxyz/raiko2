@@ -145,6 +145,8 @@ enum Stage {
     ControlledOverhead,
     #[value(name = "controlled-block")]
     ControlledBlock,
+    #[value(name = "controlled-block-identity")]
+    ControlledBlockIdentity,
     #[value(name = "controlled-state-holdout")]
     ControlledStateHoldout,
     #[value(name = "controlled-state-holdout-trace")]
@@ -426,6 +428,7 @@ impl Stage {
             Stage::PrecompileLab => "precompile-lab",
             Stage::ControlledOverhead => "controlled-overhead",
             Stage::ControlledBlock => "controlled-block",
+            Stage::ControlledBlockIdentity => "controlled-block-identity",
             Stage::ControlledStateHoldout => "controlled-state-holdout",
             Stage::ControlledStateHoldoutTrace => "controlled-state-holdout-trace",
         }
@@ -616,6 +619,37 @@ impl Args {
             || self.risc0_execution_po2 != 20
         {
             bail!("context-opcode-identity rejects guest, prover, and alternate-input flags");
+        }
+        Ok(())
+    }
+
+    fn validate_controlled_block_identity(&self) -> Result<()> {
+        if self.stage != Stage::ControlledBlockIdentity {
+            bail!("controlled block identity validation requires its dedicated stage");
+        }
+        if self.proof_type != ProofType::Native
+            || self.mode != Mode::Execute
+            || self.sp1_execution_engine != Sp1ExecutionEngine::Standard
+        {
+            bail!("controlled-block-identity supports only native execute semantics");
+        }
+        if self.input.is_none() || self.json_out.is_none() {
+            bail!("controlled-block-identity requires --input and --json-out");
+        }
+        if self.input_list.is_some()
+            || self.elf.is_some()
+            || !self.aggregate.is_empty()
+            || self.output.is_some()
+            || self.jsonl_out.is_some()
+            || self.proof_mode.is_some()
+            || self.sp1_prover.is_some()
+            || self.sp1_network_mode != CliSp1NetworkMode::Reserved
+            || self.sp1_fulfillment_strategy != CliSp1FulfillmentStrategy::Reserved
+            || self.sp1_cycle_limit != 1_000_000_000_000
+            || self.sp1_timeout_secs != 3_600
+            || self.risc0_execution_po2 != 20
+        {
+            bail!("controlled-block-identity rejects guest, prover, and alternate-input flags");
         }
         Ok(())
     }
@@ -831,6 +865,7 @@ fn opcode_lab_memory_labels(stage: Stage) -> OpcodeLabMemoryLabels {
         | Stage::PrecompileLab
         | Stage::ControlledOverhead
         | Stage::ControlledBlock
+        | Stage::ControlledBlockIdentity
         | Stage::ControlledStateHoldout
         | Stage::ControlledStateHoldoutTrace => {
             unreachable!("not an opcode lab stage")
@@ -955,6 +990,9 @@ async fn main() -> Result<()> {
     if args.stage == Stage::ControlledBlock {
         return run_controlled_block(args).await;
     }
+    if args.stage == Stage::ControlledBlockIdentity {
+        return run_controlled_block_identity(args);
+    }
     if args.stage == Stage::ControlledStateHoldoutTrace {
         return run_controlled_state_holdout_trace(args);
     }
@@ -995,6 +1033,24 @@ fn run_context_opcode_identity(args: Args) -> Result<()> {
     let input = read_context_opcode_lab_input(input_path)?;
     let bundle = controlled_workload::controlled_context_opcode_identity_bundle(&input)?;
     let mut contents = serde_json::to_vec(&bundle).context("serialize context opcode identity")?;
+    contents.push(b'\n');
+    fs::write(output_path, contents).with_context(|| format!("write {}", output_path.display()))?;
+    Ok(())
+}
+
+fn run_controlled_block_identity(args: Args) -> Result<()> {
+    args.validate_controlled_block_identity()?;
+    let input_path = args.input.as_ref().context("missing --input")?;
+    let output_path = args.json_out.as_ref().context("missing --json-out")?;
+    let spec: controlled_workload::ControlledBlockRowSpec = serde_json::from_slice(
+        &fs::read(input_path).with_context(|| format!("read {}", input_path.display()))?,
+    )
+    .context("parse controlled-block-identity input")?;
+    let bundle = controlled_workload::freeze_controlled_context_block_fixture(&spec)?;
+    let canonical =
+        serde_json::to_value(&bundle).context("canonicalize controlled block identity bundle")?;
+    let mut contents =
+        serde_json::to_vec(&canonical).context("serialize controlled block identity bundle")?;
     contents.push(b'\n');
     fs::write(output_path, contents).with_context(|| format!("write {}", output_path.display()))?;
     Ok(())
@@ -2935,6 +2991,45 @@ mod tests {
 
         assert_eq!(args.stage, Stage::ControlledBlock);
         assert!(args.elf.is_none(), "production proposal ELF is built in");
+    }
+
+    #[test]
+    fn controlled_block_identity_is_native_trace_only() {
+        let args = Args::try_parse_from([
+            "guest-launcher",
+            "--stage",
+            "controlled-block-identity",
+            "--proof-type",
+            "native",
+            "--mode",
+            "execute",
+            "--input",
+            "context-row.json",
+            "--json-out",
+            "context-row-identity.json",
+        ])
+        .expect("parse controlled block identity args");
+        assert_eq!(args.stage, Stage::ControlledBlockIdentity);
+        args.validate_controlled_block_identity()
+            .expect("native identity tracing has no proving side effect");
+
+        for proof_type in ["sp1", "risc0"] {
+            let invalid = Args::try_parse_from([
+                "guest-launcher",
+                "--stage",
+                "controlled-block-identity",
+                "--proof-type",
+                proof_type,
+                "--mode",
+                "execute",
+                "--input",
+                "context-row.json",
+                "--json-out",
+                "context-row-identity.json",
+            ])
+            .unwrap();
+            assert!(invalid.validate_controlled_block_identity().is_err());
+        }
     }
 
     #[test]

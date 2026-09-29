@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
@@ -478,6 +479,171 @@ class ProductionContextIdentityTests(unittest.TestCase):
             grouped.setdefault((row.scenario, row.count), set()).add(row.workload_id)
         self.assertTrue(grouped)
         self.assertTrue(all(len(ids) == 1 for ids in grouped.values()))
+
+    def test_fixture_requests_bind_every_row_to_the_structured_rust_builder(self):
+        manifest = production.load_production_context_manifest(MANIFEST)
+        fixtures = production.production_context_fixture_requests(manifest)
+        self.assertEqual(len(fixtures), 792)
+        self.assertEqual(
+            [fixture.row_id for fixture in fixtures],
+            [row.row_id for row in production.production_context_row_specs(manifest)],
+        )
+        self.assertEqual(
+            production.production_context_fixture_requests(manifest), fixtures
+        )
+        self.assertEqual({fixture.builder_input["program"]["lane"] for fixture in fixtures}, {"target", "control"})
+        self.assertEqual({fixture.builder_input["program"]["count"] for fixture in fixtures}, {0, 1, 2, 4, 8, 16, 32, 64})
+        for fixture in fixtures:
+            builder_input = fixture.builder_input
+            self.assertEqual(builder_input["row_id"], fixture.row_id)
+            self.assertEqual(builder_input["workload_family"], "context_opcode")
+            self.assertEqual(builder_input["block_count"], 1)
+            self.assertEqual(builder_input["transaction_count"], 1)
+            self.assertEqual(builder_input["expected_final_state_root"], "0x" + "00" * 32)
+            self.assertEqual(builder_input["expected_raw_gas_by_key"], {})
+            self.assertEqual(builder_input["expected_context_features"], {})
+            self.assertEqual(builder_input["expected_features"], {})
+            self.assertEqual(builder_input["expected_diagnostics"], {})
+            program = builder_input["program"]
+            self.assertEqual(program["kind"], "context_opcode_loop")
+            self.assertEqual(program["workload_id"], fixture.workload_id)
+            self.assertEqual(program["repeat_index"], fixture.repeat_index)
+            self.assertNotIn("family", program)
+            self.assertNotIn("scenario", program)
+
+        by_scenario = {fixture.scenario: fixture for fixture in fixtures if fixture.lane == "target" and fixture.count in {0, 1} and fixture.repeat_index == 0}
+        self.assertEqual(by_scenario["address_alternate"].builder_input["program"]["profile"], {"kind": "address", "address_profile": "alternate"})
+        self.assertEqual(by_scenario["caller_alternate"].builder_input["program"]["profile"], {"kind": "caller", "caller_profile": "alternate"})
+        self.assertEqual(by_scenario["callvalue_nonzero_4294967297"].builder_input["program"]["profile"], {"kind": "callvalue", "value": 4_294_967_297, "value_class": "nonzero"})
+        self.assertEqual(by_scenario["calldataload_partial_31_offset_30"].builder_input["program"]["profile"], {"kind": "calldataload", "input_length": 31, "offset": 30, "access_class": "partial"})
+        self.assertEqual(by_scenario["calldatasize_255"].builder_input["program"]["profile"], {"kind": "calldatasize", "input_length": 255})
+        self.assertEqual(by_scenario["timestamp_post_unzen_delta_86400"].builder_input["program"]["profile"], {"kind": "timestamp", "timestamp_delta": 86_400, "value_class": "nonzero"})
+
+    @staticmethod
+    def _identity_bundle(fixture):
+        spec = copy.deepcopy(fixture.builder_input)
+        spec.update(
+            {
+                "expected_final_state_root": "0x" + "12" * 32,
+                "expected_raw_gas_by_key": {"opcode:0x30": fixture.count * 2},
+                "expected_context_features": (
+                    {"context_fixed:opcode:0x30": fixture.count}
+                    if fixture.lane == "target" and fixture.count
+                    else {}
+                ),
+                "expected_features": {"proposal_startup": 1, "block_base": 1, "tx_base": 1, "native_value_transfer": 0},
+                "expected_diagnostics": {"bytecode_length": 256},
+                "expected_backend_input_sha256": "a" * 64,
+                "expected_host_trace_sha256": "b" * 64,
+            }
+        )
+        observation = {
+            "row_id": fixture.row_id,
+            "backend_input_sha256": "a" * 64,
+            "host_trace_sha256": "b" * 64,
+            "actual_final_state_root": "0x" + "12" * 32,
+            "actual_raw_gas_by_key": dict(spec["expected_raw_gas_by_key"]),
+            "actual_context_features": dict(spec["expected_context_features"]),
+            "actual_features": dict(spec["expected_features"]),
+            "actual_diagnostics": dict(spec["expected_diagnostics"]),
+        }
+        return {
+            "schema_version": 1,
+            "fixture_spec_sha256": production.sha256_bytes(production.canonical_json(spec)),
+            "spec": spec,
+            "observation": observation,
+        }
+
+    def test_fixture_identity_requires_exact_observed_ledger_equality(self):
+        manifest = production.load_production_context_manifest(MANIFEST)
+        fixture = next(
+            row
+            for row in production.production_context_fixture_requests(manifest)
+            if row.scenario == "address_canonical"
+            and row.count == 2
+            and row.lane == "target"
+            and row.repeat_index == 0
+        )
+        bundle = self._identity_bundle(fixture)
+        validated = production.validate_production_context_fixture_identity(fixture, bundle)
+        self.assertEqual(validated["fixture_spec_sha256"], bundle["fixture_spec_sha256"])
+        for field in (
+            "expected_raw_gas_by_key",
+            "expected_context_features",
+            "expected_features",
+            "expected_diagnostics",
+            "expected_final_state_root",
+            "expected_backend_input_sha256",
+            "expected_host_trace_sha256",
+        ):
+            drifted = copy.deepcopy(bundle)
+            if isinstance(drifted["spec"][field], dict):
+                drifted["spec"][field]["drift"] = 1
+            else:
+                drifted["spec"][field] = "c" * 64
+            drifted["fixture_spec_sha256"] = production.sha256_bytes(
+                production.canonical_json(drifted["spec"])
+            )
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, "mismatch"):
+                production.validate_production_context_fixture_identity(fixture, drifted)
+
+    def test_fixture_identity_invokes_native_rust_trace_without_sp1(self):
+        manifest = production.load_production_context_manifest(MANIFEST)
+        fixture = production.production_context_fixture_requests(manifest)[0]
+        bundle = self._identity_bundle(fixture)
+        with tempfile.TemporaryDirectory() as directory:
+            launcher = pathlib.Path(directory) / "guest-launcher"
+            launcher.write_bytes(b"test launcher")
+
+            def run(command, **kwargs):
+                self.assertEqual(
+                    command[1:7],
+                    [
+                        "--stage",
+                        "controlled-block-identity",
+                        "--proof-type",
+                        "native",
+                        "--mode",
+                        "execute",
+                    ],
+                )
+                self.assertNotIn("--sp1-prover", command)
+                self.assertNotIn("--elf", command)
+                output = pathlib.Path(command[command.index("--json-out") + 1])
+                output.write_bytes(production.canonical_json(bundle) + b"\n")
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            with mock.patch.object(production.subprocess, "run", side_effect=run) as invoked:
+                observed = production.run_production_context_fixture_identity(
+                    fixture, launcher=launcher, repo_root=ROOT
+                )
+            self.assertEqual(invoked.call_count, 1)
+            self.assertEqual(observed["fixture_spec_sha256"], bundle["fixture_spec_sha256"])
+
+    def test_standard_estimator_parity_is_identity_only_not_a_model_sample(self):
+        common = {
+            "gas": 159_030_265,
+            "total_instruction_count": 136_594_192,
+            "total_syscall_count": 229_747,
+            "public_values": "0x1234",
+            "guest_input_sha256": "0x" + "a" * 64,
+            "exit_code": 0,
+            "controlled_block": {"observation": {"host_trace_sha256": "b" * 64}},
+        }
+        standard = {**common, "sp1_execution_engine": "standard"}
+        estimator = {**common, "sp1_execution_engine": "gas-estimator"}
+        identity = production.production_context_parity_identity(
+            row_id="c" * 64, standard=standard, gas_estimator=estimator
+        )
+        self.assertEqual(identity["kind"], "production_context_parity_v1")
+        self.assertFalse(identity["model_sample"])
+        self.assertEqual(len(identity["identity_sha256"]), 64)
+        drifted = copy.deepcopy(estimator)
+        drifted["gas"] += 1
+        with self.assertRaisesRegex(ValueError, "parity mismatch"):
+            production.production_context_parity_identity(
+                row_id="c" * 64, standard=standard, gas_estimator=drifted
+            )
 
 
 class ProductionContextCliTests(unittest.TestCase):

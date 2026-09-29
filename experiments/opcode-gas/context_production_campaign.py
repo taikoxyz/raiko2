@@ -11,8 +11,10 @@ import stat
 import subprocess
 import tempfile
 from dataclasses import dataclass
+from decimal import Context, Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
+from fractions import Fraction
 from types import MappingProxyType
-from typing import Any, Mapping
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from opcode_gas import canonical_json, sha256_bytes
 
@@ -32,6 +34,8 @@ KEYS = (
 )
 MODEL_SELECTION_ORDER = ("calldatasize_length", "calldatasize_boundary")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
+_GIT_REVISION_RE = re.compile(r"[0-9a-f]{40}\Z")
+_DECIMAL_CONTEXT = Context(prec=80, rounding=ROUND_HALF_EVEN)
 
 SOURCES = {
     "operation_coverage_v5": {
@@ -1204,3 +1208,1375 @@ def production_context_parity_identity(
     }
     identity["identity_sha256"] = sha256_bytes(canonical_json(identity))
     return identity
+
+
+# Production-native fitting and bounded campaign execution.  These helpers are
+# intentionally independent of the discovery-ELF model: only the frozen V5
+# production registry contributes to a controlled row subtotal.
+
+
+def _decimal(value: Any, *, label: str, nonnegative: bool = False) -> Decimal:
+    if isinstance(value, bool) or isinstance(value, float):
+        raise ValueError(f"{label} must use finite exact decimal arithmetic")
+    if isinstance(value, Decimal):
+        result = value
+    elif isinstance(value, int):
+        result = Decimal(value)
+    elif isinstance(value, str):
+        try:
+            result = Decimal(value)
+        except InvalidOperation as error:
+            raise ValueError(f"{label} must be a finite Decimal") from error
+    else:
+        raise ValueError(f"{label} must be an integer or canonical decimal string")
+    if not result.is_finite():
+        raise ValueError(f"{label} must be finite")
+    if nonnegative and result < 0:
+        raise ValueError(f"{label} must be nonnegative")
+    return result
+
+
+def _decimal_text(value: Decimal) -> str:
+    if not value.is_finite():
+        raise ValueError("cannot serialize a nonfinite Decimal")
+    if value == 0:
+        return "0"
+    text = format(value, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text
+
+
+def _fraction(value: Any, *, label: str) -> Fraction:
+    decimal = _decimal(value, label=label)
+    numerator, denominator = decimal.as_integer_ratio()
+    return Fraction(numerator, denominator)
+
+
+def _exact_rank(matrix: Sequence[Sequence[Fraction]]) -> int:
+    if not matrix:
+        return 0
+    width = len(matrix[0])
+    if width == 0 or any(len(row) != width for row in matrix):
+        raise ValueError("exact matrix dimensions differ")
+    reduced = [list(row) for row in matrix]
+    pivot_row = 0
+    for column in range(width):
+        pivot = next(
+            (
+                row
+                for row in range(pivot_row, len(reduced))
+                if reduced[row][column] != 0
+            ),
+            None,
+        )
+        if pivot is None:
+            continue
+        reduced[pivot_row], reduced[pivot] = reduced[pivot], reduced[pivot_row]
+        divisor = reduced[pivot_row][column]
+        reduced[pivot_row] = [value / divisor for value in reduced[pivot_row]]
+        for row in range(len(reduced)):
+            if row == pivot_row:
+                continue
+            factor = reduced[row][column]
+            if factor:
+                reduced[row] = [
+                    value - factor * pivot_value
+                    for value, pivot_value in zip(reduced[row], reduced[pivot_row])
+                ]
+        pivot_row += 1
+        if pivot_row == len(reduced):
+            break
+    return pivot_row
+
+
+def _solve_decimal_system(
+    matrix: Sequence[Sequence[Decimal]], values: Sequence[Decimal]
+) -> list[Decimal]:
+    width = len(matrix)
+    if width == 0 or len(values) != width or any(len(row) != width for row in matrix):
+        raise ValueError("decimal system dimensions differ")
+    augmented = [list(row) + [value] for row, value in zip(matrix, values)]
+    for column in range(width):
+        pivot = next(
+            (row for row in range(column, width) if augmented[row][column] != 0),
+            None,
+        )
+        if pivot is None:
+            raise ValueError("exact model matrix is rank deficient")
+        augmented[column], augmented[pivot] = augmented[pivot], augmented[column]
+        divisor = augmented[column][column]
+        augmented[column] = [value / divisor for value in augmented[column]]
+        for row in range(width):
+            if row == column:
+                continue
+            factor = augmented[row][column]
+            if factor:
+                augmented[row] = [
+                    value - factor * pivot_value
+                    for value, pivot_value in zip(
+                        augmented[row], augmented[column]
+                    )
+                ]
+    return [row[-1] for row in augmented]
+
+
+def _solve_fraction_system(
+    matrix: Sequence[Sequence[Fraction]], values: Sequence[Fraction]
+) -> list[Fraction]:
+    width = len(matrix)
+    if width == 0 or len(values) != width or any(len(row) != width for row in matrix):
+        raise ValueError("exact system dimensions differ")
+    augmented = [list(row) + [value] for row, value in zip(matrix, values)]
+    for column in range(width):
+        pivot = next(
+            (row for row in range(column, width) if augmented[row][column] != 0),
+            None,
+        )
+        if pivot is None:
+            raise ValueError("exact model matrix is rank deficient")
+        augmented[column], augmented[pivot] = augmented[pivot], augmented[column]
+        divisor = augmented[column][column]
+        augmented[column] = [value / divisor for value in augmented[column]]
+        for row in range(width):
+            if row == column:
+                continue
+            factor = augmented[row][column]
+            if factor:
+                augmented[row] = [
+                    value - factor * pivot_value
+                    for value, pivot_value in zip(
+                        augmented[row], augmented[column]
+                    )
+                ]
+    return [row[-1] for row in augmented]
+
+
+def _inverse_decimal_matrix(matrix: Sequence[Sequence[Decimal]]) -> list[list[Decimal]]:
+    width = len(matrix)
+    columns = []
+    for column in range(width):
+        unit = [Decimal(int(row == column)) for row in range(width)]
+        columns.append(_solve_decimal_system(matrix, unit))
+    return [[columns[column][row] for column in range(width)] for row in range(width)]
+
+
+def fit_exact_decimal_model(
+    *,
+    matrix: Sequence[Sequence[Any]],
+    observed: Sequence[Any],
+    terms: Sequence[str],
+) -> dict[str, Any]:
+    """Fit a full-rank through-origin model with exact inputs and Decimal algebra."""
+    if not matrix or len(matrix) != len(observed) or not terms:
+        raise ValueError("exact model dimensions differ")
+    if len(set(terms)) != len(terms):
+        raise ValueError("exact model terms must be unique")
+    width = len(terms)
+    if any(len(row) != width for row in matrix):
+        raise ValueError("exact model dimensions differ")
+    exact_matrix = [
+        [_fraction(value, label="design matrix value") for value in row]
+        for row in matrix
+    ]
+    rank = _exact_rank(exact_matrix)
+    if rank != width:
+        raise ValueError("exact model matrix is rank deficient")
+    targets = [_decimal(value, label="observed model value") for value in observed]
+    exact_targets = [
+        _fraction(value, label="observed model value") for value in observed
+    ]
+    decimal_matrix = [
+        [_decimal(value, label="design matrix value") for value in row]
+        for row in matrix
+    ]
+    with localcontext(_DECIMAL_CONTEXT):
+        exact_gram = [
+            [
+                sum(
+                    (row[left] * row[right] for row in decimal_matrix),
+                    Decimal(0),
+                )
+                for right in range(width)
+            ]
+            for left in range(width)
+        ]
+        exact_gram_fraction = [
+            [
+                sum(
+                    (row[left] * row[right] for row in exact_matrix),
+                    Fraction(0),
+                )
+                for right in range(width)
+            ]
+            for left in range(width)
+        ]
+        exact_projection = [
+            sum(
+                (
+                    row[column] * target
+                    for row, target in zip(exact_matrix, exact_targets)
+                ),
+                Fraction(0),
+            )
+            for column in range(width)
+        ]
+        exact_coefficients = _solve_fraction_system(
+            exact_gram_fraction, exact_projection
+        )
+        coefficients = [
+            Decimal(value.numerator) / Decimal(value.denominator)
+            for value in exact_coefficients
+        ]
+        if any(value < 0 for value in coefficients):
+            raise ValueError("exact model coefficients must be nonnegative")
+        predictions = [
+            sum(
+                (feature * coefficient for feature, coefficient in zip(row, coefficients)),
+                Decimal(0),
+            )
+            for row in decimal_matrix
+        ]
+        residuals = [target - predicted for target, predicted in zip(targets, predictions)]
+        sse = sum((value * value for value in residuals), Decimal(0))
+        total_signal = sum((value * value for value in targets), Decimal(0))
+        r2 = Decimal(1) if sse == 0 else (
+            Decimal(1) - sse / total_signal if total_signal else Decimal(0)
+        )
+        degrees_of_freedom = len(targets) - width
+        if degrees_of_freedom > 0:
+            variance = sse / Decimal(degrees_of_freedom)
+            inverse = _inverse_decimal_matrix(exact_gram)
+            stderr = [
+                (variance * inverse[index][index]).sqrt()
+                for index in range(width)
+            ]
+        else:
+            stderr = [Decimal(0) if sse == 0 else Decimal("Infinity")] * width
+        relative_stderr = [
+            (error / coefficient if coefficient else (Decimal(0) if error == 0 else Decimal("Infinity")))
+            for error, coefficient in zip(stderr, coefficients)
+        ]
+    return {
+        "terms": list(terms),
+        "design_matrix": [
+            [_decimal_text(value) for value in row] for row in decimal_matrix
+        ],
+        "observed": [_decimal_text(value) for value in targets],
+        "rank": rank,
+        "coefficients": {
+            term: _decimal_text(value) for term, value in zip(terms, coefficients)
+        },
+        "predicted": [_decimal_text(value) for value in predictions],
+        "residuals": [_decimal_text(value) for value in residuals],
+        "r2": _decimal_text(r2),
+        "coefficient_stderr": {
+            term: _decimal_text(value) for term, value in zip(terms, stderr)
+        },
+        "relative_coefficient_stderr": {
+            term: _decimal_text(value)
+            for term, value in zip(terms, relative_stderr)
+        },
+    }
+
+
+def production_context_design_row(
+    candidate: ProductionContextModelCandidate,
+    scenario: ProductionContextScenario,
+) -> tuple[Decimal, ...]:
+    context = scenario.context
+    if candidate.name in {"address_constant", "caller_constant"}:
+        return (Decimal(1),)
+    if candidate.name == "callvalue_classes":
+        value_class = context.get("value_class")
+        if value_class not in {"zero", "nonzero"}:
+            raise ValueError("CALLVALUE scenario has an unknown value class")
+        return (Decimal(value_class == "zero"), Decimal(value_class == "nonzero"))
+    if candidate.name == "calldataload_access_classes":
+        access_class = context.get("access_class")
+        if access_class not in {"zero", "partial", "full"}:
+            raise ValueError("CALLDATALOAD scenario has an unknown access class")
+        return tuple(
+            Decimal(access_class == expected)
+            for expected in ("zero", "partial", "full")
+        )
+    if candidate.name == "calldatasize_length":
+        length = context.get("input_length")
+        if type(length) is not int or length < 0:
+            raise ValueError("CALLDATASIZE input length must be nonnegative")
+        return (Decimal(1), Decimal(length))
+    if candidate.name == "calldatasize_boundary":
+        length = context.get("input_length")
+        if type(length) is not int or length < 0:
+            raise ValueError("CALLDATASIZE input length must be nonnegative")
+        return (
+            Decimal(1),
+            Decimal((length + 31) // 32),
+            Decimal(length % 32 != 0),
+        )
+    if candidate.name == "timestamp_nonzero":
+        if context.get("value_class") != "nonzero":
+            raise ValueError("TIMESTAMP fit admits only the nonzero class")
+        return (Decimal(1),)
+    raise ValueError(f"unknown production context candidate: {candidate.name}")
+
+
+@dataclass(frozen=True)
+class ProductionSubtotalModel:
+    fixed_costs: Mapping[str, Decimal]
+    opcode_prices: Mapping[str, Decimal]
+
+    @classmethod
+    def from_mappings(
+        cls,
+        *,
+        fixed_costs: Mapping[str, Any],
+        opcode_prices: Mapping[str, Any],
+    ) -> "ProductionSubtotalModel":
+        expected_fixed = {
+            "proposal_startup",
+            "block_base",
+            "tx_base",
+            "native_value_transfer",
+        }
+        if set(fixed_costs) != expected_fixed:
+            raise ValueError("V5 subtotal fixed-cost inventory differs")
+        if not opcode_prices:
+            raise ValueError("V5 subtotal opcode price inventory is empty")
+        parsed_fixed = {
+            key: _decimal(value, label=f"fixed cost {key}", nonnegative=True)
+            for key, value in fixed_costs.items()
+        }
+        parsed_prices = {
+            key: _decimal(value, label=f"opcode price {key}", nonnegative=True)
+            for key, value in opcode_prices.items()
+        }
+        if any(not isinstance(key, str) or not key.startswith("opcode:0x") for key in parsed_prices):
+            raise ValueError("V5 subtotal opcode price key differs")
+        return cls(MappingProxyType(parsed_fixed), MappingProxyType(parsed_prices))
+
+
+def evaluate_v5_subtotal(
+    row: Mapping[str, Any],
+    model: ProductionSubtotalModel,
+    *,
+    excluded_target_key: str | None,
+) -> Decimal:
+    features = row.get("actual_features")
+    raw_gas = row.get("actual_raw_gas_by_key")
+    if not isinstance(features, Mapping) or set(features) != set(model.fixed_costs):
+        raise ValueError("V5 subtotal higher-layer feature inventory differs")
+    if not isinstance(raw_gas, Mapping):
+        raise ValueError("V5 subtotal raw-gas ledger differs")
+    subtotal_keys = row.get("subtotal_keys")
+    if subtotal_keys is not None:
+        if excluded_target_key is not None and excluded_target_key in subtotal_keys:
+            raise ValueError("target context work was accidentally included in K")
+        raise ValueError("V5 subtotal keys must be derived, not supplied")
+    with localcontext(_DECIMAL_CONTEXT):
+        subtotal = Decimal(0)
+        for key, price in model.fixed_costs.items():
+            count = features[key]
+            if type(count) is not int or count < 0:
+                raise ValueError("V5 subtotal feature counts must be nonnegative integers")
+            subtotal += Decimal(count) * price
+        for key, units in raw_gas.items():
+            if type(units) is not int or units < 0:
+                raise ValueError("V5 subtotal raw gas must be nonnegative integers")
+            if key == excluded_target_key:
+                continue
+            price = model.opcode_prices.get(key)
+            # A zero raw-gas subtotal term is exactly zero independently of a
+            # coefficient.  This admits terminal STOP while still rejecting
+            # any positive unpriced non-target work.
+            if price is None and units == 0:
+                continue
+            if price is None:
+                raise ValueError(f"unpriced non-target work in V5 subtotal: {key}")
+            subtotal += Decimal(units) * price
+    return subtotal
+
+
+def _reject_forbidden_fit_fields(value: Any, path: str = "fit input") -> None:
+    if isinstance(value, float):
+        raise ValueError(f"forbidden binary float at {path}")
+    if isinstance(value, Mapping):
+        for key, child in value.items():
+            normalized = str(key).lower().replace("-", "_")
+            if "body_scale" in normalized or "context_elf" in normalized:
+                raise ValueError(f"forbidden production fit field: {path}.{key}")
+            _reject_forbidden_fit_fields(child, f"{path}.{key}")
+    elif isinstance(value, (list, tuple)):
+        for index, child in enumerate(value):
+            _reject_forbidden_fit_fields(child, f"{path}[{index}]")
+
+
+def exact_ape(predicted: Decimal, observed: Decimal) -> Decimal:
+    predicted = _decimal(predicted, label="predicted increment")
+    observed = _decimal(observed, label="observed increment")
+    if observed == 0:
+        raise ValueError("APE is undefined for zero observed signal")
+    with localcontext(_DECIMAL_CONTEXT):
+        return abs(predicted - observed) / abs(observed)
+
+
+def _normalized_fit_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    required = {
+        "row_id",
+        "scenario",
+        "split",
+        "count",
+        "lane",
+        "repeat_index",
+        "prover_gas",
+        "public_output",
+        "backend_input_sha256",
+        "host_trace_sha256",
+        "actual_raw_gas_by_key",
+        "actual_context_features",
+        "actual_features",
+        "actual_diagnostics",
+    }
+    if not isinstance(row, Mapping) or not required.issubset(row):
+        raise ValueError("production fit row fields differ")
+    if _SHA256_RE.fullmatch(row["row_id"]) is None:
+        raise ValueError("production fit row ID differs")
+    if row["lane"] not in {"target", "control"}:
+        raise ValueError("production fit lane differs")
+    if type(row["count"]) is not int or row["count"] < 0:
+        raise ValueError("production fit count differs")
+    if type(row["repeat_index"]) is not int or row["repeat_index"] not in range(REPEATS):
+        raise ValueError("production fit repeat index differs")
+    for field in ("backend_input_sha256", "host_trace_sha256"):
+        if _SHA256_RE.fullmatch(row[field]) is None:
+            raise ValueError(f"production fit {field} differs")
+    normalized = dict(row)
+    normalized["prover_gas"] = _decimal(
+        row["prover_gas"], label="row prover gas", nonnegative=True
+    )
+    for field in (
+        "actual_raw_gas_by_key",
+        "actual_context_features",
+        "actual_features",
+        "actual_diagnostics",
+    ):
+        value = row[field]
+        if not isinstance(value, Mapping) or any(
+            not isinstance(key, str)
+            or type(count) is not int
+            or count < 0
+            for key, count in value.items()
+        ):
+            raise ValueError(f"production fit {field} differs")
+        normalized[field] = dict(value)
+    return normalized
+
+
+def _candidate_gate_reasons(
+    fit: Mapping[str, Any], observed: Sequence[Decimal]
+) -> list[str]:
+    reasons = []
+    if _decimal(fit["r2"], label="fit R2") < Decimal(QUALITY_GATES["r2_min"]):
+        reasons.append("fit_r2")
+    relative = [
+        _decimal(value, label="relative coefficient stderr")
+        for value in fit["relative_coefficient_stderr"].values()
+    ]
+    if any(
+        not value.is_finite()
+        or value > Decimal(QUALITY_GATES["relative_coefficient_stderr_max"])
+        for value in relative
+    ):
+        reasons.append("coefficient_stderr")
+    maximum_signal = max((abs(value) for value in observed), default=Decimal(0))
+    maximum_residual = max(
+        (
+            abs(_decimal(value, label="fit residual"))
+            for value in fit["residuals"]
+        ),
+        default=Decimal(0),
+    )
+    if maximum_signal == 0 or maximum_residual / maximum_signal > Decimal(
+        QUALITY_GATES["fit_residual_signal_max"]
+    ):
+        reasons.append("fit_residual")
+    return reasons
+
+
+def _expected_context_feature(
+    operation: ProductionContextOperation,
+    scenario: ProductionContextScenario,
+) -> str:
+    if operation.trace_input_kind == "context_fixed":
+        return f"context_fixed:{operation.key}"
+    if operation.trace_input_kind == "context_value":
+        value_class = scenario.context.get("value_class")
+        if value_class not in {"zero", "nonzero"}:
+            raise ValueError("context-value scenario class differs")
+        return f"context_value:{operation.key}:value_class:{value_class}"
+    if operation.trace_input_kind == "calldata_load":
+        access_class = scenario.context.get("access_class")
+        if access_class not in {"zero", "partial", "full"}:
+            raise ValueError("calldata-load scenario class differs")
+        return f"calldata_load:{operation.key}:access_class:{access_class}"
+    if operation.trace_input_kind == "calldata_size":
+        input_length = scenario.context.get("input_length")
+        if type(input_length) is not int or input_length < 0:
+            raise ValueError("calldata-size scenario length differs")
+        return f"calldata_size:{operation.key}:input_length:{input_length}"
+    raise ValueError("production context trace input kind differs")
+
+
+def fit_production_context_rows(
+    manifest: ProductionContextManifest,
+    rows: Iterable[Mapping[str, Any]],
+    subtotal_model: ProductionSubtotalModel,
+    *,
+    family_keys: Sequence[str] = KEYS,
+) -> dict[str, Any]:
+    """Residualize and fit production rows without consulting a control coefficient."""
+    raw_rows = list(rows)
+    _reject_forbidden_fit_fields(raw_rows)
+    if any(not isinstance(row, Mapping) for row in raw_rows):
+        raise ValueError("production fit rows must be objects")
+    if len({row.get("row_id") for row in raw_rows}) != len(raw_rows):
+        raise ValueError("duplicate production fit row")
+    normalized = [_normalized_fit_row(row) for row in raw_rows]
+    unknown_families = set(family_keys) - set(manifest.keys)
+    if unknown_families:
+        raise ValueError(f"unknown production context families: {sorted(unknown_families)!r}")
+    scenario_by_name = {scenario.name: scenario for scenario in manifest.scenarios}
+    operation_by_key = {operation.key: operation for operation in manifest.operations}
+    selected_scenarios = {
+        scenario.name
+        for scenario in manifest.scenarios
+        if scenario.key in family_keys and scenario.reachability == "measured"
+    }
+    normalized = [row for row in normalized if row["scenario"] in selected_scenarios]
+    grouped: dict[tuple[str, int, str], list[dict[str, Any]]] = {}
+    for row in normalized:
+        scenario = scenario_by_name[row["scenario"]]
+        if row["split"] != scenario.split or row["count"] not in scenario.counts(manifest):
+            raise ValueError("production fit row split or count differs from manifest")
+        grouped.setdefault((row["scenario"], row["count"], row["lane"]), []).append(row)
+    summaries: dict[tuple[str, int, str], dict[str, Any]] = {}
+    for scenario_name in sorted(selected_scenarios):
+        scenario = scenario_by_name[scenario_name]
+        operation = operation_by_key[scenario.key]
+        control_key = f"opcode:0x{operation.control_opcode:02x}"
+        for count in scenario.counts(manifest):
+            lane_rows = {}
+            for lane in ("target", "control"):
+                repeats = grouped.get((scenario_name, count, lane), [])
+                if len(repeats) != manifest.repeats or {
+                    row["repeat_index"] for row in repeats
+                } != set(range(manifest.repeats)):
+                    raise ValueError(
+                        f"missing count-zero rows or duplicate repeats for {scenario_name} count {count} {lane}"
+                        if count == 0
+                        else f"missing rows or duplicate repeats for {scenario_name} count {count} {lane}"
+                    )
+                repeats.sort(key=lambda row: row["repeat_index"])
+                lane_rows[lane] = repeats
+            target = lane_rows["target"][0]
+            control = lane_rows["control"][0]
+            expected_context = (
+                {_expected_context_feature(operation, scenario): count}
+                if count
+                else {}
+            )
+            if (
+                target["actual_context_features"] != expected_context
+                or control["actual_context_features"] != {}
+            ):
+                raise ValueError("exact context event matching differs")
+            target_non_target = dict(target["actual_raw_gas_by_key"])
+            target_non_target.pop(scenario.key, None)
+            control_non_target = dict(control["actual_raw_gas_by_key"])
+            control_non_target.pop(control_key, None)
+            if (
+                target_non_target != control_non_target
+                or target["actual_features"] != control["actual_features"]
+                or target["actual_diagnostics"] != control["actual_diagnostics"]
+            ):
+                raise ValueError("target/control non-target ledger differs")
+            for lane, repeats in lane_rows.items():
+                equality_fields = (
+                    "prover_gas",
+                    "public_output",
+                    "backend_input_sha256",
+                    "host_trace_sha256",
+                    "actual_raw_gas_by_key",
+                    "actual_context_features",
+                    "actual_features",
+                    "actual_diagnostics",
+                )
+                if any(
+                    any(row[field] != repeats[0][field] for field in equality_fields)
+                    for row in repeats[1:]
+                ):
+                    raise ValueError(
+                        f"repeat drift for {scenario_name} count {count} {lane}"
+                    )
+                excluded = scenario.key if lane == "target" else None
+                subtotal = evaluate_v5_subtotal(
+                    repeats[0], subtotal_model, excluded_target_key=excluded
+                )
+                summaries[(scenario_name, count, lane)] = {
+                    "prover_gas": repeats[0]["prover_gas"],
+                    "subtotal": subtotal,
+                }
+
+    residual_rows: dict[tuple[str, int], dict[str, Decimal]] = {}
+    for scenario_name in sorted(selected_scenarios):
+        scenario = scenario_by_name[scenario_name]
+        for lane in ("target", "control"):
+            if (scenario_name, 0, lane) not in summaries:
+                raise ValueError(f"missing count-zero row for {scenario_name} {lane}")
+        for count in scenario.counts(manifest):
+            target = summaries[(scenario_name, count, "target")]
+            target_zero = summaries[(scenario_name, 0, "target")]
+            control = summaries[(scenario_name, count, "control")]
+            control_zero = summaries[(scenario_name, 0, "control")]
+            residual_rows[(scenario_name, count)] = {
+                "observed": (target["prover_gas"] - target_zero["prover_gas"])
+                - (target["subtotal"] - target_zero["subtotal"]),
+                "control": (control["prover_gas"] - control_zero["prover_gas"])
+                - (control["subtotal"] - control_zero["subtotal"]),
+            }
+
+    family_results: dict[str, Any] = {}
+    for key in family_keys:
+        operation = operation_by_key[key]
+        fit_scenarios = [
+            scenario
+            for scenario in manifest.scenarios
+            if scenario.key == key and scenario.split == "fit"
+        ]
+        selection_scenarios = [
+            scenario
+            for scenario in manifest.scenarios
+            if scenario.key == key and scenario.split == "model_selection"
+        ]
+        final_scenarios = [
+            scenario
+            for scenario in manifest.scenarios
+            if scenario.key == key and scenario.split == "final_holdout"
+        ]
+        candidate_names = operation.candidate_ids
+        candidate_reports = {}
+        selected_candidate = None
+        selected_fit = None
+        selected_rows = None
+        selection_decisions = []
+        for candidate_name in candidate_names:
+            candidate = manifest.model_candidate(candidate_name)
+            design = []
+            observed = []
+            fit_row_labels = []
+            for scenario in fit_scenarios:
+                features = production_context_design_row(candidate, scenario)
+                for count in manifest.fit_counts:
+                    if count == 0:
+                        continue
+                    design.append(tuple(Decimal(count) * value for value in features))
+                    observed.append(residual_rows[(scenario.name, count)]["observed"])
+                    fit_row_labels.append({"scenario": scenario.name, "count": count})
+            fit = fit_exact_decimal_model(
+                matrix=design, observed=observed, terms=candidate.terms
+            )
+            reasons = _candidate_gate_reasons(fit, observed)
+            coefficients = {
+                term: _decimal(value, label=f"coefficient {term}", nonnegative=True)
+                for term, value in fit["coefficients"].items()
+            }
+            selection_rows = []
+            for scenario in selection_scenarios:
+                features = production_context_design_row(candidate, scenario)
+                for count in manifest.validation_counts:
+                    if count == 0:
+                        continue
+                    prediction = Decimal(count) * sum(
+                        (
+                            feature * coefficients[term]
+                            for feature, term in zip(features, candidate.terms)
+                        ),
+                        Decimal(0),
+                    )
+                    observed_value = residual_rows[(scenario.name, count)]["observed"]
+                    try:
+                        ape = exact_ape(prediction, observed_value)
+                    except ValueError:
+                        reasons.append("selection_zero_signal")
+                        ape = None
+                    if ape is not None and ape > Decimal(
+                        QUALITY_GATES["count_holdout_ape_max"]
+                        if count == 32
+                        else QUALITY_GATES["extrapolation_ape_max"]
+                    ):
+                        reasons.append(
+                            "count_holdout" if count == 32 else "extrapolation"
+                        )
+                    selection_rows.append(
+                        {
+                            "scenario": scenario.name,
+                            "count": count,
+                            "observed_increment": _decimal_text(observed_value),
+                            "predicted_increment": _decimal_text(prediction),
+                            "ape": _decimal_text(ape) if ape is not None else None,
+                        }
+                    )
+            report = {
+                **fit,
+                "fit_rows": fit_row_labels,
+                "selection_rows": selection_rows,
+                "rejection_reasons": sorted(set(reasons)),
+                "status": "accepted" if not reasons else "rejected",
+            }
+            candidate_reports[candidate_name] = report
+            selection_decisions.append(
+                {"candidate": candidate_name, "status": report["status"]}
+            )
+            if selected_candidate is None and not reasons:
+                selected_candidate = candidate
+                selected_fit = fit
+                selected_rows = selection_rows
+                if selection_scenarios:
+                    break
+        reasons = []
+        if selected_candidate is None:
+            reasons.append("no_candidate_passed")
+            fallback_name = candidate_names[0]
+            selected_candidate = manifest.model_candidate(fallback_name)
+            selected_fit = candidate_reports[fallback_name]
+            selected_rows = candidate_reports[fallback_name]["selection_rows"]
+        reasons.extend(candidate_reports[selected_candidate.name]["rejection_reasons"])
+        coefficients = {
+            term: _decimal(value, label=f"coefficient {term}", nonnegative=True)
+            for term, value in selected_fit["coefficients"].items()
+        }
+        for scenario in fit_scenarios:
+            signal = abs(residual_rows[(scenario.name, 16)]["observed"])
+            if signal < Decimal(QUALITY_GATES["signal_min_prover_gas"]):
+                reasons.append("insufficient_signal")
+        maximum_control = max(
+            (
+                abs(residual_rows[(scenario.name, count)]["control"])
+                for scenario in (*fit_scenarios, *selection_scenarios, *final_scenarios)
+                for count in scenario.counts(manifest)
+            ),
+            default=Decimal(0),
+        )
+        if maximum_control > Decimal(
+            QUALITY_GATES["control_residual_abs_max_prover_gas"]
+        ):
+            reasons.append("control_contamination")
+
+        class_slopes: dict[tuple[str, tuple[Decimal, ...]], list[Decimal]] = {}
+        for scenario in fit_scenarios:
+            numerator = sum(
+                (
+                    Decimal(count) * residual_rows[(scenario.name, count)]["observed"]
+                    for count in manifest.fit_counts
+                    if count
+                ),
+                Decimal(0),
+            )
+            denominator = sum(
+                (Decimal(count * count) for count in manifest.fit_counts if count),
+                Decimal(0),
+            )
+            sibling_key = (
+                scenario.model_class,
+                production_context_design_row(selected_candidate, scenario),
+            )
+            class_slopes.setdefault(sibling_key, []).append(numerator / denominator)
+        sibling_decisions = []
+        for (model_class, feature_vector), slopes in sorted(class_slopes.items()):
+            passed = True
+            relative_difference = Decimal(0)
+            if len(slopes) > 1:
+                maximum = max(abs(value) for value in slopes)
+                relative_difference = (
+                    (max(slopes) - min(slopes)) / maximum if maximum else Decimal(0)
+                )
+                passed = relative_difference <= Decimal(
+                    QUALITY_GATES["sibling_slope_relative_difference_max"]
+                )
+                if not passed:
+                    reasons.append("sibling_inconsistency")
+            sibling_decisions.append(
+                {
+                    "model_class": model_class,
+                    "feature_vector": [
+                        _decimal_text(value) for value in feature_vector
+                    ],
+                    "diagnostic_slopes": [_decimal_text(value) for value in slopes],
+                    "relative_difference": _decimal_text(relative_difference),
+                    "status": "accepted" if passed else "rejected",
+                }
+            )
+
+        final_rows = []
+        final_apes = []
+        for scenario in final_scenarios:
+            features = production_context_design_row(selected_candidate, scenario)
+            for count in manifest.validation_counts:
+                if count == 0:
+                    continue
+                prediction = Decimal(count) * sum(
+                    (
+                        feature * coefficients[term]
+                        for feature, term in zip(features, selected_candidate.terms)
+                    ),
+                    Decimal(0),
+                )
+                observed_value = residual_rows[(scenario.name, count)]["observed"]
+                try:
+                    ape = exact_ape(prediction, observed_value)
+                except ValueError:
+                    reasons.append("final_holdout_zero_signal")
+                    ape = None
+                if ape is not None:
+                    final_apes.append(ape)
+                    if ape > Decimal(QUALITY_GATES["final_scenario_row_ape_max"]):
+                        reasons.append("final_holdout_row")
+                    if count == 32 and ape > Decimal(
+                        QUALITY_GATES["count_holdout_ape_max"]
+                    ):
+                        reasons.append("count_holdout")
+                    if count == 64 and ape > Decimal(
+                        QUALITY_GATES["extrapolation_ape_max"]
+                    ):
+                        reasons.append("extrapolation")
+                final_rows.append(
+                    {
+                        "scenario": scenario.name,
+                        "count": count,
+                        "observed_increment": _decimal_text(observed_value),
+                        "predicted_increment": _decimal_text(prediction),
+                        "ape": _decimal_text(ape) if ape is not None else None,
+                    }
+                )
+        family_mape = (
+            sum(final_apes, Decimal(0)) / Decimal(len(final_apes))
+            if final_apes
+            else Decimal(0)
+        )
+        if family_mape > Decimal(QUALITY_GATES["final_scenario_family_mape_max"]):
+            reasons.append("final_holdout_mape")
+        row_decisions = []
+        for scenario in (*fit_scenarios, *selection_scenarios, *final_scenarios):
+            features = production_context_design_row(selected_candidate, scenario)
+            event_cost = sum(
+                (
+                    feature * coefficients[term]
+                    for feature, term in zip(features, selected_candidate.terms)
+                ),
+                Decimal(0),
+            )
+            if not event_cost.is_finite() or event_cost < 0:
+                reasons.append("invalid_prediction")
+            for count in scenario.counts(manifest):
+                row_decisions.append(
+                    {
+                        "scenario": scenario.name,
+                        "split": scenario.split,
+                        "count": count,
+                        "observed_increment": _decimal_text(
+                            residual_rows[(scenario.name, count)]["observed"]
+                        ),
+                        "predicted_increment": _decimal_text(
+                            Decimal(count) * event_cost
+                        ),
+                        "control_residual": _decimal_text(
+                            residual_rows[(scenario.name, count)]["control"]
+                        ),
+                    }
+                )
+        reasons = sorted(set(reasons))
+        family_results[key] = {
+            "status": "accepted" if not reasons else "rejected",
+            "selected_candidate": selected_candidate.name,
+            "coefficients": {
+                term: _decimal_text(value) for term, value in coefficients.items()
+            },
+            "candidate_reports": candidate_reports,
+            "selection_decisions": selection_decisions,
+            "sibling_decisions": sibling_decisions,
+            "rows": row_decisions,
+            "selection_rows": selected_rows,
+            "final_holdout_rows": final_rows,
+            "final_holdout_mape": _decimal_text(family_mape),
+            "maximum_control_residual": _decimal_text(maximum_control),
+            "rejection_reasons": reasons,
+        }
+    result = {
+        "schema_version": 1,
+        "purpose": "production_context_fit_decisions",
+        "manifest_identity_sha256": manifest.identity_sha256,
+        "families": family_results,
+        "all_families_accepted": all(
+            family["status"] == "accepted" for family in family_results.values()
+        ),
+    }
+    result["decision_sha256"] = sha256_bytes(canonical_json(result))
+    return result
+
+
+def load_production_v5_subtotal_model(
+    manifest: ProductionContextManifest, repo_root: pathlib.Path
+) -> ProductionSubtotalModel:
+    """Load production-scaled V5 prices while excluding unsupported context targets."""
+    repo_root = repo_root.resolve(strict=True)
+    _, coverage = _load_pinned_json(
+        repo_root, manifest.sources["operation_coverage_v5"], "operation_coverage_v5"
+    )
+    _, higher = _load_pinned_json(
+        repo_root, manifest.sources["higher_layer"], "higher_layer"
+    )
+    fixed_costs = higher.get("fixed_costs")
+    if not isinstance(fixed_costs, Mapping):
+        raise ValueError("pinned higher-layer fixed costs differ")
+    target_keys = set(manifest.keys)
+    opcode_prices: dict[str, Any] = {}
+    artifact_cache: dict[str, Mapping[str, Any]] = {}
+    for row in coverage.get("execution_coverage", ()):
+        if not isinstance(row, Mapping) or row.get("component") != "opcode":
+            continue
+        key = row.get("key")
+        if key in target_keys or row.get("model_status") != "measured":
+            continue
+        reference = row.get("artifact_ref")
+        if not isinstance(reference, Mapping):
+            continue
+        relative = _require_relative_path(reference.get("path"), "V5 model path")
+        artifact = artifact_cache.get(relative)
+        if artifact is None:
+            path = repo_root / relative
+            try:
+                artifact = json.loads(path.read_bytes(), object_pairs_hook=_reject_duplicate_fields)
+            except (OSError, json.JSONDecodeError) as error:
+                raise ValueError("V5 model artifact is unreadable") from error
+            if artifact.get("artifact_sha256") != reference.get("artifact_sha256"):
+                raise ValueError("V5 model artifact identity differs")
+            _validate_content_address(
+                artifact, reference["artifact_sha256"], "V5 model artifact"
+            )
+            artifact_cache[relative] = artifact
+        model = artifact.get("registry", {}).get("models", {}).get(key)
+        if (
+            isinstance(model, Mapping)
+            and model.get("kind") == "static_raw_gas"
+            and isinstance(model.get("parameters"), Mapping)
+        ):
+            opcode_prices[key] = model["parameters"].get("body_per_raw_gas")
+    return ProductionSubtotalModel.from_mappings(
+        fixed_costs=fixed_costs, opcode_prices=opcode_prices
+    )
+
+
+def _write_json_create_only(path: pathlib.Path, payload: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with path.open("xb") as output:
+            output.write(canonical_json(payload) + b"\n")
+    except FileExistsError as error:
+        raise ValueError(f"create-only output already exists: {path}") from error
+
+
+def _load_canonical_json(path: pathlib.Path, *, label: str) -> dict[str, Any]:
+    try:
+        raw = path.read_bytes()
+        payload = json.loads(
+            raw,
+            object_pairs_hook=_reject_duplicate_fields,
+            parse_float=_reject_json_float,
+            parse_constant=_reject_json_float,
+        )
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"{label} is missing or invalid") from error
+    if not isinstance(payload, dict) or raw != canonical_json(payload) + b"\n":
+        raise ValueError(f"{label} is not canonical JSON")
+    return payload
+
+
+def load_production_context_parity_identity(path: pathlib.Path) -> dict[str, Any]:
+    return _load_canonical_json(
+        pathlib.Path(path), label="production context parity identity"
+    )
+
+
+def prepare_production_context_run(
+    *,
+    manifest: ProductionContextManifest,
+    row_requests: Sequence[ProductionContextFixtureRequest],
+    run: pathlib.Path,
+    launcher: pathlib.Path,
+    production_elf: pathlib.Path,
+    production_vk: pathlib.Path,
+    trace_source: pathlib.Path,
+    implementation_revision: str,
+    source_hashes: Mapping[str, str],
+    parity_identity: Mapping[str, Any],
+) -> pathlib.Path:
+    if _GIT_REVISION_RE.fullmatch(implementation_revision) is None:
+        raise ValueError("production context implementation revision differs")
+    parity_unhashed = dict(parity_identity)
+    parity_claimed = parity_unhashed.pop("identity_sha256", None)
+    if (
+        parity_identity.get("model_sample") is not False
+        or _SHA256_RE.fullmatch(parity_claimed or "") is None
+        or sha256_bytes(canonical_json(parity_unhashed)) != parity_claimed
+    ):
+        raise ValueError("production context parity identity differs")
+    if not source_hashes or any(
+        not isinstance(key, str) or _SHA256_RE.fullmatch(value) is None
+        for key, value in source_hashes.items()
+    ):
+        raise ValueError("production context source hashes differ")
+    assets = {
+        "launcher": pathlib.Path(launcher),
+        "production_elf": pathlib.Path(production_elf),
+        "production_vk": pathlib.Path(production_vk),
+        "trace_source": pathlib.Path(trace_source),
+    }
+    asset_identity = {}
+    for key, path in assets.items():
+        if not path.is_file() or path.is_symlink():
+            raise ValueError(f"production context {key} is not a regular file")
+        asset_identity[key] = {"basename": path.name, "sha256": _sha256_file(path)}
+    run = pathlib.Path(run)
+    try:
+        run.mkdir(parents=True, exist_ok=False)
+    except FileExistsError as error:
+        raise ValueError(f"production context run already exists: {run}") from error
+    (run / "row-inputs").mkdir()
+    (run / "rows").mkdir()
+    row_entries = []
+    seen = set()
+    for request in row_requests:
+        if request.row_id in seen:
+            raise ValueError("duplicate production context prepared row")
+        seen.add(request.row_id)
+        payload = {
+            "row_id": request.row_id,
+            "workload_id": request.workload_id,
+            "scenario": request.scenario,
+            "split": request.split,
+            "count": request.count,
+            "lane": request.lane,
+            "repeat_index": request.repeat_index,
+            "builder_input": dict(request.builder_input),
+        }
+        input_sha256 = sha256_bytes(canonical_json(payload))
+        wrapped = {**payload, "input_sha256": input_sha256}
+        relative = pathlib.PurePosixPath("row-inputs") / f"{request.row_id}.json"
+        _write_json_create_only(run / relative, wrapped)
+        row_entries.append(
+            {
+                "row_id": request.row_id,
+                "path": str(relative),
+                "input_sha256": input_sha256,
+            }
+        )
+    identity = {
+        "schema_version": 1,
+        "purpose": "production_context_run_identity",
+        "manifest_identity_sha256": manifest.identity_sha256,
+        "implementation_revision": implementation_revision,
+        "source_hashes": dict(sorted(source_hashes.items())),
+        "assets": asset_identity,
+        "parity_identity": dict(parity_identity),
+        "rows": row_entries,
+    }
+    identity["identity_sha256"] = sha256_bytes(canonical_json(identity))
+    _write_json_create_only(run / "calibration-identity.json", identity)
+    return run
+
+
+def _resolve_run_asset(
+    run: pathlib.Path,
+    identity: Mapping[str, Any],
+    role: str,
+    supplied: pathlib.Path | None,
+) -> pathlib.Path:
+    asset = identity.get("assets", {}).get(role)
+    if not isinstance(asset, Mapping) or set(asset) != {"basename", "sha256"}:
+        raise ValueError(f"production context {role} identity differs")
+    path = pathlib.Path(supplied) if supplied is not None else run.parent / asset["basename"]
+    if not path.is_file() or path.is_symlink() or path.name != asset["basename"]:
+        raise ValueError(f"production context {role} path differs")
+    if _sha256_file(path) != asset["sha256"]:
+        label = "launcher hash" if role == "launcher" else f"{role} hash"
+        raise ValueError(f"production context {label} differs")
+    return path
+
+
+def _validate_run_identity(
+    run: pathlib.Path,
+    *,
+    launcher: pathlib.Path | None = None,
+    production_elf: pathlib.Path | None = None,
+    production_vk: pathlib.Path | None = None,
+    trace_source: pathlib.Path | None = None,
+) -> tuple[dict[str, Any], dict[str, pathlib.Path]]:
+    identity = _load_canonical_json(
+        run / "calibration-identity.json", label="production context run identity"
+    )
+    claimed = identity.get("identity_sha256")
+    unhashed = dict(identity)
+    unhashed.pop("identity_sha256", None)
+    if _SHA256_RE.fullmatch(claimed or "") is None or sha256_bytes(
+        canonical_json(unhashed)
+    ) != claimed:
+        raise ValueError("production context run identity hash differs")
+    resolved = {
+        role: _resolve_run_asset(run, identity, role, supplied)
+        for role, supplied in {
+            "launcher": launcher,
+            "production_elf": production_elf,
+            "production_vk": production_vk,
+            "trace_source": trace_source,
+        }.items()
+    }
+    return identity, resolved
+
+
+def _validate_prepared_row_input(
+    run: pathlib.Path, entry: Mapping[str, Any]
+) -> dict[str, Any]:
+    if not isinstance(entry, Mapping) or set(entry) != {"row_id", "path", "input_sha256"}:
+        raise ValueError("production context prepared row entry differs")
+    expected_path = f"row-inputs/{entry['row_id']}.json"
+    if entry["path"] != expected_path or _SHA256_RE.fullmatch(entry["row_id"]) is None:
+        raise ValueError("production context prepared row path differs")
+    payload = _load_canonical_json(run / expected_path, label="prepared row input")
+    unhashed = dict(payload)
+    claimed = unhashed.pop("input_sha256", None)
+    if (
+        claimed != entry["input_sha256"]
+        or sha256_bytes(canonical_json(unhashed)) != claimed
+        or payload.get("row_id") != entry["row_id"]
+    ):
+        raise ValueError("production context prepared row hash differs")
+    return payload
+
+
+def _normalize_execution_report(
+    row_input: Mapping[str, Any], report: Mapping[str, Any]
+) -> dict[str, Any]:
+    _reject_forbidden_fit_fields(report, "execution report")
+    try:
+        controlled = report["controlled_block"]
+        observation = controlled["observation"]
+        guest_input_sha256 = report["guest_input_sha256"].removeprefix("0x")
+        if (
+            report["sp1_execution_engine"] != "gas-estimator"
+            or report["exit_code"] != 0
+            or controlled["status"] != "accepted"
+            or controlled["row_id"] != row_input["row_id"]
+            or observation["backend_input_sha256"] != guest_input_sha256
+            or observation["public_output"].lower() != report["public_values"].lower()
+        ):
+            raise ValueError("production context execution report is not accepted")
+        normalized = {
+            "row_id": row_input["row_id"],
+            "input_sha256": row_input["input_sha256"],
+            "scenario": row_input["scenario"],
+            "split": row_input["split"],
+            "count": row_input["count"],
+            "lane": row_input["lane"],
+            "repeat_index": row_input["repeat_index"],
+            "prover_gas": _decimal_text(
+                _decimal(report["gas"], label="execution prover gas", nonnegative=True)
+            ),
+            "public_output": report["public_values"],
+            "backend_input_sha256": observation["backend_input_sha256"],
+            "host_trace_sha256": observation["host_trace_sha256"],
+            "actual_raw_gas_by_key": observation["actual_raw_gas_by_key"],
+            "actual_context_features": observation["actual_context_features"],
+            "actual_features": observation["actual_features"],
+            "actual_diagnostics": observation["actual_diagnostics"],
+        }
+    except (KeyError, AttributeError, TypeError) as error:
+        raise ValueError("production context execution report is incomplete") from error
+    _normalized_fit_row(normalized)
+    evidence = dict(normalized)
+    evidence["evidence_sha256"] = sha256_bytes(canonical_json(evidence))
+    return evidence
+
+
+def _default_row_executor(
+    row_input: Mapping[str, Any], *, launcher: pathlib.Path, run: pathlib.Path
+) -> Mapping[str, Any]:
+    with tempfile.TemporaryDirectory(prefix="raiko2-production-context-") as directory:
+        temporary = pathlib.Path(directory)
+        source = temporary / "row.json"
+        output = temporary / "report.jsonl"
+        source.write_bytes(canonical_json(row_input["builder_input"]) + b"\n")
+        subprocess.run(
+            [
+                str(launcher),
+                "--stage",
+                "controlled-block",
+                "--proof-type",
+                "sp1",
+                "--mode",
+                "execute",
+                "--sp1-prover",
+                "local",
+                "--sp1-execution-engine",
+                "gas-estimator",
+                "--input",
+                str(source),
+                "--jsonl-out",
+                str(output),
+            ],
+            cwd=run.parent,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=3600,
+        )
+        lines = output.read_text().splitlines()
+        if len(lines) != 1:
+            raise ValueError("production context launcher emitted an unexpected row count")
+        return json.loads(
+            lines[0],
+            object_pairs_hook=_reject_duplicate_fields,
+            parse_float=_reject_json_float,
+            parse_constant=_reject_json_float,
+        )
+
+
+def run_production_context_campaign(
+    run: pathlib.Path,
+    *,
+    executor: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
+    launcher: pathlib.Path | None = None,
+    production_elf: pathlib.Path | None = None,
+    production_vk: pathlib.Path | None = None,
+    trace_source: pathlib.Path | None = None,
+) -> dict[str, Any]:
+    """Run or resume rows, persisting every accepted row before continuing."""
+    run = pathlib.Path(run)
+    identity, assets = _validate_run_identity(
+        run,
+        launcher=launcher,
+        production_elf=production_elf,
+        production_vk=production_vk,
+        trace_source=trace_source,
+    )
+    row_hashes = []
+    for entry in identity.get("rows", ()):
+        row_input = _validate_prepared_row_input(run, entry)
+        output_path = run / "rows" / f"{entry['row_id']}.json"
+        if output_path.exists():
+            evidence = _load_canonical_json(output_path, label="production context row")
+            claimed = evidence.get("evidence_sha256")
+            unhashed = dict(evidence)
+            unhashed.pop("evidence_sha256", None)
+            if (
+                claimed is None
+                or sha256_bytes(canonical_json(unhashed)) != claimed
+                or evidence.get("row_id") != entry["row_id"]
+                or evidence.get("input_sha256") != entry["input_sha256"]
+            ):
+                raise ValueError("production context existing row hash differs")
+        else:
+            report = (
+                executor(row_input)
+                if executor is not None
+                else _default_row_executor(
+                    row_input, launcher=assets["launcher"], run=run
+                )
+            )
+            evidence = _normalize_execution_report(row_input, report)
+            _write_json_create_only(output_path, evidence)
+        row_hashes.append(
+            {"row_id": entry["row_id"], "evidence_sha256": evidence["evidence_sha256"]}
+        )
+    terminal = {
+        "schema_version": 1,
+        "status": "execution_complete",
+        "identity_sha256": identity["identity_sha256"],
+        "row_hashes": row_hashes,
+    }
+    terminal["terminal_sha256"] = sha256_bytes(canonical_json(terminal))
+    path = run / "execution-complete.json"
+    if path.exists():
+        existing = _load_canonical_json(path, label="execution terminal")
+        if canonical_json(existing) != canonical_json(terminal):
+            raise ValueError("production context execution terminal differs")
+    else:
+        _write_json_create_only(path, terminal)
+    return terminal
+
+
+def fit_production_context_run(
+    run: pathlib.Path,
+    *,
+    manifest: ProductionContextManifest,
+    subtotal_model: ProductionSubtotalModel,
+    launcher: pathlib.Path | None = None,
+    production_elf: pathlib.Path | None = None,
+    production_vk: pathlib.Path | None = None,
+    trace_source: pathlib.Path | None = None,
+) -> dict[str, Any]:
+    run = pathlib.Path(run)
+    identity, _assets = _validate_run_identity(
+        run,
+        launcher=launcher,
+        production_elf=production_elf,
+        production_vk=production_vk,
+        trace_source=trace_source,
+    )
+    if identity.get("manifest_identity_sha256") != manifest.identity_sha256:
+        raise ValueError("production context fit manifest identity differs")
+    completion = _load_canonical_json(
+        run / "execution-complete.json", label="production context execution terminal"
+    )
+    completion_unhashed = dict(completion)
+    completion_claimed = completion_unhashed.pop("terminal_sha256", None)
+    if (
+        completion.get("identity_sha256") != identity["identity_sha256"]
+        or _SHA256_RE.fullmatch(completion_claimed or "") is None
+        or sha256_bytes(canonical_json(completion_unhashed)) != completion_claimed
+    ):
+        raise ValueError("production context execution identity differs")
+    completion_hashes = completion.get("row_hashes")
+    if not isinstance(completion_hashes, list) or len(completion_hashes) != len(
+        identity["rows"]
+    ):
+        raise ValueError("production context execution row inventory differs")
+    rows = []
+    for entry, completed in zip(identity["rows"], completion_hashes):
+        row = _load_canonical_json(
+            run / "rows" / f"{entry['row_id']}.json",
+            label="production context fit row",
+        )
+        row_unhashed = dict(row)
+        row_claimed = row_unhashed.pop("evidence_sha256", None)
+        if (
+            completed
+            != {"row_id": entry["row_id"], "evidence_sha256": row_claimed}
+            or _SHA256_RE.fullmatch(row_claimed or "") is None
+            or sha256_bytes(canonical_json(row_unhashed)) != row_claimed
+            or row.get("input_sha256") != entry["input_sha256"]
+        ):
+            raise ValueError("production context completed row hash differs")
+        rows.append(row)
+    decisions = fit_production_context_rows(manifest, rows, subtotal_model)
+    _write_json_create_only(run / "campaign-decisions.json", decisions)
+    terminal = {
+        "schema_version": 1,
+        "status": (
+            "accepted" if decisions["all_families_accepted"] else "rejected"
+        ),
+        "identity_sha256": identity["identity_sha256"],
+        "decision_sha256": decisions["decision_sha256"],
+    }
+    terminal["terminal_sha256"] = sha256_bytes(canonical_json(terminal))
+    _write_json_create_only(run / "terminal.json", terminal)
+    return terminal

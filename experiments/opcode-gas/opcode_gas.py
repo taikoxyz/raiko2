@@ -25689,6 +25689,129 @@ def cmd_validate_context_production_manifest(args: argparse.Namespace) -> None:
     print(f"validated production context manifest {manifest.identity_sha256}")
 
 
+def _context_production_assets(args: argparse.Namespace) -> dict[str, pathlib.Path]:
+    return {
+        "launcher": args.guest_launcher,
+        "production_elf": args.production_elf,
+        "production_vk": args.production_vk,
+        "trace_source": args.trace_source,
+    }
+
+
+def cmd_prepare_context_production(args: argparse.Namespace) -> None:
+    from context_production_campaign import (
+        ProductionContextFixtureRequest,
+        load_production_context_parity_identity,
+        load_production_context_manifest,
+        prepare_production_context_run,
+        production_context_fixture_requests,
+        run_production_context_fixture_identity,
+        validate_production_context_sources,
+    )
+
+    manifest = load_production_context_manifest(args.manifest)
+    source_hashes = validate_production_context_sources(manifest, REPO_ROOT)
+    status = subprocess.run(
+        ["git", "status", "--porcelain", "--untracked-files=no"],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if status.stdout:
+        raise ValueError("production context prepare requires a clean implementation revision")
+    revision = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    ).stdout.strip()
+    parity = load_production_context_parity_identity(args.parity_identity)
+    frozen = []
+    for request in production_context_fixture_requests(manifest):
+        bundle = run_production_context_fixture_identity(
+            request, launcher=args.guest_launcher, repo_root=REPO_ROOT
+        )
+        frozen.append(
+            ProductionContextFixtureRequest(
+                scenario=request.scenario,
+                split=request.split,
+                count=request.count,
+                lane=request.lane,
+                repeat_index=request.repeat_index,
+                workload_id=request.workload_id,
+                row_id=request.row_id,
+                builder_input=bundle["spec"],
+            )
+        )
+    prepare_production_context_run(
+        manifest=manifest,
+        row_requests=tuple(frozen),
+        run=args.out,
+        implementation_revision=revision,
+        source_hashes=source_hashes,
+        parity_identity=parity,
+        **_context_production_assets(args),
+    )
+    print(f"prepared production context run at {args.out}")
+
+
+def cmd_run_context_production(args: argparse.Namespace) -> None:
+    from context_production_campaign import run_production_context_campaign
+
+    terminal = run_production_context_campaign(
+        args.run, **_context_production_assets(args)
+    )
+    print(
+        f"production context execution {terminal['status']} "
+        f"({len(terminal['row_hashes'])} rows)"
+    )
+
+
+def cmd_fit_context_production(args: argparse.Namespace) -> None:
+    from context_production_campaign import (
+        fit_production_context_run,
+        load_production_context_manifest,
+        load_production_v5_subtotal_model,
+    )
+
+    manifest = load_production_context_manifest(args.manifest)
+    subtotal = load_production_v5_subtotal_model(manifest, REPO_ROOT)
+    terminal = fit_production_context_run(
+        args.run,
+        manifest=manifest,
+        subtotal_model=subtotal,
+        **_context_production_assets(args),
+    )
+    print(f"production context fit {terminal['status']}")
+
+
+def _add_context_production_asset_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--guest-launcher",
+        type=pathlib.Path,
+        default=REPO_ROOT / "target/release/guest-launcher",
+    )
+    parser.add_argument(
+        "--production-elf",
+        type=pathlib.Path,
+        default=REPO_ROOT / "crates/guests/elf/sp1_shasta_proposal.elf",
+    )
+    parser.add_argument(
+        "--production-vk",
+        type=pathlib.Path,
+        default=REPO_ROOT / "crates/guests/elf/sp1_shasta_proposal.vk.bin",
+    )
+    parser.add_argument(
+        "--trace-source",
+        type=pathlib.Path,
+        default=REPO_ROOT / "crates/zkgas-trace/src/reconstruct.rs",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subcommands = parser.add_subparsers(dest="command", required=True)
@@ -25708,6 +25831,36 @@ def build_parser() -> argparse.ArgumentParser:
         "--manifest", type=pathlib.Path, required=True
     )
     context_manifest_validate.set_defaults(func=cmd_validate_context_production_manifest)
+
+    context_prepare = subcommands.add_parser(
+        "prepare-context-production",
+        help="freeze create-only inputs for the production context campaign",
+    )
+    context_prepare.add_argument("--manifest", type=pathlib.Path, required=True)
+    context_prepare.add_argument(
+        "--parity-identity", type=pathlib.Path, required=True
+    )
+    context_prepare.add_argument("--out", type=pathlib.Path, required=True)
+    _add_context_production_asset_arguments(context_prepare)
+    context_prepare.set_defaults(func=cmd_prepare_context_production)
+
+    for command in ("run-context-production", "resume-context-production"):
+        context_run = subcommands.add_parser(
+            command,
+            help="run or exactly resume the bounded production context campaign",
+        )
+        context_run.add_argument("--run", type=pathlib.Path, required=True)
+        _add_context_production_asset_arguments(context_run)
+        context_run.set_defaults(func=cmd_run_context_production)
+
+    context_fit = subcommands.add_parser(
+        "fit-context-production",
+        help="fit exact production context models and write terminal decisions",
+    )
+    context_fit.add_argument("--manifest", type=pathlib.Path, required=True)
+    context_fit.add_argument("--run", type=pathlib.Path, required=True)
+    _add_context_production_asset_arguments(context_fit)
+    context_fit.set_defaults(func=cmd_fit_context_production)
 
     higher_prepare = subcommands.add_parser(
         "prepare-higher-layer-calibration",

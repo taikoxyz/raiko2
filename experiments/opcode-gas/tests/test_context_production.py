@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from decimal import Decimal
 from unittest import mock
 
 
@@ -719,7 +720,7 @@ class ProductionContextIdentityTests(unittest.TestCase):
 
 
 class ProductionContextCliTests(unittest.TestCase):
-    def test_cli_registers_only_live_task_one_surfaces(self):
+    def test_cli_registers_live_campaign_surfaces(self):
         completed = subprocess.run(
             [sys.executable, str(OPCODE_GAS / "opcode_gas.py"), "--help"],
             cwd=ROOT,
@@ -729,14 +730,18 @@ class ProductionContextCliTests(unittest.TestCase):
         )
         self.assertIn("generate-context-production-manifest", completed.stdout)
         self.assertIn("validate-context-production-manifest", completed.stdout)
-        for dead in (
+        for live in (
             "prepare-context-production",
+            "resume-context-production",
             "run-context-production",
             "fit-context-production",
+        ):
+            self.assertIn(live, completed.stdout)
+        for future in (
             "verify-context-production-result",
             "seal-context-production-result",
         ):
-            self.assertNotIn(dead, completed.stdout)
+            self.assertNotIn(future, completed.stdout)
 
     def test_generate_is_create_only_and_validate_prints_identity(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -767,6 +772,583 @@ class ProductionContextCliTests(unittest.TestCase):
                 text=True,
             )
             self.assertIn(production.load_production_context_manifest(output).identity_sha256, validated.stdout)
+
+
+class ProductionContextFitTests(unittest.TestCase):
+    @staticmethod
+    def _parity_identity():
+        identity = {"kind": "production_context_parity_v1", "model_sample": False}
+        identity["identity_sha256"] = production.sha256_bytes(
+            production.canonical_json(identity)
+        )
+        return identity
+
+    @staticmethod
+    def _subtotal_model(control_price="5"):
+        return production.ProductionSubtotalModel.from_mappings(
+            fixed_costs={
+                "proposal_startup": "100",
+                "block_base": "20",
+                "tx_base": "3",
+                "native_value_transfer": "7",
+            },
+            opcode_prices={
+                "opcode:0x5f": control_price,
+                "opcode:0x60": "2",
+                "opcode:0x90": "11",
+            },
+        )
+
+    @staticmethod
+    def _row(*, scenario, split, count, lane, repeat, prover_gas, target_key, control_key):
+        measured = target_key if lane == "target" else control_key
+        raw = {"opcode:0x60": 9, measured: count}
+        return {
+            "row_id": production.sha256_bytes(
+                production.canonical_json(
+                    [scenario, split, count, lane, repeat]
+                )
+            ),
+            "scenario": scenario,
+            "split": split,
+            "count": count,
+            "lane": lane,
+            "repeat_index": repeat,
+            "prover_gas": str(prover_gas),
+            "public_output": "0x1234",
+            "backend_input_sha256": "a" * 64,
+            "host_trace_sha256": "b" * 64,
+            "actual_raw_gas_by_key": raw,
+            "actual_context_features": (
+                {f"context_fixed:{target_key}": count}
+                if lane == "target" and count
+                else {}
+            ),
+            "actual_features": {
+                "proposal_startup": 1,
+                "block_base": 1,
+                "tx_base": 1,
+                "native_value_transfer": 0,
+            },
+            "actual_diagnostics": {"bytecode_length": 256},
+        }
+
+    def _address_rows(self, *, coefficient=300, control_price=5):
+        rows = []
+        base = Decimal(141)
+        non_target = Decimal(18)
+        for scenario, split, counts in (
+            ("address_canonical", "fit", (0, 1, 2, 4, 8, 16)),
+            ("address_alternate", "final_holdout", (0, 32, 64)),
+        ):
+            for count in counts:
+                for lane in ("control", "target"):
+                    increment = (
+                        Decimal(count * coefficient)
+                        if lane == "target"
+                        else Decimal(count * control_price)
+                    )
+                    for repeat in range(3):
+                        rows.append(
+                            self._row(
+                                scenario=scenario,
+                                split=split,
+                                count=count,
+                                lane=lane,
+                                repeat=repeat,
+                                prover_gas=base + non_target + increment,
+                                target_key="opcode:0x30",
+                                control_key="opcode:0x5f",
+                            )
+                        )
+        return rows
+
+    def _complete_rows(self, *, calldatasize_model="length"):
+        manifest = production.load_production_context_manifest(MANIFEST)
+        model = self._subtotal_model()
+
+        def event_cost(scenario):
+            context = scenario.context
+            if scenario.key == "opcode:0x30":
+                return Decimal(300)
+            if scenario.key == "opcode:0x33":
+                return Decimal(310)
+            if scenario.key == "opcode:0x34":
+                return Decimal(320 if context["value_class"] == "zero" else 340)
+            if scenario.key == "opcode:0x35":
+                return {
+                    "zero": Decimal(330),
+                    "partial": Decimal(350),
+                    "full": Decimal(370),
+                }[context["access_class"]]
+            if scenario.key == "opcode:0x36":
+                length = Decimal(context["input_length"])
+                if calldatasize_model == "length":
+                    return Decimal(300) + Decimal(2) * length
+                words = Decimal((context["input_length"] + 31) // 32)
+                partial = Decimal(context["input_length"] % 32 != 0)
+                return Decimal(300) + Decimal(20) * words + Decimal(5) * partial
+            if scenario.key == "opcode:0x42":
+                return Decimal(360)
+            raise AssertionError(scenario.key)
+
+        rows = []
+        for scenario in manifest.scenarios:
+            if scenario.reachability != "measured":
+                continue
+            operation = manifest.operation(scenario.key)
+            control_key = f"opcode:0x{operation.control_opcode:02x}"
+            control_price = model.opcode_prices[control_key]
+            feature_key = production._expected_context_feature(operation, scenario)
+            for count in scenario.counts(manifest):
+                for lane in ("control", "target"):
+                    raw = {
+                        "opcode:0x60": 9,
+                        scenario.key if lane == "target" else control_key: count,
+                    }
+                    increment = Decimal(count) * (
+                        event_cost(scenario) if lane == "target" else control_price
+                    )
+                    for repeat in range(3):
+                        row = self._row(
+                            scenario=scenario.name,
+                            split=scenario.split,
+                            count=count,
+                            lane=lane,
+                            repeat=repeat,
+                            prover_gas=Decimal(159) + increment,
+                            target_key=scenario.key,
+                            control_key=control_key,
+                        )
+                        row["actual_raw_gas_by_key"] = dict(raw)
+                        row["actual_context_features"] = (
+                            {feature_key: count}
+                            if lane == "target" and count
+                            else {}
+                        )
+                        rows.append(row)
+        return rows
+
+    def test_target_fit_is_independent_of_historical_control_price(self):
+        manifest = production.load_production_context_manifest(MANIFEST)
+        rows = self._address_rows()
+        accepted = production.fit_production_context_rows(
+            manifest,
+            rows,
+            self._subtotal_model("5"),
+            family_keys=("opcode:0x30",),
+        )
+        rejected_control = production.fit_production_context_rows(
+            manifest,
+            rows,
+            self._subtotal_model("500"),
+            family_keys=("opcode:0x30",),
+        )
+        self.assertEqual(
+            accepted["families"]["opcode:0x30"]["coefficients"],
+            rejected_control["families"]["opcode:0x30"]["coefficients"],
+        )
+        self.assertEqual(
+            accepted["families"]["opcode:0x30"]["coefficients"],
+            {"address_constant": "300"},
+        )
+        self.assertEqual(accepted["families"]["opcode:0x30"]["status"], "accepted")
+        self.assertEqual(
+            rejected_control["families"]["opcode:0x30"]["status"], "rejected"
+        )
+        self.assertIn(
+            "control_contamination",
+            rejected_control["families"]["opcode:0x30"]["rejection_reasons"],
+        )
+
+    def test_v5_subtotal_excludes_only_target_and_allows_exact_zero_work(self):
+        row = self._address_rows()[0]
+        row["actual_raw_gas_by_key"]["opcode:0x00"] = 0
+        subtotal = production.evaluate_v5_subtotal(
+            row, self._subtotal_model(), excluded_target_key=None
+        )
+        self.assertEqual(subtotal, Decimal(141))
+        row["actual_raw_gas_by_key"]["opcode:0xfe"] = 1
+        with self.assertRaisesRegex(ValueError, "unpriced"):
+            production.evaluate_v5_subtotal(
+                row, self._subtotal_model(), excluded_target_key=None
+            )
+
+        manifest = production.load_production_context_manifest(MANIFEST)
+        loaded = production.load_production_v5_subtotal_model(manifest, ROOT)
+        self.assertEqual(set(loaded.fixed_costs), set(self._subtotal_model().fixed_costs))
+        self.assertIn("opcode:0x5f", loaded.opcode_prices)
+        self.assertNotIn("opcode:0x30", loaded.opcode_prices)
+
+    def test_residualization_rejects_incomplete_or_contaminated_inputs(self):
+        manifest = production.load_production_context_manifest(MANIFEST)
+        cases = []
+        missing_zero = [row for row in self._address_rows() if row["count"] != 0]
+        cases.append(("count-zero", missing_zero))
+        duplicate = self._address_rows()
+        duplicate.append(copy.deepcopy(duplicate[-1]))
+        cases.append(("duplicate", duplicate))
+        mismatched = self._address_rows()
+        mismatched[0]["actual_raw_gas_by_key"]["opcode:0x60"] += 1
+        cases.append(("non-target ledger", mismatched))
+        unpriced = self._address_rows()
+        for row in unpriced:
+            if row["scenario"] == "address_canonical" and row["count"] == 0:
+                row["actual_raw_gas_by_key"]["opcode:0xfe"] = 1
+        cases.append(("unpriced", unpriced))
+        target_in_subtotal = self._address_rows()
+        next(row for row in target_in_subtotal if row["lane"] == "target")[
+            "subtotal_keys"
+        ] = ["opcode:0x30"]
+        cases.append(("target context", target_in_subtotal))
+        forbidden = self._address_rows()
+        forbidden[0]["body_scale"] = "1"
+        cases.append(("forbidden", forbidden))
+        for expected, rows in cases:
+            with self.subTest(expected=expected), self.assertRaisesRegex(
+                ValueError, expected
+            ):
+                production.fit_production_context_rows(
+                    manifest,
+                    rows,
+                    self._subtotal_model(),
+                    family_keys=("opcode:0x30",),
+                )
+
+    def test_exact_models_cover_frozen_family_feature_shapes(self):
+        manifest = production.load_production_context_manifest(MANIFEST)
+        expected = {
+            "address_constant": (["1"],),
+            "caller_constant": (["1"],),
+            "callvalue_classes": (["1", "0"], ["0", "1"]),
+            "calldataload_access_classes": (
+                ["1", "0", "0"],
+                ["0", "1", "0"],
+                ["0", "0", "1"],
+            ),
+            "calldatasize_length": (["1", "33"],),
+            "calldatasize_boundary": (["1", "2", "1"],),
+            "timestamp_nonzero": (["1"],),
+        }
+        scenarios = {
+            "address_constant": "address_canonical",
+            "caller_constant": "caller_canonical",
+            "callvalue_classes": ("callvalue_zero", "callvalue_nonzero_7"),
+            "calldataload_access_classes": (
+                "calldataload_empty_offset_0",
+                "calldataload_partial_33_offset_17",
+                "calldataload_full_32_offset_0",
+            ),
+            "calldatasize_length": "calldatasize_33",
+            "calldatasize_boundary": "calldatasize_33",
+            "timestamp_nonzero": "timestamp_post_unzen_delta_17",
+        }
+        for candidate, scenario_names in scenarios.items():
+            if isinstance(scenario_names, str):
+                scenario_names = (scenario_names,)
+            vectors = tuple(
+                production.production_context_design_row(
+                    manifest.model_candidate(candidate), manifest.scenario(name)
+                )
+                for name in scenario_names
+            )
+            with self.subTest(candidate=candidate):
+                self.assertEqual(
+                    tuple([str(value) for value in row] for row in vectors),
+                    expected[candidate],
+                )
+
+    def test_exact_decimal_fit_records_matrix_rank_residuals_and_gates(self):
+        fit = production.fit_exact_decimal_model(
+            matrix=((1, 0), (2, 0), (0, 1), (0, 2), (3, 0), (0, 3)),
+            observed=(10, 20, 7, 14, 30, 21),
+            terms=("left", "right"),
+        )
+        self.assertEqual(fit["coefficients"], {"left": "10", "right": "7"})
+        self.assertEqual(fit["rank"], 2)
+        self.assertEqual(fit["residuals"], ["0"] * 6)
+        self.assertEqual(fit["design_matrix"][0], ["1", "0"])
+        with self.assertRaisesRegex(ValueError, "rank deficient"):
+            production.fit_exact_decimal_model(
+                matrix=((1, 2), (2, 4)), observed=(1, 2), terms=("a", "b")
+            )
+        with self.assertRaisesRegex(ValueError, "nonnegative"):
+            production.fit_exact_decimal_model(
+                matrix=((1,), (2,), (3,)), observed=(-1, -2, -3), terms=("a",)
+            )
+        with self.assertRaisesRegex(ValueError, "finite"):
+            production.fit_exact_decimal_model(
+                matrix=((1,), (2,), (3,)),
+                observed=("NaN", "2", "3"),
+                terms=("a",),
+            )
+
+    def test_repeat_signal_and_exact_ape_fail_closed(self):
+        manifest = production.load_production_context_manifest(MANIFEST)
+        rows = self._address_rows(coefficient=300)
+        drifted = copy.deepcopy(rows)
+        drifted[1]["public_output"] = "0xabcd"
+        with self.assertRaisesRegex(ValueError, "repeat drift"):
+            production.fit_production_context_rows(
+                manifest,
+                drifted,
+                self._subtotal_model(),
+                family_keys=("opcode:0x30",),
+            )
+        weak = production.fit_production_context_rows(
+            manifest,
+            self._address_rows(coefficient=100),
+            self._subtotal_model(),
+            family_keys=("opcode:0x30",),
+        )
+        self.assertIn(
+            "insufficient_signal",
+            weak["families"]["opcode:0x30"]["rejection_reasons"],
+        )
+        self.assertEqual(production.exact_ape(Decimal(11), Decimal(10)), Decimal("0.1"))
+        with self.assertRaisesRegex(ValueError, "zero observed"):
+            production.exact_ape(Decimal(1), Decimal(0))
+
+    def test_all_six_families_recover_and_calldatasize_selection_is_fixed_order(self):
+        manifest = production.load_production_context_manifest(MANIFEST)
+        length = production.fit_production_context_rows(
+            manifest, self._complete_rows(), self._subtotal_model()
+        )
+        self.assertTrue(length["all_families_accepted"])
+        self.assertEqual(
+            length["families"]["opcode:0x34"]["coefficients"],
+            {"callvalue_zero": "320", "callvalue_nonzero": "340"},
+        )
+        self.assertEqual(
+            length["families"]["opcode:0x35"]["coefficients"],
+            {"load_zero": "330", "load_partial": "350", "load_full": "370"},
+        )
+        self.assertEqual(
+            length["families"]["opcode:0x36"]["selected_candidate"],
+            "calldatasize_length",
+        )
+        self.assertEqual(
+            length["families"]["opcode:0x36"]["coefficients"],
+            {"beta_0": "300", "beta_length": "2"},
+        )
+
+        boundary = production.fit_production_context_rows(
+            manifest,
+            self._complete_rows(calldatasize_model="boundary"),
+            self._subtotal_model(),
+            family_keys=("opcode:0x36",),
+        )
+        self.assertEqual(
+            boundary["families"]["opcode:0x36"]["selected_candidate"],
+            "calldatasize_boundary",
+        )
+        self.assertEqual(
+            boundary["families"]["opcode:0x36"]["selection_decisions"],
+            [
+                {"candidate": "calldatasize_length", "status": "rejected"},
+                {"candidate": "calldatasize_boundary", "status": "accepted"},
+            ],
+        )
+
+    def test_fit_holdout_and_sibling_gates_do_not_tune_coefficients(self):
+        manifest = production.load_production_context_manifest(MANIFEST)
+        baseline_rows = self._complete_rows()
+        baseline = production.fit_production_context_rows(
+            manifest,
+            baseline_rows,
+            self._subtotal_model(),
+            family_keys=("opcode:0x30",),
+        )["families"]["opcode:0x30"]
+
+        final_drift = copy.deepcopy(baseline_rows)
+        for row in final_drift:
+            if (
+                row["scenario"] == "address_alternate"
+                and row["lane"] == "target"
+                and row["count"]
+            ):
+                row["prover_gas"] = str(Decimal(row["prover_gas"]) + 10_000)
+        rejected = production.fit_production_context_rows(
+            manifest,
+            final_drift,
+            self._subtotal_model(),
+            family_keys=("opcode:0x30",),
+        )["families"]["opcode:0x30"]
+        self.assertEqual(rejected["coefficients"], baseline["coefficients"])
+        self.assertEqual(rejected["selected_candidate"], baseline["selected_candidate"])
+        self.assertIn("count_holdout", rejected["rejection_reasons"])
+        self.assertIn("extrapolation", rejected["rejection_reasons"])
+        self.assertIn("final_holdout_row", rejected["rejection_reasons"])
+
+        nonlinear = copy.deepcopy(baseline_rows)
+        for row in nonlinear:
+            if (
+                row["scenario"] == "address_canonical"
+                and row["lane"] == "target"
+                and row["count"] == 8
+            ):
+                row["prover_gas"] = str(Decimal(row["prover_gas"]) + 2_000)
+        nonlinear_result = production.fit_production_context_rows(
+            manifest,
+            nonlinear,
+            self._subtotal_model(),
+            family_keys=("opcode:0x30",),
+        )["families"]["opcode:0x30"]
+        self.assertTrue(
+            {"fit_r2", "fit_residual"} & set(nonlinear_result["rejection_reasons"])
+        )
+
+        sibling_drift = copy.deepcopy(baseline_rows)
+        for row in sibling_drift:
+            if (
+                row["scenario"] == "calldataload_out_of_range_4_offset_64"
+                and row["lane"] == "target"
+            ):
+                row["prover_gas"] = str(
+                    Decimal(row["prover_gas"]) + Decimal(row["count"] * 30)
+                )
+        sibling = production.fit_production_context_rows(
+            manifest,
+            sibling_drift,
+            self._subtotal_model(),
+            family_keys=("opcode:0x35",),
+        )["families"]["opcode:0x35"]
+        self.assertIn("sibling_inconsistency", sibling["rejection_reasons"])
+
+    def test_prepare_run_resume_is_create_only_and_hash_bound(self):
+        manifest = production.load_production_context_manifest(MANIFEST)
+        fixture = production.production_context_fixture_requests(manifest)[0]
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            launcher = root / "guest-launcher"
+            elf = root / "proposal.elf"
+            vk = root / "proposal.vk"
+            trace = root / "reconstruct.rs"
+            for path, value in (
+                (launcher, b"launcher"),
+                (elf, b"elf"),
+                (vk, b"vk"),
+                (trace, b"trace"),
+            ):
+                path.write_bytes(value)
+            run = root / "run"
+            production.prepare_production_context_run(
+                manifest=manifest,
+                row_requests=(fixture,),
+                run=run,
+                launcher=launcher,
+                production_elf=elf,
+                production_vk=vk,
+                trace_source=trace,
+                implementation_revision="1" * 40,
+                source_hashes={"operation_coverage_v5": "2" * 64},
+                parity_identity=self._parity_identity(),
+            )
+            with self.assertRaisesRegex(ValueError, "already exists"):
+                production.prepare_production_context_run(
+                    manifest=manifest,
+                    row_requests=(fixture,),
+                    run=run,
+                    launcher=launcher,
+                    production_elf=elf,
+                    production_vk=vk,
+                    trace_source=trace,
+                    implementation_revision="1" * 40,
+                    source_hashes={"operation_coverage_v5": "2" * 64},
+                    parity_identity=self._parity_identity(),
+                )
+
+            report = {
+                "gas": 123,
+                "public_values": "0x1234",
+                "exit_code": 0,
+                "sp1_execution_engine": "gas-estimator",
+                "guest_input_sha256": "0x" + "a" * 64,
+                "controlled_block": {
+                    "status": "accepted",
+                    "row_id": fixture.row_id,
+                    "observation": {
+                        "backend_input_sha256": "a" * 64,
+                        "host_trace_sha256": "b" * 64,
+                        "public_output": "0x1234",
+                        "actual_raw_gas_by_key": {},
+                        "actual_context_features": {},
+                        "actual_features": {},
+                        "actual_diagnostics": {},
+                    },
+                },
+            }
+            calls = []
+
+            def execute(_row_input):
+                calls.append(_row_input["row_id"])
+                return report
+
+            production.run_production_context_campaign(run, executor=execute)
+            production.run_production_context_campaign(run, executor=execute)
+            self.assertEqual(calls, [fixture.row_id])
+            self.assertTrue((run / "execution-complete.json").is_file())
+            launcher.write_bytes(b"changed")
+            with self.assertRaisesRegex(ValueError, "launcher hash"):
+                production.run_production_context_campaign(run, executor=execute)
+
+    def test_subprocess_failure_preserves_rows_without_terminal(self):
+        manifest = production.load_production_context_manifest(MANIFEST)
+        fixtures = production.production_context_fixture_requests(manifest)[:2]
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            files = []
+            for name in ("guest-launcher", "proposal.elf", "proposal.vk", "reconstruct.rs"):
+                path = root / name
+                path.write_bytes(name.encode())
+                files.append(path)
+            run = root / "run"
+            production.prepare_production_context_run(
+                manifest=manifest,
+                row_requests=fixtures,
+                run=run,
+                launcher=files[0],
+                production_elf=files[1],
+                production_vk=files[2],
+                trace_source=files[3],
+                implementation_revision="1" * 40,
+                source_hashes={"operation_coverage_v5": "2" * 64},
+                parity_identity=self._parity_identity(),
+            )
+            calls = 0
+
+            def execute(row_input):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise subprocess.TimeoutExpired(["guest-launcher"], 10)
+                return {
+                    "gas": 1,
+                    "public_values": "0x01",
+                    "exit_code": 0,
+                    "sp1_execution_engine": "gas-estimator",
+                    "guest_input_sha256": "0x" + "a" * 64,
+                    "controlled_block": {
+                        "status": "accepted",
+                        "row_id": row_input["row_id"],
+                        "observation": {
+                            "backend_input_sha256": "a" * 64,
+                            "host_trace_sha256": "b" * 64,
+                            "public_output": "0x01",
+                            "actual_raw_gas_by_key": {},
+                            "actual_context_features": {},
+                            "actual_features": {},
+                            "actual_diagnostics": {},
+                        },
+                    },
+                }
+
+            with self.assertRaises(subprocess.TimeoutExpired):
+                production.run_production_context_campaign(run, executor=execute)
+            self.assertEqual(len(list((run / "rows").glob("*.json"))), 1)
+            self.assertFalse((run / "execution-complete.json").exists())
+            self.assertFalse((run / "campaign-decisions.json").exists())
+            self.assertFalse((run / "terminal.json").exists())
 
 
 if __name__ == "__main__":

@@ -1044,6 +1044,7 @@ def production_context_fixture_requests(
             },
             "expected_final_state_root": "0x" + "00" * 32,
             "expected_raw_gas_by_key": {},
+            "expected_operation_event_count_by_key": {},
             "expected_context_features": {},
             "expected_features": {},
             "expected_diagnostics": {},
@@ -1066,6 +1067,7 @@ def production_context_fixture_requests(
 _FIXTURE_EVIDENCE_FIELDS = {
     "expected_final_state_root": "actual_final_state_root",
     "expected_raw_gas_by_key": "actual_raw_gas_by_key",
+    "expected_operation_event_count_by_key": "actual_operation_event_count_by_key",
     "expected_context_features": "actual_context_features",
     "expected_features": "actual_features",
     "expected_diagnostics": "actual_diagnostics",
@@ -1272,6 +1274,7 @@ def validate_production_context_parity_identity(
     row_ids: Iterable[str],
     production_elf_sha256: str,
     guest_launcher_sha256: str,
+    prepared_row: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Validate the complete row-bound parity identity and its execution assets."""
     expected_keys = {
@@ -1343,6 +1346,18 @@ def validate_production_context_parity_identity(
         canonical_json(unhashed)
     ) != claimed:
         raise ValueError("production context parity identity hash differs")
+    if prepared_row is not None:
+        builder = prepared_row.get("builder_input")
+        if not isinstance(builder, Mapping):
+            raise ValueError("production context parity prepared row evidence join differs")
+        expected_backend = builder.get("expected_backend_input_sha256")
+        expected_trace = builder.get("expected_host_trace_sha256")
+        if (
+            equal_values["guest_input_sha256"].removeprefix("0x")
+            != expected_backend
+            or equal_values["host_trace_sha256"] != expected_trace
+        ):
+            raise ValueError("production context parity prepared row evidence join differs")
     return dict(identity)
 
 
@@ -1588,11 +1603,11 @@ def fit_exact_decimal_model(
                 for index in range(width)
             ]
         else:
-            stderr = [Decimal(0) if sse == 0 else Decimal("Infinity")] * width
-        relative_stderr = [
-            (error / coefficient if coefficient else (Decimal(0) if error == 0 else Decimal("Infinity")))
-            for error, coefficient in zip(stderr, coefficients)
-        ]
+            if sse != 0:
+                raise CandidateFitRejected(
+                    "exact model coefficient stderr is nonfinite without residual degrees of freedom"
+                )
+            stderr = [Decimal(0)] * width
     return {
         "terms": list(terms),
         "design_matrix": [
@@ -1610,8 +1625,12 @@ def fit_exact_decimal_model(
             term: _decimal_text(value) for term, value in zip(terms, stderr)
         },
         "relative_coefficient_stderr": {
-            term: _decimal_text(value)
-            for term, value in zip(terms, relative_stderr)
+            term: (
+                {"status": "applicable", "value": _decimal_text(error / coefficient)}
+                if coefficient
+                else {"status": "not_applicable_zero_coefficient", "value": None}
+            )
+            for term, error, coefficient in zip(terms, stderr, coefficients)
         },
     }
 
@@ -1749,10 +1768,13 @@ def evaluate_v5_subtotal(
 ) -> Decimal:
     features = row.get("actual_features")
     raw_gas = row.get("actual_raw_gas_by_key")
+    event_counts = row.get("actual_operation_event_count_by_key")
     if not isinstance(features, Mapping) or set(features) != set(model.fixed_costs):
         raise ValueError("V5 subtotal higher-layer feature inventory differs")
     if not isinstance(raw_gas, Mapping):
         raise ValueError("V5 subtotal raw-gas ledger differs")
+    if not isinstance(event_counts, Mapping) or set(event_counts) != set(raw_gas):
+        raise ValueError("V5 subtotal event-count ledger differs")
     subtotal_keys = row.get("subtotal_keys")
     if subtotal_keys is not None:
         if excluded_target_key is not None and excluded_target_key in subtotal_keys:
@@ -1785,6 +1807,11 @@ def evaluate_v5_subtotal(
         for key, units in raw_gas.items():
             if type(units) is not int or units < 0:
                 raise ValueError("V5 subtotal raw gas must be nonnegative integers")
+            event_count = event_counts[key]
+            if type(event_count) is not int or event_count < 0:
+                raise ValueError("V5 subtotal event count must be a nonnegative integer")
+            if (units == 0) != (event_count == 0):
+                raise ValueError("V5 subtotal raw-gas/event count mismatch")
             if key == excluded_target_key:
                 continue
             kind = model.opcode_model_kinds.get(key)
@@ -1797,6 +1824,8 @@ def evaluate_v5_subtotal(
                 raise ValueError(f"unpriced non-target work in V5 subtotal: {key}")
             if kind == ModelKind.STATIC_RAW_GAS.value:
                 subtotal += Decimal(units) * model.opcode_prices[key]
+                if model.typed_registry is not None:
+                    subtotal += Decimal(event_count) * model.typed_registry.common_dispatch
                 continue
             if model.typed_registry is None:
                 raise ValueError("missing_typed_features for known structured V5 work")
@@ -1806,6 +1835,8 @@ def evaluate_v5_subtotal(
                 components, (str, bytes)
             ) or not components:
                 raise ValueError("missing_typed_features for known structured V5 work")
+            if len(components) != event_count:
+                raise ValueError("V5 structured opcode component event count mismatch")
             observed_units = 0
             for component in components:
                 if not isinstance(component, Mapping):
@@ -1863,6 +1894,7 @@ def _normalized_fit_row(row: Mapping[str, Any]) -> dict[str, Any]:
         "backend_input_sha256",
         "host_trace_sha256",
         "actual_raw_gas_by_key",
+        "actual_operation_event_count_by_key",
         "actual_context_features",
         "actual_features",
         "actual_diagnostics",
@@ -1891,6 +1923,7 @@ def _normalized_fit_row(row: Mapping[str, Any]) -> dict[str, Any]:
     )
     for field in (
         "actual_raw_gas_by_key",
+        "actual_operation_event_count_by_key",
         "actual_context_features",
         "actual_features",
         "actual_diagnostics",
@@ -1913,10 +1946,22 @@ def _candidate_gate_reasons(
     reasons = []
     if _decimal(fit["r2"], label="fit R2") < Decimal(QUALITY_GATES["r2_min"]):
         reasons.append("fit_r2")
-    relative = [
-        _decimal(value, label="relative coefficient stderr")
-        for value in fit["relative_coefficient_stderr"].values()
-    ]
+    relative = []
+    coefficients = fit.get("coefficients")
+    values = fit.get("relative_coefficient_stderr")
+    if not isinstance(coefficients, Mapping) or not isinstance(values, Mapping) or set(values) != set(coefficients):
+        raise ValueError("relative coefficient stderr schema differs")
+    for term, entry in values.items():
+        coefficient = _decimal(coefficients[term], label=f"coefficient {term}")
+        if not isinstance(entry, Mapping) or set(entry) != {"status", "value"}:
+            raise ValueError("relative coefficient stderr schema differs")
+        if coefficient == 0:
+            if entry != {"status": "not_applicable_zero_coefficient", "value": None}:
+                raise ValueError("zero coefficient stderr applicability differs")
+            continue
+        if entry["status"] != "applicable" or entry["value"] is None:
+            raise ValueError("nonzero coefficient stderr applicability differs")
+        relative.append(_decimal(entry["value"], label="relative coefficient stderr"))
     if any(
         not value.is_finite()
         or value > Decimal(QUALITY_GATES["relative_coefficient_stderr_max"])
@@ -2029,8 +2074,17 @@ def fit_production_context_rows(
             target_non_target.pop(scenario.key, None)
             control_non_target = dict(control["actual_raw_gas_by_key"])
             control_non_target.pop(control_key, None)
+            target_non_target_events = dict(
+                target["actual_operation_event_count_by_key"]
+            )
+            target_non_target_events.pop(scenario.key, None)
+            control_non_target_events = dict(
+                control["actual_operation_event_count_by_key"]
+            )
+            control_non_target_events.pop(control_key, None)
             if (
                 target_non_target != control_non_target
+                or target_non_target_events != control_non_target_events
                 or target["actual_features"] != control["actual_features"]
                 or target["actual_diagnostics"] != control["actual_diagnostics"]
             ):
@@ -2044,6 +2098,7 @@ def fit_production_context_rows(
                     "sp1_proposal_elf_sha256",
                     "guest_launcher_sha256",
                     "actual_raw_gas_by_key",
+                    "actual_operation_event_count_by_key",
                     "actual_context_features",
                     "actual_features",
                     "actual_diagnostics",
@@ -2595,20 +2650,7 @@ def prepare_production_context_run(
     row_ids = [request.row_id for request in row_requests]
     if len(row_ids) != len(set(row_ids)):
         raise ValueError("duplicate production context prepared row")
-    validated_parity = validate_production_context_parity_identity(
-        parity_identity,
-        row_ids=row_ids,
-        production_elf_sha256=asset_identity["production_elf"]["sha256"],
-        guest_launcher_sha256=asset_identity["launcher"]["sha256"],
-    )
-    run = pathlib.Path(run)
-    try:
-        run.mkdir(parents=True, exist_ok=False)
-    except FileExistsError as error:
-        raise ValueError(f"production context run already exists: {run}") from error
-    (run / "row-inputs").mkdir()
-    (run / "rows").mkdir()
-    row_entries = []
+    prepared_rows = []
     for request in row_requests:
         payload = {
             "row_id": request.row_id,
@@ -2620,13 +2662,37 @@ def prepare_production_context_run(
             "repeat_index": request.repeat_index,
             "builder_input": dict(request.builder_input),
         }
-        input_sha256 = sha256_bytes(canonical_json(payload))
-        wrapped = {**payload, "input_sha256": input_sha256}
-        relative = pathlib.PurePosixPath("row-inputs") / f"{request.row_id}.json"
+        prepared_rows.append(
+            {**payload, "input_sha256": sha256_bytes(canonical_json(payload))}
+        )
+    for prepared_row in prepared_rows:
+        _validate_prepared_row_semantics(prepared_row)
+    parity_row_id = parity_identity.get("row_id") if isinstance(parity_identity, Mapping) else None
+    parity_row = next(
+        (row for row in prepared_rows if row["row_id"] == parity_row_id), None
+    )
+    validated_parity = validate_production_context_parity_identity(
+        parity_identity,
+        row_ids=row_ids,
+        production_elf_sha256=asset_identity["production_elf"]["sha256"],
+        guest_launcher_sha256=asset_identity["launcher"]["sha256"],
+        prepared_row=parity_row,
+    )
+    run = pathlib.Path(run)
+    try:
+        run.mkdir(parents=True, exist_ok=False)
+    except FileExistsError as error:
+        raise ValueError(f"production context run already exists: {run}") from error
+    (run / "row-inputs").mkdir()
+    (run / "rows").mkdir()
+    row_entries = []
+    for wrapped in prepared_rows:
+        input_sha256 = wrapped["input_sha256"]
+        relative = pathlib.PurePosixPath("row-inputs") / f"{wrapped['row_id']}.json"
         _write_json_create_only(run / relative, wrapped)
         row_entries.append(
             {
-                "row_id": request.row_id,
+                "row_id": wrapped["row_id"],
                 "path": str(relative),
                 "input_sha256": input_sha256,
             }
@@ -2735,13 +2801,19 @@ def _validate_run_identity(
     if not isinstance(rows, list) or not isinstance(assets, Mapping):
         raise ValueError("production context run identity inventory differs")
     try:
+        parity_row_id = identity["parity_identity"]["row_id"]
+        parity_entry = next(
+            entry for entry in rows if entry.get("row_id") == parity_row_id
+        )
+        parity_row = _validate_prepared_row_input(run, parity_entry)
         validate_production_context_parity_identity(
             identity["parity_identity"],
             row_ids=(entry["row_id"] for entry in rows),
             production_elf_sha256=assets["production_elf"]["sha256"],
             guest_launcher_sha256=assets["launcher"]["sha256"],
+            prepared_row=parity_row,
         )
-    except (KeyError, TypeError) as error:
+    except (KeyError, TypeError, StopIteration) as error:
         raise ValueError("production context run parity join differs") from error
     resolved = {
         role: _resolve_run_asset(run, identity, role, supplied)
@@ -2753,6 +2825,37 @@ def _validate_run_identity(
         }.items()
     }
     return identity, resolved
+
+
+def _validate_prepared_row_semantics(payload: Mapping[str, Any]) -> None:
+    if set(payload) != {
+        "row_id",
+        "workload_id",
+        "scenario",
+        "split",
+        "count",
+        "lane",
+        "repeat_index",
+        "builder_input",
+        "input_sha256",
+    }:
+        raise ValueError("production context prepared row schema differs")
+    builder = payload["builder_input"]
+    program = builder.get("program") if isinstance(builder, Mapping) else None
+    if (
+        not isinstance(program, Mapping)
+        or builder.get("row_id") != payload["row_id"]
+        or program.get("workload_id") != payload["workload_id"]
+        or program.get("count") != payload["count"]
+        or program.get("lane") != payload["lane"]
+        or program.get("repeat_index") != payload["repeat_index"]
+        or _SHA256_RE.fullmatch(builder.get("expected_backend_input_sha256", ""))
+        is None
+        or _SHA256_RE.fullmatch(builder.get("expected_host_trace_sha256", ""))
+        is None
+        or not isinstance(builder.get("expected_operation_event_count_by_key"), Mapping)
+    ):
+        raise ValueError("production context prepared row semantic fields differ")
 
 
 def _validate_prepared_row_input(
@@ -2772,7 +2875,72 @@ def _validate_prepared_row_input(
         or payload.get("row_id") != entry["row_id"]
     ):
         raise ValueError("production context prepared row hash differs")
+    _validate_prepared_row_semantics(payload)
     return payload
+
+
+def _validate_prepared_row_evidence(
+    row_input: Mapping[str, Any],
+    evidence: Mapping[str, Any],
+    *,
+    production_elf_sha256: str,
+    guest_launcher_sha256: str,
+) -> dict[str, Any]:
+    """Join persisted evidence exactly to its immutable prepared row and assets."""
+    expected_fields = {
+        "row_id",
+        "input_sha256",
+        "workload_id",
+        "scenario",
+        "split",
+        "count",
+        "lane",
+        "repeat_index",
+        "prover_gas",
+        "public_output",
+        "backend_input_sha256",
+        "host_trace_sha256",
+        "sp1_proposal_elf_sha256",
+        "guest_launcher_sha256",
+        "actual_raw_gas_by_key",
+        "actual_operation_event_count_by_key",
+        "actual_context_features",
+        "actual_features",
+        "actual_diagnostics",
+        "evidence_sha256",
+    }
+    if not isinstance(evidence, Mapping) or set(evidence) != expected_fields:
+        raise ValueError("production context prepared-row join schema differs")
+    unhashed = dict(evidence)
+    claimed = unhashed.pop("evidence_sha256")
+    if _SHA256_RE.fullmatch(claimed or "") is None or sha256_bytes(
+        canonical_json(unhashed)
+    ) != claimed:
+        raise ValueError("production context prepared-row join evidence hash differs")
+    for field in (
+        "row_id",
+        "input_sha256",
+        "workload_id",
+        "scenario",
+        "split",
+        "count",
+        "lane",
+        "repeat_index",
+    ):
+        if evidence[field] != row_input[field]:
+            raise ValueError("production context prepared-row join metadata differs")
+    builder = row_input["builder_input"]
+    if (
+        evidence["backend_input_sha256"]
+        != builder["expected_backend_input_sha256"]
+        or evidence["host_trace_sha256"] != builder["expected_host_trace_sha256"]
+        or evidence["sp1_proposal_elf_sha256"] != production_elf_sha256
+        or evidence["guest_launcher_sha256"] != guest_launcher_sha256
+    ):
+        raise ValueError("production context prepared-row join identity differs")
+    _reject_forbidden_fit_fields(evidence, "prepared execution row")
+    _normalized_fit_row(evidence)
+    return dict(evidence)
 
 
 def _normalize_execution_report(
@@ -2803,6 +2971,7 @@ def _normalize_execution_report(
         normalized = {
             "row_id": row_input["row_id"],
             "input_sha256": row_input["input_sha256"],
+            "workload_id": row_input["workload_id"],
             "scenario": row_input["scenario"],
             "split": row_input["split"],
             "count": row_input["count"],
@@ -2817,16 +2986,23 @@ def _normalize_execution_report(
             "sp1_proposal_elf_sha256": report["sp1_proposal_elf_sha256"],
             "guest_launcher_sha256": report["guest_launcher_sha256"],
             "actual_raw_gas_by_key": observation["actual_raw_gas_by_key"],
+            "actual_operation_event_count_by_key": observation[
+                "actual_operation_event_count_by_key"
+            ],
             "actual_context_features": observation["actual_context_features"],
             "actual_features": observation["actual_features"],
             "actual_diagnostics": observation["actual_diagnostics"],
         }
     except (KeyError, AttributeError, TypeError) as error:
         raise ValueError("production context execution report is incomplete") from error
-    _normalized_fit_row(normalized)
     evidence = dict(normalized)
     evidence["evidence_sha256"] = sha256_bytes(canonical_json(evidence))
-    return evidence
+    return _validate_prepared_row_evidence(
+        row_input,
+        evidence,
+        production_elf_sha256=production_elf_sha256,
+        guest_launcher_sha256=guest_launcher_sha256,
+    )
 
 
 def _default_row_executor(
@@ -2896,22 +3072,12 @@ def run_production_context_campaign(
         output_path = run / "rows" / f"{entry['row_id']}.json"
         if output_path.exists():
             evidence = _load_canonical_json(output_path, label="production context row")
-            claimed = evidence.get("evidence_sha256")
-            unhashed = dict(evidence)
-            unhashed.pop("evidence_sha256", None)
-            if (
-                claimed is None
-                or sha256_bytes(canonical_json(unhashed)) != claimed
-                or evidence.get("row_id") != entry["row_id"]
-                or evidence.get("input_sha256") != entry["input_sha256"]
-                or evidence.get("sp1_proposal_elf_sha256")
-                != identity["assets"]["production_elf"]["sha256"]
-                or evidence.get("guest_launcher_sha256")
-                != identity["assets"]["launcher"]["sha256"]
-            ):
-                raise ValueError("production context existing row hash differs")
-            _reject_forbidden_fit_fields(evidence, "existing execution row")
-            _normalized_fit_row(evidence)
+            evidence = _validate_prepared_row_evidence(
+                row_input,
+                evidence,
+                production_elf_sha256=identity["assets"]["production_elf"]["sha256"],
+                guest_launcher_sha256=identity["assets"]["launcher"]["sha256"],
+            )
         else:
             report = (
                 executor(row_input)
@@ -2985,26 +3151,23 @@ def fit_production_context_run(
         raise ValueError("production context execution row inventory differs")
     rows = []
     for entry, completed in zip(identity["rows"], completion_hashes):
+        row_input = _validate_prepared_row_input(run, entry)
         row = _load_canonical_json(
             run / "rows" / f"{entry['row_id']}.json",
             label="production context fit row",
         )
-        row_unhashed = dict(row)
-        row_claimed = row_unhashed.pop("evidence_sha256", None)
+        row = _validate_prepared_row_evidence(
+            row_input,
+            row,
+            production_elf_sha256=identity["assets"]["production_elf"]["sha256"],
+            guest_launcher_sha256=identity["assets"]["launcher"]["sha256"],
+        )
+        row_claimed = row["evidence_sha256"]
         if (
             completed
             != {"row_id": entry["row_id"], "evidence_sha256": row_claimed}
-            or _SHA256_RE.fullmatch(row_claimed or "") is None
-            or sha256_bytes(canonical_json(row_unhashed)) != row_claimed
-            or row.get("input_sha256") != entry["input_sha256"]
-            or row.get("sp1_proposal_elf_sha256")
-            != identity["assets"]["production_elf"]["sha256"]
-            or row.get("guest_launcher_sha256")
-            != identity["assets"]["launcher"]["sha256"]
         ):
             raise ValueError("production context completed row hash differs")
-        _reject_forbidden_fit_fields(row, "completed execution row")
-        _normalized_fit_row(row)
         rows.append(row)
     recomputed_decisions = fit_production_context_rows(manifest, rows, subtotal_model)
     decisions_path = run / "campaign-decisions.json"

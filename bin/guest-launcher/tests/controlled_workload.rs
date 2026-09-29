@@ -138,6 +138,18 @@ fn block_row_spec() -> ControlledBlockRowSpec {
             ("opcode:0x80".into(), 6),
             ("opcode:0x90".into(), 3),
         ]),
+        expected_operation_event_count_by_key: BTreeMap::from([
+            ("opcode:0x03".into(), 1),
+            ("opcode:0x15".into(), 2),
+            ("opcode:0x50".into(), 2),
+            ("opcode:0x56".into(), 1),
+            ("opcode:0x57".into(), 2),
+            ("opcode:0x5b".into(), 3),
+            ("opcode:0x60".into(), 5),
+            ("opcode:0x62".into(), 1),
+            ("opcode:0x80".into(), 2),
+            ("opcode:0x90".into(), 1),
+        ]),
         expected_context_features: BTreeMap::new(),
         expected_features: BTreeMap::from([
             ("proposal_startup".into(), 1),
@@ -469,6 +481,7 @@ fn materialize_opcode_block_row(
         },
         expected_final_state_root: B256::ZERO,
         expected_raw_gas_by_key: BTreeMap::new(),
+        expected_operation_event_count_by_key: BTreeMap::new(),
         expected_context_features: BTreeMap::new(),
         expected_features: BTreeMap::new(),
         expected_diagnostics: BTreeMap::new(),
@@ -494,6 +507,8 @@ fn materialize_opcode_block_row(
     let observed = observe_controlled_block_fixture(&fixture).expect("trace production GuestInput");
     spec.expected_final_state_root = observed.actual_final_state_root;
     spec.expected_raw_gas_by_key = observed.actual_raw_gas_by_key.clone();
+    spec.expected_operation_event_count_by_key =
+        observed.actual_operation_event_count_by_key.clone();
     spec.expected_features = observed.actual_features.clone();
     spec.expected_diagnostics = observed.actual_diagnostics.clone();
     spec.row_id = controlled_block_row_id(&spec).unwrap();
@@ -529,6 +544,7 @@ fn materialize_context_block_row(
         },
         expected_final_state_root: B256::ZERO,
         expected_raw_gas_by_key: BTreeMap::new(),
+        expected_operation_event_count_by_key: BTreeMap::new(),
         expected_context_features: BTreeMap::new(),
         expected_features: BTreeMap::new(),
         expected_diagnostics: BTreeMap::new(),
@@ -554,6 +570,8 @@ fn materialize_context_block_row(
     let observed = observe_controlled_block_fixture(&fixture).expect("trace context fixture");
     spec.expected_final_state_root = observed.actual_final_state_root;
     spec.expected_raw_gas_by_key = observed.actual_raw_gas_by_key.clone();
+    spec.expected_operation_event_count_by_key =
+        observed.actual_operation_event_count_by_key.clone();
     spec.expected_context_features = observed.actual_context_features.clone();
     spec.expected_features = observed.actual_features.clone();
     spec.expected_diagnostics = observed.actual_diagnostics.clone();
@@ -616,6 +634,7 @@ fn context_opcode_program_schema_is_structured_and_rejects_mismatched_profiles()
     };
     mismatched.expected_final_state_root = B256::ZERO;
     mismatched.expected_raw_gas_by_key.clear();
+    mismatched.expected_operation_event_count_by_key.clear();
     mismatched.expected_context_features.clear();
     mismatched.expected_features.clear();
     mismatched.expected_diagnostics.clear();
@@ -739,6 +758,20 @@ fn context_opcode_pairs_change_only_the_measurement_instruction_and_feature() {
             measurement_raw_gas,
         );
         assert_eq!(target_non_measurement, control_non_measurement);
+        let target_non_measurement_events = without_measurement(
+            target.actual_operation_event_count_by_key.clone(),
+            opcode.byte(),
+            1,
+        );
+        let control_non_measurement_events = without_measurement(
+            control.actual_operation_event_count_by_key.clone(),
+            opcode.control_byte(),
+            1,
+        );
+        assert_eq!(
+            target_non_measurement_events,
+            control_non_measurement_events
+        );
     }
 }
 
@@ -818,6 +851,7 @@ fn context_profiles_bind_source_builder_environment_and_positive_value_state() {
             },
             expected_final_state_root: B256::ZERO,
             expected_raw_gas_by_key: BTreeMap::new(),
+            expected_operation_event_count_by_key: BTreeMap::new(),
             expected_context_features: BTreeMap::new(),
             expected_features: BTreeMap::new(),
             expected_diagnostics: BTreeMap::new(),
@@ -882,6 +916,7 @@ fn context_identity_freezes_the_same_trace_that_controlled_block_validates() {
         },
         expected_final_state_root: B256::ZERO,
         expected_raw_gas_by_key: BTreeMap::new(),
+        expected_operation_event_count_by_key: BTreeMap::new(),
         expected_context_features: BTreeMap::new(),
         expected_features: BTreeMap::new(),
         expected_diagnostics: BTreeMap::new(),
@@ -907,6 +942,10 @@ fn context_identity_freezes_the_same_trace_that_controlled_block_validates() {
     assert_eq!(
         bundle.spec.expected_context_features,
         bundle.observation.actual_context_features
+    );
+    assert_eq!(
+        bundle.spec.expected_operation_event_count_by_key,
+        bundle.observation.actual_operation_event_count_by_key
     );
     let fixture = build_controlled_block_fixture(&bundle.spec).unwrap();
     let replay = validate_controlled_block_fixture(&fixture)
@@ -1069,6 +1108,7 @@ fn touched_state_key_count_comes_from_built_topology_and_rejects_stale_manifest(
     let mut stale = spec;
     stale.expected_final_state_root = mutated.actual_final_state_root;
     stale.expected_raw_gas_by_key = mutated.actual_raw_gas_by_key;
+    stale.expected_operation_event_count_by_key = mutated.actual_operation_event_count_by_key;
     stale.expected_features = mutated.actual_features;
     stale.expected_diagnostics = mutated.actual_diagnostics;
     stale.expected_diagnostics.insert(
@@ -1097,6 +1137,10 @@ fn controlled_block_fixture_uses_post_unzen_trace_and_matches_frozen_row() {
         observation.actual_raw_gas_by_key,
         spec.expected_raw_gas_by_key
     );
+    assert_eq!(
+        observation.actual_operation_event_count_by_key,
+        spec.expected_operation_event_count_by_key
+    );
     assert_eq!(observation.actual_features, spec.expected_features);
     assert_eq!(observation.actual_diagnostics, spec.expected_diagnostics);
     assert!(observation.minimum_block_timestamp > observation.unzen_activation_timestamp);
@@ -1106,6 +1150,28 @@ fn controlled_block_fixture_uses_post_unzen_trace_and_matches_frozen_row() {
     );
     assert_eq!(observation.system_operation_ownership, "block_base");
     assert_eq!(observation.anchor_operation_ownership, "block_base");
+}
+
+#[test]
+fn controlled_block_fixture_rejects_missing_or_mismatched_event_counts() {
+    let mut spec = block_row_spec();
+    spec.expected_operation_event_count_by_key.clear();
+    spec.row_id = controlled_block_row_id(&spec).unwrap();
+    let fixture = build_controlled_block_fixture(&spec).expect("build stale event-count row");
+    let error = validate_controlled_block_fixture(&fixture)
+        .expect_err("missing event-count evidence must fail closed");
+    assert!(error.to_string().contains("operation-event-count mismatch"));
+
+    let mut spec = block_row_spec();
+    *spec
+        .expected_operation_event_count_by_key
+        .get_mut("opcode:0x60")
+        .unwrap() += 1;
+    spec.row_id = controlled_block_row_id(&spec).unwrap();
+    let fixture = build_controlled_block_fixture(&spec).expect("build mismatched event-count row");
+    let error = validate_controlled_block_fixture(&fixture)
+        .expect_err("mismatched event-count evidence must fail closed");
+    assert!(error.to_string().contains("operation-event-count mismatch"));
 }
 
 #[test]

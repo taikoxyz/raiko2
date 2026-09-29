@@ -444,6 +444,8 @@ pub struct ControlledBlockRowSpec {
     pub program: ControlledProgram,
     pub expected_final_state_root: B256,
     pub expected_raw_gas_by_key: BTreeMap<String, i64>,
+    #[serde(default)]
+    pub expected_operation_event_count_by_key: BTreeMap<String, i64>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub expected_context_features: BTreeMap<String, i64>,
     pub expected_features: BTreeMap<String, i64>,
@@ -473,6 +475,7 @@ pub struct ControlledBlockObservation {
     pub public_output: B256,
     pub actual_final_state_root: B256,
     pub actual_raw_gas_by_key: BTreeMap<String, i64>,
+    pub actual_operation_event_count_by_key: BTreeMap<String, i64>,
     pub actual_context_features: BTreeMap<String, i64>,
     pub actual_features: BTreeMap<String, i64>,
     pub actual_diagnostics: BTreeMap<String, i64>,
@@ -2121,8 +2124,12 @@ pub fn observe_controlled_block_fixture(
         bail!("controlled block row contains spawned fixed-per-event work");
     }
     let actual_raw_gas_by_key = operation_units
+        .iter()
+        .map(|(key, value)| (key.clone(), value.units))
+        .collect::<BTreeMap<_, _>>();
+    let actual_operation_event_count_by_key = operation_units
         .into_iter()
-        .map(|(key, value)| (key, value.units))
+        .map(|(key, value)| (key, value.event_count))
         .collect::<BTreeMap<_, _>>();
     if actual_raw_gas_by_key
         .keys()
@@ -2258,6 +2265,7 @@ pub fn observe_controlled_block_fixture(
             .header
             .state_root,
         actual_raw_gas_by_key,
+        actual_operation_event_count_by_key,
         actual_context_features,
         actual_features,
         actual_diagnostics,
@@ -2299,6 +2307,16 @@ pub fn validate_controlled_block_fixture(
             fixture.spec.row_id,
             fixture.spec.expected_raw_gas_by_key,
             observation.actual_raw_gas_by_key
+        );
+    }
+    if observation.actual_operation_event_count_by_key
+        != fixture.spec.expected_operation_event_count_by_key
+    {
+        bail!(
+            "controlled block row {} operation-event-count mismatch: declared={:?}, observed={:?}",
+            fixture.spec.row_id,
+            fixture.spec.expected_operation_event_count_by_key,
+            observation.actual_operation_event_count_by_key
         );
     }
     if let Some(expected) = &fixture.spec.expected_backend_input_sha256
@@ -2364,6 +2382,7 @@ pub fn freeze_controlled_context_block_fixture(
     }
     if source.expected_final_state_root != B256::ZERO
         || !source.expected_raw_gas_by_key.is_empty()
+        || !source.expected_operation_event_count_by_key.is_empty()
         || !source.expected_context_features.is_empty()
         || !source.expected_features.is_empty()
         || !source.expected_diagnostics.is_empty()
@@ -2377,6 +2396,8 @@ pub fn freeze_controlled_context_block_fixture(
     let mut spec = source.clone();
     spec.expected_final_state_root = observed.actual_final_state_root;
     spec.expected_raw_gas_by_key = observed.actual_raw_gas_by_key.clone();
+    spec.expected_operation_event_count_by_key =
+        observed.actual_operation_event_count_by_key.clone();
     spec.expected_context_features = observed.actual_context_features.clone();
     spec.expected_features = observed.actual_features.clone();
     spec.expected_diagnostics = observed.actual_diagnostics.clone();

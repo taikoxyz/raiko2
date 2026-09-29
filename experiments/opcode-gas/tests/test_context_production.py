@@ -503,6 +503,7 @@ class ProductionContextIdentityTests(unittest.TestCase):
             self.assertEqual(builder_input["transaction_count"], 1)
             self.assertEqual(builder_input["expected_final_state_root"], "0x" + "00" * 32)
             self.assertEqual(builder_input["expected_raw_gas_by_key"], {})
+            self.assertEqual(builder_input["expected_operation_event_count_by_key"], {})
             self.assertEqual(builder_input["expected_context_features"], {})
             self.assertEqual(builder_input["expected_features"], {})
             self.assertEqual(builder_input["expected_diagnostics"], {})
@@ -545,6 +546,9 @@ class ProductionContextIdentityTests(unittest.TestCase):
             "host_trace_sha256": "b" * 64,
             "actual_final_state_root": "0x" + "12" * 32,
             "actual_raw_gas_by_key": dict(spec["expected_raw_gas_by_key"]),
+            "actual_operation_event_count_by_key": dict(
+                spec["expected_operation_event_count_by_key"]
+            ),
             "actual_context_features": dict(spec["expected_context_features"]),
             "actual_features": dict(spec["expected_features"]),
             "actual_diagnostics": dict(spec["expected_diagnostics"]),
@@ -858,6 +862,23 @@ class ProductionContextCliTests(unittest.TestCase):
 
 class ProductionContextFitTests(unittest.TestCase):
     @staticmethod
+    def _frozen_fixture(fixture):
+        builder_input = copy.deepcopy(fixture.builder_input)
+        builder_input["expected_backend_input_sha256"] = "a" * 64
+        builder_input["expected_host_trace_sha256"] = "b" * 64
+        builder_input["expected_operation_event_count_by_key"] = {}
+        return production.ProductionContextFixtureRequest(
+            scenario=fixture.scenario,
+            split=fixture.split,
+            count=fixture.count,
+            lane=fixture.lane,
+            repeat_index=fixture.repeat_index,
+            workload_id=fixture.workload_id,
+            row_id=fixture.row_id,
+            builder_input=builder_input,
+        )
+
+    @staticmethod
     def _parity_identity(*, row_id, launcher, elf):
         identity = {
             "kind": "production_context_parity_v1",
@@ -916,6 +937,7 @@ class ProductionContextFitTests(unittest.TestCase):
     def _row(*, scenario, split, count, lane, repeat, prover_gas, target_key, control_key):
         measured = target_key if lane == "target" else control_key
         raw = {"opcode:0x60": 9, measured: count}
+        event_counts = {"opcode:0x60": 3, measured: count}
         return {
             "row_id": production.sha256_bytes(
                 production.canonical_json(
@@ -934,6 +956,7 @@ class ProductionContextFitTests(unittest.TestCase):
             "sp1_proposal_elf_sha256": "d" * 64,
             "guest_launcher_sha256": "e" * 64,
             "actual_raw_gas_by_key": raw,
+            "actual_operation_event_count_by_key": event_counts,
             "actual_context_features": (
                 {f"context_fixed:{target_key}": count}
                 if lane == "target" and count
@@ -1081,11 +1104,13 @@ class ProductionContextFitTests(unittest.TestCase):
     def test_v5_subtotal_excludes_only_target_and_allows_exact_zero_work(self):
         row = self._address_rows()[0]
         row["actual_raw_gas_by_key"]["opcode:0x00"] = 0
+        row["actual_operation_event_count_by_key"]["opcode:0x00"] = 0
         subtotal = production.evaluate_v5_subtotal(
             row, self._subtotal_model(), excluded_target_key=None
         )
         self.assertEqual(subtotal, Decimal(141))
         row["actual_raw_gas_by_key"]["opcode:0xfe"] = 1
+        row["actual_operation_event_count_by_key"]["opcode:0xfe"] = 1
         with self.assertRaisesRegex(ValueError, "unpriced"):
             production.evaluate_v5_subtotal(
                 row, self._subtotal_model(), excluded_target_key=None
@@ -1170,6 +1195,7 @@ class ProductionContextFitTests(unittest.TestCase):
             row = {
                 "actual_features": {name: 0 for name in model.fixed_costs},
                 "actual_raw_gas_by_key": {key: component["interpreter_raw_gas"]},
+                "actual_operation_event_count_by_key": {key: 1},
                 "actual_typed_opcode_components_by_key": {key: [component]},
             }
             expected = production.predict_opcode_event(
@@ -1197,12 +1223,60 @@ class ProductionContextFitTests(unittest.TestCase):
         extra = {
             "actual_features": {name: 0 for name in model.fixed_costs},
             "actual_raw_gas_by_key": {"opcode:0x60": 3},
+            "actual_operation_event_count_by_key": {"opcode:0x60": 1},
             "actual_typed_opcode_components_by_key": {
                 "opcode:0x0a": [cases["opcode:0x0a"]]
             },
         }
         with self.assertRaisesRegex(ValueError, "extras"):
             production.evaluate_v5_subtotal(extra, model, excluded_target_key=None)
+
+    def test_v5_static_subtotal_matches_authoritative_push1_predictor(self):
+        manifest = production.load_production_context_manifest(MANIFEST)
+        model = production.load_production_v5_subtotal_model(manifest, ROOT)
+        component = {
+            "interpreter_raw_gas": 3,
+            "model_input": {"kind": "static_raw_gas", "raw_gas": 3},
+        }
+        row = {
+            "actual_features": {name: 0 for name in model.fixed_costs},
+            "actual_raw_gas_by_key": {"opcode:0x60": 3},
+            "actual_operation_event_count_by_key": {"opcode:0x60": 1},
+        }
+        expected = production.predict_opcode_event(
+            model.typed_registry, production._opcode_event(0x60, component)
+        )
+        self.assertEqual(
+            production.evaluate_v5_subtotal(row, model, excluded_target_key=None),
+            expected,
+        )
+        missing = copy.deepcopy(row)
+        missing.pop("actual_operation_event_count_by_key")
+        with self.assertRaisesRegex(ValueError, "event-count ledger"):
+            production.evaluate_v5_subtotal(missing, model, excluded_target_key=None)
+        mismatched = copy.deepcopy(row)
+        mismatched["actual_operation_event_count_by_key"] = {"opcode:0x61": 1}
+        with self.assertRaisesRegex(ValueError, "event-count ledger"):
+            production.evaluate_v5_subtotal(mismatched, model, excluded_target_key=None)
+
+    def test_zero_coefficient_relative_stderr_is_explicitly_not_applicable(self):
+        fit = production.fit_exact_decimal_model(
+            matrix=((1, 0), (2, 0), (0, 1), (0, 2)),
+            observed=(10, 20, "0.2", "-0.1"),
+            terms=("positive", "zero"),
+        )
+        self.assertEqual(fit["coefficients"]["zero"], "0")
+        self.assertEqual(
+            fit["relative_coefficient_stderr"]["zero"],
+            {"status": "not_applicable_zero_coefficient", "value": None},
+        )
+        self.assertNotIn("coefficient_stderr", production._candidate_gate_reasons(
+            fit, tuple(Decimal(str(value)) for value in fit["observed"])
+        ))
+        encoded = production.canonical_json(fit)
+        self.assertNotIn(b"Infinity", encoded)
+        self.assertNotIn(b"NaN", encoded)
+        self.assertEqual(json.loads(encoded), fit)
 
     def test_residualization_rejects_incomplete_or_contaminated_inputs(self):
         manifest = production.load_production_context_manifest(MANIFEST)
@@ -1219,6 +1293,7 @@ class ProductionContextFitTests(unittest.TestCase):
         for row in unpriced:
             if row["scenario"] == "address_canonical" and row["count"] == 0:
                 row["actual_raw_gas_by_key"]["opcode:0xfe"] = 1
+                row["actual_operation_event_count_by_key"]["opcode:0xfe"] = 1
         cases.append(("unpriced", unpriced))
         target_in_subtotal = self._address_rows()
         next(row for row in target_in_subtotal if row["lane"] == "target")[
@@ -1487,7 +1562,9 @@ class ProductionContextFitTests(unittest.TestCase):
 
     def test_prepare_run_resume_is_create_only_and_hash_bound(self):
         manifest = production.load_production_context_manifest(MANIFEST)
-        fixture = production.production_context_fixture_requests(manifest)[0]
+        fixture = self._frozen_fixture(
+            production.production_context_fixture_requests(manifest)[0]
+        )
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             launcher = root / "guest-launcher"
@@ -1502,6 +1579,28 @@ class ProductionContextFitTests(unittest.TestCase):
             ):
                 path.write_bytes(value)
             run = root / "run"
+            substituted = self._parity_identity(
+                row_id=fixture.row_id, launcher=launcher, elf=elf
+            )
+            substituted["equal_values"]["host_trace_sha256"] = "c" * 64
+            substituted_without_hash = dict(substituted)
+            substituted_without_hash.pop("identity_sha256")
+            substituted["identity_sha256"] = production.sha256_bytes(
+                production.canonical_json(substituted_without_hash)
+            )
+            with self.assertRaisesRegex(ValueError, "prepared row evidence join"):
+                production.prepare_production_context_run(
+                    manifest=manifest,
+                    row_requests=(fixture,),
+                    run=root / "substituted-parity",
+                    launcher=launcher,
+                    production_elf=elf,
+                    production_vk=vk,
+                    trace_source=trace,
+                    implementation_revision="1" * 40,
+                    source_hashes={"operation_coverage_v5": "2" * 64},
+                    parity_identity=substituted,
+                )
             production.prepare_production_context_run(
                 manifest=manifest,
                 row_requests=(fixture,),
@@ -1550,6 +1649,7 @@ class ProductionContextFitTests(unittest.TestCase):
                         "host_trace_sha256": "b" * 64,
                         "public_output": "0x1234",
                         "actual_raw_gas_by_key": {},
+                        "actual_operation_event_count_by_key": {},
                         "actual_context_features": {},
                         "actual_features": {},
                         "actual_diagnostics": {},
@@ -1601,6 +1701,33 @@ class ProductionContextFitTests(unittest.TestCase):
             self.assertTrue((run / "execution-complete.json").is_file())
             row_path = run / "rows" / f"{fixture.row_id}.json"
             original_row = row_path.read_bytes()
+            relabeled = json.loads(original_row)
+            relabeled["scenario"] = "caller_canonical"
+            relabeled_unhashed = dict(relabeled)
+            relabeled_unhashed.pop("evidence_sha256")
+            relabeled["evidence_sha256"] = production.sha256_bytes(
+                production.canonical_json(relabeled_unhashed)
+            )
+            row_path.write_bytes(production.canonical_json(relabeled) + b"\n")
+            with mock.patch.object(
+                production, "_require_current_implementation_revision"
+            ), self.assertRaisesRegex(ValueError, "prepared-row join"):
+                production.run_production_context_campaign(run, executor=execute)
+            row_path.write_bytes(original_row)
+            swapped = json.loads(original_row)
+            swapped["lane"] = "control" if fixture.lane == "target" else "target"
+            swapped["repeat_index"] = (fixture.repeat_index + 1) % 3
+            swapped_unhashed = dict(swapped)
+            swapped_unhashed.pop("evidence_sha256")
+            swapped["evidence_sha256"] = production.sha256_bytes(
+                production.canonical_json(swapped_unhashed)
+            )
+            row_path.write_bytes(production.canonical_json(swapped) + b"\n")
+            with mock.patch.object(
+                production, "_require_current_implementation_revision"
+            ), self.assertRaisesRegex(ValueError, "prepared-row join"):
+                production.run_production_context_campaign(run, executor=execute)
+            row_path.write_bytes(original_row)
             forged = json.loads(original_row)
             forged["guest_launcher_sha256"] = "f" * 64
             forged_unhashed = dict(forged)
@@ -1611,7 +1738,7 @@ class ProductionContextFitTests(unittest.TestCase):
             row_path.write_bytes(production.canonical_json(forged) + b"\n")
             with mock.patch.object(
                 production, "_require_current_implementation_revision"
-            ), self.assertRaisesRegex(ValueError, "existing row hash"):
+            ), self.assertRaisesRegex(ValueError, "prepared-row join"):
                 production.run_production_context_campaign(run, executor=execute)
             row_path.write_bytes(original_row)
             launcher.write_bytes(b"changed")
@@ -1623,7 +1750,10 @@ class ProductionContextFitTests(unittest.TestCase):
 
     def test_subprocess_failure_preserves_rows_without_terminal(self):
         manifest = production.load_production_context_manifest(MANIFEST)
-        fixtures = production.production_context_fixture_requests(manifest)[:2]
+        fixtures = tuple(
+            self._frozen_fixture(fixture)
+            for fixture in production.production_context_fixture_requests(manifest)[:2]
+        )
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             files = []
@@ -1671,6 +1801,7 @@ class ProductionContextFitTests(unittest.TestCase):
                             "host_trace_sha256": "b" * 64,
                             "public_output": "0x01",
                             "actual_raw_gas_by_key": {},
+                            "actual_operation_event_count_by_key": {},
                             "actual_context_features": {},
                             "actual_features": {},
                             "actual_diagnostics": {},
@@ -1690,7 +1821,9 @@ class ProductionContextFitTests(unittest.TestCase):
 
     def test_fit_recovers_terminal_from_valid_existing_decisions(self):
         manifest = production.load_production_context_manifest(MANIFEST)
-        fixture = production.production_context_fixture_requests(manifest)[0]
+        fixture = self._frozen_fixture(
+            production.production_context_fixture_requests(manifest)[0]
+        )
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             launcher = root / "guest-launcher"
@@ -1732,6 +1865,7 @@ class ProductionContextFitTests(unittest.TestCase):
                         "host_trace_sha256": "b" * 64,
                         "public_output": "0x01",
                         "actual_raw_gas_by_key": {},
+                        "actual_operation_event_count_by_key": {},
                         "actual_context_features": {},
                         "actual_features": {},
                         "actual_diagnostics": {},

@@ -569,7 +569,7 @@ next predeclared family but cannot repair the sealed storage coefficients.
 The production zkGas registry, runtime configuration, block limit, Boundless configuration, frozen
 integration smokes, and final proposal-validation corpus remain untouched.
 
-## In-Progress Milestone: Context Opcode Guest Isolation
+## Completed Milestone: Context Opcode Isolation And Non-Candidate Sampling
 
 The first context campaign attempt correctly stopped at the fixed legacy compatibility canary before
 sampling any context coefficient. Calibration `d9b45369e540fb6606429fda` used the context-expanded
@@ -584,8 +584,7 @@ drift (`JUMPI` checkpoint APE remained about `16%`) and was reverted. The contex
 input/public commitment had changed the SP1 guest cost surface itself; this is not evidence that
 `JUMPI` changed under Osaka and must not trigger a one-relation resample.
 
-The implementation is therefore being split into three explicit artifacts in one calibration
-identity:
+The implementation was split into three explicit artifacts in one calibration identity:
 
 - `sp1_revm_opcode_lab.elf` preserves the legacy `OpcodeLabInput`, default environment, and public
   commitment and is the only guest used by the fixed 11-relation reuse canary;
@@ -597,18 +596,76 @@ The legacy canary can authorize historical-table reuse only on the preserved leg
 It cannot prove that a marginal coefficient from a different context ELF shares that scale. Until
 an independent cross-ELF bridge is evaluated, the context artifact records transport status
 `not_evaluated`, requires transport evidence before candidate promotion, and remains
-`candidate_eligible=false`. Controlled context sampling may proceed and be sealed as non-candidate
-evidence; composite resealing and proposal replay may not.
+`candidate_eligible=false`.
+
+Calibration `5d3963807dc0282307b5e5f6` completed that bounded context campaign and sealed portable result
+`79dcfe2d5be2c3432987a671`:
+
+- execution revision: `7c71c7eed8be9979983cee12854ebe7a0ca87dbb`;
+- analysis/seal revision: `3a43ceda8da6f7450aa683bced739d5e301f5923`;
+- result identity SHA256:
+  `79dcfe2d5be2c3432987a671f92ae94b44361c4a0ae914218c149efe7eaa8734`;
+- result artifact SHA256:
+  `b5c1e0efdf22d6c0bb1fef07e0a42785af6d49ae68ebf2c36fafb6399b541675`;
+- compatibility canary artifact SHA256:
+  `3f374d7c040edb6ba50f23c140ed8d4174e8da2305d163de353f9ed9d688f080`;
+- deterministic adaptive archive: 3,708 formal rows, `970302501` uncompressed bytes,
+  `24056930` compressed bytes, file SHA256
+  `d24a6915e2a894e97e8f1c1d98ac471ad3423cc143d34d8dfff0cff2922d3219`;
+- terminal evidence: 1,128 rows across all 15 frozen scenarios.
+
+The adaptive controller opened only the frozen bounds `8`, `32`, `128`, `512`, and `2048`. Four
+scenarios passed without result-driven threshold changes:
+
+| Scenario | Selected bound | Slope (`proverGas` per repeated operation) | Checkpoint APE |
+| --- | ---: | ---: | ---: |
+| `caller_canonical` | 8 | `64.642857142857...` | `2.506%` |
+| `calldataload_in_range` | 32 | `38.315860215053...` | `7.275%` |
+| `address_canonical` | 128 | `71.419449723956...` | `0.109%` |
+| `calldataload_partial` | 128 | `99.204407638700...` | `1.174%` |
+
+Required-sibling completeness permits only `opcode:0x30` (`ADDRESS`) and `opcode:0x33` (`CALLER`)
+to enter the sealed model inventory. `CALLDATALOAD` remains unmeasured as a production key because
+its empty and out-of-range required siblings failed even though its in-range and partial scenarios
+passed. `CALLVALUE`, all five `CALLDATASIZE` length scenarios, both remaining `CALLDATALOAD`
+scenarios, and both `TIMESTAMP` scenarios reached bound 2048 without satisfying the frozen static
+relation gates. This is evidence that the current scalar relation is insufficient for those
+scenarios; it is not evidence that the opcodes cost zero or are unreachable.
+
+The first materializing sealer exhausted memory because 970 MB of JSONL was copied into several
+Python object graphs. Schema 2 now stores every formal row in a deterministic gzip stream and keeps
+only compact decisions/fits in JSON. Directory replay re-admits and refits every archived row with
+bounded reads. Because that derivation fix followed execution, provenance now records the original
+execution revision separately from the later clean analysis revision; live sampling still requires
+the checkout to match the frozen execution revision exactly. Legacy schema-1 result replay remains
+byte-compatible.
+
+The unmocked seal and `verify-result` both completed. Fresh root validation passed all 49 context
+tests; independent review closed two schema-1 compatibility findings; independent behavioral
+verification replayed the real 970 MB campaign, exercised non-local-revision, manifest-tamper, and
+dirty-checkout failures, and passed all 49 tests plus 21 subtests. No proposal was opened, and no
+production registry, schedule, runtime configuration, block limit, or Boundless configuration
+changed. Composite resealing and proposal replay remain closed.
 
 ## Next Gate
 
-Close the remaining ordinary operation families before CALL wrappers and direct precompiles. Begin
-with the highest-impact calldata/returndata/environment/copy keys observed independently in both
-ad-hoc fixtures. Reuse sealed controlled evidence where its execution semantics and model inputs are
-already sufficient; otherwise predeclare the smallest additional controlled campaign. Then close
-LOG/EXTCODE, CALL-family wrappers, and direct precompiles in descending observed impact. Re-seal and
-replay the same diagnostics after each independently reviewed family milestone; do not use those
-proposal results to repair a coefficient.
+Evaluate the context-to-legacy cross-ELF transport independently of the opcode fits. The bridge must
+use predeclared common controlled workloads and may validate or reject transport; it may not tune the
+four visible context slopes after seeing them. If transport is supported, promote only the complete
+`ADDRESS` and `CALLER` keys. If it is not supported, keep the context result diagnostic and measure
+those keys directly on the destination cost surface.
+
+For the eleven failed scenarios, do not increase the repeat count beyond 2048 or weaken the gates.
+Use their sealed residual shapes to predeclare the next smallest model family: explicit context-value
+classes for `CALLVALUE`/`TIMESTAMP`, and length/range terms for calldata operations. A successor
+campaign must retain required-sibling completeness and exact event matching. Only after an
+independently reviewed transport decision and operation-family successor may the composite estimator
+be resealed and the same ad-hoc block/proposal diagnostics rerun; those diagnostics still may not
+repair coefficients.
+
+After this context family, close the remaining ordinary returndata/copy/LOG/EXTCODE keys before CALL
+wrappers and direct precompiles. Reuse sealed controlled evidence where its execution semantics and
+model inputs are sufficient; otherwise predeclare the smallest additional controlled campaign.
 
 The frozen Hoodi `79852` and Mainnet `38261` integration smokes remain required once a
 witness-capable RPC or immutable GuestInputs are available. Record their exact trace/report joins,

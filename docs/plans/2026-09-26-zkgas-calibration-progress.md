@@ -890,16 +890,45 @@ and all 168 coverage rows are identical. Independent review recomputed both iden
 31 bound source/execution hashes, and passed exact replay. The header remains review-only with
 `production_write=false` and `proposal_validation_opened=false`.
 
+## Completed Milestone: Frozen Controlled-Block Manifest
+
+The source-only block manifest is sealed at
+`experiments/opcode-gas/manifests/sp1-block-comparison-v1/bd0652fb4a5a5999d558410c`:
+
+- full manifest identity SHA256:
+  `bd0652fb4a5a5999d558410c5aac9a5fbc78b3d1c50efdd0bf97c2823f4efa6f`;
+- canonical manifest-file SHA256:
+  `d02eda0c5cab45c250febe6f3bdafbffe24f8b0bf3644447ac38e560eedeb11b`;
+- fixed matrix SHA256:
+  `132e1b6f6210c0f1f07a8dd1e9af1cda6dfe2e8ee623f74711eca32625abf44e`;
+- bound candidate identity SHA256:
+  `464c3d49e3ddd17090d6b8febe8a35b128da6dfaa42efebda75c85b600ab64b8`.
+
+The 140,705-byte schema-2 artifact freezes 12 calibration rows and 20 untouched validation rows.
+Both partitions cover all nine workload categories; together they cover all nine declared context
+classes and the storage set, clear, reset, and restore-original branches. Every row has complete
+candidate coverage, a deterministic prediction, unique bundle and trace hashes, and mutually
+disjoint workload, row, and backend-input identities. The compact artifact contains neither the
+full `candidate_trace` nor a `frozen_bundle`; exact seal and verify regenerate those bytes with the
+bound launcher and require full bundle, compact evidence, trace, identity, coverage, and prediction
+equality.
+
+Independent artifact review recomputed all content, matrix, candidate, and seven source hashes.
+Independent behavioral verification observed exactly 32 native launcher executions and zero SP1
+executions, then repeated a separate 32-row replay. Both passed. Compact/full hash, prediction,
+identity, source, launcher TOCTOU, and self-consistent swapped-trace tampering all failed closed.
+The manifest is canonical, mode `0444`, and contains no observed proverGas, scalar, normalization,
+comparison, proposal, or verdict field. The validation partition remains unopened.
+
 ## Next Gate
 
 Strict Task 7 is not executed. Result `a41bef...` remains ineligible for strict promotion and its six
 family verdicts remain rejected. The separately sealed approximation above is not a reinterpretation
 of those verdicts. The `0bae...` and `72a584...` estimators remain review-only historical
 checkpoints. The reviewed `464c3d...` successor is the only candidate eligible to bind the final
-block manifest; none is a production candidate. The next gate is to freeze the controlled-block
-calibration/validation manifest against the successor's exact identity. Only after independent
-manifest review may calibration execute
-and seal; the Unzen scalar is then derived and sealed before the untouched validation partition can
+block manifest; none is a production candidate. The controlled-block manifest is now frozen and
+independently reviewed. The next gate is to execute and seal only its 12-row calibration partition;
+the Unzen scalar is then derived and sealed before the untouched validation partition can
 open. Every validation row must bind both sealed identities. SP1 diagnostics remain explanatory
 sidecar data and never enter the online formula.
 

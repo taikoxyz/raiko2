@@ -830,14 +830,46 @@ or validation observation has been opened while making this ordering correction.
 No production table, registry, schedule, runtime configuration, block limit, Boundless
 configuration, or deployed component changed.
 
+## Completed Milestone: Structured-Fixture Successor Candidate
+
+The structured block fixtures, exact native replay gate, and schema-5 successor are now complete.
+The reviewed successor is sealed at
+`experiments/opcode-gas/estimators/72a5843c0c9031dd48014608`:
+
+- implementation revision:
+  `ec2ad0c0a55182cfa1e0b3c32f617a74ede93d86`;
+- full candidate identity SHA256:
+  `72a5843c0c9031dd48014608d4694ad2f9d3888fcafe8db62cec4456618badfa`;
+- canonical estimator-file SHA256:
+  `4ba2407f72db83835f2c18c292fd82b7c118ef8db263cb7a56e947d37bfe605a`;
+- rebuilt guest-launcher SHA256:
+  `4836a23aa1e6a6c5471cde7633951a2a4bfcbbaa964993d6e66e7aee9f4b2899`.
+
+Relative to `0bae...`, the successor preserves the registry, storage model, fixed costs and
+statuses, coarse state/trie model, context approximation, ownership and coverage policies,
+formula, and version identity. Of 168 execution-coverage keys, only `opcode:0x00` changes: the
+schema-5 overlay accepts exactly a real `STOP` event with zero raw gas and assigns zero direct cost,
+leaving any residual terminal work to the transaction-base term and the block-level acceptance
+gate. The successor additionally binds the structured fixture source and block-manifest builder.
+
+Independent artifact review recomputed the logical and file identities, matched all 31 bound
+source and execution hashes, replayed the exact verifier, and confirmed the model-preservation
+claims above. Source verification separately ran all 32 fixed native rows through
+prepare/build/seal/verify, for 128 audited launcher invocations, with complete candidate coverage,
+zero gaps, positive finalized Unzen zkGas, and no SP1 execution. Tampered identities, sources,
+bundles, inventory, symlinks, collisions, and launcher TOCTOU all failed closed.
+
+No controlled-block manifest, observed proverGas row, Unzen scalar, comparison result, proposal
+result, or validation result was created while sealing this candidate.
+
 ## Next Gate
 
 Strict Task 7 is not executed. Result `a41bef...` remains ineligible for strict promotion and its six
 family verdicts remain rejected. The separately sealed approximation above is not a reinterpretation
-of those verdicts. The `0bae...` estimator is sealed but remains a review-only pre-fixture checkpoint
-and is not a production candidate. The next gate is to review the structured fixture source, rebuild
-the launcher, seal and review its successor candidate, then freeze the controlled-block
-calibration/validation manifest against that successor's exact identity. Only after independent
+of those verdicts. The `0bae...` estimator remains a review-only pre-fixture checkpoint and the
+reviewed `72a584...` successor is the only candidate eligible to bind the final block manifest;
+neither is a production candidate. The next gate is to freeze the controlled-block
+calibration/validation manifest against the successor's exact identity. Only after independent
 manifest review may calibration execute
 and seal; the Unzen scalar is then derived and sealed before the untouched validation partition can
 open. Every validation row must bind both sealed identities. SP1 diagnostics remain explanatory

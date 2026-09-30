@@ -4,7 +4,7 @@
 
 In progress.
 
-Last updated: 2026-09-29.
+Last updated: 2026-09-30.
 
 This document is the execution-status ledger for the ZKGas calibration work. It records what is
 currently proved, what is actively being changed, and which gate opens the next layer. It does not
@@ -64,7 +64,7 @@ Osaka execution semantics while continuing to bind the actual exported Unzen sch
 | Opcode core | Complete at partial coverage | Preserve sealed 101-plus-2 augmentation |
 | Remaining operations | Complete at frozen classification | Preserve the sealed coverage and ownership ledgers |
 | Stateful storage execution | Promoted and replayed on two ad-hoc proposals | Preserve sealed typed features while closing the remaining operation families |
-| Context-sensitive operations | Function-shape discovery sealed | Fit frozen function families directly in controlled production-guest workloads |
+| Context-sensitive operations | Declared approximation sealed | Compare the fully evaluable candidate with current Unzen on frozen controlled blocks |
 | State/trie | Coarse model accepted | Preserve the sealed holdout evidence; split only after a new predeclared experiment |
 | Transaction | Declared approximation accepted and sealed | Preserve `5017` and its `0.002` materiality budget |
 | Block | Fixed base accepted and sealed | Preserve the selected round-128 fixed-cost artifact |
@@ -714,23 +714,71 @@ No proposal or final validation corpus was opened. No production estimator, regi
 coverage table, runtime configuration, schedule, block limit, Boundless configuration, or other
 production parameter changed.
 
+## Completed Milestone: Declared Context Approximation
+
+The strict result above remains rejected and immutable. A separate review-only approximation was
+derived from its same-production-guest target/control rows and sealed as
+`experiments/opcode-gas/derivations/1d2758bcb7aa3ae7f09d14eb`:
+
+- implementation revision: `60f6c2146cda122a5fd9a269173c7ba39c31a5c1`;
+- approximation identity SHA256:
+  `1d2758bcb7aa3ae7f09d14eb8d539250747992c42d6ae95d204f4cc5efec06cb`;
+- artifact SHA256:
+  `357a6c47bad8e6def3280be77a300e113e350fa673e08c39af13034861aee3d8`;
+- canonical artifact-file SHA256:
+  `346c2ac112357872f4a981737469c39639d7cc845ae97b0cc8bb77ddfc8a5b58`;
+- strict source identity SHA256:
+  `a41befb63e663890896ba67de48a51e65de49c4b281229a37b0e271a094e1943`;
+- inventory: nine typed classes across the six context opcode families and `327` exact-repeat,
+  nonzero controlled observations;
+- policy: `declared_approximation`; no strict family was relabeled or promoted.
+
+For every scenario, target and control are paired within the same repeat at count zero and at each
+nonzero count. The fit uses
+`D_s(n) = (P_target(n) - P_control(n)) - (P_target(0) - P_control(0))`, then adds exactly once the
+canonical V5 cost of the lane-exclusive replacement instruction. Removing the target event and the
+replacement event must leave identical raw-gas and event-count ledgers. Fixed context operations
+use one `PUSH0`; `CALLDATALOAD` uses only its second, lane-exclusive `SWAP1`, so shared cleanup is not
+charged twice. Each typed class selects the maximum finite nonnegative scenario cost.
+
+Sealed per-event costs in SP1 normalized `proverGas` are:
+
+| Class | Declared cost |
+| --- | ---: |
+| `address` | `97.649129037858121176747031351368990855052366915359737824471331436422526620808534` |
+| `caller` | `88.011629037858121176747031351368990855052366915359737824471331436422526620808534` |
+| `callvalue:zero` | `22.730379037858121176747031351368990855052366915359737824471331436422526620808534` |
+| `callvalue:nonzero` | `21.780379037858121176747031351368990855052366915359737824471331436422526620808534` |
+| `calldataload:zero` | `162.2406529527636473664319181838285678034906249065125651137631293968871533473679784164222873900293255` |
+| `calldataload:partial` | `239.4840547122944391552882231691658112052501556983014214187484666402889128781597672727272727272727273` |
+| `calldataload:full` | `202.9825884366346151083674020547963097389744958742545005976340971388226372183357203519061583577712610` |
+| `calldatasize` | `28.96432331938304786296404014902294979933389184204595483326898539536680814573522021700879765395894428` |
+| `timestamp` | `21.292879037858121176747031351368990855052366915359737824471331436422526620808534` |
+
+The largest controlled whole-guest materiality is
+`0.00001431259513559476800353930390251359861648052115561643635389931983088029171898040545852075899095550709`
+(`0.0014312595%`), at `calldataload_partial_31_offset_30`, count `64`. This is training/diagnostic
+evidence, not the acceptance result. Acceptance moves to a newly frozen controlled-block split.
+
+Focused approximation and CLI tests passed, as did Python compilation, diff checks, create-only
+collision, tamper rejection, and exact replay. Independent review fixed repeat collapsing and
+publication durability before source commit. Independent arithmetic verification recomputed
+ADDRESS/PUSH0 and CALLDATALOAD/SWAP1 without calling the builder. Artifact review then found and
+closed a sealed-purpose overwrite before this final identity was generated. The artifact is mode
+`0444` and its CLI verifier replays successfully.
+
+No proposal or final-validation row was opened. No production table, registry, schedule, runtime
+configuration, block limit, Boundless configuration, or deployed component changed.
+
 ## Next Gate
 
 Strict Task 7 is not executed. Result `a41bef...` remains ineligible for strict promotion and its six
-family verdicts remain rejected. The accepted successor direction is a separately sealed declared
-approximation, not a reinterpretation of those verdicts:
-
-1. preserve RISC-V opcode, syscall, and touched-memory diagnostics in future production-guest rows;
-2. compute same-production-guest target/control marginal differences from the immutable rows and
-   add exactly once the canonical V5 marginal cost of the lane-exclusive replacement instruction;
-   assert that removing the target and replacement events leaves identical ledgers, so common setup
-   and cleanup are never charged twice;
-3. select a finite nonnegative conservative maximum per typed class, retaining every source slope,
-   strict rejection, and controlled whole-guest materiality value;
-4. keep SP1 diagnostics out of the online formula; they only explain ownership and model mismatch;
-5. seal the approximation and fully evaluable estimator before any controlled block executes;
-6. execute and seal the block calibration partition, derive and seal the Unzen scalar, then open an
-   untouched validation partition whose rows bind both sealed identities.
+family verdicts remain rejected. The separately sealed approximation above is not a reinterpretation
+of those verdicts and is not yet a production candidate. The next gate is to build and seal the fully
+evaluable estimator, freeze the controlled-block calibration/validation manifest, execute and seal
+calibration only, derive and seal the Unzen scalar, and only then open the untouched validation
+partition whose rows bind both sealed identities. SP1 diagnostics remain explanatory sidecar data
+and never enter the online formula.
 
 The decisive acceptance condition is comparative rather than perfect per-opcode identification.
 On the same frozen block validation partition, the candidate must have complete coverage, strictly

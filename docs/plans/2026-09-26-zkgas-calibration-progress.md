@@ -650,29 +650,82 @@ dirty-checkout failures, and passed all 49 tests plus 21 subtests. No proposal w
 production registry, schedule, runtime configuration, block limit, or Boundless configuration
 changed. Composite resealing and proposal replay remain closed.
 
+## Completed Milestone: Production-Guest Context Calibration Rejected
+
+The frozen production-guest campaign completed from clean calibration revision
+`dda214e385ee9608ad88ae18eefe3b7111224f45` and sealed the immutable result directory
+`experiments/opcode-gas/derivations/a41befb63e663890896ba67d`:
+
+- result ID: `a41befb63e663890896ba67d`;
+- full result identity SHA256:
+  `a41befb63e663890896ba67de48a51e65de49c4b281229a37b0e271a094e1943`;
+- result artifact SHA256:
+  `ff48d2285f3f34a87c608780bb98fe344606eab511c6b3f4ba834c68f0e01837`;
+- decision SHA256:
+  `e2f76cae70e8018888e9ded4bd0b162cb05957ff5deb2917a6eb4a4e994d3803`;
+- calibration identity SHA256:
+  `138ef55b8c1f9d48cc92e98fb17c7976d1bf86a6df37f851e5284668ce92ff1b`;
+- manifest identity SHA256:
+  `00c375a82a9a5b98a7011af26e603ab53c9779fae83199f81100154382c8be50`.
+
+All `846` predeclared rows completed and were admitted: `540` fit, `72` model-selection, and `234`
+final-holdout rows; `423` target and `423` control rows; `282` rows for each repeat index. There were
+zero execution failures and all `846` row identities were unique. The execution identity binds:
+
+- `guest-launcher` SHA256
+  `59cb045b25a72e4a59ea5894085ef35952f0156eba0b9da051c44ede9612bef6`;
+- production `sp1_shasta_proposal.elf` SHA256
+  `ba5ab7026643730c4416550a069fd0776f0e11ae09155ec5fce413acbe5e59c7`;
+- production verification-key SHA256
+  `bd71c1f1cbd72387aa057ae6e936afd6dcb0bc170c6a91193c6d1a0b47507102`;
+- trace reconstruction source SHA256
+  `e35e6860d2d1fec6f9e76089fa4a14be218df3bf257d4ddbafbd378ce7173077`;
+- production parity identity SHA256
+  `39c7ba3fe67f8046d74e36090afdd0f06d9769b940a92da419f82eafb4d66319`.
+
+The parity row remained the frozen `address_canonical / fit / count=1 / target / repeat=0` contract,
+with row identity `a1116979a652d65df11dc489698e4359e2f1198205f52d3ffc4f0294373882ca`.
+Standard and gas-estimator execution agreed on public output, gas, instruction count, syscall count,
+guest-input identity, trace identity, and exit code.
+
+The six family reports are retained as exact diagnostics, but every family was rejected:
+
+| Opcode | Diagnostic function | Exact fitted coefficients | Decisive gate outcome |
+| --- | --- | --- | --- |
+| `0x30 ADDRESS` | `address_constant` | `22.39736880136499416652483455683297534744654566024311629262663198974926276313783` | Rejected: fit R2/residual, relative coefficient stderr, insufficient signal, and control contamination (`4780.0856756634... > 2860`). |
+| `0x33 CALLER` | `caller_constant` | `12.423761763241827011099614615484001740408422493087691072685283016142224639970674` | Rejected: fit, signal/control, count/extrapolation, final-holdout, and sibling-consistency gates. |
+| `0x34 CALLVALUE` | `callvalue_classes` | zero `-53.38855495230069498303528274521981057630712002890644382467542079617449090255132`; nonzero `-54.318173720629140730835869255483740195075448474654244411185684725793259230997067` | No selected candidate; negative coefficients, fit/stderr, insufficient signal, control contamination, and sibling consistency rejected it. Signed coefficients are diagnostic only. |
+| `0x35 CALLDATALOAD` | `calldataload_access_classes` | zero `128.55900732966437957253284718155413237517853126047376458878825156569666660486804`; partial `212.29947653787552326754750993815237284438674240416877925154484980616587481601173`; full `161.10299559945910098015748061263917636344832598188138922221933660968493639958944` | Rejected: fit residual, insufficient signal, count/extrapolation, final-holdout, and sibling-consistency gates. |
+| `0x36 CALLDATASIZE` | `calldatasize_length` and `calldatasize_boundary` | length: intercept `-50.403392753324387700347107844807401795283238723085316596866502102681394527822523`, length `-0.22099127263812179560263029537246659197418737639951961363357766974894583309402594`; boundary: intercept `-50.110084766572444738656006107878657106121391778662064548038079642704305174301075`, words `-4.051686217008797653958944281524926686217008797653958944281524926686217008797654`, partial `-2.9925464320625610948191593352883675464320625610948191593352883675464320625610948` | Both candidates were evaluated and rejected; no candidate was selected. Negative coefficients, fit/stderr, insufficient signal, control contamination, and sibling consistency failed. Signed coefficients are diagnostic only. |
+| `0x42 TIMESTAMP` | `timestamp_nonzero` | `-63.461868735291897329076338463694883890090111231252484880393895869488273893753666` | No selected candidate; negative coefficient, fit/stderr, insufficient signal, control contamination, and sibling consistency rejected it. Signed coefficient is diagnostic only. |
+
+The sealed outcome is therefore `result_status=rejected`, with zero promoted families,
+`candidate_eligible=false`, `discovery_numeric_parameters_promoted=false`, and
+`production_registry_modified=false`. Same-checkout replay, clean detached-checkout replay at
+`dda214e385ee9608ad88ae18eefe3b7111224f45`, independent adversarial review, and independent
+behavioral verification all passed.
+
+An earlier `09e4c7e92a8758f4bce4424e` directory exposed a report-generation bug that omitted determinable
+diagnostics for coefficient-less rejected candidates. It is uncommitted diagnostic evidence, is not
+a valid result, and must not be used or sealed as a successor source. Result `a41bef...` contains the
+corrected exact reports without changing any sampled row.
+
+No proposal or final validation corpus was opened. No production estimator, registry, operation
+coverage table, runtime configuration, schedule, block limit, Boundless configuration, or other
+production parameter changed.
+
 ## Next Gate
 
-Treat the context artifact as function-shape discovery and freeze the successor production model
-before opening new rows:
+Task 7 is not executed. Its only legal promotion source must be candidate-eligible and contain at
+least one complete passing family; this result is explicitly ineligible and has zero passing
+families. It cannot be used to construct operation-coverage V6 or a successor composite estimator.
 
-- `ADDRESS` and `CALLER`: constant per-execution terms;
-- `CALLVALUE` and `TIMESTAMP`: explicit value classes before any numeric magnitude function;
-- `CALLDATALOAD`: calldata length plus in-range, partial, or out-of-range word access;
-- `CALLDATASIZE`: a single length term first, with predeclared boundary buckets only if its controlled
-  production holdout rejects that shape.
-
-For each family, use paired production-proposal-guest blocks or transactions with identical
-block/transaction/state envelopes and non-target operation ledgers. Fit production-native
-coefficients directly; do not import context-ELF slopes, the historical `body_scale`, or historical
-control bodies. Required-sibling completeness and exact event matching still apply.
-
-For the eleven failed discovery scenarios, do not increase the repeat count beyond 2048 or weaken
-the old gates. Their sealed residuals justify the typed feature vocabulary above, not a more complex
-fit to the same opened data. A count- or feature-correlated production holdout error returns to its
-operation family. Only workload-independent residual may move upward into transaction or block
-offsets. After the production family result is independently reviewed, derive V6, reseal the
-composite estimator, and rerun the same ad-hoc block/proposal diagnostics; those diagnostics still
-may not repair coefficients.
+The next step requires a separately reviewed revision of the controlled production measurement
+design. The current target/control pairing leaves a material, count-correlated control residual and
+an inadequate signal-to-noise ratio; signed negative fits are evidence of that mismatch, not usable
+opcode prices. Any successor must predeclare a revised envelope, matched control/reference workload,
+signal authority, fit/gate contract, and fresh holdouts before opening new evidence. It must not
+repair, reinterpret, or selectively refit this rejected result.
 
 After this context family, close the remaining ordinary returndata/copy/LOG/EXTCODE keys before CALL
 wrappers and direct precompiles. Reuse sealed controlled evidence where its execution semantics and

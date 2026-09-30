@@ -707,6 +707,9 @@ class ContextDeclaredApproximationTests(unittest.TestCase):
                 pathlib.Path(first["directory"])
             )
             self.assertEqual(verified["approximation_id"], first["approximation_id"])
+            self.assertEqual(
+                verified["purpose"], "sealed_declared_context_approximation"
+            )
             with self.assertRaisesRegex(ValueError, "already exists"):
                 approximation.seal_context_approximation(
                     source_result=self.source, out_root=out
@@ -714,6 +717,15 @@ class ContextDeclaredApproximationTests(unittest.TestCase):
             artifact = pathlib.Path(first["directory"]) / "context-approximation.json"
             self.assertEqual(stat.S_IMODE(artifact.stat().st_mode), 0o444)
             original = artifact.read_bytes()
+            wrong_schema = json.loads(original)
+            wrong_schema["purpose"] = "declared_context_approximation_model"
+            artifact.chmod(0o644)
+            artifact.write_bytes(production.canonical_json(wrong_schema) + b"\n")
+            with self.assertRaisesRegex(ValueError, "schema"):
+                approximation.verify_context_approximation_path(
+                    pathlib.Path(first["directory"])
+                )
+            artifact.write_bytes(original)
             tampered = json.loads(original)
             tampered["classes"]["address"]["cost_exact"]["numerator"] = "0"
             artifact.chmod(0o644)

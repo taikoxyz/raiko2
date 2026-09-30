@@ -1172,6 +1172,7 @@ def _approximation_envelope(source: Mapping[str, object], model: Mapping[str, ob
     if not isinstance(source_identity, Mapping) or not isinstance(source_hashes, Mapping):
         raise ValueError("declared approximation strict source provenance differs")
     base = {
+        **dict(model),
         "schema_version": 1,
         "purpose": "sealed_declared_context_approximation",
         "source_result_id": source["result_id"],
@@ -1179,7 +1180,6 @@ def _approximation_envelope(source: Mapping[str, object], model: Mapping[str, ob
         "source_result_identity_sha256": source["result_identity_sha256"],
         "source_result_artifact_sha256": source["artifact_sha256"],
         "source_file_sha256s": dict(source_hashes),
-        **dict(model),
     }
     identity = sha256_bytes(canonical_json(base))
     with_identity = {
@@ -1298,6 +1298,11 @@ def verify_context_approximation_path(path: pathlib.Path) -> dict[str, object]:
         raise ValueError("declared approximation JSON differs") from error
     if raw != canonical_json(artifact) + b"\n":
         raise ValueError("declared approximation JSON is not canonical")
+    if (
+        artifact.get("schema_version") != 1
+        or artifact.get("purpose") != "sealed_declared_context_approximation"
+    ):
+        raise ValueError("declared approximation schema differs")
     artifact_without_hash = dict(artifact)
     claimed_artifact = artifact_without_hash.pop("artifact_sha256", None)
     claimed_id = artifact_without_hash.pop("approximation_id", None)

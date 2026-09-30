@@ -25833,6 +25833,26 @@ def cmd_verify_context_diagnostics(args: argparse.Namespace) -> None:
     print(f"verified context diagnostics {sidecar['diagnostic_id']}")
 
 
+def cmd_seal_context_approximation(args: argparse.Namespace) -> None:
+    from context_approximation import seal_context_approximation
+
+    result = seal_context_approximation(
+        source_result=args.source_result,
+        out_root=args.out_root,
+    )
+    print(
+        f"sealed context approximation {result['approximation_id']} "
+        f"at {result['directory']}"
+    )
+
+
+def cmd_verify_context_approximation(args: argparse.Namespace) -> None:
+    from context_approximation import verify_context_approximation_path
+
+    result = verify_context_approximation_path(args.approximation)
+    print(f"verified context approximation {result['approximation_id']}")
+
+
 def _add_context_production_asset_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--guest-launcher",
@@ -25940,6 +25960,27 @@ def build_parser() -> argparse.ArgumentParser:
         "--diagnostics", type=pathlib.Path, required=True
     )
     context_diagnostics_verify.set_defaults(func=cmd_verify_context_diagnostics)
+
+    context_approximation_seal = subcommands.add_parser(
+        "seal-context-approximation",
+        help="seal declared context costs from the immutable rejected result",
+    )
+    context_approximation_seal.add_argument(
+        "--source-result", type=pathlib.Path, required=True
+    )
+    context_approximation_seal.add_argument(
+        "--out-root", type=pathlib.Path, required=True
+    )
+    context_approximation_seal.set_defaults(func=cmd_seal_context_approximation)
+
+    context_approximation_verify = subcommands.add_parser(
+        "verify-context-approximation",
+        help="replay a sealed declared context approximation",
+    )
+    context_approximation_verify.add_argument(
+        "--approximation", type=pathlib.Path, required=True
+    )
+    context_approximation_verify.set_defaults(func=cmd_verify_context_approximation)
 
     higher_prepare = subcommands.add_parser(
         "prepare-higher-layer-calibration",

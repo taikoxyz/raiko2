@@ -5,9 +5,12 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import shutil
 import subprocess
 import tempfile
 from collections.abc import Iterable, Mapping
+from decimal import Context, Decimal, ROUND_HALF_EVEN, localcontext
+from fractions import Fraction
 from typing import Any
 
 from opcode_gas import REPO_ROOT, canonical_json, sha256_bytes, sha256_file
@@ -33,6 +36,29 @@ _STRICT_SOURCE_RESULT_ARTIFACT_SHA256 = (
 _STRICT_SOURCE_ROWS_SHA256 = (
     "651e7423330b428f346306c8dda52a7c2dff3fd5ae15f82bed02bdbaf7154c06"
 )
+_STRICT_SOURCE_RESULT_JSON_SHA256 = (
+    "634783f4518151ad16aa5f92022f54cb1e5d258e85a5b16196159bfdc9c285a2"
+)
+_STRICT_SOURCE_DECISIONS_SHA256 = (
+    "2d0c82e67e8ccb86849475fb27df46432fb3c1a1f520d95346e02da326f17fc2"
+)
+_STRICT_SOURCE_MANIFEST_IDENTITY_SHA256 = (
+    "00c375a82a9a5b98a7011af26e603ab53c9779fae83199f81100154382c8be50"
+)
+_APPROXIMATION_FILE = "context-approximation.json"
+_APPROXIMATION_CLASS_BY_MODEL = {
+    "address_constant": "address",
+    "caller_constant": "caller",
+    "callvalue_zero": "callvalue:zero",
+    "callvalue_nonzero": "callvalue:nonzero",
+    "load_zero": "calldataload:zero",
+    "load_partial": "calldataload:partial",
+    "load_full": "calldataload:full",
+    "calldata_size": "calldatasize",
+    "timestamp_nonzero": "timestamp",
+}
+_APPROXIMATION_CLASSES = frozenset(_APPROXIMATION_CLASS_BY_MODEL.values())
+_FRACTION_DECIMAL_CONTEXT = Context(prec=100, rounding=ROUND_HALF_EVEN)
 
 _FIT_SCENARIOS = (
     "address_canonical",
@@ -723,3 +749,599 @@ def verify_context_diagnostics_path(path: pathlib.Path) -> dict[str, object]:
             if canonical_json(diagnostics) != canonical_json(entry["diagnostics"]):
                 raise ValueError("context diagnostic report diagnostics differ")
     return verified
+
+
+def _fraction_decimal_text(value: Fraction) -> str:
+    with localcontext(_FRACTION_DECIMAL_CONTEXT):
+        projected = Decimal(value.numerator) / Decimal(value.denominator)
+    return format(projected, "f")
+
+
+def _exact_fraction_payload(value: Fraction) -> dict[str, str]:
+    if not isinstance(value, Fraction):
+        raise TypeError("declared approximation exact value must be a Fraction")
+    return {
+        "numerator": str(value.numerator),
+        "denominator": str(value.denominator),
+        "decimal": _fraction_decimal_text(value),
+    }
+
+
+def _replay_exact_fraction(value: object) -> Fraction:
+    if not isinstance(value, Mapping) or set(value) != {
+        "numerator",
+        "denominator",
+        "decimal",
+    }:
+        raise ValueError("declared approximation exact fraction shape differs")
+    numerator = value["numerator"]
+    denominator = value["denominator"]
+    if not isinstance(numerator, str) or not isinstance(denominator, str):
+        raise ValueError("declared approximation exact fraction differs")
+    try:
+        exact = Fraction(int(numerator), int(denominator))
+    except (ValueError, ZeroDivisionError) as error:
+        raise ValueError("declared approximation exact fraction differs") from error
+    if (
+        str(exact.numerator) != numerator
+        or str(exact.denominator) != denominator
+        or value["decimal"] != _fraction_decimal_text(exact)
+    ):
+        raise ValueError("declared approximation exact fraction is noncanonical")
+    return exact
+
+
+def _fraction_from_decimal(value: Decimal) -> Fraction:
+    if not isinstance(value, Decimal) or not value.is_finite():
+        raise ValueError("declared approximation Decimal differs")
+    return Fraction(value)
+
+
+def _strict_source_directory() -> pathlib.Path:
+    return (
+        REPO_ROOT
+        / "experiments/opcode-gas/derivations"
+        / _STRICT_SOURCE_RESULT_ID
+    )
+
+
+def load_context_approximation_source_result(
+    directory: pathlib.Path,
+) -> dict[str, object]:
+    """Load the one immutable rejected result allowed to feed approximation costs."""
+    import context_production_campaign as production
+
+    directory = pathlib.Path(directory)
+    try:
+        source = load_context_diagnostic_source_result(directory)
+        raw = production._read_result_directory(directory)
+    except ValueError as error:
+        raise ValueError("declared approximation strict source differs") from error
+    source_file_sha256s = {name: sha256_bytes(data) for name, data in raw.items()}
+    if (
+        directory.name != _STRICT_SOURCE_RESULT_ID
+        or source.get("result_identity_sha256")
+        != _STRICT_SOURCE_RESULT_IDENTITY_SHA256
+        or source.get("artifact_sha256") != _STRICT_SOURCE_RESULT_ARTIFACT_SHA256
+        or source_file_sha256s.get("result.json")
+        != _STRICT_SOURCE_RESULT_JSON_SHA256
+        or source_file_sha256s.get("rows.jsonl") != _STRICT_SOURCE_ROWS_SHA256
+        or source_file_sha256s.get("campaign-decisions.json")
+        != _STRICT_SOURCE_DECISIONS_SHA256
+        or set(source_file_sha256s) != production.PRODUCTION_CONTEXT_RESULT_INVENTORY
+        or source.get("result_status") != "rejected"
+        or source.get("candidate_eligible") is not False
+        or source.get("promoted_families") != []
+    ):
+        raise ValueError("declared approximation strict source differs")
+    try:
+        decisions = json.loads(raw["campaign-decisions.json"])
+    except json.JSONDecodeError as error:  # pragma: no cover - fixed hash already gates this.
+        raise ValueError("declared approximation strict source decisions differ") from error
+    if canonical_json(decisions) + b"\n" != raw["campaign-decisions.json"]:
+        raise ValueError("declared approximation strict source decisions differ")
+    return {
+        **source,
+        "decisions": decisions,
+        "source_file_sha256s": source_file_sha256s,
+    }
+
+
+def _strict_rejection_references() -> dict[str, object]:
+    source = load_context_approximation_source_result(_strict_source_directory())
+    decisions = source["decisions"]
+    families = decisions.get("families") if isinstance(decisions, Mapping) else None
+    if not isinstance(families, Mapping) or set(families) != {
+        "opcode:0x30",
+        "opcode:0x33",
+        "opcode:0x34",
+        "opcode:0x35",
+        "opcode:0x36",
+        "opcode:0x42",
+    }:
+        raise ValueError("declared approximation strict rejection inventory differs")
+    result = {}
+    for key, family in families.items():
+        reasons = family.get("rejection_reasons") if isinstance(family, Mapping) else None
+        if family.get("status") != "rejected" or not isinstance(reasons, list) or not reasons:
+            raise ValueError("declared approximation strict rejection differs")
+        result[key] = {
+            "status": "rejected",
+            "rejection_reasons": list(reasons),
+        }
+    return result
+
+
+def _residual_measurement_ledgers(
+    row: Mapping[str, object], *, key: str, count: int, opcode: int
+) -> tuple[dict[str, int], dict[str, int]]:
+    import context_production_campaign as production
+
+    return production._subtract_measurement_contribution(
+        row["actual_raw_gas_by_key"],
+        row["actual_operation_event_count_by_key"],
+        key=key,
+        count=count,
+        per_event_raw_gas=production._measurement_raw_gas(opcode),
+    )
+
+
+def _replacement_cost(
+    row: Mapping[str, object],
+    residual_raw: Mapping[str, int],
+    residual_events: Mapping[str, int],
+    count: int,
+    subtotal_model: object,
+) -> Fraction:
+    import context_production_campaign as production
+
+    raw_delta = {
+        key: row["actual_raw_gas_by_key"].get(key, 0) - residual_raw.get(key, 0)
+        for key in set(row["actual_raw_gas_by_key"]) | set(residual_raw)
+    }
+    event_delta = {
+        key: row["actual_operation_event_count_by_key"].get(key, 0)
+        - residual_events.get(key, 0)
+        for key in set(row["actual_operation_event_count_by_key"]) | set(residual_events)
+    }
+    raw_delta = {key: value for key, value in raw_delta.items() if value}
+    event_delta = {key: value for key, value in event_delta.items() if value}
+    if (
+        set(raw_delta) != set(event_delta)
+        or len(raw_delta) != 1
+        or next(iter(event_delta.values())) != count
+    ):
+        raise ValueError("declared approximation replacement ledger differs")
+    key = next(iter(raw_delta))
+    raw_units, remainder = divmod(raw_delta[key], count)
+    if remainder:
+        raise ValueError("declared approximation replacement raw gas differs")
+    isolated = {
+        "actual_features": {name: 0 for name in subtotal_model.fixed_costs},
+        "actual_raw_gas_by_key": {key: raw_units},
+        "actual_operation_event_count_by_key": {key: 1},
+        "actual_typed_opcode_components_by_key": {},
+    }
+    replacement = _fraction_from_decimal(
+        production.evaluate_v5_subtotal(
+            isolated, subtotal_model, excluded_target_key=None
+        )
+    )
+    if replacement < 0:
+        raise ValueError("declared approximation replacement cost is negative")
+    return replacement
+
+
+def build_declared_context_approximation(
+    manifest: object,
+    rows: Iterable[Mapping[str, object]],
+    subtotal_model: object,
+) -> dict[str, object]:
+    """Build the conservative review-only context costs from exact paired rows."""
+    import context_production_campaign as production
+
+    if (
+        not isinstance(manifest, production.ProductionContextManifest)
+        or manifest.identity_sha256 != _STRICT_SOURCE_MANIFEST_IDENTITY_SHA256
+    ):
+        raise ValueError("declared approximation manifest differs from the strict source")
+    if not isinstance(subtotal_model, production.ProductionSubtotalModel):
+        raise ValueError("declared approximation V5 subtotal model differs")
+    raw_rows = list(rows)
+    production._reject_forbidden_fit_fields(raw_rows)
+    reject_context_diagnostics_from_coefficient_input(raw_rows)
+    if any(not isinstance(row, Mapping) for row in raw_rows):
+        raise ValueError("declared approximation rows must be objects")
+    row_ids = [row.get("row_id") for row in raw_rows]
+    if len(row_ids) != len(set(row_ids)):
+        raise ValueError("duplicate declared approximation row")
+    normalized = [production._normalized_fit_row(row) for row in raw_rows]
+    measured_scenarios = {
+        scenario.name: scenario
+        for scenario in manifest.scenarios
+        if scenario.reachability == "measured"
+    }
+    if any(row["scenario"] not in measured_scenarios for row in normalized):
+        raise ValueError("declared approximation row scenario differs")
+    grouped: dict[tuple[str, int, str, int], dict[str, object]] = {}
+    for row in normalized:
+        scenario = measured_scenarios[row["scenario"]]
+        if row["split"] != scenario.split or row["count"] not in scenario.counts(manifest):
+            raise ValueError("declared approximation row split or count differs")
+        key = (row["scenario"], row["count"], row["lane"], row["repeat_index"])
+        if key in grouped:
+            raise ValueError("duplicate declared approximation pair member")
+        grouped[key] = row
+
+    operation_by_key = {operation.key: operation for operation in manifest.operations}
+    paired: dict[tuple[str, int, int], dict[str, object]] = {}
+    for scenario_name, scenario in measured_scenarios.items():
+        operation = operation_by_key[scenario.key]
+        control_key = f"opcode:0x{operation.control_opcode:02x}"
+        for count in scenario.counts(manifest):
+            for repeat in range(manifest.repeats):
+                target = grouped.get((scenario_name, count, "target", repeat))
+                control = grouped.get((scenario_name, count, "control", repeat))
+                if target is None or control is None:
+                    missing_lane = "target" if target is None else "control"
+                    raise ValueError(
+                        f"missing declared approximation row or repeat for {scenario_name} count {count} {missing_lane}"
+                    )
+                expected_context = (
+                    {production._expected_context_feature(operation, scenario): count}
+                    if count
+                    else {}
+                )
+                if (
+                    target["actual_context_features"] != expected_context
+                    or control["actual_context_features"] != {}
+                ):
+                    raise ValueError("declared approximation exact context event differs")
+                target_raw, target_events = _residual_measurement_ledgers(
+                    target,
+                    key=scenario.key,
+                    count=count,
+                    opcode=operation.opcode,
+                )
+                control_raw, control_events = _residual_measurement_ledgers(
+                    control,
+                    key=control_key,
+                    count=count,
+                    opcode=operation.control_opcode,
+                )
+                if (
+                    target_raw != control_raw
+                    or target_events != control_events
+                    or target["actual_features"] != control["actual_features"]
+                    or target["actual_diagnostics"] != control["actual_diagnostics"]
+                ):
+                    raise ValueError("declared approximation residual non-target ledger differs")
+                paired[(scenario_name, count, repeat)] = {
+                    "target": target,
+                    "control": control,
+                    "replacement_cost": (
+                        _replacement_cost(
+                            control,
+                            control_raw,
+                            control_events,
+                            count,
+                            subtotal_model,
+                        )
+                        if count
+                        else None
+                    ),
+                }
+    if len(grouped) != sum(
+        len(scenario.counts(manifest)) * 2 * manifest.repeats
+        for scenario in measured_scenarios.values()
+    ):
+        raise ValueError("declared approximation row inventory differs")
+
+    scenario_costs: dict[str, object] = {}
+    observed_rows: list[dict[str, object]] = []
+    for scenario_name in sorted(measured_scenarios):
+        scenario = measured_scenarios[scenario_name]
+        increments: list[
+            tuple[int, int, Fraction, Fraction, Mapping[str, object]]
+        ] = []
+        for repeat in range(manifest.repeats):
+            zero = paired[(scenario_name, 0, repeat)]
+            for count in scenario.counts(manifest):
+                if count == 0:
+                    continue
+                point = paired[(scenario_name, count, repeat)]
+                target = point["target"]
+                control = point["control"]
+                delta = (
+                    Fraction(target["prover_gas"])
+                    - Fraction(control["prover_gas"])
+                    - Fraction(zero["target"]["prover_gas"])
+                    + Fraction(zero["control"]["prover_gas"])
+                )
+                replacement = point["replacement_cost"]
+                increments.append((repeat, count, delta, replacement, point))
+        denominator = sum((count * count for _, count, _, _, _ in increments), 0)
+        if denominator == 0:
+            raise ValueError("declared approximation scenario has no nonzero count")
+        slope = sum(
+            (
+                Fraction(count) * delta
+                for _, count, delta, _, _ in increments
+            ),
+            Fraction(),
+        ) / denominator
+        replacements = {replacement for _, _, _, replacement, _ in increments}
+        if len(replacements) != 1:
+            raise ValueError("declared approximation scenario replacement cost differs")
+        replacement = next(iter(replacements))
+        scenario_cost = slope + replacement
+        class_id = _APPROXIMATION_CLASS_BY_MODEL.get(scenario.model_class)
+        if class_id is None:
+            raise ValueError("declared approximation scenario class differs")
+        scenario_costs[scenario_name] = {
+            "class": class_id,
+            "production_schedule_key": scenario.key,
+            "split": scenario.split,
+            "through_origin_slope_exact": _exact_fraction_payload(slope),
+            "replacement_cost_exact": _exact_fraction_payload(replacement),
+            "scenario_cost_exact": _exact_fraction_payload(scenario_cost),
+        }
+        for repeat, count, delta, replacement, point in increments:
+            observed_rows.append(
+                {
+                    "scenario": scenario_name,
+                    "split": scenario.split,
+                    "class": class_id,
+                    "count": count,
+                    "repeat_index": repeat,
+                    "target_row_id": point["target"]["row_id"],
+                    "control_row_id": point["control"]["row_id"],
+                    "target_prover_gas_exact": _exact_fraction_payload(
+                        Fraction(point["target"]["prover_gas"])
+                    ),
+                    "observed_target_control_marginal_exact": _exact_fraction_payload(
+                        delta
+                    ),
+                    "replacement_marginal_exact": _exact_fraction_payload(
+                        Fraction(count) * replacement
+                    ),
+                    "observed_absolute_marginal_exact": _exact_fraction_payload(
+                        delta + Fraction(count) * replacement
+                    ),
+                }
+            )
+
+    classes = {}
+    for class_id in sorted(_APPROXIMATION_CLASSES):
+        members = sorted(
+            name
+            for name, cost in scenario_costs.items()
+            if cost["class"] == class_id
+        )
+        if not members:
+            raise ValueError("declared approximation class inventory differs")
+        selected = max(
+            (_replay_exact_fraction(scenario_costs[name]["scenario_cost_exact"]) for name in members),
+            default=Fraction(),
+        )
+        selected = max(Fraction(), selected)
+        production_keys = {scenario_costs[name]["production_schedule_key"] for name in members}
+        if len(production_keys) != 1:
+            raise ValueError("declared approximation class production key differs")
+        classes[class_id] = {
+            "status": "declared_approximation",
+            "production_schedule_key": next(iter(production_keys)),
+            "shape": "constant_per_execution",
+            "selection": "max_zero_and_scenario_costs",
+            "scenario_ids": members,
+            "cost_exact": _exact_fraction_payload(selected),
+        }
+    if set(classes) != _APPROXIMATION_CLASSES:
+        raise ValueError("declared approximation class inventory differs")
+
+    for row in observed_rows:
+        predicted = Fraction(row["count"]) * _replay_exact_fraction(
+            classes[row["class"]]["cost_exact"]
+        )
+        observed = _replay_exact_fraction(row["observed_absolute_marginal_exact"])
+        error = predicted - observed
+        target_prover_gas = _replay_exact_fraction(row["target_prover_gas_exact"])
+        if target_prover_gas <= 0:
+            raise ValueError("declared approximation target prover gas is not positive")
+        materiality = abs(error) / target_prover_gas
+        row["predicted_marginal_exact"] = _exact_fraction_payload(predicted)
+        row["error_exact"] = _exact_fraction_payload(error)
+        row["whole_guest_materiality"] = _fraction_decimal_text(materiality)
+
+    return {
+        "schema_version": 1,
+        "purpose": "declared_context_approximation_model",
+        "policy": "declared_approximation",
+        "arithmetic": "exact_fraction_with_decimal_projection",
+        "calldatasize_semantics": "constant_per_execution_calldata_ingestion_tx_owned",
+        "strict_rejections": _strict_rejection_references(),
+        "classes": classes,
+        "scenario_costs": scenario_costs,
+        "controlled_rows": observed_rows,
+    }
+
+
+def _approximation_envelope(source: Mapping[str, object], model: Mapping[str, object]) -> dict[str, object]:
+    source_identity = source.get("result_identity")
+    source_hashes = source.get("source_file_sha256s")
+    if not isinstance(source_identity, Mapping) or not isinstance(source_hashes, Mapping):
+        raise ValueError("declared approximation strict source provenance differs")
+    base = {
+        "schema_version": 1,
+        "purpose": "sealed_declared_context_approximation",
+        "source_result_id": source["result_id"],
+        "source_result_identity": dict(source_identity),
+        "source_result_identity_sha256": source["result_identity_sha256"],
+        "source_result_artifact_sha256": source["artifact_sha256"],
+        "source_file_sha256s": dict(source_hashes),
+        **dict(model),
+    }
+    identity = sha256_bytes(canonical_json(base))
+    with_identity = {
+        **base,
+        "approximation_identity_sha256": identity,
+        "approximation_id": identity[:24],
+    }
+    return {
+        **with_identity,
+        "artifact_sha256": sha256_bytes(canonical_json(with_identity)),
+    }
+
+
+def _fsync_directory(path: pathlib.Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _publish_approximation_create_only(
+    out_root: pathlib.Path, artifact: Mapping[str, object]
+) -> pathlib.Path:
+    import ctypes
+    import errno
+
+    out_root = pathlib.Path(out_root)
+    if out_root.exists() and (out_root.is_symlink() or not out_root.is_dir()):
+        raise ValueError("declared approximation output root differs")
+    out_root.mkdir(parents=True, exist_ok=True)
+    artifact_id = artifact["approximation_id"]
+    if not _is_result_id(artifact_id):
+        raise ValueError("declared approximation identity differs")
+    destination = out_root / artifact_id
+    if destination.exists() or destination.is_symlink():
+        raise ValueError(f"declared approximation directory already exists: {destination}")
+    temporary = pathlib.Path(tempfile.mkdtemp(prefix=f".{artifact_id}.", dir=out_root))
+    try:
+        path = temporary / _APPROXIMATION_FILE
+        _write_create_only(path, canonical_json(dict(artifact)) + b"\n")
+        path.chmod(0o444)
+        descriptor = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        _fsync_directory(temporary)
+        rename_noreplace = getattr(ctypes.CDLL(None, use_errno=True), "renameat2", None)
+        if rename_noreplace is None:
+            raise OSError(errno.ENOSYS, "renameat2 is required for create-only sealing")
+        rename_noreplace.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        rename_noreplace.restype = ctypes.c_int
+        if rename_noreplace(
+            -100, os.fsencode(temporary), -100, os.fsencode(destination), 1
+        ) != 0:
+            error_number = ctypes.get_errno()
+            if error_number == errno.EEXIST:
+                raise ValueError(
+                    f"declared approximation directory already exists: {destination}"
+                )
+            raise OSError(error_number, "declared approximation create-only publish failed")
+        temporary = None
+        _fsync_directory(out_root)
+        return destination
+    finally:
+        if temporary is not None and temporary.exists():
+            shutil.rmtree(temporary)
+
+
+def seal_context_approximation(
+    *, source_result: pathlib.Path, out_root: pathlib.Path
+) -> dict[str, object]:
+    """Replay the strict source and create one immutable approximation directory."""
+    import context_production_campaign as production
+
+    source = load_context_approximation_source_result(source_result)
+    subtotal = production.load_production_v5_subtotal_model(source["manifest"], REPO_ROOT)
+    model = build_declared_context_approximation(
+        source["manifest"], source["rows"], subtotal
+    )
+    artifact = _approximation_envelope(source, model)
+    destination = _publish_approximation_create_only(out_root, artifact)
+    return {
+        "status": "sealed",
+        "approximation_id": artifact["approximation_id"],
+        "artifact_sha256": artifact["artifact_sha256"],
+        "directory": str(destination),
+    }
+
+
+def verify_context_approximation_path(path: pathlib.Path) -> dict[str, object]:
+    """Verify content addressing and exact replay from the immutable strict source."""
+    import context_production_campaign as production
+
+    directory = pathlib.Path(path)
+    if (
+        directory.is_symlink()
+        or not directory.is_dir()
+        or {entry.name for entry in directory.iterdir()} != {_APPROXIMATION_FILE}
+    ):
+        raise ValueError("declared approximation directory inventory differs")
+    artifact_path = directory / _APPROXIMATION_FILE
+    if artifact_path.is_symlink() or not artifact_path.is_file():
+        raise ValueError("declared approximation file differs")
+    raw = artifact_path.read_bytes()
+    try:
+        artifact = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise ValueError("declared approximation JSON differs") from error
+    if raw != canonical_json(artifact) + b"\n":
+        raise ValueError("declared approximation JSON is not canonical")
+    artifact_without_hash = dict(artifact)
+    claimed_artifact = artifact_without_hash.pop("artifact_sha256", None)
+    claimed_id = artifact_without_hash.pop("approximation_id", None)
+    claimed_identity = artifact_without_hash.pop("approximation_identity_sha256", None)
+    if (
+        not _is_sha256(claimed_artifact)
+        or not _is_result_id(claimed_id)
+        or not _is_sha256(claimed_identity)
+        or claimed_identity != sha256_bytes(canonical_json(artifact_without_hash))
+        or claimed_id != claimed_identity[:24]
+        or claimed_artifact
+        != sha256_bytes(
+            canonical_json(
+                {
+                    **artifact_without_hash,
+                    "approximation_identity_sha256": claimed_identity,
+                    "approximation_id": claimed_id,
+                }
+            )
+        )
+        or directory.name != claimed_id
+    ):
+        raise ValueError("declared approximation identity differs")
+    for section in (artifact.get("classes"), artifact.get("scenario_costs")):
+        if not isinstance(section, Mapping):
+            raise ValueError("declared approximation exact fraction inventory differs")
+        for entry in section.values():
+            if not isinstance(entry, Mapping):
+                raise ValueError("declared approximation exact fraction inventory differs")
+            for field, value in entry.items():
+                if field.endswith("_exact"):
+                    _replay_exact_fraction(value)
+    for row in artifact.get("controlled_rows", ()):
+        if not isinstance(row, Mapping):
+            raise ValueError("declared approximation controlled row differs")
+        for field, value in row.items():
+            if field.endswith("_exact"):
+                _replay_exact_fraction(value)
+    source = load_context_approximation_source_result(_strict_source_directory())
+    subtotal = production.load_production_v5_subtotal_model(source["manifest"], REPO_ROOT)
+    expected = _approximation_envelope(
+        source,
+        build_declared_context_approximation(source["manifest"], source["rows"], subtotal),
+    )
+    if canonical_json(expected) != canonical_json(artifact):
+        raise ValueError("declared approximation exact replay differs")
+    return dict(artifact)

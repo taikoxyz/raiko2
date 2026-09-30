@@ -11,6 +11,7 @@ import tempfile
 import types
 import unittest
 from decimal import Decimal, localcontext
+from fractions import Fraction
 from unittest import mock
 
 
@@ -426,6 +427,301 @@ class ContextDiagnosticTests(unittest.TestCase):
             (out / "reports" / f"{rows[0]['row_id']}.json").unlink()
             with self.assertRaisesRegex(ValueError, "inventory"):
                 approximation.verify_context_diagnostics_path(out)
+
+
+class ContextDeclaredApproximationTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.source = (
+            OPCODE_GAS
+            / "derivations"
+            / "a41befb63e663890896ba67d"
+        )
+        cls.manifest = production.load_production_context_manifest(
+            cls.source / "campaign-manifest.json"
+        )
+        cls.rows = [
+            json.loads(line)
+            for line in (cls.source / "rows.jsonl").read_text().splitlines()
+        ]
+        cls.subtotal = production.load_production_v5_subtotal_model(
+            cls.manifest, ROOT
+        )
+
+    @staticmethod
+    def _fraction(payload):
+        return Fraction(int(payload["numerator"]), int(payload["denominator"]))
+
+    @staticmethod
+    def _rewrite_scenario_delta(rows, scenario, per_event_delta):
+        rewritten = copy.deepcopy(rows)
+        zero = {
+            row["lane"]: Decimal(row["prover_gas"])
+            for row in rewritten
+            if row["scenario"] == scenario
+            and row["count"] == 0
+            and row["repeat_index"] == 0
+        }
+        baseline_gap = zero["target"] - zero["control"]
+        controls = {
+            (row["count"], row["repeat_index"]): Decimal(row["prover_gas"])
+            for row in rewritten
+            if row["scenario"] == scenario and row["lane"] == "control"
+        }
+        for row in rewritten:
+            if row["scenario"] != scenario or row["lane"] != "target" or row["count"] == 0:
+                continue
+            row["prover_gas"] = str(
+                controls[(row["count"], row["repeat_index"])]
+                + baseline_gap
+                + Decimal(row["count"] * per_event_delta)
+            )
+        return rewritten
+
+    def test_source_loader_binds_full_identity_and_every_file_hash(self):
+        source = approximation.load_context_approximation_source_result(self.source)
+        self.assertEqual(
+            source["result_identity_sha256"],
+            "a41befb63e663890896ba67de48a51e65de49c4b281229a37b0e271a094e1943",
+        )
+        self.assertEqual(
+            source["source_file_sha256s"]["result.json"],
+            "634783f4518151ad16aa5f92022f54cb1e5d258e85a5b16196159bfdc9c285a2",
+        )
+        self.assertEqual(
+            set(source["source_file_sha256s"]),
+            set(production.PRODUCTION_CONTEXT_RESULT_INVENTORY),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            copied = pathlib.Path(directory) / source["result_id"]
+            shutil.copytree(self.source, copied)
+            envelope = json.loads((copied / "result.json").read_bytes())
+            envelope["result_identity_sha256"] = (
+                source["result_id"] + "1" * 40
+            )
+            envelope["artifact_sha256"] = production.sha256_bytes(
+                production.canonical_json(
+                    {key: value for key, value in envelope.items() if key != "artifact_sha256"}
+                )
+            )
+            (copied / "result.json").chmod(0o644)
+            (copied / "result.json").write_bytes(
+                production.canonical_json(envelope) + b"\n"
+            )
+            with self.assertRaisesRegex(ValueError, "strict source"):
+                approximation.load_context_approximation_source_result(copied)
+
+    def test_builder_pairs_count_zero_adds_one_replacement_and_preserves_rejections(self):
+        built = approximation.build_declared_context_approximation(
+            self.manifest, self.rows, self.subtotal
+        )
+        self.assertEqual(
+            set(built["classes"]),
+            {
+                "address",
+                "caller",
+                "callvalue:zero",
+                "callvalue:nonzero",
+                "calldataload:zero",
+                "calldataload:partial",
+                "calldataload:full",
+                "calldatasize",
+                "timestamp",
+            },
+        )
+        self.assertEqual(len(built["controlled_rows"]), 327)
+        address = built["scenario_costs"]["address_canonical"]
+        count_one = next(
+            row
+            for row in built["controlled_rows"]
+            if row["scenario"] == "address_canonical"
+            and row["count"] == 1
+            and row["repeat_index"] == 0
+        )
+        self.assertEqual(
+            self._fraction(count_one["observed_target_control_marginal_exact"]),
+            Fraction(99),
+        )
+        self.assertEqual(
+            self._fraction(address["replacement_cost_exact"]),
+            Fraction(
+                Decimal(
+                    "24.005379037858121176747031351368990855052366915359737824471331436422526620808534"
+                )
+            ),
+        )
+        load = built["scenario_costs"]["calldataload_full_32_offset_0"]
+        self.assertEqual(
+            self._fraction(load["replacement_cost_exact"]),
+            Fraction(
+                Decimal(
+                    "160.21132743956716642801549589643853847797742842557414869147573936756164015088704"
+                )
+            ),
+        )
+        self.assertTrue(
+            all(
+                value["status"] == "declared_approximation"
+                for value in built["classes"].values()
+            )
+        )
+        self.assertEqual(
+            built["classes"]["calldatasize"]["shape"],
+            "constant_per_execution",
+        )
+        decisions = json.loads((self.source / "campaign-decisions.json").read_bytes())
+        self.assertEqual(
+            built["strict_rejections"],
+            {
+                key: {
+                    "status": "rejected",
+                    "rejection_reasons": value["rejection_reasons"],
+                }
+                for key, value in decisions["families"].items()
+            },
+        )
+
+    def test_builder_fails_closed_on_pair_and_residual_ledger_errors(self):
+        missing = self.rows[:-1]
+        with self.assertRaisesRegex(ValueError, "missing.*repeat|missing.*row"):
+            approximation.build_declared_context_approximation(
+                self.manifest, missing, self.subtotal
+            )
+        duplicate = [*self.rows, copy.deepcopy(self.rows[-1])]
+        with self.assertRaisesRegex(ValueError, "duplicate"):
+            approximation.build_declared_context_approximation(
+                self.manifest, duplicate, self.subtotal
+            )
+        residual = copy.deepcopy(self.rows)
+        for row in residual:
+            if (
+                row["scenario"] == "address_canonical"
+                and row["count"] == 1
+                and row["lane"] == "target"
+            ):
+                row["actual_raw_gas_by_key"]["opcode:0x60"] += 3
+                row["actual_operation_event_count_by_key"]["opcode:0x60"] += 1
+        with self.assertRaisesRegex(ValueError, "residual|non-target"):
+            approximation.build_declared_context_approximation(
+                self.manifest, residual, self.subtotal
+            )
+
+    def test_builder_pairs_and_retains_each_exact_repeat_observation(self):
+        rows = copy.deepcopy(self.rows)
+        changed = next(
+            row
+            for row in rows
+            if row["scenario"] == "address_canonical"
+            and row["count"] == 1
+            and row["lane"] == "target"
+            and row["repeat_index"] == 1
+        )
+        changed["prover_gas"] = str(int(changed["prover_gas"]) + 3)
+        built = approximation.build_declared_context_approximation(
+            self.manifest, rows, self.subtotal
+        )
+        evidence = [
+            row
+            for row in built["controlled_rows"]
+            if row["scenario"] == "address_canonical" and row["count"] == 1
+        ]
+        self.assertEqual([row["repeat_index"] for row in evidence], [0, 1, 2])
+        self.assertEqual(
+            [
+                self._fraction(row["observed_target_control_marginal_exact"])
+                for row in evidence
+            ],
+            [Fraction(99), Fraction(102), Fraction(99)],
+        )
+        self.assertTrue(
+            all(
+                isinstance(row["target_row_id"], str)
+                and isinstance(row["control_row_id"], str)
+                and "target_row_ids" not in row
+                and "control_row_ids" not in row
+                for row in evidence
+            )
+        )
+
+    def test_builder_floors_negative_classes_and_chooses_conservative_sibling_maximum(self):
+        rows = self._rewrite_scenario_delta(
+            self.rows, "callvalue_zero", -100
+        )
+        rows = self._rewrite_scenario_delta(
+            rows, "callvalue_zero_calldata_1", -200
+        )
+        built = approximation.build_declared_context_approximation(
+            self.manifest, rows, self.subtotal
+        )
+        self.assertEqual(
+            self._fraction(built["classes"]["callvalue:zero"]["cost_exact"]),
+            Fraction(0),
+        )
+        rows = self._rewrite_scenario_delta(
+            self.rows, "callvalue_zero", 10
+        )
+        rows = self._rewrite_scenario_delta(
+            rows, "callvalue_zero_calldata_1", 20
+        )
+        built = approximation.build_declared_context_approximation(
+            self.manifest, rows, self.subtotal
+        )
+        replacement = self._fraction(
+            built["scenario_costs"]["callvalue_zero"]["replacement_cost_exact"]
+        )
+        self.assertEqual(
+            self._fraction(built["classes"]["callvalue:zero"]["cost_exact"]),
+            Fraction(20) + replacement,
+        )
+
+    def test_builder_rejects_discovery_coefficients_and_sp1_diagnostics(self):
+        discovery = copy.deepcopy(self.rows)
+        discovery[0]["body_scale"] = "1"
+        with self.assertRaisesRegex(ValueError, "forbidden"):
+            approximation.build_declared_context_approximation(
+                self.manifest, discovery, self.subtotal
+            )
+        diagnostics = copy.deepcopy(self.rows)
+        diagnostics[0]["total_instruction_count"] = 1
+        with self.assertRaisesRegex(ValueError, "diagnostic"):
+            approximation.build_declared_context_approximation(
+                self.manifest, diagnostics, self.subtotal
+            )
+
+    def test_seal_is_deterministic_create_only_and_verifier_rejects_tampering(self):
+        with tempfile.TemporaryDirectory() as directory:
+            out = pathlib.Path(directory) / "derivations"
+            with mock.patch.object(
+                approximation,
+                "_fsync_directory",
+                wraps=approximation._fsync_directory,
+            ) as fsync_directory:
+                first = approximation.seal_context_approximation(
+                    source_result=self.source, out_root=out
+                )
+            self.assertIn(
+                mock.call(out),
+                fsync_directory.call_args_list,
+            )
+            verified = approximation.verify_context_approximation_path(
+                pathlib.Path(first["directory"])
+            )
+            self.assertEqual(verified["approximation_id"], first["approximation_id"])
+            with self.assertRaisesRegex(ValueError, "already exists"):
+                approximation.seal_context_approximation(
+                    source_result=self.source, out_root=out
+                )
+            artifact = pathlib.Path(first["directory"]) / "context-approximation.json"
+            self.assertEqual(stat.S_IMODE(artifact.stat().st_mode), 0o444)
+            original = artifact.read_bytes()
+            tampered = json.loads(original)
+            tampered["classes"]["address"]["cost_exact"]["numerator"] = "0"
+            artifact.chmod(0o644)
+            artifact.write_bytes(production.canonical_json(tampered) + b"\n")
+            with self.assertRaisesRegex(ValueError, "identity|replay|fraction"):
+                approximation.verify_context_approximation_path(
+                    pathlib.Path(first["directory"])
+                )
 
 
 class ProductionContextManifestTests(unittest.TestCase):
@@ -1327,6 +1623,8 @@ class ProductionContextCliTests(unittest.TestCase):
             "seal-context-production-result",
             "run-context-diagnostics",
             "verify-context-diagnostics",
+            "seal-context-approximation",
+            "verify-context-approximation",
         ):
             self.assertIn(live, completed.stdout)
 

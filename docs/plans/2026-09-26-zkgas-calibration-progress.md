@@ -869,7 +869,7 @@ the candidate prediction, while public seal and verify still regenerate every fu
 bound launcher. The resulting manifest is about 140 KB. Because that builder source is candidate
 bound, `72a584...` remains immutable but is no longer eligible for the final manifest.
 
-## Completed Milestone: Compact-Manifest Final Candidate
+## Reviewed Pre-Portability Checkpoint: Compact-Manifest Candidate
 
 The final reviewed successor is sealed at
 `experiments/opcode-gas/estimators/464c3d49e3ddd17090d6b8fe`:
@@ -890,7 +890,7 @@ and all 168 coverage rows are identical. Independent review recomputed both iden
 31 bound source/execution hashes, and passed exact replay. The header remains review-only with
 `production_write=false` and `proposal_validation_opened=false`.
 
-## Completed Milestone: Frozen Controlled-Block Manifest
+## Reviewed Pre-Portability Checkpoint: Frozen Controlled-Block Manifest
 
 The source-only block manifest is sealed at
 `experiments/opcode-gas/manifests/sp1-block-comparison-v1/bd0652fb4a5a5999d558410c`:
@@ -920,14 +920,54 @@ identity, source, launcher TOCTOU, and self-consistent swapped-trace tampering a
 The manifest is canonical, mode `0444`, and contains no observed proverGas, scalar, normalization,
 comparison, proposal, or verdict field. The validation partition remains unopened.
 
+The local sealer correctly created `bd065.../manifest.json` as mode `0444`, but Git cannot preserve
+read-only mode bits: a fresh checkout materializes every non-executable tracked file as `0644`.
+The verifier originally accepted only `0444`, so `bd065...` could not be replayed from a fresh
+clone. Before data-open, the verifier was narrowed to the two portable canonical modes `0444` and
+`0644`; it still rejects other modes, symlinks, extra inventory, source drift, and all replay
+mismatches. This builder change makes `464c3d...` and `bd065...` immutable pre-portability
+checkpoints rather than the pair eligible for calibration.
+
+## Completed Milestone: Portable Final Candidate And Manifest
+
+The final candidate is sealed at
+`experiments/opcode-gas/estimators/c3f24358f8a2b702658a6496`:
+
+- implementation revision:
+  `cac07a74b4b6d8d72806b99c11761ed6dbdc3f51`;
+- full candidate identity SHA256:
+  `c3f24358f8a2b702658a6496431e06d589c54fadaeb9dea34b5aa3805db115aa`;
+- canonical estimator-file SHA256:
+  `19b548ef041f7e9a99ed217b11ec5a40377f276b5ba09832777f6f1a018b9907`.
+
+The final manifest is sealed at
+`experiments/opcode-gas/manifests/sp1-block-comparison-v1/658fc415d93188e7ee1e0584`:
+
+- full manifest identity SHA256:
+  `658fc415d93188e7ee1e058449558c3041b14bae5e23f0f5f7272763a38efc85`;
+- canonical manifest-file SHA256:
+  `e0658953033ad7067de90b6f11c38f3f6e4d4737b0d6245c74c7b3e0a1c93f75`;
+- fixed matrix SHA256:
+  `132e1b6f6210c0f1f07a8dd1e9af1cda6dfe2e8ee623f74711eca32625abf44e`;
+- bound candidate identity SHA256:
+  `c3f24358f8a2b702658a6496431e06d589c54fadaeb9dea34b5aa3805db115aa`.
+
+The candidate differs from `464c3d...` only in revision-bound provenance. The manifest differs from
+`bd065...` only in candidate/builder provenance and the repeated candidate identity; all workloads,
+compact evidence, bundle and trace hashes, and predictions are identical. Independent review and
+behavioral verification both passed with the final manifest in fresh-checkout mode `0644`. The
+formal CLI executed exactly 32 native launcher calls and zero SP1 calls, and a separate 32-row
+replay reproduced every full bundle, compact identity, trace, ID, coverage result, and prediction.
+The validation partition remains unopened.
+
 ## Next Gate
 
 Strict Task 7 is not executed. Result `a41bef...` remains ineligible for strict promotion and its six
 family verdicts remain rejected. The separately sealed approximation above is not a reinterpretation
-of those verdicts. The `0bae...` and `72a584...` estimators remain review-only historical
-checkpoints. The reviewed `464c3d...` successor is the only candidate eligible to bind the final
-block manifest; none is a production candidate. The controlled-block manifest is now frozen and
-independently reviewed. The next gate is to execute and seal only its 12-row calibration partition;
+of those verdicts. The `0bae...`, `72a584...`, and `464c3d...` estimators remain review-only
+historical checkpoints. The reviewed `c3f243...` candidate and `658fc...` manifest are the only pair
+eligible for calibration; neither is a production artifact. The next gate is to execute and seal
+only the manifest's 12-row calibration partition;
 the Unzen scalar is then derived and sealed before the untouched validation partition can
 open. Every validation row must bind both sealed identities. SP1 diagnostics remain explanatory
 sidecar data and never enter the online formula.

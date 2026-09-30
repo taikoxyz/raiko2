@@ -279,6 +279,7 @@ class BlockComparisonManifestTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)
             sealed = self._seal_manifest(self.manifest, root)
+            self.assertEqual(sealed.stat().st_mode & 0o777, 0o444)
             with mock.patch.object(
                 block_comparison, "_read_bound_sources", return_value=self.sources
             ), mock.patch.object(
@@ -290,6 +291,27 @@ class BlockComparisonManifestTests(unittest.TestCase):
                     ),
                     self.manifest,
                 )
+            sealed.chmod(0o644)
+            with mock.patch.object(
+                block_comparison, "_read_bound_sources", return_value=self.sources
+            ), mock.patch.object(
+                block_comparison, "_run_native_freezes", return_value=self.bundles
+            ):
+                self.assertEqual(
+                    block_comparison.verify_sealed_manifest(
+                        sealed, source_paths=self.source_paths
+                    ),
+                    self.manifest,
+                )
+            for mode in (0o600, 0o666, 0o755):
+                sealed.chmod(mode)
+                with self.subTest(mode=oct(mode)), self.assertRaisesRegex(
+                    ValueError, "inventory"
+                ):
+                    block_comparison.verify_sealed_manifest(
+                        sealed, source_paths=self.source_paths
+                    )
+            sealed.chmod(0o444)
             linked = root / "linked"
             linked.symlink_to(sealed.parent, target_is_directory=True)
             with self.assertRaisesRegex(ValueError, "inventory"):

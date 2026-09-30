@@ -823,7 +823,14 @@ def verify_sealed_manifest(
         parent_mode = path.parent.lstat().st_mode
     except OSError as error:
         raise ValueError("sealed manifest inventory differs") from error
-    if not stat.S_ISREG(file_mode) or stat.S_IMODE(file_mode) != 0o444 or not stat.S_ISDIR(parent_mode) or path.is_symlink() or path.parent.is_symlink() or {item.name for item in path.parent.iterdir()} != {"manifest.json"}:
+    if (
+        not stat.S_ISREG(file_mode)
+        or stat.S_IMODE(file_mode) not in {0o444, 0o644}
+        or not stat.S_ISDIR(parent_mode)
+        or path.is_symlink()
+        or path.parent.is_symlink()
+        or {item.name for item in path.parent.iterdir()} != {"manifest.json"}
+    ):
         raise ValueError("sealed manifest inventory differs")
     raw = path.read_bytes()
     manifest = json.loads(raw)

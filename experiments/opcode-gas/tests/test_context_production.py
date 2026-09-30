@@ -893,6 +893,15 @@ class ContextBlockComparisonTests(unittest.TestCase):
         ]
         report = approximation.compare_block_models(biased, Decimal("1"))
         self.assertFalse(report["gates"]["mean_spe_floor"])
+        relaxed = copy.deepcopy(
+            approximation.BLOCK_VALIDATION_ACCEPTANCE_THRESHOLDS
+        )
+        relaxed["minimum_mean_spe"] = "-0.10"
+        with mock.patch.object(
+            approximation, "BLOCK_VALIDATION_ACCEPTANCE_THRESHOLDS", relaxed
+        ):
+            report = approximation.compare_block_models(biased, Decimal("1"))
+        self.assertTrue(report["gates"]["mean_spe_floor"])
 
         p95_tail = [
             self.validation_row(

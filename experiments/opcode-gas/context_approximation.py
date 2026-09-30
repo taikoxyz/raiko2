@@ -60,6 +60,16 @@ _APPROXIMATION_CLASS_BY_MODEL = {
 _APPROXIMATION_CLASSES = frozenset(_APPROXIMATION_CLASS_BY_MODEL.values())
 _FRACTION_DECIMAL_CONTEXT = Context(prec=100, rounding=ROUND_HALF_EVEN)
 _BLOCK_COMPARISON_DECIMAL_CONTEXT = Context(prec=100, rounding=ROUND_HALF_EVEN)
+BLOCK_VALIDATION_ACCEPTANCE_THRESHOLDS = {
+    "complete_coverage_required": True,
+    "strict_mape_improvement": True,
+    "maximum_ape_no_worse": True,
+    "minimum_mean_spe": "-0.05",
+    "maximum_p95_upe": "0.10",
+    "p95_upe_no_worse": True,
+    "maximum_upe": "0.20",
+    "maximum_upe_no_worse": True,
+}
 
 _FIT_SCENARIOS = (
     "address_canonical",
@@ -1038,6 +1048,10 @@ def compare_block_models(
         unzen_decimal = {key: Decimal(value) for key, value in unzen_metrics.items()}
         complete_coverage = all(row["coverage_complete"] for row in parsed_rows)
         if complete_coverage:
+            thresholds = BLOCK_VALIDATION_ACCEPTANCE_THRESHOLDS
+            mean_spe_floor = Decimal(thresholds["minimum_mean_spe"])
+            maximum_p95_upe = Decimal(thresholds["maximum_p95_upe"])
+            maximum_upe = Decimal(thresholds["maximum_upe"])
             candidate_metrics = _comparison_metrics(
                 [row["candidate"] for row in parsed_rows]
             )
@@ -1054,16 +1068,16 @@ def compare_block_models(
                     <= unzen_decimal["maximum_ape"]
                 ),
                 "mean_spe_floor": (
-                    candidate_decimal["mean_spe"] >= Decimal("-0.05")
+                    candidate_decimal["mean_spe"] >= mean_spe_floor
                 ),
                 "p95_upe_limit": (
-                    candidate_decimal["p95_upe"] <= Decimal("0.10")
+                    candidate_decimal["p95_upe"] <= maximum_p95_upe
                 ),
                 "p95_upe_not_regressed": (
                     candidate_decimal["p95_upe"] <= unzen_decimal["p95_upe"]
                 ),
                 "maximum_upe_limit": (
-                    candidate_decimal["maximum_upe"] <= Decimal("0.20")
+                    candidate_decimal["maximum_upe"] <= maximum_upe
                 ),
                 "maximum_upe_not_regressed": (
                     candidate_decimal["maximum_upe"]

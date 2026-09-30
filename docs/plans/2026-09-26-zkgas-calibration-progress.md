@@ -1008,26 +1008,63 @@ rows produce the largest residuals. The scalar-normalized Unzen baseline has `31
 rows. These fit-partition numbers are not the acceptance verdict and must not be used to repair the
 candidate.
 
+## Completed Milestone: Untouched Block Validation
+
+The validation-only runner landed and was pushed at source revision
+`9fb28d648e60ab4d652cd7dc170e59043d1f00e2` before the validation partition was opened. The runner
+requires the exact `c3f243...` candidate, `658fc...` manifest, `c785...` calibration, and `9d970...`
+normalization. It pure-read checks all seven bound source paths and hashes before native replay,
+executes only the manifest's 20 validation rows, and uses create-only resumable checkpoints with a
+600-second timeout per row. Independent source review and behavioral testing passed before the real
+run; both review findings were fixed and rechecked.
+
+The ignored run `experiments/opcode-gas/runs/658fc415d93188e7ee1e0584-validation` completed all 20
+validation rows once. Its 20 input IDs and 20 report IDs exactly equal the frozen validation
+partition, have zero overlap with the 12 calibration IDs, and bind source revision `9fb28d64...`.
+
+The exact validation evidence is sealed at
+`experiments/opcode-gas/validations/sp1-block-comparison-v1/d1e00d3424e2ed5b93c04231`:
+
+- full validation identity SHA256:
+  `d1e00d3424e2ed5b93c04231ae37bafbc0640c20ef10c55ae0e2fb8a73f20051`;
+- canonical validation-file SHA256:
+  `3e5875c5b6d6a2da832b26599a84b8839cb85c79e4dd332e9e672113d84b8b83`;
+- file mode and size: `0444`, 120,680 bytes;
+- row count: 20 validation rows and zero calibration rows.
+
+The one predeclared comparison is sealed at
+`experiments/opcode-gas/comparisons/sp1-block-comparison-v1/fc28fac748793362d7fe40f5`:
+
+- full comparison identity SHA256:
+  `fc28fac748793362d7fe40f5041957566627d26f18ec21a7cd54d52ccf172de2`;
+- canonical comparison-file SHA256:
+  `eb0e393750da30461e4ff27bcea03539e2db560f3a014ca5eacb553467e8bf7c`;
+- file mode and size: `0444`, 25,169 bytes;
+- result: `block_validated_against_unzen`; all eight explicit gate booleans are true.
+
+On the untouched 20-row partition, the candidate MAPE is `0.17406%` versus `14.61521%` for the
+scalar-normalized Unzen baseline. Candidate maximum APE is `0.51574%` versus `148.55504%`; mean SPE
+is `-0.17406%` versus `14.28769%`; p95 UPE is `0.50534%` versus `0.54049%`; and maximum UPE is
+`0.51574%` versus `0.54106%`. All candidate residuals are small underpredictions, but the worst is
+only about `0.52%`, well inside the predeclared `10%` p95 and `20%` maximum underprediction limits.
+No coefficient, scalar, threshold, or repair offset was changed after validation opened. Independent
+public verification completed in 93.40 seconds with exactly 32 native identity replays, zero SP1
+executions, and an exact independent Decimal recomputation of every row, aggregate, and gate.
+
 ## Next Gate
 
 Strict Task 7 is not executed. Result `a41bef...` remains ineligible for strict promotion and its six
 family verdicts remain rejected. The separately sealed approximation above is not a reinterpretation
 of those verdicts. The `0bae...`, `72a584...`, and `464c3d...` estimators remain review-only
 historical checkpoints. The reviewed `c3f243...` candidate and `658fc...` manifest are the only pair
-eligible for this experiment; neither is a production artifact. Their 12-row calibration and
-`9d970...` normalization are now sealed. The next gate is a reviewed validation-only runner that
-requires both the `c785...` calibration and `9d970...` normalization identities, then executes
-exactly the manifest's untouched 20-row validation partition. SP1 diagnostics remain explanatory
-sidecar data and never enter the online formula.
+eligible for this experiment; neither is a production artifact. Their 12-row calibration,
+`9d970...` normalization, 20-row validation, and comparative verdict are now sealed. SP1 diagnostics
+remain explanatory sidecar data and never enter the online formula.
 
-The decisive acceptance condition is comparative rather than perfect per-opcode identification.
-On the same frozen block validation partition, the candidate must have complete coverage, strictly
-lower MAPE than the scalar-normalized current Unzen `finalized_block_zkgas` baseline, no worse
-maximum APE, mean signed percentage error at least `-5%`, 95th-percentile underprediction at most
-`10%` and no worse than Unzen, and maximum underprediction at most `20%` and no worse than Unzen.
-The scalar baseline is fitted only on the separate block calibration partition and is sealed before
-validation executes. Failure routes back to the smallest residual-correlated owner; validation may
-not fit a repair offset.
+The decisive comparative block condition has passed without a result-time adjustment. This result
+does not by itself promote the candidate to the production schedule or replace proposal-level
+validation. The next experiment may use the sealed block result as input, but may not reinterpret the
+20 validation rows as calibration data.
 
 After this context family, close the remaining ordinary returndata/copy/LOG/EXTCODE keys before CALL
 wrappers and direct precompiles. Reuse sealed controlled evidence where its execution semantics and

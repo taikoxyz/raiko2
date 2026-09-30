@@ -830,7 +830,7 @@ or validation observation has been opened while making this ordering correction.
 No production table, registry, schedule, runtime configuration, block limit, Boundless
 configuration, or deployed component changed.
 
-## Completed Milestone: Structured-Fixture Successor Candidate
+## Reviewed Pre-Compact Checkpoint: Structured-Fixture Successor Candidate
 
 The structured block fixtures, exact native replay gate, and schema-5 successor are now complete.
 The reviewed successor is sealed at
@@ -862,13 +862,41 @@ bundles, inventory, symlinks, collisions, and launcher TOCTOU all failed closed.
 No controlled-block manifest, observed proverGas row, Unzen scalar, comparison result, proposal
 result, or validation result was created while sealing this candidate.
 
+The first real prepare exposed that embedding every deterministic `candidate_trace` would make the
+32-row manifest about 147 MB. No data had opened, so the builder was changed before manifest seal:
+schema 2 stores the complete compact identity evidence, canonical full-bundle and trace hashes, and
+the candidate prediction, while public seal and verify still regenerate every full trace with the
+bound launcher. The resulting manifest is about 140 KB. Because that builder source is candidate
+bound, `72a584...` remains immutable but is no longer eligible for the final manifest.
+
+## Completed Milestone: Compact-Manifest Final Candidate
+
+The final reviewed successor is sealed at
+`experiments/opcode-gas/estimators/464c3d49e3ddd17090d6b8fe`:
+
+- implementation revision:
+  `cb0a536959dacbb89173e9b46103260c76dac21c`;
+- full candidate identity SHA256:
+  `464c3d49e3ddd17090d6b8febe8a35b128da6dfaa42efebda75c85b600ab64b8`;
+- canonical estimator-file SHA256:
+  `88f273b6317423bb7ec3a495615657afb60948fb9b3d9ecb03b09f9ece0a90bb`;
+- rebuilt guest-launcher SHA256:
+  `4836a23aa1e6a6c5471cde7633951a2a4bfcbbaa964993d6e66e7aee9f4b2899`.
+
+Relative to `72a584...`, only the implementation revision, compact builder source hash,
+revision-bound higher-layer projection identity, and total artifact identity change. The registry,
+storage model, fixed/coarse models, policies, formula, context and terminal overlays, trace schema,
+and all 168 coverage rows are identical. Independent review recomputed both identities, matched all
+31 bound source/execution hashes, and passed exact replay. The header remains review-only with
+`production_write=false` and `proposal_validation_opened=false`.
+
 ## Next Gate
 
 Strict Task 7 is not executed. Result `a41bef...` remains ineligible for strict promotion and its six
 family verdicts remain rejected. The separately sealed approximation above is not a reinterpretation
-of those verdicts. The `0bae...` estimator remains a review-only pre-fixture checkpoint and the
-reviewed `72a584...` successor is the only candidate eligible to bind the final block manifest;
-neither is a production candidate. The next gate is to freeze the controlled-block
+of those verdicts. The `0bae...` and `72a584...` estimators remain review-only historical
+checkpoints. The reviewed `464c3d...` successor is the only candidate eligible to bind the final
+block manifest; none is a production candidate. The next gate is to freeze the controlled-block
 calibration/validation manifest against the successor's exact identity. Only after independent
 manifest review may calibration execute
 and seal; the Unzen scalar is then derived and sealed before the untouched validation partition can

@@ -960,16 +960,64 @@ formal CLI executed exactly 32 native launcher calls and zero SP1 calls, and a s
 replay reproduced every full bundle, compact identity, trace, ID, coverage result, and prediction.
 The validation partition remains unopened.
 
+## Completed Milestone: Sealed Block Calibration And Unzen Normalization
+
+The post-freeze runner landed at implementation revision
+`daea85db579854689445f18ee6ea4c50a59047b1`. It pins the sole eligible
+`c3f243...` / `658fc...` pair, verifies the full manifest before data open, executes only the 12
+calibration rows with the production SP1 proposal ELF and gas estimator, and binds the exact Python
+implementation sources, launcher, ELF, VK, trace, fixture, and builder. Each row has a 600-second
+hard timeout and an atomic create-only checkpoint. Independent source review and behavioral testing
+passed before the first real SP1 execution.
+
+The ignored resumable run
+`experiments/opcode-gas/runs/658fc415d93188e7ee1e0584-calibration` completed exactly 12 input and
+12 result rows at that revision. All row IDs are members of the frozen calibration partition; no
+validation row was executed or copied into the run.
+
+The exact calibration result is sealed at
+`experiments/opcode-gas/calibrations/sp1-block-comparison-v1/c785d807bf97dbf8c46eb66a`:
+
+- full calibration identity SHA256:
+  `c785d807bf97dbf8c46eb66aed27a564ba6b2826b442160a60d2bebfe121651f`;
+- canonical calibration-file SHA256:
+  `b0139d961fa990996ce5951ea3527bc4b7e6ed7f5ca35a482d3b8fa7f275ff57`;
+- file mode and size: `0444`, 69,644 bytes;
+- row count: 12 calibration rows and zero validation rows.
+
+The separate Unzen normalization is sealed before validation at
+`experiments/opcode-gas/normalizations/sp1-block-comparison-v1/9d97015d76b8c5d66f28f8d2`:
+
+- full normalization identity SHA256:
+  `9d97015d76b8c5d66f28f8d220138f91aee740adcd083d62f5938219b5a5470e`;
+- canonical normalization-file SHA256:
+  `3856ea6deca594d80c8d68d698cfce1faac037110f02049a6db2c0c6a47b72c7`;
+- file mode and size: `0444`, 4,270 bytes;
+- `kappa_unzen`:
+  `84.3750814595324998189721280545860481398170409774561269072240732568704027429022289800884237437716668`.
+
+The normalization stores the exact median formula and the predeclared acceptance thresholds from
+the comparator's single source of truth. Public exact verification replayed the bound native
+manifest and both sealed artifacts successfully.
+
+Calibration diagnostics are descriptive only and did not change a coefficient or threshold. On
+these 12 fit rows the frozen candidate has `0.14055%` MAPE, `0.52525%` maximum APE, `-0.14055%`
+mean SPE, and `0.52525%` maximum UPE. All candidate errors are small underpredictions; the two mixed
+rows produce the largest residuals. The scalar-normalized Unzen baseline has `31.09887%` MAPE,
+`343.70590%` maximum APE, `30.68136%` mean SPE, and `0.54106%` maximum UPE on the same calibration
+rows. These fit-partition numbers are not the acceptance verdict and must not be used to repair the
+candidate.
+
 ## Next Gate
 
 Strict Task 7 is not executed. Result `a41bef...` remains ineligible for strict promotion and its six
 family verdicts remain rejected. The separately sealed approximation above is not a reinterpretation
 of those verdicts. The `0bae...`, `72a584...`, and `464c3d...` estimators remain review-only
 historical checkpoints. The reviewed `c3f243...` candidate and `658fc...` manifest are the only pair
-eligible for calibration; neither is a production artifact. The next gate is to execute and seal
-only the manifest's 12-row calibration partition;
-the Unzen scalar is then derived and sealed before the untouched validation partition can
-open. Every validation row must bind both sealed identities. SP1 diagnostics remain explanatory
+eligible for this experiment; neither is a production artifact. Their 12-row calibration and
+`9d970...` normalization are now sealed. The next gate is a reviewed validation-only runner that
+requires both the `c785...` calibration and `9d970...` normalization identities, then executes
+exactly the manifest's untouched 20-row validation partition. SP1 diagnostics remain explanatory
 sidecar data and never enter the online formula.
 
 The decisive acceptance condition is comparative rather than perfect per-opcode identification.

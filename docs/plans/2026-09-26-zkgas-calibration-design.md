@@ -242,6 +242,47 @@ When a production holdout fails, route the residual by shape:
 This rule prevents a large fixed offset from hiding a systematically wrong operation model while
 still allowing approximate lower-layer functions whose remaining whole-workload error is immaterial.
 
+### Declared Operation Approximations
+
+A strict production-guest family fit may fail because the historical non-target model does not
+fully price the production guest's count-correlated scaffold. That failure rejects the strict
+coefficient, but it does not require an immaterial active operation to remain unpriced forever.
+After the strict result is sealed, a separately reviewed successor may declare an approximation
+from the same-production-guest target/control contrast. The old operation-level final holdout is
+already open and rejected; it may become approximation training/diagnostic evidence only when the
+successor freezes a new untouched controlled-block validation partition before execution:
+
+```text
+D_s(n) = ([P_target_s(n) - P_control_s(n)]
+        - [P_target_s(0) - P_control_s(0)])
+
+A_s = replacement_control_cost_v5_s + slope_through_origin(D_s(n), n)
+```
+
+Target and control must retain the frozen matched envelope and differ only by the declared measured
+instruction. `replacement_control_cost_v5_s` is exactly the canonical production-scaled V5 marginal
+cost of the lane-exclusive instruction that replaces the target: one `PUSH0` for the fixed context
+operations or one `SWAP1` for `CALLDATALOAD`. It excludes stack setup, cleanup, loop control, and all
+other instructions shared by both lanes. Before fitting, remove exactly `n` target events from the
+target ledger and exactly `n` replacement events from the control ledger, then require the remaining
+raw-gas and event-count ledgers to be identical. This prevents `CALLDATALOAD`'s shared cleanup
+`SWAP1` from being charged a second time. The replacement cost is applied exactly once; it is not a
+cross-ELF scale and no context-ELF coefficient enters the equation. A typed class uses the maximum
+finite nonnegative scenario slope assigned to that class. A negative result is floored at zero and
+remains labelled `declared_approximation`, never `measured` or `accepted_fit`.
+
+For context operations, calldata ingestion, value transfer, signature recovery, witness handling,
+and state finalization remain transaction or higher-layer work. In particular, `CALLDATASIZE` is a
+constant opcode approximation unless later host-computable evidence proves a per-invocation length
+term; transaction calldata length must not be charged again by every `CALLDATASIZE`. Approximation
+artifacts retain the strict rejection reasons, source rows, per-scenario slopes, selected maximum,
+and whole-guest materiality for every controlled row.
+
+SP1 low-level diagnostics such as RISC-V opcode counts, syscall counts, and touched-memory totals
+may explain why a strict EVM-level decomposition failed. They are diagnostic and provenance-bound:
+they may select a future host-computable model or ownership correction, but they are unavailable
+before guest execution and therefore never become online estimator inputs.
+
 ## Historical Baseline And Osaka Supplement
 
 The sealed historical baseline models 101 named opcodes. Its raw measurements used the Prague REVM
@@ -427,6 +468,41 @@ The fixed proposal corpus opens only after the candidate is sealed. Validation m
 failure, or insufficient-coverage evidence, but it cannot write to the calibration root or change a
 candidate value.
 
+Before proposal validation, run a separate controlled-block comparison against the current Unzen
+schedule. First seal the fully evaluable candidate, including coverage, ownership, estimator source,
+trace schema, and every coefficient. Then freeze the block calibration and validation partitions,
+workload identities, formulas, thresholds, and exact candidate identity before any SP1 result is
+opened. The production baseline is the trace's
+`finalized_block_zkgas` under the bound `UNZEN_ZK_GAS_SCHEDULE`. Because production zkGas and SP1
+`proverGas` are different units, fit exactly one zero-intercept scalar on the calibration partition:
+
+```text
+kappa_unzen = median(observed_prover_gas / finalized_block_zkgas)
+p_unzen(j)  = kappa_unzen * finalized_block_zkgas(j)
+
+SPE_model(j) = (predicted_model(j) - observed_prover_gas(j))
+             / observed_prover_gas(j)
+APE_model(j) = abs(SPE_model(j))
+UPE_model(j) = max(0, -SPE_model(j))
+```
+
+The candidate is `block_validated_against_unzen` only when the untouched validation partition has
+complete prediction coverage and all of these predeclared conditions hold:
+
+- candidate MAPE is strictly lower than Unzen-baseline MAPE;
+- candidate maximum APE is no greater than Unzen-baseline maximum APE;
+- candidate mean signed percentage error is at least `-0.05`;
+- candidate 95th-percentile UPE is at most `0.10` and no greater than the Unzen-baseline value;
+- candidate maximum UPE is at most `0.20` and no greater than the Unzen-baseline value.
+
+Use canonical `Decimal` arithmetic. Quantiles use the nearest-rank definition. Execute and seal the
+calibration partition first, derive and seal `kappa_unzen`, and only then open the validation
+partition. Every validation row binds both the candidate and normalization identities. The Unzen
+scalar, candidate coefficients, ownership rules, and thresholds cannot be changed after validation
+opens. Failure returns to the smallest residual-correlated owning layer; it never
+creates a validation-fitted offset. Passing this comparative block gate does not update the
+production schedule and does not replace final proposal validation.
+
 ## Backend Bridge Boundary
 
 Record SP1 instruction count alongside proverGas as an independently hashed diagnostic. A controlled
@@ -465,7 +541,8 @@ The experiment is complete only when:
   shortcut;
 - the state/trie ownership boundary is explicit and its chosen coarse or split model passes holdouts;
 - transaction, block, and proposal fixed costs pass controlled fit and holdout gates, except for a
-  separately declared approximation that passes its frozen whole-model materiality budget;
+  separately declared approximation that retains its strict rejection evidence and passes its
+  frozen whole-model materiality and comparative block-validation gates;
 - the complete candidate and coverage rules are sealed before proposal output is opened;
 - final proposal predictions and coverage are independently reproducible;
 - no production schedule or configuration was changed by the experiment.

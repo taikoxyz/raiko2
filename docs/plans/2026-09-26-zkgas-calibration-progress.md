@@ -716,16 +716,30 @@ production parameter changed.
 
 ## Next Gate
 
-Task 7 is not executed. Its only legal promotion source must be candidate-eligible and contain at
-least one complete passing family; this result is explicitly ineligible and has zero passing
-families. It cannot be used to construct operation-coverage V6 or a successor composite estimator.
+Strict Task 7 is not executed. Result `a41bef...` remains ineligible for strict promotion and its six
+family verdicts remain rejected. The accepted successor direction is a separately sealed declared
+approximation, not a reinterpretation of those verdicts:
 
-The next step requires a separately reviewed revision of the controlled production measurement
-design. The current target/control pairing leaves a material, count-correlated control residual and
-an inadequate signal-to-noise ratio; signed negative fits are evidence of that mismatch, not usable
-opcode prices. Any successor must predeclare a revised envelope, matched control/reference workload,
-signal authority, fit/gate contract, and fresh holdouts before opening new evidence. It must not
-repair, reinterpret, or selectively refit this rejected result.
+1. preserve RISC-V opcode, syscall, and touched-memory diagnostics in future production-guest rows;
+2. compute same-production-guest target/control marginal differences from the immutable rows and
+   add exactly once the canonical V5 marginal cost of the lane-exclusive replacement instruction;
+   assert that removing the target and replacement events leaves identical ledgers, so common setup
+   and cleanup are never charged twice;
+3. select a finite nonnegative conservative maximum per typed class, retaining every source slope,
+   strict rejection, and controlled whole-guest materiality value;
+4. keep SP1 diagnostics out of the online formula; they only explain ownership and model mismatch;
+5. seal the approximation and fully evaluable estimator before any controlled block executes;
+6. execute and seal the block calibration partition, derive and seal the Unzen scalar, then open an
+   untouched validation partition whose rows bind both sealed identities.
+
+The decisive acceptance condition is comparative rather than perfect per-opcode identification.
+On the same frozen block validation partition, the candidate must have complete coverage, strictly
+lower MAPE than the scalar-normalized current Unzen `finalized_block_zkgas` baseline, no worse
+maximum APE, mean signed percentage error at least `-5%`, 95th-percentile underprediction at most
+`10%` and no worse than Unzen, and maximum underprediction at most `20%` and no worse than Unzen.
+The scalar baseline is fitted only on the separate block calibration partition and is sealed before
+validation executes. Failure routes back to the smallest residual-correlated owner; validation may
+not fit a repair offset.
 
 After this context family, close the remaining ordinary returndata/copy/LOG/EXTCODE keys before CALL
 wrappers and direct precompiles. Reuse sealed controlled evidence where its execution semantics and

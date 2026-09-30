@@ -556,6 +556,11 @@ epsilon.
 
 ### Task 7: Promote passing families into V6 and a schema-4 composite estimator
 
+**Status:** Superseded for result `a41befb63e663890896ba67d`. The strict result had zero passing
+families, so this task remains correctly unexecuted. The separately reviewed successor described in
+the authoritative design may consume the immutable rejected rows only as declared-approximation and
+diagnostic evidence; it must not relabel this result or execute this task's strict-promotion path.
+
 **Files:**
 
 - Modify: `experiments/opcode-gas/context_production_campaign.py`

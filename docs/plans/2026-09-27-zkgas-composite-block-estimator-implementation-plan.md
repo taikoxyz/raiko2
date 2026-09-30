@@ -24,7 +24,9 @@ not opened.
 - The estimator owns each contribution exactly once: proposal startup, block base, started
   non-Anchor transaction base, committed native-transfer approximation, and executed operations.
 - Structured opcode models consume typed execution features. Missing or incompatible features are
-  explicit coverage gaps; they never fall back to current-schedule multipliers.
+  explicit coverage gaps. A separately sealed `declared_approximation` may close a gap only through
+  the approximation contract in the authoritative design; it never silently falls back to a
+  current-schedule multiplier.
 - Unsupported opcodes, direct precompiles, and unmeasured wrappers remain explicit gaps.
 - A partial trace may emit a modeled subtotal and coverage report, but not a complete prediction.
 - Final proposal rows cannot tune the sealed estimator. Integration smoke rows must be outside the
@@ -65,6 +67,11 @@ not opened.
 
 ## Task 4: Validate On Real Inputs
 
+- Before opening proposal rows, freeze controlled-block calibration and validation partitions.
+  Seal the fully evaluable candidate before either partition executes. Execute and seal calibration
+  alone, compute and seal the current Unzen baseline's single zero-intercept `kappa_unzen`, then open
+  validation and apply the authoritative comparative MAPE/max-APE/signed-bias/UPE gates. Bind exact
+  candidate and normalization identities into every validation row.
 - Build release preflight and guest-launcher artifacts and verify the sealed ELF/VK identities.
 - Run one Hoodi and one Mainnet integration smoke outside the final corpus. Smoke validates trace,
   joins, feature extraction, and estimator execution only; it cannot tune coefficients.

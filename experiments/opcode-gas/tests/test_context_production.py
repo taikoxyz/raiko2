@@ -736,6 +736,211 @@ class ContextDeclaredApproximationTests(unittest.TestCase):
                 )
 
 
+class ContextBlockComparisonTests(unittest.TestCase):
+    CANDIDATE = "a" * 64
+    NORMALIZATION = "b" * 64
+
+    @classmethod
+    def calibration_row(cls, index, *, observed="100", zkgas="100"):
+        return {
+            "row_id": f"calibration-{index}",
+            "partition": "calibration",
+            "candidate_identity_sha256": cls.CANDIDATE,
+            "observed_prover_gas": observed,
+            "finalized_block_zkgas": zkgas,
+        }
+
+    @classmethod
+    def validation_row(
+        cls,
+        index,
+        *,
+        predicted="100",
+        observed="100",
+        zkgas="100",
+        coverage=True,
+    ):
+        return {
+            "row_id": f"validation-{index}",
+            "partition": "validation",
+            "candidate_identity_sha256": cls.CANDIDATE,
+            "normalization_identity_sha256": cls.NORMALIZATION,
+            "candidate_coverage_complete": coverage,
+            "candidate_predicted_prover_gas": predicted,
+            "observed_prover_gas": observed,
+            "finalized_block_zkgas": zkgas,
+        }
+
+    def test_unzen_scalar_uses_exact_even_median_and_rejects_wrong_partition_or_zero(self):
+        rows = [
+            self.calibration_row(0, observed="10", zkgas="10"),
+            self.calibration_row(1, observed="20", zkgas="10"),
+            self.calibration_row(2, observed="100", zkgas="10"),
+            self.calibration_row(3, observed="200", zkgas="10"),
+        ]
+        self.assertEqual(approximation.fit_unzen_scalar(rows), Decimal("6"))
+
+        wrong_partition = copy.deepcopy(rows)
+        wrong_partition[0]["partition"] = "validation"
+        with self.assertRaisesRegex(ValueError, "calibration partition"):
+            approximation.fit_unzen_scalar(wrong_partition)
+        for field in ("observed_prover_gas", "finalized_block_zkgas"):
+            invalid = copy.deepcopy(rows)
+            invalid[0][field] = "0"
+            with self.subTest(field=field), self.assertRaisesRegex(
+                ValueError, "positive"
+            ):
+                approximation.fit_unzen_scalar(invalid)
+
+    def test_comparison_uses_exact_metrics_nearest_rank_and_explicit_gates(self):
+        rows = [
+            self.validation_row(0, predicted="99", zkgas="80"),
+            self.validation_row(1, predicted="101", zkgas="120"),
+        ]
+        report = approximation.compare_block_models(rows, Decimal("1"))
+        self.assertEqual(report["candidate_identity_sha256"], self.CANDIDATE)
+        self.assertEqual(
+            report["normalization_identity_sha256"], self.NORMALIZATION
+        )
+        self.assertEqual(report["kappa_unzen"], "1")
+        self.assertEqual(
+            report["metrics"]["candidate"],
+            {
+                "mape": "0.01",
+                "maximum_ape": "0.01",
+                "mean_spe": "0",
+                "p95_upe": "0.01",
+                "maximum_upe": "0.01",
+            },
+        )
+        self.assertTrue(all(report["gates"].values()))
+        self.assertTrue(report["accepted"])
+
+        tail_rows = [
+            self.validation_row(
+                index,
+                predicted=str(100 - index),
+                zkgas="50",
+            )
+            for index in range(20)
+        ]
+        tail = approximation.compare_block_models(tail_rows, Decimal("1"))
+        self.assertEqual(tail["metrics"]["candidate"]["p95_upe"], "0.18")
+        self.assertEqual(tail["metrics"]["candidate"]["maximum_upe"], "0.19")
+
+    def test_comparison_rejects_each_acceptance_regression(self):
+        passing = [
+            self.validation_row(0, predicted="99", zkgas="80"),
+            self.validation_row(1, predicted="101", zkgas="120"),
+        ]
+
+        incomplete = copy.deepcopy(passing)
+        incomplete[0]["candidate_coverage_complete"] = False
+        incomplete[0]["candidate_predicted_prover_gas"] = None
+        report = approximation.compare_block_models(incomplete, Decimal("1"))
+        self.assertFalse(report["gates"]["complete_candidate_coverage"])
+        self.assertEqual(report["validation_status"], "insufficient_coverage")
+        self.assertEqual(
+            report["metrics"]["candidate"],
+            {
+                "mape": None,
+                "maximum_ape": None,
+                "mean_spe": None,
+                "p95_upe": None,
+                "maximum_upe": None,
+            },
+        )
+        self.assertTrue(
+            all(
+                not passed
+                for gate, passed in report["gates"].items()
+                if gate != "complete_candidate_coverage"
+            )
+        )
+        self.assertEqual(
+            report["rows"][0]["candidate"],
+            {
+                "predicted_prover_gas": None,
+                "spe": None,
+                "ape": None,
+                "upe": None,
+            },
+        )
+        self.assertFalse(report["accepted"])
+
+        fabricated = copy.deepcopy(incomplete)
+        fabricated[0]["candidate_predicted_prover_gas"] = "99"
+        with self.assertRaisesRegex(ValueError, "absent.*incomplete coverage"):
+            approximation.compare_block_models(fabricated, Decimal("1"))
+
+        equal_mape = copy.deepcopy(passing)
+        equal_mape[0]["candidate_predicted_prover_gas"] = "80"
+        equal_mape[1]["candidate_predicted_prover_gas"] = "120"
+        report = approximation.compare_block_models(equal_mape, Decimal("1"))
+        self.assertFalse(report["gates"]["strict_mape_improvement"])
+
+        max_regression = [
+            self.validation_row(0, predicted="100", zkgas="90"),
+            self.validation_row(1, predicted="141", zkgas="140"),
+        ]
+        report = approximation.compare_block_models(max_regression, Decimal("1"))
+        self.assertTrue(report["gates"]["strict_mape_improvement"])
+        self.assertFalse(report["gates"]["maximum_ape_not_regressed"])
+
+        biased = [
+            self.validation_row(0, predicted="94", zkgas="80"),
+            self.validation_row(1, predicted="94", zkgas="120"),
+        ]
+        report = approximation.compare_block_models(biased, Decimal("1"))
+        self.assertFalse(report["gates"]["mean_spe_floor"])
+
+        p95_tail = [
+            self.validation_row(
+                index,
+                predicted="89" if index < 2 else "100",
+                zkgas="80",
+            )
+            for index in range(20)
+        ]
+        report = approximation.compare_block_models(p95_tail, Decimal("1"))
+        self.assertFalse(report["gates"]["p95_upe_limit"])
+
+        maximum_tail = [
+            self.validation_row(
+                index,
+                predicted="79" if index == 0 else "100",
+                zkgas="50",
+            )
+            for index in range(20)
+        ]
+        report = approximation.compare_block_models(maximum_tail, Decimal("1"))
+        self.assertFalse(report["gates"]["maximum_upe_limit"])
+
+    def test_comparison_rejects_float_partition_and_identity_mixing(self):
+        calibration = [self.calibration_row(0)]
+        calibration[0]["observed_prover_gas"] = 100.0
+        with self.assertRaisesRegex(ValueError, "canonical Decimal string"):
+            approximation.fit_unzen_scalar(calibration)
+
+        rows = [self.validation_row(0), self.validation_row(1)]
+        for field, replacement in (
+            ("candidate_identity_sha256", "c" * 64),
+            ("normalization_identity_sha256", "d" * 64),
+        ):
+            mixed = copy.deepcopy(rows)
+            mixed[1][field] = replacement
+            with self.subTest(field=field), self.assertRaisesRegex(
+                ValueError, "single.*identity"
+            ):
+                approximation.compare_block_models(mixed, Decimal("1"))
+        wrong_partition = copy.deepcopy(rows)
+        wrong_partition[0]["partition"] = "calibration"
+        with self.assertRaisesRegex(ValueError, "validation partition"):
+            approximation.compare_block_models(wrong_partition, Decimal("1"))
+        with self.assertRaisesRegex(ValueError, "Decimal"):
+            approximation.compare_block_models(rows, 1.0)
+
+
 class ProductionContextManifestTests(unittest.TestCase):
     def test_canonical_manifest_payload_is_deeply_independent(self):
         payload = production.canonical_production_context_manifest_payload()

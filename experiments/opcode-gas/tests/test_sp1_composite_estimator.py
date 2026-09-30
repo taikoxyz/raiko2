@@ -17,6 +17,7 @@ sys.path.insert(0, str(ROOT / "experiments" / "opcode-gas"))
 sys.path.insert(0, str(ROOT / "experiments" / "opcode-gas" / "tests"))
 
 import opcode_gas
+import context_approximation as approximation
 import context_opcode_campaign as context_opcode
 from test_context_opcode import (
     HISTORICAL_CONTROL_ELF_SHA256,
@@ -58,6 +59,31 @@ STATEFUL_SOURCE = (
     / "derivations"
     / "64065fa462311bdc1848e9d0"
 )
+CORRECTED_OSAKA_CORE_SOURCE = (
+    ROOT
+    / "experiments"
+    / "opcode-gas"
+    / "derivations"
+    / "3fc67063a921182e971e7882"
+    / "core-opcode-submodel.json"
+)
+COVERAGE_V5_SOURCE = (
+    ROOT
+    / "experiments"
+    / "opcode-gas"
+    / "manifests"
+    / "operation-coverage-v5.json"
+)
+CONTEXT_APPROXIMATION_SOURCE = (
+    ROOT
+    / "experiments"
+    / "opcode-gas"
+    / "derivations"
+    / "1d2758bcb7aa3ae7f09d14eb"
+)
+GUEST_LAUNCHER = ROOT / "target" / "release" / "guest-launcher"
+SP1_PROPOSAL_ELF = ROOT / "crates" / "guests" / "elf" / "sp1_shasta_proposal.elf"
+SP1_PROPOSAL_VK = ROOT / "crates" / "guests" / "elf" / "sp1_shasta_proposal.vk.bin"
 SEALED_SCHEMA_3_ESTIMATOR = (
     ROOT
     / "experiments"
@@ -387,6 +413,342 @@ class CompositeEstimatorTests(unittest.TestCase):
     def setUpClass(cls):
         cls.estimator = json.loads(SEALED_SCHEMA_3_ESTIMATOR.read_text())
         opcode_gas._validate_composite_estimator_artifact(cls.estimator)
+
+    @staticmethod
+    def build_declared_context_candidate():
+        with mock.patch.object(
+            opcode_gas, "git_head", return_value="f" * 40
+        ), mock.patch.object(
+            opcode_gas, "git_worktree_status", return_value=""
+        ), mock.patch.object(
+            opcode_gas, "git_has_local_commit", return_value=True
+        ):
+            return opcode_gas.build_composite_estimator_artifact(
+                augmented_core_path=CORRECTED_OSAKA_CORE_SOURCE,
+                operation_coverage_path=COVERAGE_V5_SOURCE,
+                higher_layer_package=HIGHER_LAYER_SOURCE,
+                stateful_result_path=STATEFUL_SOURCE,
+                context_approximation_path=CONTEXT_APPROXIMATION_SOURCE,
+                guest_launcher_path=GUEST_LAUNCHER,
+                proposal_elf_path=SP1_PROPOSAL_ELF,
+                proposal_vk_path=SP1_PROPOSAL_VK,
+            )
+
+    def test_declared_context_candidate_keeps_registry_and_binds_exact_sources(self):
+        candidate = self.build_declared_context_candidate()
+        core = json.loads(CORRECTED_OSAKA_CORE_SOURCE.read_text())
+        approximation_artifact = json.loads(
+            (CONTEXT_APPROXIMATION_SOURCE / "context-approximation.json").read_text()
+        )
+
+        self.assertEqual(candidate["schema_version"], 4)
+        self.assertEqual(candidate["trace_schema"]["schema_version"], 4)
+        self.assertEqual(candidate["implementation_revision"], "f" * 40)
+        self.assertEqual(
+            candidate["trace_schema"]["source_sha256"],
+            opcode_gas.sha256_file(
+                ROOT / candidate["trace_schema"]["source_path"]
+            ),
+        )
+        self.assertEqual(candidate["registry"], core["registry"])
+        sources = candidate["source_artifacts"]
+        self.assertEqual(
+            sources["augmented_core"],
+            {
+                "path": (
+                    "experiments/opcode-gas/derivations/"
+                    "3fc67063a921182e971e7882/core-opcode-submodel.json"
+                ),
+                "file_sha256": opcode_gas.sha256_file(
+                    CORRECTED_OSAKA_CORE_SOURCE
+                ),
+                "artifact_sha256": core["artifact_sha256"],
+            },
+        )
+        coverage_v5 = json.loads(COVERAGE_V5_SOURCE.read_text())
+        self.assertEqual(
+            sources["operation_coverage"],
+            {
+                "path": "experiments/opcode-gas/manifests/operation-coverage-v5.json",
+                "file_sha256": opcode_gas.sha256_file(COVERAGE_V5_SOURCE),
+                "artifact_sha256": coverage_v5["artifact_sha256"],
+            },
+        )
+        self.assertEqual(
+            sources["corrected_higher_layer"]["identity_sha256"],
+            opcode_gas._COMPOSITE_HIGHER_LAYER_SOURCE["identity_sha256"],
+        )
+        self.assertEqual(
+            sources["stateful_storage"]["result_identity_sha256"],
+            opcode_gas._COMPOSITE_STATEFUL_STORAGE_REF[
+                "result_identity_sha256"
+            ],
+        )
+        self.assertEqual(
+            candidate["source_artifacts"]["declared_context_approximation"],
+            {
+                "path": (
+                    "experiments/opcode-gas/derivations/"
+                    "1d2758bcb7aa3ae7f09d14eb"
+                ),
+                "file_sha256": (
+                    "346c2ac112357872f4a981737469c39639d7cc845ae97b0cc8bb77ddfc8a5b58"
+                ),
+                "approximation_id": "1d2758bcb7aa3ae7f09d14eb",
+                "approximation_identity_sha256": (
+                    "1d2758bcb7aa3ae7f09d14eb8d539250747992c42d6ae95d204f4cc5efec06cb"
+                ),
+                "artifact_sha256": (
+                    "357a6c47bad8e6def3280be77a300e113e350fa673e08c39af13034861aee3d8"
+                ),
+            },
+        )
+        self.assertEqual(
+            candidate["declared_context_approximation"]["classes"],
+            approximation_artifact["classes"],
+        )
+        execution = candidate["source_artifacts"]["execution_artifacts"]
+        self.assertEqual(execution["guest_launcher"]["file_sha256"], opcode_gas.sha256_file(GUEST_LAUNCHER))
+        self.assertEqual(execution["sp1_proposal_guest"]["elf_sha256"], opcode_gas.sha256_file(SP1_PROPOSAL_ELF))
+        self.assertEqual(execution["sp1_proposal_guest"]["vk_sha256"], opcode_gas.sha256_file(SP1_PROPOSAL_VK))
+        self.assertEqual(
+            set(candidate["source_artifacts"]["source_code_sha256s"]),
+            set(opcode_gas._COMPOSITE_DECLARED_CONTEXT_SOURCE_PATHS),
+        )
+        for relative, digest in candidate["source_artifacts"][
+            "source_code_sha256s"
+        ].items():
+            self.assertEqual(digest, opcode_gas.sha256_file(ROOT / relative))
+
+        by_key = {row["key"]: row for row in candidate["execution_coverage"]}
+        current_inspector_sha256 = opcode_gas.sha256_file(
+            ROOT / "crates/zkgas-trace/src/inspector.rs"
+        )
+        for opcode in (0x30, 0x33, 0x34, 0x35, 0x36, 0x42):
+            row = by_key[f"opcode:0x{opcode:02x}"]
+            self.assertEqual(row["classification"], "declared_context_approximation")
+            self.assertEqual(row["model_status"], "declared_approximation")
+            machine_evidence = [
+                evidence
+                for evidence in row["source_evidence"]
+                if evidence.get("kind") == "machine_trace_selector"
+            ]
+            self.assertEqual(len(machine_evidence), 1)
+            self.assertEqual(
+                machine_evidence[0],
+                {
+                    "kind": "machine_trace_selector",
+                    "path": "crates/zkgas-trace/src/inspector.rs",
+                    "selector_ref": "opcode_raw_gas_execution",
+                    "sha256": current_inspector_sha256,
+                },
+            )
+            self.assertNotEqual(
+                machine_evidence[0]["sha256"],
+                "f75dff0f7d0e2b45a0ab3e1e3ff1604dc6d1c6a13615298b6a834c32a876f987",
+            )
+
+    def test_declared_context_candidate_prices_all_classes_once_from_typed_input(self):
+        candidate = self.build_declared_context_candidate()
+        cases = (
+            (0x30, {"kind": "context_fixed"}, "address"),
+            (0x33, {"kind": "context_fixed"}, "caller"),
+            (0x34, {"kind": "context_value", "value_class": "zero"}, "callvalue:zero"),
+            (0x34, {"kind": "context_value", "value_class": "nonzero"}, "callvalue:nonzero"),
+            (0x35, {"kind": "calldata_load", "access_class": "zero"}, "calldataload:zero"),
+            (0x35, {"kind": "calldata_load", "access_class": "partial"}, "calldataload:partial"),
+            (0x35, {"kind": "calldata_load", "access_class": "full"}, "calldataload:full"),
+            (0x36, {"kind": "calldata_size", "input_length": 0}, "calldatasize"),
+            (0x42, {"kind": "context_value", "value_class": "nonzero"}, "timestamp"),
+        )
+        operations = []
+        with localcontext(opcode_gas._OPCODE_DECIMAL_CONTEXT):
+            expected = Decimal(0)
+            for index, (opcode, model_input, class_id) in enumerate(cases):
+                operation = _opcode(index, opcode, model_input)
+                operation["component"]["interpreter_raw_gas"] = 1_000_000 + index
+                operations.append(operation)
+                expected += Decimal(
+                    candidate["declared_context_approximation"]["classes"][class_id][
+                        "cost_exact"
+                    ]["decimal"]
+                )
+        trace = _complete_trace(*operations)
+        trace["schema_version"] = 4
+        report = opcode_gas.estimate_composite_trace(candidate, trace)
+
+        self.assertEqual(report["gaps"], [])
+        self.assertEqual(
+            report["layer_contributions"]["operations"],
+            {"count": 9, "prover_gas": opcode_gas._decimal_text(expected)},
+        )
+        self.assertEqual(report["coverage"]["typed_feature"]["numerator"], 9)
+        self.assertEqual(report["coverage"]["raw_gas"]["numerator"], "9000036")
+
+    def test_declared_context_call_data_size_is_constant_and_not_raw_gas_scaled(self):
+        candidate = self.build_declared_context_candidate()
+        reports = []
+        for raw_gas, input_length in ((3, 0), (999_999, 127)):
+            operation = _opcode(
+                0,
+                0x36,
+                {"kind": "calldata_size", "input_length": input_length},
+            )
+            operation["component"]["interpreter_raw_gas"] = raw_gas
+            trace = _complete_trace(operation)
+            trace["schema_version"] = 4
+            reports.append(opcode_gas.estimate_composite_trace(candidate, trace))
+        self.assertEqual(
+            reports[0]["layer_contributions"]["operations"],
+            reports[1]["layer_contributions"]["operations"],
+        )
+
+    def test_declared_context_rejects_missing_extra_or_incompatible_typed_input(self):
+        candidate = self.build_declared_context_candidate()
+        malformed = (
+            (0x30, {}),
+            (0x33, {"kind": "context_fixed", "value_class": "zero"}),
+            (0x34, {"kind": "context_fixed"}),
+            (0x35, {"kind": "calldata_load", "access_class": "other"}),
+            (0x36, {"kind": "calldata_size", "input_length": -1}),
+            (0x42, {"kind": "context_value", "value_class": "zero"}),
+        )
+        for opcode, model_input in malformed:
+            with self.subTest(opcode=opcode, model_input=model_input):
+                trace = _complete_trace(_opcode(0, opcode, model_input))
+                trace["schema_version"] = 4
+                report = opcode_gas.estimate_composite_trace(candidate, trace)
+                self.assertEqual(
+                    report["gaps"][0]["reason"],
+                    "opcode_model_input_incompatible",
+                )
+
+    def test_declared_context_candidate_is_deterministic_and_source_tamper_fails(self):
+        first = self.build_declared_context_candidate()
+        second = self.build_declared_context_candidate()
+        self.assertEqual(first, second)
+
+        read_once = opcode_gas._read_regular_file_bytes_once
+
+        def tamper(path, *, label):
+            raw = read_once(path, label=label)
+            if pathlib.Path(path).name == "context-approximation.json":
+                return raw + b"\n"
+            return raw
+
+        with mock.patch.object(
+            opcode_gas, "git_head", return_value="f" * 40
+        ), mock.patch.object(
+            opcode_gas, "git_worktree_status", return_value=""
+        ), mock.patch.object(
+            opcode_gas, "git_has_local_commit", return_value=True
+        ), mock.patch.object(
+            opcode_gas, "_read_regular_file_bytes_once", side_effect=tamper
+        ), self.assertRaisesRegex(ValueError, "context approximation.*hash"):
+            opcode_gas.build_composite_estimator_artifact(
+                augmented_core_path=CORRECTED_OSAKA_CORE_SOURCE,
+                operation_coverage_path=COVERAGE_V5_SOURCE,
+                higher_layer_package=HIGHER_LAYER_SOURCE,
+                stateful_result_path=STATEFUL_SOURCE,
+                context_approximation_path=CONTEXT_APPROXIMATION_SOURCE,
+                guest_launcher_path=GUEST_LAUNCHER,
+                proposal_elf_path=SP1_PROPOSAL_ELF,
+                proposal_vk_path=SP1_PROPOSAL_VK,
+            )
+
+    def test_declared_context_candidate_seals_create_only_and_replays_exact_sources(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            out_root = root / "estimators"
+            pointer = root / "estimator-path"
+            kwargs = {
+                "augmented_core_path": CORRECTED_OSAKA_CORE_SOURCE,
+                "operation_coverage_path": COVERAGE_V5_SOURCE,
+                "higher_layer_package": HIGHER_LAYER_SOURCE,
+                "stateful_result_path": STATEFUL_SOURCE,
+                "context_approximation_path": CONTEXT_APPROXIMATION_SOURCE,
+                "guest_launcher_path": GUEST_LAUNCHER,
+                "proposal_elf_path": SP1_PROPOSAL_ELF,
+                "proposal_vk_path": SP1_PROPOSAL_VK,
+                "out_root": out_root,
+                "estimator_path_file": pointer,
+            }
+            with mock.patch.object(
+                opcode_gas, "git_head", return_value="f" * 40
+            ), mock.patch.object(
+                opcode_gas, "git_worktree_status", return_value=""
+            ), mock.patch.object(
+                opcode_gas, "git_has_local_commit", return_value=True
+            ):
+                sealed = opcode_gas.seal_composite_estimator(**kwargs)
+                verified = opcode_gas.verify_composite_estimator(sealed)
+                self.assertEqual(verified["schema_version"], 4)
+                self.assertEqual(pointer.read_text(), f"{sealed}\n")
+                with self.assertRaisesRegex(ValueError, "already exists"):
+                    opcode_gas.seal_composite_estimator(**kwargs)
+
+    def test_declared_context_coverage_rejects_mismatched_machine_trace_provenance(self):
+        mismatches = (
+            (
+                "sha256",
+                "f75dff0f7d0e2b45a0ab3e1e3ff1604dc6d1c6a13615298b6a834c32a876f987",
+            ),
+            ("path", "crates/zkgas-trace/src/reconstruct.rs"),
+            ("selector_ref", "precompile_raw_gas_execution"),
+        )
+        for field, value in mismatches:
+            with self.subTest(field=field):
+                candidate = copy.deepcopy(self.build_declared_context_candidate())
+                row = next(
+                    row
+                    for row in candidate["execution_coverage"]
+                    if row["key"] == "opcode:0x30"
+                )
+                evidence = next(
+                    evidence
+                    for evidence in row["source_evidence"]
+                    if evidence.get("kind") == "machine_trace_selector"
+                )
+                evidence[field] = value
+                candidate.pop("artifact_sha256")
+                candidate["artifact_sha256"] = opcode_gas.sha256_bytes(
+                    opcode_gas.canonical_json(candidate)
+                )
+
+                with self.assertRaisesRegex(ValueError, "context coverage"):
+                    opcode_gas._validate_composite_estimator_artifact(candidate)
+
+    def test_incomplete_estimator_output_compares_without_fabricated_prediction(self):
+        candidate = self.build_declared_context_candidate()
+        trace = _complete_trace(
+            _opcode(0, 0x31, {"kind": "static_raw_gas", "raw_gas": 2})
+        )
+        trace["schema_version"] = 4
+        estimate = opcode_gas.estimate_composite_trace(candidate, trace)
+        self.assertFalse(estimate["coverage_complete"])
+        self.assertNotIn("predicted_prover_gas", estimate)
+
+        report = approximation.compare_block_models(
+            [
+                {
+                    "row_id": "validation-incomplete-estimator",
+                    "partition": "validation",
+                    "candidate_identity_sha256": candidate["artifact_sha256"],
+                    "normalization_identity_sha256": "b" * 64,
+                    "candidate_coverage_complete": estimate["coverage_complete"],
+                    "candidate_predicted_prover_gas": estimate.get(
+                        "predicted_prover_gas"
+                    ),
+                    "observed_prover_gas": "160000000",
+                    "finalized_block_zkgas": "100000000",
+                }
+            ],
+            Decimal("1"),
+        )
+
+        self.assertEqual(report["validation_status"], "insufficient_coverage")
+        self.assertFalse(report["accepted"])
+        self.assertIsNone(report["metrics"]["candidate"]["mape"])
 
     def test_strict_registry_loader_rejects_float_and_slot_drift(self):
         core = json.loads(CORE_SOURCE.read_text())
@@ -1293,6 +1655,35 @@ class CompositeEstimatorTests(unittest.TestCase):
                 ) as raised:
                     parser.parse_args([command, "--help"])
                 self.assertEqual(raised.exception.code, 0)
+        args = parser.parse_args(
+            [
+                "seal-composite-estimator",
+                "--augmented-core",
+                str(CORRECTED_OSAKA_CORE_SOURCE),
+                "--operation-coverage",
+                str(COVERAGE_V5_SOURCE),
+                "--higher-layer",
+                str(HIGHER_LAYER_SOURCE),
+                "--stateful-result",
+                str(STATEFUL_SOURCE),
+                "--context-approximation",
+                str(CONTEXT_APPROXIMATION_SOURCE),
+                "--guest-launcher",
+                str(GUEST_LAUNCHER),
+                "--proposal-elf",
+                str(SP1_PROPOSAL_ELF),
+                "--proposal-vk",
+                str(SP1_PROPOSAL_VK),
+                "--out-root",
+                "estimators",
+                "--estimator-path-file",
+                "estimator-path",
+            ]
+        )
+        self.assertEqual(args.context_approximation, CONTEXT_APPROXIMATION_SOURCE)
+        self.assertEqual(args.guest_launcher, GUEST_LAUNCHER)
+        self.assertEqual(args.proposal_elf, SP1_PROPOSAL_ELF)
+        self.assertEqual(args.proposal_vk, SP1_PROPOSAL_VK)
 
 
 if __name__ == "__main__":

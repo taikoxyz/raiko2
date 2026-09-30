@@ -42,6 +42,9 @@ from calibration_model import (
     validate_dynamic_holdouts,
 )
 from composite_estimator import (
+    DECLARED_CONTEXT_ESTIMATOR_SCHEMA_VERSION as _COMPOSITE_DECLARED_CONTEXT_SCHEMA_VERSION,
+    DECLARED_CONTEXT_SOURCE_CODE_PATHS as _COMPOSITE_DECLARED_CONTEXT_SOURCE_PATH_SET,
+    DECLARED_CONTEXT_TRACE_SCHEMA_VERSION as _COMPOSITE_DECLARED_CONTEXT_TRACE_SCHEMA_VERSION,
     ESTIMATOR_FORMULA as _COMPOSITE_ESTIMATOR_FORMULA,
     ESTIMATOR_PURPOSE as _COMPOSITE_ESTIMATOR_PURPOSE,
     ESTIMATOR_SCHEMA_VERSION as _COMPOSITE_ESTIMATOR_SCHEMA_VERSION,
@@ -6321,6 +6324,34 @@ _COMPOSITE_OPERATION_COVERAGE_REF = {
         "2383d9788302f8447522abdcdc99a1f6490cc2b910c376ef9b4e265cc1c978be"
     ),
     "file_sha256": "941170c66baa285c1019592e9e5a215c3461695e8b548f0c5d810ebce06cf7cf",
+}
+_COMPOSITE_DECLARED_CONTEXT_CORE_REF = {
+    "path": (
+        "experiments/opcode-gas/derivations/3fc67063a921182e971e7882/"
+        "core-opcode-submodel.json"
+    ),
+    "artifact_sha256": (
+        "1c05166e674a66ed51e3b1991c597ede479657e3195774a2960b1ff1cdd5ba4a"
+    ),
+    "file_sha256": "0a85afe5f21af2599823cb0031087f4701e598acc3f7ca48896769b32b518234",
+}
+_COMPOSITE_DECLARED_CONTEXT_COVERAGE_REF = {
+    "path": "experiments/opcode-gas/manifests/operation-coverage-v5.json",
+    "artifact_sha256": (
+        "5e3f9aae0d3d9ae10a9b05bfbe877b2f9c4ab146bd7d6df66f915211c4a9108d"
+    ),
+    "file_sha256": "4c67852165636d1991e5dd21716dc225e8df8bbf79245763e5c6bca2ce505b89",
+}
+_COMPOSITE_DECLARED_CONTEXT_APPROXIMATION_REF = {
+    "path": "experiments/opcode-gas/derivations/1d2758bcb7aa3ae7f09d14eb",
+    "file_sha256": "346c2ac112357872f4a981737469c39639d7cc845ae97b0cc8bb77ddfc8a5b58",
+    "approximation_id": "1d2758bcb7aa3ae7f09d14eb",
+    "approximation_identity_sha256": (
+        "1d2758bcb7aa3ae7f09d14eb8d539250747992c42d6ae95d204f4cc5efec06cb"
+    ),
+    "artifact_sha256": (
+        "357a6c47bad8e6def3280be77a300e113e350fa673e08c39af13034861aee3d8"
+    ),
 }
 _COMPOSITE_STATEFUL_STORAGE_REF = {
     "path": "experiments/opcode-gas/derivations/64065fa462311bdc1848e9d0",
@@ -24626,6 +24657,9 @@ _COMPOSITE_SOURCE_PATHS = (
     "docs/plans/2026-09-26-zkgas-calibration-design.md",
     "docs/plans/2026-09-29-zkgas-typed-storage-promotion-design.md",
 )
+_COMPOSITE_DECLARED_CONTEXT_SOURCE_PATHS = tuple(
+    sorted(_COMPOSITE_DECLARED_CONTEXT_SOURCE_PATH_SET)
+)
 
 _COMPOSITE_STATEFUL_RESULT_INVENTORY = {
     "result.json",
@@ -24927,6 +24961,191 @@ def _composite_repo_relative(path: pathlib.Path, *, label: str) -> tuple[pathlib
     return pinned, relative
 
 
+def _load_declared_context_approximation(
+    directory: pathlib.Path,
+) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
+    from context_approximation import verify_context_approximation_path
+
+    supplied = pathlib.Path(directory)
+    resolved = supplied.resolve(strict=True)
+    root = REPO_ROOT.resolve(strict=True)
+    try:
+        relative = resolved.relative_to(root).as_posix()
+    except ValueError as error:
+        raise ValueError(
+            "composite declared context approximation must be in the repository"
+        ) from error
+    if (
+        supplied.is_symlink()
+        or not supplied.is_dir()
+        or supplied.absolute() != resolved
+        or relative != _COMPOSITE_DECLARED_CONTEXT_APPROXIMATION_REF["path"]
+        or {entry.name for entry in supplied.iterdir()}
+        != {"context-approximation.json"}
+    ):
+        raise ValueError("composite declared context approximation path differs")
+    artifact_path = supplied / "context-approximation.json"
+    raw = _read_regular_file_bytes_once(
+        artifact_path, label="composite declared context approximation"
+    )
+    if sha256_bytes(raw) != _COMPOSITE_DECLARED_CONTEXT_APPROXIMATION_REF[
+        "file_sha256"
+    ]:
+        raise ValueError(
+            "composite declared context approximation source file hash differs"
+        )
+    try:
+        artifact = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise ValueError(
+            "composite declared context approximation is not valid JSON"
+        ) from error
+    if (
+        not isinstance(artifact, Mapping)
+        or raw != canonical_json(artifact) + b"\n"
+    ):
+        raise ValueError("composite declared context approximation is not canonical JSON")
+    verified = verify_context_approximation_path(supplied)
+    if not _exact_json_equal(artifact, verified) or any(
+        artifact.get(field)
+        != _COMPOSITE_DECLARED_CONTEXT_APPROXIMATION_REF[field]
+        for field in (
+            "approximation_id",
+            "approximation_identity_sha256",
+            "artifact_sha256",
+        )
+    ):
+        raise ValueError("composite declared context approximation identity differs")
+    source = dict(_COMPOSITE_DECLARED_CONTEXT_APPROXIMATION_REF)
+    return artifact, source
+
+
+def _load_declared_context_registry(
+    core: Mapping[str, Any], coverage: Mapping[str, Any]
+) -> OpcodeRegistry:
+    _validate_content_addressed_artifact(core, label="composite augmented core")
+    _validate_content_addressed_artifact(
+        coverage, label="composite operation coverage"
+    )
+    rows = coverage.get("execution_coverage")
+    if (
+        coverage.get("schema_version") != 2
+        or coverage.get("purpose") != _OPERATION_COVERAGE_PURPOSE
+        or coverage.get("status") != "ownership_frozen"
+        or coverage.get("candidate_eligible") is not False
+        or not isinstance(rows, list)
+        or len(rows) != 168
+    ):
+        raise ValueError("composite declared context coverage schema differs")
+    keys = [row.get("key") for row in rows if isinstance(row, Mapping)]
+    if len(keys) != len(rows) or len(set(keys)) != len(keys):
+        raise ValueError("composite declared context coverage inventory differs")
+    opcode_keys = {key for key in keys if key.startswith("opcode:0x")}
+    _validate_operation_core_registry(core, opcode_keys)
+    return _composite_registry_from_payload(core.get("registry"))
+
+
+def _declared_context_coverage_overlay(
+    rows: Sequence[Mapping[str, Any]],
+    source: Mapping[str, Any],
+    *,
+    inspector_sha256: str,
+) -> list[Mapping[str, Any]]:
+    promoted = json.loads(json.dumps(rows))
+    expected = {f"opcode:0x{opcode:02x}" for opcode in (0x30, 0x33, 0x34, 0x35, 0x36, 0x42)}
+    seen = set()
+    for row in promoted:
+        if row.get("key") not in expected:
+            continue
+        if (
+            row.get("classification") != "explicitly_unsupported"
+            or row.get("model_status") != "unsupported"
+        ):
+            raise ValueError("composite declared context predecessor coverage differs")
+        seen.add(row["key"])
+        row["classification"] = "declared_context_approximation"
+        row["model_status"] = "declared_approximation"
+        row.pop("reason", None)
+        row["artifact_ref"] = {
+            "path": source["path"],
+            "approximation_identity_sha256": source[
+                "approximation_identity_sha256"
+            ],
+            "artifact_sha256": source["artifact_sha256"],
+        }
+        evidence_rows = row.get("source_evidence")
+        if not isinstance(evidence_rows, list):
+            raise ValueError("composite declared context predecessor evidence differs")
+        machine_evidence = [
+            evidence
+            for evidence in evidence_rows
+            if isinstance(evidence, Mapping)
+            and evidence.get("kind") == "machine_trace_selector"
+        ]
+        if (
+            len(machine_evidence) != 1
+            or machine_evidence[0].get("path")
+            != "crates/zkgas-trace/src/inspector.rs"
+            or machine_evidence[0].get("selector_ref")
+            != "opcode_raw_gas_execution"
+        ):
+            raise ValueError("composite declared context predecessor evidence differs")
+        machine_evidence[0]["sha256"] = inspector_sha256
+        row["source_evidence"] = [
+            evidence
+            for evidence in evidence_rows
+            if not (
+                isinstance(evidence, Mapping)
+                and evidence.get("kind") == "sealed_registry_unsupported"
+            )
+        ]
+        row["source_evidence"].append(
+            {
+                "kind": "sealed_declared_context_approximation",
+                "approximation_identity_sha256": source[
+                    "approximation_identity_sha256"
+                ],
+                "artifact_sha256": source["artifact_sha256"],
+            }
+        )
+    if seen != expected:
+        raise ValueError("composite declared context coverage inventory differs")
+    return promoted
+
+
+def _composite_execution_artifacts(
+    *,
+    guest_launcher_path: pathlib.Path,
+    proposal_elf_path: pathlib.Path,
+    proposal_vk_path: pathlib.Path,
+) -> Mapping[str, Any]:
+    expected = {
+        "guest launcher": (guest_launcher_path, pathlib.Path("target/release/guest-launcher")),
+        "SP1 proposal ELF": (proposal_elf_path, _HIGHER_LAYER_ELF_PATH),
+        "SP1 proposal VK": (proposal_vk_path, _HIGHER_LAYER_VK_PATH),
+    }
+    hashes = {}
+    for label, (supplied, relative) in expected.items():
+        path = pathlib.Path(supplied)
+        pinned = _operation_pinned_regular_file(str(relative))
+        if path.is_symlink() or path.absolute() != pinned.absolute():
+            raise ValueError(f"composite {label} path is not canonical")
+        raw = _read_regular_file_bytes_once(pinned, label=f"composite {label}")
+        hashes[label] = sha256_bytes(raw)
+    return {
+        "guest_launcher": {
+            "path": "target/release/guest-launcher",
+            "file_sha256": hashes["guest launcher"],
+        },
+        "sp1_proposal_guest": {
+            "elf_path": str(_HIGHER_LAYER_ELF_PATH),
+            "elf_sha256": hashes["SP1 proposal ELF"],
+            "vk_path": str(_HIGHER_LAYER_VK_PATH),
+            "vk_sha256": hashes["SP1 proposal VK"],
+        },
+    }
+
+
 @_isolated_decimal_context
 def build_composite_estimator_artifact(
     *,
@@ -24934,6 +25153,10 @@ def build_composite_estimator_artifact(
     operation_coverage_path: pathlib.Path,
     higher_layer_package: pathlib.Path,
     stateful_result_path: pathlib.Path,
+    context_approximation_path: pathlib.Path | None = None,
+    guest_launcher_path: pathlib.Path | None = None,
+    proposal_elf_path: pathlib.Path | None = None,
+    proposal_vk_path: pathlib.Path | None = None,
 ) -> Mapping[str, Any]:
     """Build the deterministic coverage-qualified SP1 composite estimator."""
     assert_generated_paths_only(git_worktree_status())
@@ -24941,37 +25164,74 @@ def build_composite_estimator_artifact(
     if not git_has_local_commit(implementation_revision):
         raise ValueError("composite implementation revision is not a local commit")
 
+    declared_context = context_approximation_path is not None
+    execution_paths = (
+        guest_launcher_path,
+        proposal_elf_path,
+        proposal_vk_path,
+    )
+    if declared_context != all(path is not None for path in execution_paths) or (
+        not declared_context and any(path is not None for path in execution_paths)
+    ):
+        raise ValueError(
+            "declared context candidate requires approximation, launcher, ELF, and VK together"
+        )
+
     core_path, core_relative = _composite_repo_relative(
         augmented_core_path, label="composite augmented core"
     )
     coverage_path, coverage_relative = _composite_repo_relative(
         operation_coverage_path, label="composite operation coverage"
     )
-    if core_relative != _HIGHER_LAYER_AUGMENTED_CORE_REF["path"]:
+    core_ref = (
+        _COMPOSITE_DECLARED_CONTEXT_CORE_REF
+        if declared_context
+        else _HIGHER_LAYER_AUGMENTED_CORE_REF
+    )
+    coverage_ref = (
+        _COMPOSITE_DECLARED_CONTEXT_COVERAGE_REF
+        if declared_context
+        else _COMPOSITE_OPERATION_COVERAGE_REF
+    )
+    if core_relative != core_ref["path"]:
         raise ValueError("composite augmented core path is not canonical")
-    if coverage_relative != _COMPOSITE_OPERATION_COVERAGE_REF["path"]:
+    if coverage_relative != coverage_ref["path"]:
         raise ValueError("composite operation coverage path is not canonical")
     core = _read_canonical_json_mapping_once(
         core_path,
         label="composite augmented core",
-        expected_sha256=_HIGHER_LAYER_AUGMENTED_CORE_REF["file_sha256"],
+        expected_sha256=core_ref["file_sha256"],
     )
     coverage = _read_canonical_json_mapping_once(
         coverage_path,
         label="composite operation coverage",
-        expected_sha256=_COMPOSITE_OPERATION_COVERAGE_REF["file_sha256"],
+        expected_sha256=coverage_ref["file_sha256"],
     )
     _require_pinned_operation_artifact(
         core,
-        expected_sha256=_HIGHER_LAYER_AUGMENTED_CORE_REF["artifact_sha256"],
+        expected_sha256=core_ref["artifact_sha256"],
         label="composite augmented core",
     )
     _require_pinned_operation_artifact(
         coverage,
-        expected_sha256=_COMPOSITE_OPERATION_COVERAGE_REF["artifact_sha256"],
+        expected_sha256=coverage_ref["artifact_sha256"],
         label="composite operation coverage",
     )
-    load_composite_registry(core, coverage)
+    if declared_context:
+        _load_declared_context_registry(core, coverage)
+        context_artifact, context_source = _load_declared_context_approximation(
+            pathlib.Path(context_approximation_path)
+        )
+        execution_artifacts = _composite_execution_artifacts(
+            guest_launcher_path=pathlib.Path(guest_launcher_path),
+            proposal_elf_path=pathlib.Path(proposal_elf_path),
+            proposal_vk_path=pathlib.Path(proposal_vk_path),
+        )
+    else:
+        load_composite_registry(core, coverage)
+        context_artifact = None
+        context_source = None
+        execution_artifacts = None
     corrected = build_corrected_higher_layer_projection(higher_layer_package)
     storage_model, stateful_source = _load_composite_stateful_storage(
         stateful_result_path
@@ -24987,7 +25247,12 @@ def build_composite_estimator_artifact(
         raise ValueError("composite higher-layer package must be a non-symlink directory")
 
     source_sha256s = {}
-    for relative in _COMPOSITE_SOURCE_PATHS:
+    source_paths = (
+        _COMPOSITE_DECLARED_CONTEXT_SOURCE_PATHS
+        if declared_context
+        else _COMPOSITE_SOURCE_PATHS
+    )
+    for relative in source_paths:
         source = _operation_pinned_regular_file(relative)
         source_sha256s[relative] = sha256_bytes(
             _read_regular_file_bytes_once(source, label=f"composite source {relative}")
@@ -24998,7 +25263,7 @@ def build_composite_estimator_artifact(
     ).decode()
     if (
         f"pub const OPERATION_TRACE_SCHEMA_VERSION: u32 = "
-        f"{_COMPOSITE_TRACE_SCHEMA_VERSION};"
+        f"{(_COMPOSITE_DECLARED_CONTEXT_TRACE_SCHEMA_VERSION if declared_context else _COMPOSITE_TRACE_SCHEMA_VERSION)};"
         not in reconstruct_source
     ):
         raise ValueError("composite trace schema version differs from source")
@@ -25008,8 +25273,57 @@ def build_composite_estimator_artifact(
         _canonical_artifact_decimal(
             fixed_costs.get(key), label=f"composite fixed cost {key}", nonnegative=True
         )
+    execution_coverage = _promote_composite_storage_coverage(
+        coverage["execution_coverage"],
+        stateful_source,
+        inspector_sha256=source_sha256s[
+            "crates/zkgas-trace/src/inspector.rs"
+        ],
+    )
+    if declared_context:
+        execution_coverage = _declared_context_coverage_overlay(
+            execution_coverage,
+            context_source,
+            inspector_sha256=source_sha256s[
+                "crates/zkgas-trace/src/inspector.rs"
+            ],
+        )
+    source_artifacts = {
+        "augmented_core": {
+            "path": core_relative,
+            "file_sha256": sha256_file(core_path),
+            "artifact_sha256": core["artifact_sha256"],
+        },
+        "operation_coverage": {
+            "path": coverage_relative,
+            "file_sha256": sha256_file(coverage_path),
+            "artifact_sha256": coverage["artifact_sha256"],
+        },
+        "corrected_higher_layer": {
+            "path": package_relative,
+            "derivation_id": _COMPOSITE_HIGHER_LAYER_SOURCE["derivation_id"],
+            "identity_sha256": _COMPOSITE_HIGHER_LAYER_SOURCE[
+                "identity_sha256"
+            ],
+            "file_sha256s": dict(
+                _COMPOSITE_HIGHER_LAYER_SOURCE["file_sha256s"]
+            ),
+            "projection_artifact_sha256": corrected["artifact_sha256"],
+        },
+        "stateful_storage": stateful_source,
+        "source_code_sha256s": dict(sorted(source_sha256s.items())),
+    }
+    if declared_context:
+        source_artifacts["declared_context_approximation"] = dict(context_source)
+        source_artifacts["execution_artifacts"] = json.loads(
+            json.dumps(execution_artifacts)
+        )
     artifact = {
-        "schema_version": _COMPOSITE_ESTIMATOR_SCHEMA_VERSION,
+        "schema_version": (
+            _COMPOSITE_DECLARED_CONTEXT_SCHEMA_VERSION
+            if declared_context
+            else _COMPOSITE_ESTIMATOR_SCHEMA_VERSION
+        ),
         "purpose": _COMPOSITE_ESTIMATOR_PURPOSE,
         "status": "sealed_coverage_qualified_estimator",
         "review_only": True,
@@ -25020,7 +25334,11 @@ def build_composite_estimator_artifact(
         "formula": _COMPOSITE_ESTIMATOR_FORMULA,
         "registry_parameter_basis": "production_scaled",
         "trace_schema": {
-            "schema_version": _COMPOSITE_TRACE_SCHEMA_VERSION,
+            "schema_version": (
+                _COMPOSITE_DECLARED_CONTEXT_TRACE_SCHEMA_VERSION
+                if declared_context
+                else _COMPOSITE_TRACE_SCHEMA_VERSION
+            ),
             "source_path": "crates/zkgas-trace/src/reconstruct.rs",
             "source_sha256": source_sha256s[
                 "crates/zkgas-trace/src/reconstruct.rs"
@@ -25028,13 +25346,7 @@ def build_composite_estimator_artifact(
         },
         "registry": json.loads(json.dumps(core["registry"])),
         "storage_model": storage_model,
-        "execution_coverage": _promote_composite_storage_coverage(
-            coverage["execution_coverage"],
-            stateful_source,
-            inspector_sha256=source_sha256s[
-                "crates/zkgas-trace/src/inspector.rs"
-            ],
-        ),
+        "execution_coverage": execution_coverage,
         "ownership_policy": {
             "trace_selectors": json.loads(json.dumps(coverage["trace_selectors"])),
             "side_effect_ownership": json.loads(
@@ -25060,32 +25372,17 @@ def build_composite_estimator_artifact(
                 "typed_feature",
             ],
         },
-        "source_artifacts": {
-            "augmented_core": {
-                "path": core_relative,
-                "file_sha256": sha256_file(core_path),
-                "artifact_sha256": core["artifact_sha256"],
-            },
-            "operation_coverage": {
-                "path": coverage_relative,
-                "file_sha256": sha256_file(coverage_path),
-                "artifact_sha256": coverage["artifact_sha256"],
-            },
-            "corrected_higher_layer": {
-                "path": package_relative,
-                "derivation_id": _COMPOSITE_HIGHER_LAYER_SOURCE["derivation_id"],
-                "identity_sha256": _COMPOSITE_HIGHER_LAYER_SOURCE[
-                    "identity_sha256"
-                ],
-                "file_sha256s": dict(
-                    _COMPOSITE_HIGHER_LAYER_SOURCE["file_sha256s"]
-                ),
-                "projection_artifact_sha256": corrected["artifact_sha256"],
-            },
-            "stateful_storage": stateful_source,
-            "source_code_sha256s": dict(sorted(source_sha256s.items())),
-        },
+        "source_artifacts": source_artifacts,
     }
+    if declared_context:
+        artifact["declared_context_approximation"] = {
+            "status": "declared_approximation",
+            "source_identity_sha256": context_artifact[
+                "approximation_identity_sha256"
+            ],
+            "artifact_sha256": context_artifact["artifact_sha256"],
+            "classes": json.loads(json.dumps(context_artifact["classes"])),
+        }
     artifact["artifact_sha256"] = sha256_bytes(canonical_json(artifact))
     _validate_composite_estimator_artifact(artifact)
     return artifact
@@ -25185,6 +25482,26 @@ def _composite_protected_inputs(
                 sources[name]["path"], field_name=f"composite {label} source"
             ).resolve(strict=True)
         )
+    if "declared_context_approximation" in sources:
+        protected_directories.add(
+            _resolve_repo_path(
+                sources["declared_context_approximation"]["path"],
+                field_name="composite declared context source",
+            ).resolve(strict=True)
+        )
+        execution = sources["execution_artifacts"]
+        launcher = execution["guest_launcher"]
+        guest = execution["sp1_proposal_guest"]
+        for relative in (
+            launcher["path"],
+            guest["elf_path"],
+            guest["vk_path"],
+        ):
+            protected_files.add(
+                _resolve_repo_path(
+                    relative, field_name="composite execution artifact"
+                ).resolve(strict=True)
+            )
     protected_files.update(
         _resolve_repo_path(path, field_name="composite source-code input").resolve(
             strict=True
@@ -25215,6 +25532,10 @@ def seal_composite_estimator(
     stateful_result_path: pathlib.Path,
     out_root: pathlib.Path,
     estimator_path_file: pathlib.Path,
+    context_approximation_path: pathlib.Path | None = None,
+    guest_launcher_path: pathlib.Path | None = None,
+    proposal_elf_path: pathlib.Path | None = None,
+    proposal_vk_path: pathlib.Path | None = None,
 ) -> pathlib.Path:
     """Create one new content-addressed estimator directory without overwriting."""
     artifact = build_composite_estimator_artifact(
@@ -25222,6 +25543,10 @@ def seal_composite_estimator(
         operation_coverage_path=operation_coverage_path,
         higher_layer_package=higher_layer_package,
         stateful_result_path=stateful_result_path,
+        context_approximation_path=context_approximation_path,
+        guest_launcher_path=guest_launcher_path,
+        proposal_elf_path=proposal_elf_path,
+        proposal_vk_path=proposal_vk_path,
     )
     out_root = pathlib.Path(out_root)
     estimator_path_file = pathlib.Path(estimator_path_file)
@@ -25322,6 +25647,19 @@ def verify_composite_estimator(directory: pathlib.Path) -> Mapping[str, Any]:
         isinstance(item, Mapping) for item in (core, coverage, higher, stateful)
     ):
         raise ValueError("composite estimator sources differ")
+    context = sources.get("declared_context_approximation")
+    execution = sources.get("execution_artifacts")
+    declared_context = context is not None or execution is not None
+    if declared_context and (
+        not isinstance(context, Mapping) or not isinstance(execution, Mapping)
+    ):
+        raise ValueError("composite estimator declared context sources differ")
+    launcher = execution.get("guest_launcher") if declared_context else None
+    guest = execution.get("sp1_proposal_guest") if declared_context else None
+    if declared_context and (
+        not isinstance(launcher, Mapping) or not isinstance(guest, Mapping)
+    ):
+        raise ValueError("composite estimator execution artifact sources differ")
     rebuilt = build_composite_estimator_artifact(
         augmented_core_path=_resolve_repo_path(
             core.get("path"), field_name="composite augmented core"
@@ -25334,6 +25672,35 @@ def verify_composite_estimator(directory: pathlib.Path) -> Mapping[str, Any]:
         ),
         stateful_result_path=_resolve_repo_path(
             stateful.get("path"), field_name="composite stateful result"
+        ),
+        context_approximation_path=(
+            _resolve_repo_path(
+                context.get("path"),
+                field_name="composite declared context approximation",
+            )
+            if declared_context
+            else None
+        ),
+        guest_launcher_path=(
+            _resolve_repo_path(
+                launcher.get("path"), field_name="composite guest launcher"
+            )
+            if declared_context
+            else None
+        ),
+        proposal_elf_path=(
+            _resolve_repo_path(
+                guest.get("elf_path"), field_name="composite proposal ELF"
+            )
+            if declared_context
+            else None
+        ),
+        proposal_vk_path=(
+            _resolve_repo_path(
+                guest.get("vk_path"), field_name="composite proposal VK"
+            )
+            if declared_context
+            else None
         ),
     )
     if not _exact_json_equal(artifact, rebuilt):
@@ -25511,6 +25878,10 @@ def cmd_seal_composite_estimator(args: argparse.Namespace) -> None:
         stateful_result_path=args.stateful_result,
         out_root=args.out_root,
         estimator_path_file=args.estimator_path_file,
+        context_approximation_path=getattr(args, "context_approximation", None),
+        guest_launcher_path=getattr(args, "guest_launcher", None),
+        proposal_elf_path=getattr(args, "proposal_elf", None),
+        proposal_vk_path=getattr(args, "proposal_vk", None),
     )
     print(sealed)
 
@@ -26059,6 +26430,10 @@ def build_parser() -> argparse.ArgumentParser:
     composite_seal.add_argument(
         "--stateful-result", type=pathlib.Path, required=True
     )
+    composite_seal.add_argument("--context-approximation", type=pathlib.Path)
+    composite_seal.add_argument("--guest-launcher", type=pathlib.Path)
+    composite_seal.add_argument("--proposal-elf", type=pathlib.Path)
+    composite_seal.add_argument("--proposal-vk", type=pathlib.Path)
     composite_seal.add_argument("--out-root", type=pathlib.Path, required=True)
     composite_seal.add_argument(
         "--estimator-path-file", type=pathlib.Path, required=True

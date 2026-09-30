@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from decimal import Context, Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
+from fractions import Fraction
 from pathlib import PurePosixPath
 from typing import Any, Mapping
 
@@ -19,8 +20,10 @@ from hierarchical_model import (
 
 ESTIMATOR_SCHEMA_VERSION = 2
 CONTEXT_ESTIMATOR_SCHEMA_VERSION = 3
+DECLARED_CONTEXT_ESTIMATOR_SCHEMA_VERSION = 4
 ESTIMATOR_PURPOSE = "sp1_composite_block_estimator"
 TRACE_SCHEMA_VERSION = 3
+DECLARED_CONTEXT_TRACE_SCHEMA_VERSION = 4
 SP1_GAS_TRACE_CHUNK_THRESHOLD = 134_217_728
 SP1_GAS_TRACE_CHUNK_SLOTS = 2
 ESTIMATOR_FORMULA = (
@@ -78,7 +81,26 @@ CONTEXT_SOURCE_CODE_PATHS = SOURCE_CODE_PATHS | frozenset(
         "docs/plans/2026-09-29-zkgas-context-operation-implementation-plan.md",
     }
 )
+DECLARED_CONTEXT_SOURCE_CODE_PATHS = SOURCE_CODE_PATHS | frozenset(
+    {
+        "experiments/opcode-gas/context_approximation.py",
+        "docs/plans/2026-09-30-zkgas-context-approximation-implementation-plan.md",
+    }
+)
 _CONTEXT_OPCODES = frozenset({0x30, 0x33, 0x34, 0x35, 0x36, 0x42})
+_DECLARED_CONTEXT_CLASSES = frozenset(
+    {
+        "address",
+        "caller",
+        "callvalue:zero",
+        "callvalue:nonzero",
+        "calldataload:zero",
+        "calldataload:partial",
+        "calldataload:full",
+        "calldatasize",
+        "timestamp",
+    }
+)
 
 _DECIMAL_CONTEXT = Context(prec=80, rounding=ROUND_HALF_EVEN, traps=[])
 _FIXED_COST_KEYS = frozenset(FIXED_COST_STATUSES)
@@ -122,6 +144,9 @@ _EXPECTED_ESTIMATOR_FIELDS = frozenset(
         "source_artifacts",
         "artifact_sha256",
     }
+)
+_DECLARED_CONTEXT_ESTIMATOR_FIELDS = _EXPECTED_ESTIMATOR_FIELDS | frozenset(
+    {"declared_context_approximation"}
 )
 _OWNERSHIP_SEMANTICS = {
     "system_and_anchor_operations": "block_base",
@@ -322,6 +347,52 @@ def _validate_coverage(
             != "non_anchor_started_transaction"
         ):
             raise ValueError(f"composite estimator opcode coverage differs: {key}")
+        if (
+            artifact.get("schema_version")
+            == DECLARED_CONTEXT_ESTIMATOR_SCHEMA_VERSION
+            and opcode in _CONTEXT_OPCODES
+        ):
+            source = artifact["source_artifacts"][
+                "declared_context_approximation"
+            ]
+            reference = row.get("artifact_ref")
+            evidence = row.get("source_evidence")
+            machine_evidence = [
+                item
+                for item in evidence
+                if isinstance(item, Mapping)
+                and item.get("kind") == "machine_trace_selector"
+            ] if isinstance(evidence, list) else []
+            if (
+                row.get("classification") != "declared_context_approximation"
+                or row.get("model_status") != "declared_approximation"
+                or not isinstance(reference, Mapping)
+                or set(reference)
+                != {
+                    "path",
+                    "approximation_identity_sha256",
+                    "artifact_sha256",
+                }
+                or reference.get("path") != source.get("path")
+                or reference.get("approximation_identity_sha256")
+                != source.get("approximation_identity_sha256")
+                or reference.get("artifact_sha256")
+                != source.get("artifact_sha256")
+                or len(machine_evidence) != 1
+                or machine_evidence[0].get("path")
+                != "crates/zkgas-trace/src/inspector.rs"
+                or machine_evidence[0].get("selector_ref")
+                != "opcode_raw_gas_execution"
+                or machine_evidence[0].get("sha256")
+                != artifact["source_artifacts"]["source_code_sha256s"][
+                    "crates/zkgas-trace/src/inspector.rs"
+                ]
+                or "reason" in row
+            ):
+                raise ValueError(
+                    f"composite estimator declared context coverage differs: {key}"
+                )
+            continue
         model_id = registry.opcode_model_ids[opcode]
         if model_id is None:
             if opcode in _STORAGE_OPCODES:
@@ -472,6 +543,10 @@ def _validate_sources(sources: Any, *, schema_version: int) -> None:
     }
     if schema_version == CONTEXT_ESTIMATOR_SCHEMA_VERSION:
         expected_sources.add("context_operations")
+    elif schema_version == DECLARED_CONTEXT_ESTIMATOR_SCHEMA_VERSION:
+        expected_sources.update(
+            {"declared_context_approximation", "execution_artifacts"}
+        )
     if not isinstance(sources, Mapping) or set(sources) != expected_sources:
         raise ValueError("composite estimator source artifacts differ")
     for label in ("augmented_core", "operation_coverage"):
@@ -607,6 +682,51 @@ def _validate_sources(sources: Any, *, schema_version: int) -> None:
             or any(not _is_sha256(value) for value in context["file_sha256s"].values())
         ):
             raise ValueError("composite estimator context-operation source differs")
+    elif schema_version == DECLARED_CONTEXT_ESTIMATOR_SCHEMA_VERSION:
+        context = sources["declared_context_approximation"]
+        context_path = context.get("path") if isinstance(context, Mapping) else None
+        context_pure = PurePosixPath(context_path) if isinstance(context_path, str) else None
+        if (
+            not isinstance(context, Mapping)
+            or set(context)
+            != {
+                "path",
+                "file_sha256",
+                "approximation_id",
+                "approximation_identity_sha256",
+                "artifact_sha256",
+            }
+            or context_pure is None
+            or context_pure.is_absolute()
+            or ".." in context_pure.parts
+            or str(context_pure) != context_path
+            or not isinstance(context.get("approximation_id"), str)
+            or len(context["approximation_id"]) != 24
+            or not _is_sha256(context.get("approximation_identity_sha256"))
+            or context["approximation_identity_sha256"][:24]
+            != context["approximation_id"]
+            or not _is_sha256(context.get("artifact_sha256"))
+            or not _is_sha256(context.get("file_sha256"))
+        ):
+            raise ValueError("composite estimator declared context source differs")
+        execution = sources["execution_artifacts"]
+        launcher = execution.get("guest_launcher") if isinstance(execution, Mapping) else None
+        guest = execution.get("sp1_proposal_guest") if isinstance(execution, Mapping) else None
+        if (
+            not isinstance(execution, Mapping)
+            or set(execution) != {"guest_launcher", "sp1_proposal_guest"}
+            or not isinstance(launcher, Mapping)
+            or launcher.get("path") != "target/release/guest-launcher"
+            or set(launcher) != {"path", "file_sha256"}
+            or not _is_sha256(launcher.get("file_sha256"))
+            or not isinstance(guest, Mapping)
+            or set(guest) != {"elf_path", "elf_sha256", "vk_path", "vk_sha256"}
+            or guest.get("elf_path") != "crates/guests/elf/sp1_shasta_proposal.elf"
+            or guest.get("vk_path") != "crates/guests/elf/sp1_shasta_proposal.vk.bin"
+            or not _is_sha256(guest.get("elf_sha256"))
+            or not _is_sha256(guest.get("vk_sha256"))
+        ):
+            raise ValueError("composite estimator execution artifact source differs")
     source_code = sources["source_code_sha256s"]
     if (
         not isinstance(source_code, Mapping)
@@ -614,11 +734,78 @@ def _validate_sources(sources: Any, *, schema_version: int) -> None:
         != (
             CONTEXT_SOURCE_CODE_PATHS
             if schema_version == CONTEXT_ESTIMATOR_SCHEMA_VERSION
+            else DECLARED_CONTEXT_SOURCE_CODE_PATHS
+            if schema_version == DECLARED_CONTEXT_ESTIMATOR_SCHEMA_VERSION
             else SOURCE_CODE_PATHS
         )
         or any(not _is_sha256(value) for value in source_code.values())
     ):
         raise ValueError("composite estimator source-code identities differ")
+
+
+def _validate_declared_context_approximation(
+    section: Any, source: Mapping[str, Any]
+) -> dict[str, Decimal]:
+    if (
+        not isinstance(section, Mapping)
+        or set(section)
+        != {
+            "status",
+            "source_identity_sha256",
+            "artifact_sha256",
+            "classes",
+        }
+        or section.get("status") != "declared_approximation"
+        or section.get("source_identity_sha256")
+        != source.get("approximation_identity_sha256")
+        or section.get("artifact_sha256") != source.get("artifact_sha256")
+        or not isinstance(section.get("classes"), Mapping)
+        or set(section["classes"]) != _DECLARED_CONTEXT_CLASSES
+    ):
+        raise ValueError("composite estimator declared context approximation differs")
+    costs = {}
+    for class_id, row in section["classes"].items():
+        if (
+            not isinstance(row, Mapping)
+            or row.get("status") != "declared_approximation"
+            or row.get("shape") != "constant_per_execution"
+            or not isinstance(row.get("cost_exact"), Mapping)
+        ):
+            raise ValueError("composite estimator declared context class differs")
+        exact = row["cost_exact"]
+        if set(exact) != {"numerator", "denominator", "decimal"}:
+            raise ValueError("composite estimator declared context cost differs")
+        numerator = exact.get("numerator")
+        denominator = exact.get("denominator")
+        if not isinstance(numerator, str) or not isinstance(denominator, str):
+            raise ValueError("composite estimator declared context cost differs")
+        try:
+            fraction = Fraction(int(numerator), int(denominator))
+        except (ValueError, ZeroDivisionError) as error:
+            raise ValueError("composite estimator declared context cost differs") from error
+        if (
+            str(fraction.numerator) != numerator
+            or str(fraction.denominator) != denominator
+            or fraction < 0
+        ):
+            raise ValueError("composite estimator declared context cost differs")
+        decimal = exact.get("decimal")
+        if not isinstance(decimal, str):
+            raise ValueError("composite estimator declared context cost differs")
+        try:
+            parsed = Decimal(decimal)
+        except InvalidOperation as error:
+            raise ValueError(
+                "composite estimator declared context cost differs"
+            ) from error
+        with localcontext(Context(prec=100, rounding=ROUND_HALF_EVEN)):
+            projection = format(
+                Decimal(fraction.numerator) / Decimal(fraction.denominator), "f"
+            )
+        if not parsed.is_finite() or parsed < 0 or decimal != projection:
+            raise ValueError("composite estimator declared context cost differs")
+        costs[class_id] = parsed
+    return costs
 
 
 def _validate_ownership_policy(policy: Any) -> None:
@@ -794,11 +981,21 @@ def validate_estimator_artifact(artifact: Mapping[str, Any]) -> OpcodeRegistry:
     if not isinstance(artifact, Mapping):
         raise ValueError("composite estimator must be an object")
     _validate_content_address(artifact)
-    if set(artifact) != _EXPECTED_ESTIMATOR_FIELDS:
+    schema_version = artifact.get("schema_version")
+    expected_fields = (
+        _DECLARED_CONTEXT_ESTIMATOR_FIELDS
+        if schema_version == DECLARED_CONTEXT_ESTIMATOR_SCHEMA_VERSION
+        else _EXPECTED_ESTIMATOR_FIELDS
+    )
+    if set(artifact) != expected_fields:
         raise ValueError("composite estimator schema differs")
     if (
-        artifact.get("schema_version")
-        not in {ESTIMATOR_SCHEMA_VERSION, CONTEXT_ESTIMATOR_SCHEMA_VERSION}
+        schema_version
+        not in {
+            ESTIMATOR_SCHEMA_VERSION,
+            CONTEXT_ESTIMATOR_SCHEMA_VERSION,
+            DECLARED_CONTEXT_ESTIMATOR_SCHEMA_VERSION,
+        }
         or artifact.get("purpose") != ESTIMATOR_PURPOSE
         or artifact.get("status") != "sealed_coverage_qualified_estimator"
         or artifact.get("review_only") is not True
@@ -814,7 +1011,12 @@ def validate_estimator_artifact(artifact: Mapping[str, Any]) -> OpcodeRegistry:
     if (
         not isinstance(trace_schema, Mapping)
         or set(trace_schema) != {"schema_version", "source_path", "source_sha256"}
-        or trace_schema.get("schema_version") != TRACE_SCHEMA_VERSION
+        or trace_schema.get("schema_version")
+        != (
+            DECLARED_CONTEXT_TRACE_SCHEMA_VERSION
+            if schema_version == DECLARED_CONTEXT_ESTIMATOR_SCHEMA_VERSION
+            else TRACE_SCHEMA_VERSION
+        )
         or trace_schema.get("source_path") != "crates/zkgas-trace/src/reconstruct.rs"
         or not _is_sha256(trace_schema.get("source_sha256"))
     ):
@@ -832,7 +1034,6 @@ def validate_estimator_artifact(artifact: Mapping[str, Any]) -> OpcodeRegistry:
         raise ValueError("composite estimator coarse state/trie status differs")
     if artifact.get("coverage_policy") != COVERAGE_POLICY:
         raise ValueError("composite estimator coverage policy differs")
-    schema_version = artifact["schema_version"]
     _validate_sources(artifact.get("source_artifacts"), schema_version=schema_version)
     _validate_ownership_policy(artifact.get("ownership_policy"))
     registry = load_registry_payload(artifact.get("registry"))
@@ -856,6 +1057,11 @@ def validate_estimator_artifact(artifact: Mapping[str, Any]) -> OpcodeRegistry:
             != artifact["source_artifacts"]["context_operations"]["models_sha256"]
         ):
             raise ValueError("composite estimator context model source digest differs")
+    elif schema_version == DECLARED_CONTEXT_ESTIMATOR_SCHEMA_VERSION:
+        _validate_declared_context_approximation(
+            artifact.get("declared_context_approximation"),
+            artifact["source_artifacts"]["declared_context_approximation"],
+        )
     if trace_schema["source_sha256"] != artifact["source_artifacts"][
         "source_code_sha256s"
     ][trace_schema["source_path"]]:
@@ -930,6 +1136,57 @@ def _opcode_event(opcode: int, component: Mapping[str, Any]) -> OpcodeEvent:
     if kind == "invalid" and set(model_input) == {"kind"}:
         return OpcodeEvent(**common)
     raise ValueError("opcode model input kind is unsupported")
+
+
+def _declared_context_cost(
+    opcode: int,
+    component: Mapping[str, Any],
+    costs: Mapping[str, Decimal],
+) -> Decimal:
+    model_input = component.get("model_input")
+    if not isinstance(model_input, Mapping):
+        raise ValueError("declared context opcode model input is missing")
+    if opcode in {0x30, 0x33}:
+        if set(model_input) != {"kind"} or model_input.get("kind") != "context_fixed":
+            raise ValueError("fixed context model input fields differ")
+        class_id = "address" if opcode == 0x30 else "caller"
+    elif opcode == 0x34:
+        if (
+            set(model_input) != {"kind", "value_class"}
+            or model_input.get("kind") != "context_value"
+            or model_input.get("value_class") not in {"zero", "nonzero"}
+        ):
+            raise ValueError("CALLVALUE model input fields differ")
+        class_id = f"callvalue:{model_input['value_class']}"
+    elif opcode == 0x35:
+        if (
+            set(model_input) != {"kind", "access_class"}
+            or model_input.get("kind") != "calldata_load"
+            or model_input.get("access_class") not in {"zero", "partial", "full"}
+        ):
+            raise ValueError("CALLDATALOAD model input fields differ")
+        class_id = f"calldataload:{model_input['access_class']}"
+    elif opcode == 0x36:
+        if (
+            set(model_input) != {"kind", "input_length"}
+            or model_input.get("kind") != "calldata_size"
+        ):
+            raise ValueError("CALLDATASIZE model input fields differ")
+        _nonnegative_int(
+            model_input.get("input_length"), label="CALLDATASIZE input length"
+        )
+        class_id = "calldatasize"
+    elif opcode == 0x42:
+        if (
+            set(model_input) != {"kind", "value_class"}
+            or model_input.get("kind") != "context_value"
+            or model_input.get("value_class") != "nonzero"
+        ):
+            raise ValueError("TIMESTAMP requires the frozen post-Unzen nonzero class")
+        class_id = "timestamp"
+    else:  # pragma: no cover - guarded by the coverage classifier.
+        raise ValueError("declared context model received a non-context opcode")
+    return costs[class_id]
 
 
 def _storage_cost(
@@ -1162,6 +1419,15 @@ def _estimate_trace(
 ) -> Mapping[str, Any]:
     registry = validate_estimator_artifact(estimator)
     storage_parameters = _validate_storage_model(estimator["storage_model"])
+    declared_context_costs = (
+        _validate_declared_context_approximation(
+            estimator["declared_context_approximation"],
+            estimator["source_artifacts"]["declared_context_approximation"],
+        )
+        if estimator["schema_version"]
+        == DECLARED_CONTEXT_ESTIMATOR_SCHEMA_VERSION
+        else {}
+    )
     _validate_trace_header(trace, estimator)
     gaps: list[dict[str, Any]] = []
     if trace.get("status") != "complete":
@@ -1526,6 +1792,28 @@ def _estimate_trace(
                 try:
                     predicted = _storage_cost(
                         opcode, component, storage_parameters
+                    )
+                except (TypeError, ValueError) as error:
+                    _gap(
+                        gaps,
+                        reason="opcode_model_input_incompatible",
+                        layer="operation",
+                        block_index=block_index,
+                        operation_id=operation_id,
+                        execution_key=key,
+                        detail=str(error),
+                    )
+                    continue
+                operation_cost += predicted
+                measured_operation_count += 1
+                measured_raw_gas += Decimal(raw_gas)
+                measured_typed_feature_count += 1
+                continue
+            if coverage.get("classification") == "declared_context_approximation":
+                total_typed_feature_count += 1
+                try:
+                    predicted = _declared_context_cost(
+                        opcode, component, declared_context_costs
                     )
                 except (TypeError, ValueError) as error:
                     _gap(

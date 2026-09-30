@@ -9,7 +9,7 @@ import shutil
 import subprocess
 import tempfile
 from collections.abc import Iterable, Mapping
-from decimal import Context, Decimal, ROUND_HALF_EVEN, localcontext
+from decimal import Context, Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
 from fractions import Fraction
 from typing import Any
 
@@ -59,6 +59,7 @@ _APPROXIMATION_CLASS_BY_MODEL = {
 }
 _APPROXIMATION_CLASSES = frozenset(_APPROXIMATION_CLASS_BY_MODEL.values())
 _FRACTION_DECIMAL_CONTEXT = Context(prec=100, rounding=ROUND_HALF_EVEN)
+_BLOCK_COMPARISON_DECIMAL_CONTEXT = Context(prec=100, rounding=ROUND_HALF_EVEN)
 
 _FIT_SCENARIOS = (
     "address_canonical",
@@ -795,6 +796,315 @@ def _fraction_from_decimal(value: Decimal) -> Fraction:
     if not isinstance(value, Decimal) or not value.is_finite():
         raise ValueError("declared approximation Decimal differs")
     return Fraction(value)
+
+
+def _canonical_decimal_text(value: Decimal) -> str:
+    if not isinstance(value, Decimal) or not value.is_finite():
+        raise ValueError("block comparison value must be a finite Decimal")
+    if value == 0:
+        return "0"
+    rendered = format(value, "f")
+    if "." in rendered:
+        rendered = rendered.rstrip("0").rstrip(".")
+    return rendered
+
+
+def _canonical_decimal_input(
+    value: object, *, label: str, positive: bool = False, nonnegative: bool = False
+) -> Decimal:
+    if not isinstance(value, str):
+        raise ValueError(f"{label} must be a canonical Decimal string")
+    try:
+        parsed = Decimal(value)
+    except (InvalidOperation, ValueError) as error:
+        raise ValueError(f"{label} must be a canonical Decimal string") from error
+    if not parsed.is_finite() or _canonical_decimal_text(parsed) != value:
+        raise ValueError(f"{label} must be a canonical Decimal string")
+    if positive and parsed <= 0:
+        raise ValueError(f"{label} must be positive")
+    if nonnegative and parsed < 0:
+        raise ValueError(f"{label} must be nonnegative")
+    return parsed
+
+
+def _comparison_identity(value: object, *, label: str) -> str:
+    if not _is_sha256(value):
+        raise ValueError(f"{label} identity must be a lowercase SHA256")
+    return str(value)
+
+
+def _bound_row_identity(
+    rows: list[Mapping[str, object]], field: str, *, label: str
+) -> str:
+    values = {
+        _comparison_identity(row.get(field), label=label)
+        for row in rows
+    }
+    if len(values) != 1:
+        raise ValueError(f"block rows must bind a single {label} identity")
+    return next(iter(values))
+
+
+def fit_unzen_scalar(calibration_rows: Iterable[Mapping[str, object]]) -> Decimal:
+    """Fit the frozen zero-intercept Unzen scalar from calibration rows only."""
+    rows = list(calibration_rows)
+    if not rows:
+        raise ValueError("Unzen calibration rows must not be empty")
+    expected_fields = {
+        "row_id",
+        "partition",
+        "candidate_identity_sha256",
+        "observed_prover_gas",
+        "finalized_block_zkgas",
+    }
+    seen_row_ids = set()
+    ratios = []
+    with localcontext(_BLOCK_COMPARISON_DECIMAL_CONTEXT):
+        for row in rows:
+            if not isinstance(row, Mapping) or set(row) != expected_fields:
+                raise ValueError("Unzen calibration row fields differ")
+            if row.get("partition") != "calibration":
+                raise ValueError("Unzen scalar accepts the calibration partition only")
+            row_id = row.get("row_id")
+            if not isinstance(row_id, str) or not row_id or row_id in seen_row_ids:
+                raise ValueError("Unzen calibration row ID differs")
+            seen_row_ids.add(row_id)
+            observed = _canonical_decimal_input(
+                row.get("observed_prover_gas"),
+                label="observed proverGas",
+                positive=True,
+            )
+            zkgas = _canonical_decimal_input(
+                row.get("finalized_block_zkgas"),
+                label="finalized block zkGas",
+                positive=True,
+            )
+            ratios.append(observed / zkgas)
+        _bound_row_identity(
+            rows, "candidate_identity_sha256", label="candidate"
+        )
+        ratios.sort()
+        midpoint = len(ratios) // 2
+        if len(ratios) % 2:
+            return +ratios[midpoint]
+        return +(ratios[midpoint - 1] + ratios[midpoint]) / Decimal(2)
+
+
+def _comparison_metrics(rows: list[dict[str, Decimal]]) -> dict[str, str]:
+    if not rows:
+        raise ValueError("block comparison rows must not be empty")
+    with localcontext(_BLOCK_COMPARISON_DECIMAL_CONTEXT):
+        count = Decimal(len(rows))
+        apes = [row["ape"] for row in rows]
+        spes = [row["spe"] for row in rows]
+        upes = sorted(row["upe"] for row in rows)
+        # Nearest rank is ceil(0.95 * N), using the exact integer equivalent.
+        rank = (95 * len(upes) + 99) // 100
+        return {
+            "mape": _canonical_decimal_text(sum(apes, Decimal(0)) / count),
+            "maximum_ape": _canonical_decimal_text(max(apes)),
+            "mean_spe": _canonical_decimal_text(sum(spes, Decimal(0)) / count),
+            "p95_upe": _canonical_decimal_text(upes[rank - 1]),
+            "maximum_upe": _canonical_decimal_text(max(upes)),
+        }
+
+
+def compare_block_models(
+    validation_rows: Iterable[Mapping[str, object]], kappa_unzen: Decimal
+) -> dict[str, object]:
+    """Compare one sealed candidate with one sealed Unzen normalization."""
+    if (
+        not isinstance(kappa_unzen, Decimal)
+        or not kappa_unzen.is_finite()
+        or kappa_unzen <= 0
+    ):
+        raise ValueError("kappa_unzen must be a positive finite Decimal")
+    rows = list(validation_rows)
+    if not rows:
+        raise ValueError("block validation rows must not be empty")
+    expected_fields = {
+        "row_id",
+        "partition",
+        "candidate_identity_sha256",
+        "normalization_identity_sha256",
+        "candidate_coverage_complete",
+        "candidate_predicted_prover_gas",
+        "observed_prover_gas",
+        "finalized_block_zkgas",
+    }
+    seen_row_ids = set()
+    parsed_rows = []
+    per_row = []
+    with localcontext(_BLOCK_COMPARISON_DECIMAL_CONTEXT):
+        for row in rows:
+            if not isinstance(row, Mapping) or set(row) != expected_fields:
+                raise ValueError("block validation row fields differ")
+            if row.get("partition") != "validation":
+                raise ValueError("block comparison accepts the validation partition only")
+            row_id = row.get("row_id")
+            if not isinstance(row_id, str) or not row_id or row_id in seen_row_ids:
+                raise ValueError("block validation row ID differs")
+            seen_row_ids.add(row_id)
+            coverage_complete = row.get("candidate_coverage_complete")
+            if not isinstance(coverage_complete, bool):
+                raise ValueError("candidate coverage marker must be a boolean")
+            raw_prediction = row.get("candidate_predicted_prover_gas")
+            if coverage_complete:
+                predicted = _canonical_decimal_input(
+                    raw_prediction,
+                    label="candidate predicted proverGas",
+                    nonnegative=True,
+                )
+            else:
+                if raw_prediction is not None:
+                    raise ValueError(
+                        "candidate prediction must be absent for incomplete coverage"
+                    )
+                predicted = None
+            observed = _canonical_decimal_input(
+                row.get("observed_prover_gas"),
+                label="observed proverGas",
+                positive=True,
+            )
+            zkgas = _canonical_decimal_input(
+                row.get("finalized_block_zkgas"),
+                label="finalized block zkGas",
+                positive=True,
+            )
+            unzen_prediction = kappa_unzen * zkgas
+            unzen_spe = (unzen_prediction - observed) / observed
+            candidate = None
+            if predicted is not None:
+                candidate_spe = (predicted - observed) / observed
+                candidate = {
+                    "spe": candidate_spe,
+                    "ape": abs(candidate_spe),
+                    "upe": max(Decimal(0), -candidate_spe),
+                }
+            unzen = {
+                "spe": unzen_spe,
+                "ape": abs(unzen_spe),
+                "upe": max(Decimal(0), -unzen_spe),
+            }
+            parsed_rows.append(
+                {
+                    "coverage_complete": coverage_complete,
+                    "candidate": candidate,
+                    "unzen": unzen,
+                }
+            )
+            per_row.append(
+                {
+                    "row_id": row_id,
+                    "candidate_coverage_complete": coverage_complete,
+                    "observed_prover_gas": _canonical_decimal_text(observed),
+                    "finalized_block_zkgas": _canonical_decimal_text(zkgas),
+                    "candidate": (
+                        {
+                            "predicted_prover_gas": _canonical_decimal_text(
+                                predicted
+                            ),
+                            **{
+                                key: _canonical_decimal_text(value)
+                                for key, value in candidate.items()
+                            },
+                        }
+                        if candidate is not None
+                        else {
+                            "predicted_prover_gas": None,
+                            "spe": None,
+                            "ape": None,
+                            "upe": None,
+                        }
+                    ),
+                    "unzen": {
+                        "predicted_prover_gas": _canonical_decimal_text(
+                            unzen_prediction
+                        ),
+                        **{
+                            key: _canonical_decimal_text(value)
+                            for key, value in unzen.items()
+                        },
+                    },
+                }
+            )
+        candidate_identity = _bound_row_identity(
+            rows, "candidate_identity_sha256", label="candidate"
+        )
+        normalization_identity = _bound_row_identity(
+            rows, "normalization_identity_sha256", label="normalization"
+        )
+        unzen_metrics = _comparison_metrics([row["unzen"] for row in parsed_rows])
+        unzen_decimal = {key: Decimal(value) for key, value in unzen_metrics.items()}
+        complete_coverage = all(row["coverage_complete"] for row in parsed_rows)
+        if complete_coverage:
+            candidate_metrics = _comparison_metrics(
+                [row["candidate"] for row in parsed_rows]
+            )
+            candidate_decimal = {
+                key: Decimal(value) for key, value in candidate_metrics.items()
+            }
+            gates = {
+                "complete_candidate_coverage": True,
+                "strict_mape_improvement": (
+                    candidate_decimal["mape"] < unzen_decimal["mape"]
+                ),
+                "maximum_ape_not_regressed": (
+                    candidate_decimal["maximum_ape"]
+                    <= unzen_decimal["maximum_ape"]
+                ),
+                "mean_spe_floor": (
+                    candidate_decimal["mean_spe"] >= Decimal("-0.05")
+                ),
+                "p95_upe_limit": (
+                    candidate_decimal["p95_upe"] <= Decimal("0.10")
+                ),
+                "p95_upe_not_regressed": (
+                    candidate_decimal["p95_upe"] <= unzen_decimal["p95_upe"]
+                ),
+                "maximum_upe_limit": (
+                    candidate_decimal["maximum_upe"] <= Decimal("0.20")
+                ),
+                "maximum_upe_not_regressed": (
+                    candidate_decimal["maximum_upe"]
+                    <= unzen_decimal["maximum_upe"]
+                ),
+            }
+            validation_status = "evaluated"
+        else:
+            candidate_metrics = {
+                "mape": None,
+                "maximum_ape": None,
+                "mean_spe": None,
+                "p95_upe": None,
+                "maximum_upe": None,
+            }
+            gates = {
+                "complete_candidate_coverage": False,
+                "strict_mape_improvement": False,
+                "maximum_ape_not_regressed": False,
+                "mean_spe_floor": False,
+                "p95_upe_limit": False,
+                "p95_upe_not_regressed": False,
+                "maximum_upe_limit": False,
+                "maximum_upe_not_regressed": False,
+            }
+            validation_status = "insufficient_coverage"
+        return {
+            "candidate_identity_sha256": candidate_identity,
+            "normalization_identity_sha256": normalization_identity,
+            "kappa_unzen": _canonical_decimal_text(kappa_unzen),
+            "partition": "validation",
+            "validation_status": validation_status,
+            "row_count": len(rows),
+            "rows": per_row,
+            "metrics": {
+                "candidate": candidate_metrics,
+                "unzen": unzen_metrics,
+            },
+            "gates": gates,
+            "accepted": all(gates.values()),
+        }
 
 
 def _strict_source_directory() -> pathlib.Path:

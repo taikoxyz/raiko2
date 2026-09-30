@@ -27,7 +27,7 @@ from opcode_gas import canonical_json, sha256_bytes
 from opcode_gas import REPO_ROOT
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 PURPOSE = "sp1_controlled_block_comparison_frozen_inputs"
 VERSION_IDENTITY = {
     "production_schedule": "UNZEN_ZK_GAS_SCHEDULE",
@@ -337,22 +337,27 @@ def _is_sha256(value: object) -> bool:
     )
 
 
-def _validated_bundle(
-    bundle: Mapping[str, Any], request: Mapping[str, object]
-) -> tuple[Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]]:
-    if set(bundle) != {
+def _compact_identity(bundle: Mapping[str, Any]) -> dict[str, object]:
+    return {
+        field: copy.deepcopy(bundle[field])
+        for field in ("schema_version", "fixture_spec_sha256", "spec", "observation")
+    }
+
+
+def _validated_identity(
+    identity: Mapping[str, Any], request: Mapping[str, object]
+) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
+    if set(identity) != {
         "schema_version",
         "fixture_spec_sha256",
         "spec",
         "observation",
-        "candidate_trace",
-    } or bundle.get("schema_version") != 1:
-        raise ValueError("frozen bundle schema differs")
-    spec = bundle.get("spec")
-    observation = bundle.get("observation")
-    trace = bundle.get("candidate_trace")
-    if not all(isinstance(value, Mapping) for value in (spec, observation, trace)):
-        raise ValueError("frozen bundle evidence is incomplete")
+    } or identity.get("schema_version") != 1:
+        raise ValueError("frozen identity schema differs")
+    spec = identity.get("spec")
+    observation = identity.get("observation")
+    if not all(isinstance(value, Mapping) for value in (spec, observation)):
+        raise ValueError("frozen identity evidence is incomplete")
     required_spec = {
         "row_id", "workload_id", "workload_family", "split", "block_count", "transaction_count", "program",
         "expected_final_state_root", "expected_raw_gas_by_key",
@@ -374,7 +379,7 @@ def _validated_bundle(
         required_observation | {"actual_storage_features"}
     ):
         raise ValueError("frozen observation schema differs")
-    if bundle.get("fixture_spec_sha256") != sha256_bytes(canonical_json(spec)):
+    if identity.get("fixture_spec_sha256") != sha256_bytes(canonical_json(spec)):
         raise ValueError("frozen fixture spec digest differs")
     for field in ("workload_family", "split", "block_count", "transaction_count", "program"):
         if spec.get(field) != request[field]:
@@ -426,6 +431,26 @@ def _validated_bundle(
     finalized_zkgas = observation.get("finalized_block_zkgas")
     if isinstance(finalized_zkgas, bool) or not isinstance(finalized_zkgas, int) or finalized_zkgas <= 0:
         raise ValueError("frozen finalized zkGas must be positive")
+    return spec, observation
+
+
+def _validated_bundle(
+    bundle: Mapping[str, Any], request: Mapping[str, object]
+) -> tuple[Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]]:
+    if set(bundle) != {
+        "schema_version",
+        "fixture_spec_sha256",
+        "spec",
+        "observation",
+        "candidate_trace",
+    }:
+        raise ValueError("frozen bundle schema differs")
+    spec, observation = _validated_identity(_compact_identity(bundle), request)
+    trace = bundle.get("candidate_trace")
+    if not isinstance(trace, Mapping):
+        raise ValueError("frozen bundle trace is incomplete")
+    backend_id = observation.get("backend_input_sha256")
+    host_trace_id = observation.get("host_trace_sha256")
     if sha256_bytes(canonical_json(trace)) != host_trace_id:
         raise ValueError("candidate trace does not match frozen host trace")
     if trace.get("guest_input_sha256") not in {backend_id, f"0x{backend_id}"}:
@@ -513,7 +538,9 @@ def build_manifest(
                 "backend_input_sha256": backend_id,
                 "candidate_coverage_complete": True,
                 "candidate_predicted_prover_gas": estimate["predicted_prover_gas"],
-                "frozen_bundle": copy.deepcopy(dict(bundle)),
+                "bundle_sha256": sha256_bytes(canonical_json(bundle)),
+                "trace_sha256": observation["host_trace_sha256"],
+                "frozen_identity": _compact_identity(bundle),
             }
         )
     logical_paths = {
@@ -604,22 +631,34 @@ def validate_manifest(manifest: Mapping[str, Any]) -> None:
     row_ids: set[str] = set()
     workload_ids: set[str] = set()
     for request, row in zip(row_requests(), rows, strict=True):
-        required = {"partition", "category", "candidate_identity", "workload_id", "row_id", "backend_input_sha256", "candidate_coverage_complete", "candidate_predicted_prover_gas", "frozen_bundle"}
+        required = {
+            "partition", "category", "candidate_identity", "workload_id", "row_id",
+            "backend_input_sha256", "candidate_coverage_complete",
+            "candidate_predicted_prover_gas", "bundle_sha256", "trace_sha256",
+            "frozen_identity",
+        }
         if not isinstance(row, Mapping) or set(row) != required:
             raise ValueError("manifest row schema differs")
         if row["candidate_identity"] != candidate_identity or row["candidate_coverage_complete"] is not True:
             raise ValueError("manifest candidate identity or coverage differs")
         if row["partition"] != request["partition"] or row["category"] != request["category"]:
             raise ValueError("manifest row differs from fixed matrix")
-        frozen_row, observation, trace = _validated_bundle(row["frozen_bundle"], request)
+        identity = row["frozen_identity"]
+        if not isinstance(identity, Mapping):
+            raise ValueError("manifest frozen identity differs")
+        frozen_row, observation = _validated_identity(identity, request)
         if frozen_row.get("row_id") != row["row_id"]:
             raise ValueError("manifest frozen row identity differs")
         if frozen_row.get("workload_id") != row["workload_id"]:
             raise ValueError("manifest frozen workload identity differs")
         if frozen_row.get("expected_backend_input_sha256") != row["backend_input_sha256"] or observation.get("backend_input_sha256") != row["backend_input_sha256"]:
             raise ValueError("manifest frozen backend input identity differs")
-        if trace.get("guest_input_sha256") not in {row["backend_input_sha256"], f"0x{row['backend_input_sha256']}"}:
-            raise ValueError("manifest candidate trace backend identity differs")
+        if not _is_sha256(row["bundle_sha256"]):
+            raise ValueError("manifest bundle identity differs")
+        if row["trace_sha256"] != observation.get("host_trace_sha256") or not _is_sha256(
+            row["trace_sha256"]
+        ):
+            raise ValueError("manifest trace identity differs")
         prediction = row["candidate_predicted_prover_gas"]
         try:
             parsed_prediction = Decimal(prediction)
@@ -736,11 +775,27 @@ def _validate_exact_replay(
     native = _run_bound_native_freezes(
         source_paths["launcher"], source_bytes["launcher"]
     )
-    stored = [row["frozen_bundle"] for row in manifest["rows"]]
-    if canonical_json(list(native)) != canonical_json(stored):
-        raise ValueError("sealed bundles differ from exact native launcher replay")
-    for row in manifest["rows"]:
-        replay = estimate_trace(candidate, row["frozen_bundle"]["candidate_trace"])
+    if len(native) != len(manifest["rows"]):
+        raise ValueError("sealed bundle count differs from exact native launcher replay")
+    for request, row, bundle in zip(
+        row_requests(), manifest["rows"], native, strict=True
+    ):
+        frozen_row, observation, trace = _validated_bundle(bundle, request)
+        if canonical_json(_compact_identity(bundle)) != canonical_json(
+            row["frozen_identity"]
+        ):
+            raise ValueError("sealed compact evidence differs from exact native launcher replay")
+        if sha256_bytes(canonical_json(bundle)) != row["bundle_sha256"]:
+            raise ValueError("sealed bundle hash differs from exact native launcher replay")
+        if sha256_bytes(canonical_json(trace)) != row["trace_sha256"]:
+            raise ValueError("sealed trace hash differs from exact native launcher replay")
+        if (
+            frozen_row["row_id"] != row["row_id"]
+            or frozen_row["workload_id"] != row["workload_id"]
+            or observation["backend_input_sha256"] != row["backend_input_sha256"]
+        ):
+            raise ValueError("sealed identities differ from exact native launcher replay")
+        replay = estimate_trace(candidate, trace)
         if replay.get("coverage_complete") is not True or replay.get("gaps") != []:
             raise ValueError("replay candidate coverage differs")
         if replay.get("predicted_prover_gas") != row["candidate_predicted_prover_gas"]:

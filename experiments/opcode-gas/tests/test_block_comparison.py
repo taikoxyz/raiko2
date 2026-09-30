@@ -26,6 +26,13 @@ from test_sp1_composite_estimator import (
 
 
 class BlockComparisonManifestTests(unittest.TestCase):
+    @staticmethod
+    def _rehash_manifest(manifest):
+        manifest.pop("artifact_sha256", None)
+        manifest["artifact_sha256"] = opcode_gas.sha256_bytes(
+            opcode_gas.canonical_json(manifest)
+        )
+
     @classmethod
     def _build_manifest(cls, **overrides):
         arguments = {
@@ -149,12 +156,41 @@ class BlockComparisonManifestTests(unittest.TestCase):
             )
         )
 
+    def test_manifest_is_compact_and_does_not_embed_native_traces(self):
+        encoded = opcode_gas.canonical_json(self.manifest)
+        self.assertEqual(self.manifest["schema_version"], 2)
+        self.assertLess(len(encoded), 1024 * 1024)
+        self.assertNotIn(b'"candidate_trace"', encoded)
+        self.assertNotIn(b'"frozen_bundle"', encoded)
+        for row in self.manifest["rows"]:
+            self.assertEqual(
+                set(row),
+                {
+                    "partition",
+                    "category",
+                    "candidate_identity",
+                    "workload_id",
+                    "row_id",
+                    "backend_input_sha256",
+                    "candidate_coverage_complete",
+                    "candidate_predicted_prover_gas",
+                    "bundle_sha256",
+                    "trace_sha256",
+                    "frozen_identity",
+                },
+            )
+            self.assertEqual(
+                set(row["frozen_identity"]),
+                {"schema_version", "fixture_spec_sha256", "spec", "observation"},
+            )
+
     def test_real_native_traces_have_zero_gaps_and_exact_storage_branches(self):
         self.assertEqual(len(self.manifest["rows"]), 32)
         self.assertTrue(all(row["candidate_coverage_complete"] for row in self.manifest["rows"]))
         self.assertTrue(
             all(
-                row["frozen_bundle"]["observation"]["finalized_block_zkgas"] > 0
+                row["frozen_identity"]["observation"]["finalized_block_zkgas"]
+                > 0
                 for row in self.manifest["rows"]
             )
         )
@@ -169,7 +205,7 @@ class BlockComparisonManifestTests(unittest.TestCase):
                 key
                 for row in self.manifest["rows"]
                 if row["partition"] == partition
-                for key in row["frozen_bundle"]["spec"].get(
+                for key in row["frozen_identity"]["spec"].get(
                     "expected_storage_features", {}
                 )
             }
@@ -296,12 +332,30 @@ class BlockComparisonManifestTests(unittest.TestCase):
         for field in ("workload_id", "row_id", "backend_input_sha256"):
             manifest = copy.deepcopy(self.manifest)
             manifest["rows"][1][field] = manifest["rows"][0][field]
-            manifest.pop("artifact_sha256")
-            manifest["artifact_sha256"] = opcode_gas.sha256_bytes(
-                opcode_gas.canonical_json(manifest)
-            )
+            self._rehash_manifest(manifest)
             with self.subTest(identity=field), self.assertRaises(ValueError):
                 block_comparison.validate_manifest(manifest)
+
+    def test_compact_hash_evidence_trace_and_prediction_tamper_are_rejected(self):
+        mutations = {
+            "bundle_hash": lambda row: row.__setitem__("bundle_sha256", "0" * 64),
+            "compact_evidence": lambda row: row["frozen_identity"]["spec"].__setitem__(
+                "expected_final_state_root", "0x" + "11" * 32
+            ),
+            "trace_hash": lambda row: row.__setitem__("trace_sha256", "0" * 64),
+            "prediction": lambda row: row.__setitem__(
+                "candidate_predicted_prover_gas", "1"
+            ),
+        }
+        for name, mutate in mutations.items():
+            manifest = copy.deepcopy(self.manifest)
+            mutate(manifest["rows"][0])
+            self._rehash_manifest(manifest)
+            with tempfile.TemporaryDirectory() as temporary:
+                output_root = pathlib.Path(temporary)
+                with self.subTest(tamper=name), self.assertRaises(ValueError):
+                    self._seal_manifest(manifest, output_root)
+                self.assertEqual(list(output_root.iterdir()), [])
 
     def test_native_replay_rejects_self_consistent_swapped_trace(self):
         forged = copy.deepcopy(self.bundles)
@@ -325,7 +379,15 @@ class BlockComparisonManifestTests(unittest.TestCase):
             self._build_manifest(frozen_bundles=forged)
 
         forged_manifest = copy.deepcopy(self.manifest)
-        forged_manifest["rows"][0]["frozen_bundle"] = forged[0]
+        forged_manifest["rows"][0]["frozen_identity"] = (
+            block_comparison._compact_identity(forged[0])
+        )
+        forged_manifest["rows"][0]["bundle_sha256"] = opcode_gas.sha256_bytes(
+            opcode_gas.canonical_json(forged[0])
+        )
+        forged_manifest["rows"][0]["trace_sha256"] = opcode_gas.sha256_bytes(
+            opcode_gas.canonical_json(forged_trace)
+        )
         forged_estimate = block_comparison.estimate_trace(
             self.candidate, forged_trace
         )
@@ -334,10 +396,7 @@ class BlockComparisonManifestTests(unittest.TestCase):
         forged_manifest["rows"][0]["candidate_predicted_prover_gas"] = (
             forged_estimate["predicted_prover_gas"]
         )
-        forged_manifest.pop("artifact_sha256")
-        forged_manifest["artifact_sha256"] = opcode_gas.sha256_bytes(
-            opcode_gas.canonical_json(forged_manifest)
-        )
+        self._rehash_manifest(forged_manifest)
         block_comparison.validate_manifest(forged_manifest)
         with tempfile.TemporaryDirectory() as temporary:
             output_root = pathlib.Path(temporary)

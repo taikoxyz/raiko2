@@ -1653,6 +1653,7 @@ def fit_exact_decimal_model(
     matrix: Sequence[Sequence[Any]],
     observed: Sequence[Any],
     terms: Sequence[str],
+    retain_signed_coefficients: bool = False,
 ) -> dict[str, Any]:
     """Fit a full-rank through-origin model with exact inputs and Decimal algebra."""
     if not matrix or len(matrix) != len(observed) or not terms:
@@ -1715,7 +1716,7 @@ def fit_exact_decimal_model(
             Decimal(value.numerator) / Decimal(value.denominator)
             for value in exact_coefficients
         ]
-        if any(value < 0 for value in coefficients):
+        if not retain_signed_coefficients and any(value < 0 for value in coefficients):
             raise CandidateFitRejected("exact model coefficients must be nonnegative")
         predictions = [
             sum(
@@ -1762,7 +1763,10 @@ def fit_exact_decimal_model(
         },
         "relative_coefficient_stderr": {
             term: (
-                {"status": "applicable", "value": _decimal_text(error / coefficient)}
+                {
+                    "status": "applicable",
+                    "value": _decimal_text(error / abs(coefficient)),
+                }
                 if coefficient
                 else {"status": "not_applicable_zero_coefficient", "value": None}
             )
@@ -2397,7 +2401,10 @@ def _fit_production_context_rows(
                     fit_row_labels.append({"scenario": scenario.name, "count": count})
             try:
                 fit = fit_exact_decimal_model(
-                    matrix=design, observed=observed, terms=candidate.terms
+                    matrix=design,
+                    observed=observed,
+                    terms=candidate.terms,
+                    retain_signed_coefficients=True,
                 )
             except (CandidateFitRejected, DecimalException) as error:
                 message = str(error)
@@ -2435,42 +2442,51 @@ def _fit_production_context_rows(
                 continue
             reasons = _candidate_gate_reasons(fit, observed)
             coefficients = {
-                term: _decimal(value, label=f"coefficient {term}", nonnegative=True)
+                term: _decimal(value, label=f"coefficient {term}")
                 for term, value in fit["coefficients"].items()
             }
+            coefficients_valid = all(value >= 0 for value in coefficients.values())
+            if not coefficients_valid:
+                reasons.append("negative_coefficient")
             selection_rows = []
             for scenario in selection_scenarios:
                 features = production_context_design_row(candidate, scenario)
                 for count in manifest.validation_counts:
                     if count == 0:
                         continue
-                    prediction = Decimal(count) * sum(
-                        (
-                            feature * coefficients[term]
-                            for feature, term in zip(features, candidate.terms)
-                        ),
-                        Decimal(0),
-                    )
                     observed_value = residual_rows[(scenario.name, count)]["observed"]
-                    try:
-                        ape = exact_ape(prediction, observed_value)
-                    except ValueError:
-                        reasons.append("selection_zero_signal")
-                        ape = None
-                    if ape is not None and ape > Decimal(
-                        QUALITY_GATES["count_holdout_ape_max"]
-                        if count == 32
-                        else QUALITY_GATES["extrapolation_ape_max"]
-                    ):
-                        reasons.append(
-                            "count_holdout" if count == 32 else "extrapolation"
+                    prediction = None
+                    ape = None
+                    if coefficients_valid:
+                        prediction = Decimal(count) * sum(
+                            (
+                                feature * coefficients[term]
+                                for feature, term in zip(features, candidate.terms)
+                            ),
+                            Decimal(0),
                         )
+                        try:
+                            ape = exact_ape(prediction, observed_value)
+                        except ValueError:
+                            reasons.append("selection_zero_signal")
+                        if ape is not None and ape > Decimal(
+                            QUALITY_GATES["count_holdout_ape_max"]
+                            if count == 32
+                            else QUALITY_GATES["extrapolation_ape_max"]
+                        ):
+                            reasons.append(
+                                "count_holdout" if count == 32 else "extrapolation"
+                            )
                     selection_rows.append(
                         {
                             "scenario": scenario.name,
                             "count": count,
                             "observed_increment": _decimal_text(observed_value),
-                            "predicted_increment": _decimal_text(prediction),
+                            "predicted_increment": (
+                                _decimal_text(prediction)
+                                if prediction is not None
+                                else None
+                            ),
                             "ape": _decimal_text(ape) if ape is not None else None,
                         }
                     )
@@ -2497,33 +2513,67 @@ def _fit_production_context_rows(
                     name
                     for name in reversed(candidate_names)
                     if "coefficients" in candidate_reports[name]
+                    and all(
+                        _decimal(value, label=f"coefficient {term}") >= 0
+                        for term, value in candidate_reports[name][
+                            "coefficients"
+                        ].items()
+                    )
                 ),
                 None,
             )
-            if fallback_name is None:
-                family_results[key] = {
-                    "status": "rejected",
-                    "selected_candidate": None,
-                    "coefficients": {},
-                    "candidate_reports": candidate_reports,
-                    "selection_decisions": selection_decisions,
-                    "sibling_decisions": [],
-                    "rows": [],
-                    "selection_rows": [],
-                    "final_holdout_rows": [],
-                    "final_holdout_mape": "0",
-                    "maximum_control_residual": "0",
-                    "rejection_reasons": ["no_candidate_passed"],
-                }
-                continue
-            selected_candidate = manifest.model_candidate(fallback_name)
-            selected_fit = candidate_reports[fallback_name]
-            selected_rows = candidate_reports[fallback_name]["selection_rows"]
-        reasons.extend(candidate_reports[selected_candidate.name]["rejection_reasons"])
-        coefficients = {
-            term: _decimal(value, label=f"coefficient {term}", nonnegative=True)
-            for term, value in selected_fit["coefficients"].items()
-        }
+            if fallback_name is not None:
+                selected_candidate = manifest.model_candidate(fallback_name)
+                selected_fit = candidate_reports[fallback_name]
+                selected_rows = candidate_reports[fallback_name]["selection_rows"]
+                reasons.extend(selected_fit["rejection_reasons"])
+            else:
+                reasons.extend(
+                    reason
+                    for candidate_name in candidate_names
+                    for reason in candidate_reports[candidate_name][
+                        "rejection_reasons"
+                    ]
+                )
+                signed_fallback_name = next(
+                    (
+                        name
+                        for name in reversed(candidate_names)
+                        if "coefficients" in candidate_reports[name]
+                    ),
+                    None,
+                )
+                diagnostic_candidate = manifest.model_candidate(
+                    signed_fallback_name
+                    if signed_fallback_name is not None
+                    else candidate_names[0]
+                )
+                coefficients = {}
+                selected_rows = [
+                    {
+                        "scenario": scenario.name,
+                        "count": count,
+                        "observed_increment": _decimal_text(
+                            residual_rows[(scenario.name, count)]["observed"]
+                        ),
+                        "predicted_increment": None,
+                        "ape": None,
+                    }
+                    for scenario in selection_scenarios
+                    for count in manifest.validation_counts
+                    if count
+                ]
+        if selected_candidate is not None:
+            diagnostic_candidate = selected_candidate
+            if selected_fit is None:  # pragma: no cover - guarded by construction.
+                raise ValueError("selected production context fit is missing")
+            coefficients = {
+                term: _decimal(
+                    value, label=f"coefficient {term}", nonnegative=True
+                )
+                for term, value in selected_fit["coefficients"].items()
+            }
+        has_prediction_candidate = selected_candidate is not None
         for scenario in fit_scenarios:
             signal = abs(residual_rows[(scenario.name, 16)]["observed"])
             if signal < Decimal(QUALITY_GATES["signal_min_prover_gas"]):
@@ -2560,7 +2610,7 @@ def _fit_production_context_rows(
             )
             sibling_key = (
                 scenario.model_class,
-                production_context_design_row(selected_candidate, scenario),
+                production_context_design_row(diagnostic_candidate, scenario),
             )
             class_slopes.setdefault(sibling_key, []).append(
                 (scenario.name, scenario.split, numerator / denominator)
@@ -2569,50 +2619,62 @@ def _fit_production_context_rows(
         final_rows = []
         final_apes = []
         for scenario in final_scenarios:
-            features = production_context_design_row(selected_candidate, scenario)
+            features = production_context_design_row(diagnostic_candidate, scenario)
             for count in manifest.validation_counts:
                 if count == 0:
                     continue
-                prediction = Decimal(count) * sum(
-                    (
-                        feature * coefficients[term]
-                        for feature, term in zip(features, selected_candidate.terms)
-                    ),
-                    Decimal(0),
-                )
                 observed_value = residual_rows[(scenario.name, count)]["observed"]
-                try:
-                    ape = exact_ape(prediction, observed_value)
-                except ValueError:
-                    reasons.append("final_holdout_zero_signal")
-                    ape = None
-                if ape is not None:
-                    final_apes.append(ape)
-                    if ape > Decimal(QUALITY_GATES["final_scenario_row_ape_max"]):
-                        reasons.append("final_holdout_row")
-                    if count == 32 and ape > Decimal(
-                        QUALITY_GATES["count_holdout_ape_max"]
-                    ):
-                        reasons.append("count_holdout")
-                    if count == 64 and ape > Decimal(
-                        QUALITY_GATES["extrapolation_ape_max"]
-                    ):
-                        reasons.append("extrapolation")
+                prediction = None
+                ape = None
+                if has_prediction_candidate:
+                    prediction = Decimal(count) * sum(
+                        (
+                            feature * coefficients[term]
+                            for feature, term in zip(
+                                features, selected_candidate.terms
+                            )
+                        ),
+                        Decimal(0),
+                    )
+                    try:
+                        ape = exact_ape(prediction, observed_value)
+                    except ValueError:
+                        reasons.append("final_holdout_zero_signal")
+                    if ape is not None:
+                        final_apes.append(ape)
+                        if ape > Decimal(
+                            QUALITY_GATES["final_scenario_row_ape_max"]
+                        ):
+                            reasons.append("final_holdout_row")
+                        if count == 32 and ape > Decimal(
+                            QUALITY_GATES["count_holdout_ape_max"]
+                        ):
+                            reasons.append("count_holdout")
+                        if count == 64 and ape > Decimal(
+                            QUALITY_GATES["extrapolation_ape_max"]
+                        ):
+                            reasons.append("extrapolation")
                 final_rows.append(
                     {
                         "scenario": scenario.name,
                         "count": count,
                         "observed_increment": _decimal_text(observed_value),
-                        "predicted_increment": _decimal_text(prediction),
+                        "predicted_increment": (
+                            _decimal_text(prediction)
+                            if prediction is not None
+                            else None
+                        ),
                         "ape": _decimal_text(ape) if ape is not None else None,
                     }
                 )
         family_mape = (
             sum(final_apes, Decimal(0)) / Decimal(len(final_apes))
-            if final_apes
-            else Decimal(0)
+            if has_prediction_candidate and final_apes
+            else Decimal(0) if has_prediction_candidate else None
         )
-        if family_mape > Decimal(QUALITY_GATES["final_scenario_family_mape_max"]):
+        if family_mape is not None and family_mape > Decimal(
+            QUALITY_GATES["final_scenario_family_mape_max"]
+        ):
             reasons.append("final_holdout_mape")
         sibling_decisions = []
         for (model_class, feature_vector), slope_rows in sorted(class_slopes.items()):
@@ -2649,16 +2711,20 @@ def _fit_production_context_rows(
             )
         row_decisions = []
         for scenario in (*fit_scenarios, *selection_scenarios, *final_scenarios):
-            features = production_context_design_row(selected_candidate, scenario)
-            event_cost = sum(
-                (
-                    feature * coefficients[term]
-                    for feature, term in zip(features, selected_candidate.terms)
-                ),
-                Decimal(0),
-            )
-            if not event_cost.is_finite() or event_cost < 0:
-                reasons.append("invalid_prediction")
+            event_cost = None
+            if has_prediction_candidate:
+                features = production_context_design_row(selected_candidate, scenario)
+                event_cost = sum(
+                    (
+                        feature * coefficients[term]
+                        for feature, term in zip(
+                            features, selected_candidate.terms
+                        )
+                    ),
+                    Decimal(0),
+                )
+                if not event_cost.is_finite() or event_cost < 0:
+                    reasons.append("invalid_prediction")
             for count in scenario.counts(manifest):
                 row_decisions.append(
                     {
@@ -2668,8 +2734,10 @@ def _fit_production_context_rows(
                         "observed_increment": _decimal_text(
                             residual_rows[(scenario.name, count)]["observed"]
                         ),
-                        "predicted_increment": _decimal_text(
-                            Decimal(count) * event_cost
+                        "predicted_increment": (
+                            _decimal_text(Decimal(count) * event_cost)
+                            if event_cost is not None
+                            else None
                         ),
                         "control_residual": _decimal_text(
                             residual_rows[(scenario.name, count)]["control"]
@@ -2679,7 +2747,9 @@ def _fit_production_context_rows(
         reasons = sorted(set(reasons))
         family_results[key] = {
             "status": "accepted" if not reasons else "rejected",
-            "selected_candidate": selected_candidate.name,
+            "selected_candidate": (
+                selected_candidate.name if selected_candidate is not None else None
+            ),
             "coefficients": {
                 term: _decimal_text(value) for term, value in coefficients.items()
             },
@@ -2689,7 +2759,9 @@ def _fit_production_context_rows(
             "rows": row_decisions,
             "selection_rows": selected_rows,
             "final_holdout_rows": final_rows,
-            "final_holdout_mape": _decimal_text(family_mape),
+            "final_holdout_mape": (
+                _decimal_text(family_mape) if family_mape is not None else None
+            ),
             "maximum_control_residual": _decimal_text(maximum_control),
             "rejection_reasons": reasons,
         }

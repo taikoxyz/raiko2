@@ -1788,6 +1788,85 @@ class ProductionContextFitTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "zero observed"):
             production.exact_ape(Decimal(1), Decimal(0))
 
+    def test_negative_candidate_retains_observed_family_diagnostics(self):
+        manifest = production.load_production_context_manifest(MANIFEST)
+        rows = [
+            row
+            for row in self._complete_rows()
+            if row["scenario"].startswith("timestamp_")
+        ]
+        for row in rows:
+            if row["count"] == 0:
+                continue
+            if row["lane"] == "target":
+                row["prover_gas"] = str(Decimal(159) - Decimal(row["count"]))
+            else:
+                row["prover_gas"] = str(
+                    Decimal(row["prover_gas"]) + Decimal(100 * row["count"])
+                )
+
+        family = production.fit_production_context_rows(
+            manifest,
+            rows,
+            self._subtotal_model(),
+            family_keys=("opcode:0x42",),
+        )["families"]["opcode:0x42"]
+
+        self.assertEqual(family["status"], "rejected")
+        self.assertIsNone(family["selected_candidate"])
+        self.assertEqual(family["coefficients"], {})
+        self.assertEqual(
+            set(family["rejection_reasons"]),
+            {
+                "control_contamination",
+                "insufficient_signal",
+                "negative_coefficient",
+                "no_candidate_passed",
+            },
+        )
+        self.assertEqual(family["maximum_control_residual"], "6400")
+        self.assertIsNone(family["final_holdout_mape"])
+        self.assertTrue(family["sibling_decisions"])
+        fit_row = next(
+            row
+            for row in family["rows"]
+            if row["scenario"] == "timestamp_post_unzen_delta_17"
+            and row["count"] == 16
+        )
+        self.assertEqual(
+            fit_row,
+            {
+                "scenario": "timestamp_post_unzen_delta_17",
+                "split": "fit",
+                "count": 16,
+                "observed_increment": "-16",
+                "predicted_increment": None,
+                "control_residual": "1600",
+            },
+        )
+        self.assertEqual(
+            family["final_holdout_rows"],
+            [
+                {
+                    "scenario": "timestamp_post_unzen_delta_86400",
+                    "count": 32,
+                    "observed_increment": "-32",
+                    "predicted_increment": None,
+                    "ape": None,
+                },
+                {
+                    "scenario": "timestamp_post_unzen_delta_86400",
+                    "count": 64,
+                    "observed_increment": "-64",
+                    "predicted_increment": None,
+                    "ape": None,
+                },
+            ],
+        )
+        candidate = family["candidate_reports"]["timestamp_nonzero"]
+        self.assertEqual(candidate["coefficients"], {"timestamp_nonzero": "-1"})
+        self.assertIn("negative_coefficient", candidate["rejection_reasons"])
+
     def test_all_six_families_recover_and_calldatasize_selection_is_fixed_order(self):
         manifest = production.load_production_context_manifest(MANIFEST)
         length = production.fit_production_context_rows(

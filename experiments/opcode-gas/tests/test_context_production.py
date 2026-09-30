@@ -252,6 +252,101 @@ class ContextDiagnosticTests(unittest.TestCase):
                     out=out,
                 )
             self.assertEqual(len(list((out / "reports").iterdir())), 1)
+            resumed_report_path = out / "reports" / f"{rows[0]['row_id']}.json"
+            resumed_report_path.write_bytes(
+                json.dumps(json.loads(resumed_report_path.read_bytes()), indent=2).encode()
+                + b"\n"
+            )
+            with mock.patch.object(
+                approximation,
+                "load_context_diagnostic_source_result",
+                return_value=source,
+            ), mock.patch.object(
+                approximation,
+                "sha256_file",
+                side_effect=lambda path: (
+                    elf_sha256
+                    if pathlib.Path(path).name == "sp1_shasta_proposal.elf"
+                    else launcher_sha256
+                ),
+            ), mock.patch.object(
+                approximation,
+                "_run_diagnostic_report",
+                side_effect=complete_runner,
+            ), self.assertRaisesRegex(ValueError, "not canonical"):
+                approximation.run_context_diagnostics(
+                    result_directory=ROOT / "experiments/opcode-gas/derivations/a41befb63e663890896ba67d",
+                    launcher=launcher,
+                    out=out,
+                )
+            self.assertFalse((out / "diagnostics.json").exists())
+            resumed_report_path.write_bytes(
+                production.canonical_json(self._report(rows[0])) + b"\n"
+            )
+            resumed_report_target = root / "resumed-report.json"
+            resumed_report_target.write_bytes(resumed_report_path.read_bytes())
+            resumed_report_path.unlink()
+            resumed_report_path.symlink_to(resumed_report_target)
+            with mock.patch.object(
+                approximation,
+                "load_context_diagnostic_source_result",
+                return_value=source,
+            ), mock.patch.object(
+                approximation,
+                "sha256_file",
+                side_effect=lambda path: (
+                    elf_sha256
+                    if pathlib.Path(path).name == "sp1_shasta_proposal.elf"
+                    else launcher_sha256
+                ),
+            ), mock.patch.object(
+                approximation,
+                "_run_diagnostic_report",
+                side_effect=complete_runner,
+            ), self.assertRaisesRegex(ValueError, "not a regular"):
+                approximation.run_context_diagnostics(
+                    result_directory=ROOT / "experiments/opcode-gas/derivations/a41befb63e663890896ba67d",
+                    launcher=launcher,
+                    out=out,
+                )
+            self.assertFalse((out / "diagnostics.json").exists())
+            resumed_report_path.unlink()
+            resumed_report_path.write_bytes(resumed_report_target.read_bytes())
+            mismatched_report = self._report(rows[0])
+            mismatched_report["controlled_block"]["row_id"] = rows[1]["row_id"]
+            resumed_report_path.write_bytes(
+                production.canonical_json(mismatched_report) + b"\n"
+            )
+
+            def should_not_run(**_kwargs):
+                raise AssertionError("resumed report must be checked before a new launch")
+
+            with mock.patch.object(
+                approximation,
+                "load_context_diagnostic_source_result",
+                return_value=source,
+            ), mock.patch.object(
+                approximation,
+                "sha256_file",
+                side_effect=lambda path: (
+                    elf_sha256
+                    if pathlib.Path(path).name == "sp1_shasta_proposal.elf"
+                    else launcher_sha256
+                ),
+            ), mock.patch.object(
+                approximation,
+                "_run_diagnostic_report",
+                side_effect=should_not_run,
+            ), self.assertRaisesRegex(ValueError, "source row mismatch"):
+                approximation.run_context_diagnostics(
+                    result_directory=ROOT / "experiments/opcode-gas/derivations/a41befb63e663890896ba67d",
+                    launcher=launcher,
+                    out=out,
+                )
+            self.assertFalse((out / "diagnostics.json").exists())
+            resumed_report_path.write_bytes(
+                production.canonical_json(self._report(rows[0])) + b"\n"
+            )
             unrelated_temp = out / "reports" / ".important.tmp"
             unrelated_temp.write_bytes(b"do-not-delete")
             with mock.patch.object(

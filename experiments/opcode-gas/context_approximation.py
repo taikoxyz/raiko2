@@ -582,6 +582,25 @@ def _run_diagnostic_report(
     return report
 
 
+def _load_resumed_diagnostic_report(
+    path: pathlib.Path, row: Mapping[str, object]
+) -> dict[str, object]:
+    """Accept only a complete canonical report that is bound to its source row."""
+    if path.is_symlink() or not path.is_file():
+        raise ValueError("context diagnostic resumed report is not a regular file")
+    raw = path.read_bytes()
+    try:
+        report = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise ValueError("context diagnostic resumed report is invalid JSON") from error
+    if raw != canonical_json(report) + b"\n":
+        raise ValueError("context diagnostic resumed report is not canonical")
+    if not isinstance(report, Mapping):
+        raise ValueError("context diagnostic resumed report is not an object")
+    _validated_report_for_row(report, row)
+    return dict(report)
+
+
 def run_context_diagnostics(
     *, result_directory: pathlib.Path, launcher: pathlib.Path, out: pathlib.Path
 ) -> dict[str, object]:
@@ -655,8 +674,8 @@ def run_context_diagnostics(
     reports = []
     for row in selected:
         report_path = out / "reports" / f"{row['row_id']}.json"
-        if report_path.exists():
-            report = json.loads(report_path.read_bytes())
+        if report_path.exists() or report_path.is_symlink():
+            report = _load_resumed_diagnostic_report(report_path, row)
         else:
             report = _run_diagnostic_report(
                 launcher=launcher,

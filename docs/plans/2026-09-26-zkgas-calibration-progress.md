@@ -64,7 +64,7 @@ Osaka execution semantics while continuing to bind the actual exported Unzen sch
 | Opcode core | Complete at partial coverage | Preserve sealed 101-plus-2 augmentation |
 | Remaining operations | Complete at frozen classification | Preserve the sealed coverage and ownership ledgers |
 | Stateful storage execution | Promoted and replayed on two ad-hoc proposals | Preserve sealed typed features while closing the remaining operation families |
-| Context-sensitive operations | Declared approximation sealed | Compare the fully evaluable candidate with current Unzen on frozen controlled blocks |
+| Context-sensitive operations | Fully evaluable review-only candidate sealed | Freeze the controlled-block split before executing calibration |
 | State/trie | Coarse model accepted | Preserve the sealed holdout evidence; split only after a new predeclared experiment |
 | Transaction | Declared approximation accepted and sealed | Preserve `5017` and its `0.002` materiality budget |
 | Block | Fixed base accepted and sealed | Preserve the selected round-128 fixed-cost artifact |
@@ -770,15 +770,68 @@ closed a sealed-purpose overwrite before this final identity was generated. The 
 No proposal or final-validation row was opened. No production table, registry, schedule, runtime
 configuration, block limit, Boundless configuration, or deployed component changed.
 
+## Completed Milestone: Fully Evaluable Review-Only Candidate
+
+The declared context approximation is now integrated into a schema-4 composite estimator and sealed
+at `experiments/opcode-gas/estimators/0bae279f01efa6c86ddd482c`:
+
+- implementation revision:
+  `5ff4ed2cfbb0cfc15bc96a931727ae026436d868`;
+- full candidate identity SHA256:
+  `0bae279f01efa6c86ddd482cebb344a335f7d70ee2711a0769fe31a95fb3cc4e`;
+- canonical estimator-file SHA256:
+  `6d47ac014924173a733e9cc4ba269f4f1602730d35d38908044ab2ae9577a256`;
+- guest-launcher SHA256:
+  `c839578e145cd6010bf6165857fe359dd872e50b30ae856a28cc1f32b5b160d3`;
+- production SP1 proposal ELF SHA256:
+  `ba5ab7026643730c4416550a069fd0776f0e11ae09155ec5fce413acbe5e59c7`;
+- production SP1 proposal VK SHA256:
+  `bd71c1f1cbd72387aa057ae6e936afd6dcb0bc170c6a91193c6d1a0b47507102`;
+- trace reconstruction SHA256:
+  `e35e6860d2d1fec6f9e76089fa4a14be218df3bf257d4ddbafbd378ce7173077`;
+- trace inspector SHA256:
+  `94b1da5fb5aad50da840978dd76ae0674161b242bd485d831ef6cbfaf3703f51`.
+
+The estimator preserves the corrected Osaka V5 registry byte-for-byte and adds a separate derived
+coverage overlay for exactly `ADDRESS`, `CALLER`, `CALLVALUE`, `CALLDATALOAD`, `CALLDATASIZE`, and
+`TIMESTAMP`. The overlay consumes the nine sealed typed class costs once per executed event and does
+not multiply them by raw EVM gas. Missing or incompatible typed input remains a coverage gap; no
+current-schedule fallback exists. The six derived rows bind the current trace inspector rather than
+the predecessor V5 source hash.
+
+The candidate also binds the corrected core, V5 coverage ledger, corrected higher-layer package,
+stateful storage result, declared context approximation, estimator source, implementation revision,
+trace schema, launcher, ELF, and VK. It remains `review_only=true`, `production_write=false`, and
+`proposal_validation_opened=false`.
+
+Independent source review found and closed two blockers before the source commit: incomplete
+coverage had required a fabricated prediction, and the derived context rows retained stale trace
+provenance. In the final implementation, incomplete coverage accepts only a null candidate
+prediction, produces no candidate aggregate metrics, and fails every candidate gate; a numeric
+fallback is rejected. The current inspector path, selector, and SHA are validated on all six derived
+rows. Final source review and behavioral testing passed, including schema-2/3 replay, all nine typed
+classes, raw-gas independence, exact Decimal comparison gates, create-only publication, replay,
+collision, and tamper rejection.
+
+The sealed candidate then passed independent artifact review and behavioral verification. Both
+recomputed its content address and all bound source/execution hashes, replayed it through the CLI,
+verified V5 registry equality, the six derived overlay rows, and the nine class costs, and confirmed
+that no block manifest, block row, Unzen scalar, comparison result, proposal result, or validation
+result had been created.
+
+No production table, registry, schedule, runtime configuration, block limit, Boundless
+configuration, or deployed component changed.
+
 ## Next Gate
 
 Strict Task 7 is not executed. Result `a41bef...` remains ineligible for strict promotion and its six
 family verdicts remain rejected. The separately sealed approximation above is not a reinterpretation
-of those verdicts and is not yet a production candidate. The next gate is to build and seal the fully
-evaluable estimator, freeze the controlled-block calibration/validation manifest, execute and seal
-calibration only, derive and seal the Unzen scalar, and only then open the untouched validation
-partition whose rows bind both sealed identities. SP1 diagnostics remain explanatory sidecar data
-and never enter the online formula.
+of those verdicts. The fully evaluable estimator is sealed but remains review-only and is not a
+production candidate. The next gate is to freeze the controlled-block calibration/validation
+manifest against its exact identity. Only after independent manifest review may calibration execute
+and seal; the Unzen scalar is then derived and sealed before the untouched validation partition can
+open. Every validation row must bind both sealed identities. SP1 diagnostics remain explanatory
+sidecar data and never enter the online formula.
 
 The decisive acceptance condition is comparative rather than perfect per-opcode identification.
 On the same frozen block validation partition, the candidate must have complete coverage, strictly

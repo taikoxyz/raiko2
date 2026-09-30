@@ -42,6 +42,8 @@ from calibration_model import (
     validate_dynamic_holdouts,
 )
 from composite_estimator import (
+    BLOCK_COMPARISON_ESTIMATOR_SCHEMA_VERSION as _COMPOSITE_BLOCK_COMPARISON_SCHEMA_VERSION,
+    BLOCK_COMPARISON_SOURCE_CODE_PATHS as _COMPOSITE_BLOCK_COMPARISON_SOURCE_PATH_SET,
     DECLARED_CONTEXT_ESTIMATOR_SCHEMA_VERSION as _COMPOSITE_DECLARED_CONTEXT_SCHEMA_VERSION,
     DECLARED_CONTEXT_SOURCE_CODE_PATHS as _COMPOSITE_DECLARED_CONTEXT_SOURCE_PATH_SET,
     DECLARED_CONTEXT_TRACE_SCHEMA_VERSION as _COMPOSITE_DECLARED_CONTEXT_TRACE_SCHEMA_VERSION,
@@ -24660,6 +24662,9 @@ _COMPOSITE_SOURCE_PATHS = (
 _COMPOSITE_DECLARED_CONTEXT_SOURCE_PATHS = tuple(
     sorted(_COMPOSITE_DECLARED_CONTEXT_SOURCE_PATH_SET)
 )
+_COMPOSITE_BLOCK_COMPARISON_SOURCE_PATHS = tuple(
+    sorted(_COMPOSITE_BLOCK_COMPARISON_SOURCE_PATH_SET)
+)
 
 _COMPOSITE_STATEFUL_RESULT_INVENTORY = {
     "result.json",
@@ -25113,6 +25118,57 @@ def _declared_context_coverage_overlay(
     return promoted
 
 
+def _terminal_coverage_overlay(
+    rows: Sequence[Mapping[str, Any]], *, inspector_sha256: str
+) -> list[Mapping[str, Any]]:
+    promoted = json.loads(json.dumps(rows))
+    matches = [row for row in promoted if row.get("key") == "opcode:0x00"]
+    if len(matches) != 1:
+        raise ValueError("composite terminal predecessor coverage differs")
+    row = matches[0]
+    if (
+        row.get("classification") != "explicitly_unsupported"
+        or row.get("model_status") != "unsupported"
+    ):
+        raise ValueError("composite terminal predecessor coverage differs")
+    evidence_rows = row.get("source_evidence")
+    machine_evidence = [
+        evidence
+        for evidence in evidence_rows
+        if isinstance(evidence, Mapping)
+        and evidence.get("kind") == "machine_trace_selector"
+    ] if isinstance(evidence_rows, list) else []
+    if (
+        len(machine_evidence) != 1
+        or machine_evidence[0].get("path")
+        != "crates/zkgas-trace/src/inspector.rs"
+        or machine_evidence[0].get("selector_ref")
+        != "opcode_raw_gas_execution"
+    ):
+        raise ValueError("composite terminal predecessor evidence differs")
+    machine_evidence[0]["sha256"] = inspector_sha256
+    row["classification"] = "declared_terminal_approximation"
+    row["model_status"] = "declared_approximation"
+    row.pop("reason", None)
+    row.pop("artifact_ref", None)
+    row["source_evidence"] = [
+        evidence
+        for evidence in evidence_rows
+        if not (
+            isinstance(evidence, Mapping)
+            and evidence.get("kind") == "sealed_registry_unsupported"
+        )
+    ]
+    row["source_evidence"].append(
+        {
+            "kind": "declared_terminal_approximation",
+            "opcode": "0x00",
+            "cost": "0",
+        }
+    )
+    return promoted
+
+
 def _composite_execution_artifacts(
     *,
     guest_launcher_path: pathlib.Path,
@@ -25157,6 +25213,7 @@ def build_composite_estimator_artifact(
     guest_launcher_path: pathlib.Path | None = None,
     proposal_elf_path: pathlib.Path | None = None,
     proposal_vk_path: pathlib.Path | None = None,
+    terminal_approximation: bool = False,
 ) -> Mapping[str, Any]:
     """Build the deterministic coverage-qualified SP1 composite estimator."""
     assert_generated_paths_only(git_worktree_status())
@@ -25165,6 +25222,8 @@ def build_composite_estimator_artifact(
         raise ValueError("composite implementation revision is not a local commit")
 
     declared_context = context_approximation_path is not None
+    if terminal_approximation and not declared_context:
+        raise ValueError("terminal approximation requires declared context candidate inputs")
     execution_paths = (
         guest_launcher_path,
         proposal_elf_path,
@@ -25248,7 +25307,9 @@ def build_composite_estimator_artifact(
 
     source_sha256s = {}
     source_paths = (
-        _COMPOSITE_DECLARED_CONTEXT_SOURCE_PATHS
+        _COMPOSITE_BLOCK_COMPARISON_SOURCE_PATHS
+        if terminal_approximation
+        else _COMPOSITE_DECLARED_CONTEXT_SOURCE_PATHS
         if declared_context
         else _COMPOSITE_SOURCE_PATHS
     )
@@ -25288,6 +25349,13 @@ def build_composite_estimator_artifact(
                 "crates/zkgas-trace/src/inspector.rs"
             ],
         )
+    if terminal_approximation:
+        execution_coverage = _terminal_coverage_overlay(
+            execution_coverage,
+            inspector_sha256=source_sha256s[
+                "crates/zkgas-trace/src/inspector.rs"
+            ],
+        )
     source_artifacts = {
         "augmented_core": {
             "path": core_relative,
@@ -25320,7 +25388,9 @@ def build_composite_estimator_artifact(
         )
     artifact = {
         "schema_version": (
-            _COMPOSITE_DECLARED_CONTEXT_SCHEMA_VERSION
+            _COMPOSITE_BLOCK_COMPARISON_SCHEMA_VERSION
+            if terminal_approximation
+            else _COMPOSITE_DECLARED_CONTEXT_SCHEMA_VERSION
             if declared_context
             else _COMPOSITE_ESTIMATOR_SCHEMA_VERSION
         ),
@@ -25382,6 +25452,14 @@ def build_composite_estimator_artifact(
             ],
             "artifact_sha256": context_artifact["artifact_sha256"],
             "classes": json.loads(json.dumps(context_artifact["classes"])),
+        }
+    if terminal_approximation:
+        artifact["declared_terminal_approximation"] = {
+            "status": "declared_approximation",
+            "opcode": "0x00",
+            "shape": "constant_per_execution",
+            "cost": "0",
+            "ownership": "conservatively_absorbed_by_transaction_base",
         }
     artifact["artifact_sha256"] = sha256_bytes(canonical_json(artifact))
     _validate_composite_estimator_artifact(artifact)
@@ -25536,6 +25614,7 @@ def seal_composite_estimator(
     guest_launcher_path: pathlib.Path | None = None,
     proposal_elf_path: pathlib.Path | None = None,
     proposal_vk_path: pathlib.Path | None = None,
+    terminal_approximation: bool = False,
 ) -> pathlib.Path:
     """Create one new content-addressed estimator directory without overwriting."""
     artifact = build_composite_estimator_artifact(
@@ -25547,6 +25626,7 @@ def seal_composite_estimator(
         guest_launcher_path=guest_launcher_path,
         proposal_elf_path=proposal_elf_path,
         proposal_vk_path=proposal_vk_path,
+        terminal_approximation=terminal_approximation,
     )
     out_root = pathlib.Path(out_root)
     estimator_path_file = pathlib.Path(estimator_path_file)
@@ -25701,6 +25781,10 @@ def verify_composite_estimator(directory: pathlib.Path) -> Mapping[str, Any]:
             )
             if declared_context
             else None
+        ),
+        terminal_approximation=(
+            artifact.get("schema_version")
+            == _COMPOSITE_BLOCK_COMPARISON_SCHEMA_VERSION
         ),
     )
     if not _exact_json_equal(artifact, rebuilt):
@@ -25882,6 +25966,7 @@ def cmd_seal_composite_estimator(args: argparse.Namespace) -> None:
         guest_launcher_path=getattr(args, "guest_launcher", None),
         proposal_elf_path=getattr(args, "proposal_elf", None),
         proposal_vk_path=getattr(args, "proposal_vk", None),
+        terminal_approximation=getattr(args, "terminal_approximation", False),
     )
     print(sealed)
 
@@ -26434,6 +26519,7 @@ def build_parser() -> argparse.ArgumentParser:
     composite_seal.add_argument("--guest-launcher", type=pathlib.Path)
     composite_seal.add_argument("--proposal-elf", type=pathlib.Path)
     composite_seal.add_argument("--proposal-vk", type=pathlib.Path)
+    composite_seal.add_argument("--terminal-approximation", action="store_true")
     composite_seal.add_argument("--out-root", type=pathlib.Path, required=True)
     composite_seal.add_argument(
         "--estimator-path-file", type=pathlib.Path, required=True

@@ -770,7 +770,7 @@ closed a sealed-purpose overwrite before this final identity was generated. The 
 No proposal or final-validation row was opened. No production table, registry, schedule, runtime
 configuration, block limit, Boundless configuration, or deployed component changed.
 
-## Completed Milestone: Fully Evaluable Review-Only Candidate
+## Reviewed Pre-Fixture Checkpoint: Fully Evaluable Review-Only Candidate
 
 The declared context approximation is now integrated into a schema-4 composite estimator and sealed
 at `experiments/opcode-gas/estimators/0bae279f01efa6c86ddd482c`:
@@ -819,6 +819,14 @@ verified V5 registry equality, the six derived overlay rows, and the nine class 
 that no block manifest, block row, Unzen scalar, comparison result, proposal result, or validation
 result had been created.
 
+This candidate was correctly sealed and reviewed before any block result opened. Subsequent source
+work found that the final Task 4 matrix requires additional bounded memory, storage, mixed, and
+transaction-count fixture support in the guest launcher. Therefore `0bae...` is retained unchanged
+as the reviewed pre-fixture checkpoint, but it is not the candidate that will bind the final frozen
+manifest. After the structured fixture source passes native trace/parity review, the launcher must
+be rebuilt and a create-only successor candidate must bind that launcher and source. No calibration
+or validation observation has been opened while making this ordering correction.
+
 No production table, registry, schedule, runtime configuration, block limit, Boundless
 configuration, or deployed component changed.
 
@@ -826,9 +834,11 @@ configuration, or deployed component changed.
 
 Strict Task 7 is not executed. Result `a41bef...` remains ineligible for strict promotion and its six
 family verdicts remain rejected. The separately sealed approximation above is not a reinterpretation
-of those verdicts. The fully evaluable estimator is sealed but remains review-only and is not a
-production candidate. The next gate is to freeze the controlled-block calibration/validation
-manifest against its exact identity. Only after independent manifest review may calibration execute
+of those verdicts. The `0bae...` estimator is sealed but remains a review-only pre-fixture checkpoint
+and is not a production candidate. The next gate is to review the structured fixture source, rebuild
+the launcher, seal and review its successor candidate, then freeze the controlled-block
+calibration/validation manifest against that successor's exact identity. Only after independent
+manifest review may calibration execute
 and seal; the Unzen scalar is then derived and sealed before the untouched validation partition can
 open. Every validation row must bind both sealed identities. SP1 diagnostics remain explanatory
 sidecar data and never enter the online formula.

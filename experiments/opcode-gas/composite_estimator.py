@@ -21,6 +21,7 @@ from hierarchical_model import (
 ESTIMATOR_SCHEMA_VERSION = 2
 CONTEXT_ESTIMATOR_SCHEMA_VERSION = 3
 DECLARED_CONTEXT_ESTIMATOR_SCHEMA_VERSION = 4
+BLOCK_COMPARISON_ESTIMATOR_SCHEMA_VERSION = 5
 ESTIMATOR_PURPOSE = "sp1_composite_block_estimator"
 TRACE_SCHEMA_VERSION = 3
 DECLARED_CONTEXT_TRACE_SCHEMA_VERSION = 4
@@ -87,6 +88,12 @@ DECLARED_CONTEXT_SOURCE_CODE_PATHS = SOURCE_CODE_PATHS | frozenset(
         "docs/plans/2026-09-30-zkgas-context-approximation-implementation-plan.md",
     }
 )
+BLOCK_COMPARISON_SOURCE_CODE_PATHS = DECLARED_CONTEXT_SOURCE_CODE_PATHS | frozenset(
+    {
+        "bin/guest-launcher/src/controlled_workload.rs",
+        "experiments/opcode-gas/block_comparison.py",
+    }
+)
 _CONTEXT_OPCODES = frozenset({0x30, 0x33, 0x34, 0x35, 0x36, 0x42})
 _DECLARED_CONTEXT_CLASSES = frozenset(
     {
@@ -147,6 +154,9 @@ _EXPECTED_ESTIMATOR_FIELDS = frozenset(
 )
 _DECLARED_CONTEXT_ESTIMATOR_FIELDS = _EXPECTED_ESTIMATOR_FIELDS | frozenset(
     {"declared_context_approximation"}
+)
+_BLOCK_COMPARISON_ESTIMATOR_FIELDS = _DECLARED_CONTEXT_ESTIMATOR_FIELDS | frozenset(
+    {"declared_terminal_approximation"}
 )
 _OWNERSHIP_SEMANTICS = {
     "system_and_anchor_operations": "block_base",
@@ -349,7 +359,10 @@ def _validate_coverage(
             raise ValueError(f"composite estimator opcode coverage differs: {key}")
         if (
             artifact.get("schema_version")
-            == DECLARED_CONTEXT_ESTIMATOR_SCHEMA_VERSION
+            in {
+                DECLARED_CONTEXT_ESTIMATOR_SCHEMA_VERSION,
+                BLOCK_COMPARISON_ESTIMATOR_SCHEMA_VERSION,
+            }
             and opcode in _CONTEXT_OPCODES
         ):
             source = artifact["source_artifacts"][
@@ -392,6 +405,49 @@ def _validate_coverage(
                 raise ValueError(
                     f"composite estimator declared context coverage differs: {key}"
                 )
+            continue
+        if (
+            artifact.get("schema_version")
+            == BLOCK_COMPARISON_ESTIMATOR_SCHEMA_VERSION
+            and opcode == 0x00
+        ):
+            evidence = row.get("source_evidence")
+            machine_evidence = [
+                item
+                for item in evidence
+                if isinstance(item, Mapping)
+                and item.get("kind") == "machine_trace_selector"
+            ] if isinstance(evidence, list) else []
+            terminal_evidence = [
+                item
+                for item in evidence
+                if isinstance(item, Mapping)
+                and item.get("kind") == "declared_terminal_approximation"
+            ] if isinstance(evidence, list) else []
+            if (
+                row.get("classification") != "declared_terminal_approximation"
+                or row.get("model_status") != "declared_approximation"
+                or "reason" in row
+                or "artifact_ref" in row
+                or len(machine_evidence) != 1
+                or machine_evidence[0].get("path")
+                != "crates/zkgas-trace/src/inspector.rs"
+                or machine_evidence[0].get("selector_ref")
+                != "opcode_raw_gas_execution"
+                or machine_evidence[0].get("sha256")
+                != artifact["source_artifacts"]["source_code_sha256s"][
+                    "crates/zkgas-trace/src/inspector.rs"
+                ]
+                or terminal_evidence
+                != [
+                    {
+                        "kind": "declared_terminal_approximation",
+                        "opcode": "0x00",
+                        "cost": "0",
+                    }
+                ]
+            ):
+                raise ValueError("composite estimator terminal coverage differs: opcode:0x00")
             continue
         model_id = registry.opcode_model_ids[opcode]
         if model_id is None:
@@ -543,7 +599,10 @@ def _validate_sources(sources: Any, *, schema_version: int) -> None:
     }
     if schema_version == CONTEXT_ESTIMATOR_SCHEMA_VERSION:
         expected_sources.add("context_operations")
-    elif schema_version == DECLARED_CONTEXT_ESTIMATOR_SCHEMA_VERSION:
+    elif schema_version in {
+        DECLARED_CONTEXT_ESTIMATOR_SCHEMA_VERSION,
+        BLOCK_COMPARISON_ESTIMATOR_SCHEMA_VERSION,
+    }:
         expected_sources.update(
             {"declared_context_approximation", "execution_artifacts"}
         )
@@ -682,7 +741,10 @@ def _validate_sources(sources: Any, *, schema_version: int) -> None:
             or any(not _is_sha256(value) for value in context["file_sha256s"].values())
         ):
             raise ValueError("composite estimator context-operation source differs")
-    elif schema_version == DECLARED_CONTEXT_ESTIMATOR_SCHEMA_VERSION:
+    elif schema_version in {
+        DECLARED_CONTEXT_ESTIMATOR_SCHEMA_VERSION,
+        BLOCK_COMPARISON_ESTIMATOR_SCHEMA_VERSION,
+    }:
         context = sources["declared_context_approximation"]
         context_path = context.get("path") if isinstance(context, Mapping) else None
         context_pure = PurePosixPath(context_path) if isinstance(context_path, str) else None
@@ -734,6 +796,8 @@ def _validate_sources(sources: Any, *, schema_version: int) -> None:
         != (
             CONTEXT_SOURCE_CODE_PATHS
             if schema_version == CONTEXT_ESTIMATOR_SCHEMA_VERSION
+            else BLOCK_COMPARISON_SOURCE_CODE_PATHS
+            if schema_version == BLOCK_COMPARISON_ESTIMATOR_SCHEMA_VERSION
             else DECLARED_CONTEXT_SOURCE_CODE_PATHS
             if schema_version == DECLARED_CONTEXT_ESTIMATOR_SCHEMA_VERSION
             else SOURCE_CODE_PATHS
@@ -983,7 +1047,9 @@ def validate_estimator_artifact(artifact: Mapping[str, Any]) -> OpcodeRegistry:
     _validate_content_address(artifact)
     schema_version = artifact.get("schema_version")
     expected_fields = (
-        _DECLARED_CONTEXT_ESTIMATOR_FIELDS
+        _BLOCK_COMPARISON_ESTIMATOR_FIELDS
+        if schema_version == BLOCK_COMPARISON_ESTIMATOR_SCHEMA_VERSION
+        else _DECLARED_CONTEXT_ESTIMATOR_FIELDS
         if schema_version == DECLARED_CONTEXT_ESTIMATOR_SCHEMA_VERSION
         else _EXPECTED_ESTIMATOR_FIELDS
     )
@@ -995,6 +1061,7 @@ def validate_estimator_artifact(artifact: Mapping[str, Any]) -> OpcodeRegistry:
             ESTIMATOR_SCHEMA_VERSION,
             CONTEXT_ESTIMATOR_SCHEMA_VERSION,
             DECLARED_CONTEXT_ESTIMATOR_SCHEMA_VERSION,
+            BLOCK_COMPARISON_ESTIMATOR_SCHEMA_VERSION,
         }
         or artifact.get("purpose") != ESTIMATOR_PURPOSE
         or artifact.get("status") != "sealed_coverage_qualified_estimator"
@@ -1014,7 +1081,11 @@ def validate_estimator_artifact(artifact: Mapping[str, Any]) -> OpcodeRegistry:
         or trace_schema.get("schema_version")
         != (
             DECLARED_CONTEXT_TRACE_SCHEMA_VERSION
-            if schema_version == DECLARED_CONTEXT_ESTIMATOR_SCHEMA_VERSION
+            if schema_version
+            in {
+                DECLARED_CONTEXT_ESTIMATOR_SCHEMA_VERSION,
+                BLOCK_COMPARISON_ESTIMATOR_SCHEMA_VERSION,
+            }
             else TRACE_SCHEMA_VERSION
         )
         or trace_schema.get("source_path") != "crates/zkgas-trace/src/reconstruct.rs"
@@ -1057,11 +1128,24 @@ def validate_estimator_artifact(artifact: Mapping[str, Any]) -> OpcodeRegistry:
             != artifact["source_artifacts"]["context_operations"]["models_sha256"]
         ):
             raise ValueError("composite estimator context model source digest differs")
-    elif schema_version == DECLARED_CONTEXT_ESTIMATOR_SCHEMA_VERSION:
+    elif schema_version in {
+        DECLARED_CONTEXT_ESTIMATOR_SCHEMA_VERSION,
+        BLOCK_COMPARISON_ESTIMATOR_SCHEMA_VERSION,
+    }:
         _validate_declared_context_approximation(
             artifact.get("declared_context_approximation"),
             artifact["source_artifacts"]["declared_context_approximation"],
         )
+    if schema_version == BLOCK_COMPARISON_ESTIMATOR_SCHEMA_VERSION:
+        terminal = artifact.get("declared_terminal_approximation")
+        if terminal != {
+            "status": "declared_approximation",
+            "opcode": "0x00",
+            "shape": "constant_per_execution",
+            "cost": "0",
+            "ownership": "conservatively_absorbed_by_transaction_base",
+        }:
+            raise ValueError("composite estimator terminal approximation differs")
     if trace_schema["source_sha256"] != artifact["source_artifacts"][
         "source_code_sha256s"
     ][trace_schema["source_path"]]:
@@ -1425,7 +1509,10 @@ def _estimate_trace(
             estimator["source_artifacts"]["declared_context_approximation"],
         )
         if estimator["schema_version"]
-        == DECLARED_CONTEXT_ESTIMATOR_SCHEMA_VERSION
+        in {
+            DECLARED_CONTEXT_ESTIMATOR_SCHEMA_VERSION,
+            BLOCK_COMPARISON_ESTIMATOR_SCHEMA_VERSION,
+        }
         else {}
     )
     _validate_trace_header(trace, estimator)
@@ -1829,6 +1916,27 @@ def _estimate_trace(
                 operation_cost += predicted
                 measured_operation_count += 1
                 measured_raw_gas += Decimal(raw_gas)
+                measured_typed_feature_count += 1
+                continue
+            if coverage.get("classification") == "declared_terminal_approximation":
+                total_typed_feature_count += 1
+                model_input = component.get("model_input")
+                if (
+                    opcode != 0x00
+                    or raw_gas != 0
+                    or model_input != {"kind": "static_raw_gas", "raw_gas": 0}
+                ):
+                    _gap(
+                        gaps,
+                        reason="opcode_model_input_incompatible",
+                        layer="operation",
+                        block_index=block_index,
+                        operation_id=operation_id,
+                        execution_key=key,
+                        detail="terminal approximation requires zero-gas STOP",
+                    )
+                    continue
+                measured_operation_count += 1
                 measured_typed_feature_count += 1
                 continue
             if coverage.get("classification") == "explicitly_unsupported":

@@ -38,6 +38,7 @@ use raiko2_stateless::reconstruct_block_from_transactions_with_witness_resources
 use raiko2_zkgas_trace::{
     CalldataLoadAccessClass, ContextValueClass, OpcodeModelInput, OperationComponent,
     OperationPhase, PricingBasis, ProposalTrace, ProposalTraceStatus, TransactionDisposition,
+    inspector::{StorageAccess, StorageStoreBranch},
     trace_shasta_proposal,
 };
 use reth_ethereum_primitives::TransactionSigned;
@@ -432,12 +433,55 @@ pub enum ControlledProgram {
         count: u64,
         profile: ControlledContextProfile,
     },
+    BlockComparison {
+        scenario: ControlledBlockComparisonScenario,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case", tag = "kind")]
+pub enum ControlledBlockComparisonScenario {
+    Arithmetic {
+        repeat_count: u64,
+        seed: u64,
+    },
+    ContextHeavy {
+        repeat_count: u64,
+        calldata_length: u64,
+        call_value: u64,
+        timestamp_delta: u64,
+    },
+    CalldataMemory {
+        repeat_count: u64,
+        calldata_length: u64,
+        calldata_offset: u64,
+        memory_word_offset: u64,
+    },
+    StorageRoundTrip {
+        repeat_count: u64,
+        slot: u64,
+        original_value: u64,
+        written_value: u64,
+    },
+    Mixed {
+        repeat_count: u64,
+        calldata_length: u64,
+        calldata_offset: u64,
+        memory_word_offset: u64,
+        slot: u64,
+        original_value: u64,
+        written_value: u64,
+        call_value: u64,
+        timestamp_delta: u64,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ControlledBlockRowSpec {
     pub row_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workload_id: Option<String>,
     pub workload_family: String,
     pub split: ControlledBlockSplit,
     pub block_count: usize,
@@ -449,12 +493,16 @@ pub struct ControlledBlockRowSpec {
     pub expected_operation_event_count_by_key: BTreeMap<String, i64>,
     #[serde(default)]
     pub expected_context_features: BTreeMap<String, i64>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub expected_storage_features: BTreeMap<String, i64>,
     pub expected_features: BTreeMap<String, i64>,
     pub expected_diagnostics: BTreeMap<String, i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_backend_input_sha256: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_host_trace_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_finalized_block_zkgas: Option<u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -478,6 +526,8 @@ pub struct ControlledBlockObservation {
     pub actual_raw_gas_by_key: BTreeMap<String, i64>,
     pub actual_operation_event_count_by_key: BTreeMap<String, i64>,
     pub actual_context_features: BTreeMap<String, i64>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub actual_storage_features: BTreeMap<String, i64>,
     pub actual_features: BTreeMap<String, i64>,
     pub actual_diagnostics: BTreeMap<String, i64>,
     pub unzen_activation_timestamp: u64,
@@ -485,6 +535,8 @@ pub struct ControlledBlockObservation {
     pub operation_phase_ownership: &'static str,
     pub system_operation_ownership: &'static str,
     pub anchor_operation_ownership: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finalized_block_zkgas: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -493,6 +545,8 @@ pub struct ControlledBlockIdentityBundle {
     pub fixture_spec_sha256: String,
     pub spec: ControlledBlockRowSpec,
     pub observation: ControlledBlockObservation,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub candidate_trace: Option<Value>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -600,6 +654,31 @@ pub fn controlled_block_row_id(spec: &ControlledBlockRowSpec) -> Result<String> 
             ("repeat_index", Value::from(*repeat_index)),
         ]));
     }
+    if matches!(&spec.program, ControlledProgram::BlockComparison { .. }) {
+        let mut semantics = serde_json::to_value(spec)?;
+        let semantics = semantics
+            .as_object_mut()
+            .ok_or_else(|| anyhow::anyhow!("controlled block row must serialize as an object"))?;
+        for field in [
+            "row_id",
+            "workload_id",
+            "expected_final_state_root",
+            "expected_raw_gas_by_key",
+            "expected_operation_event_count_by_key",
+            "expected_context_features",
+            "expected_storage_features",
+            "expected_features",
+            "expected_diagnostics",
+            "expected_backend_input_sha256",
+            "expected_host_trace_sha256",
+            "expected_finalized_block_zkgas",
+        ] {
+            semantics.remove(field);
+        }
+        return Ok(alloy_primitives::hex::encode(Sha256::digest(
+            serde_json::to_vec(semantics)?,
+        )));
+    }
     let mut semantics = serde_json::to_value(spec)?;
     let semantics = semantics
         .as_object_mut()
@@ -608,9 +687,26 @@ pub fn controlled_block_row_id(spec: &ControlledBlockRowSpec) -> Result<String> 
     if spec.expected_context_features.is_empty() {
         semantics.remove("expected_context_features");
     }
+    if spec.expected_storage_features.is_empty() {
+        semantics.remove("expected_storage_features");
+    }
     Ok(alloy_primitives::hex::encode(Sha256::digest(
         serde_json::to_vec(semantics)?,
     )))
+}
+
+pub fn controlled_block_workload_id(spec: &ControlledBlockRowSpec) -> Result<String> {
+    if matches!(&spec.program, ControlledProgram::ContextOpcodeLoop { .. }) {
+        bail!("context opcode rows carry their campaign workload identity in the program");
+    }
+    sha256_json(&BTreeMap::from([
+        ("block_count", serde_json::to_value(spec.block_count)?),
+        ("program", serde_json::to_value(&spec.program)?),
+        (
+            "transaction_count",
+            serde_json::to_value(spec.transaction_count)?,
+        ),
+    ]))
 }
 
 fn controlled_overhead_workload_spec(
@@ -691,6 +787,17 @@ fn absolute_transaction_operation_units(
                     ..
                 } => (
                     format!("opcode:0x{opcode:02x}:spawned"),
+                    PricingBasis::FixedPerEvent,
+                    1,
+                ),
+                OperationComponent::Opcode {
+                    opcode,
+                    pricing_basis: Some(PricingBasis::FixedPerEvent),
+                    model_input: Some(_),
+                    spawned,
+                    ..
+                } if spawned != Some(true) => (
+                    format!("opcode:0x{opcode:02x}"),
                     PricingBasis::FixedPerEvent,
                     1,
                 ),
@@ -800,6 +907,67 @@ fn absolute_context_feature_counts(trace: &ProposalTrace) -> Result<BTreeMap<Str
                 *count = count
                     .checked_add(1)
                     .ok_or_else(|| anyhow::anyhow!("controlled context feature count overflow"))?;
+            }
+        }
+    }
+    Ok(counts)
+}
+
+fn absolute_storage_feature_counts(trace: &ProposalTrace) -> Result<BTreeMap<String, i64>> {
+    let mut counts = BTreeMap::<String, i64>::new();
+    for block in &trace.blocks {
+        let anchor_started_indices = block
+            .transactions
+            .iter()
+            .filter(|transaction| transaction.is_anchor)
+            .filter_map(|transaction| transaction.started_tx_index)
+            .collect::<std::collections::BTreeSet<_>>();
+        for operation in &block.operations {
+            if operation.phase != OperationPhase::Transaction
+                || operation
+                    .tx_index
+                    .is_some_and(|index| anchor_started_indices.contains(&index))
+            {
+                continue;
+            }
+            let OperationComponent::Opcode {
+                opcode,
+                model_input: Some(model_input),
+                ..
+            } = &operation.component
+            else {
+                continue;
+            };
+            let access_name = |access: &StorageAccess| match access {
+                StorageAccess::Cold => "cold",
+                StorageAccess::Warm => "warm",
+            };
+            let key = match model_input {
+                OpcodeModelInput::StorageLoad { access } => Some(format!(
+                    "storage_load:opcode:0x{opcode:02x}:access:{}",
+                    access_name(access)
+                )),
+                OpcodeModelInput::StorageStore { access, branch } => {
+                    let branch = match branch {
+                        StorageStoreBranch::Noop => "noop",
+                        StorageStoreBranch::Set => "set",
+                        StorageStoreBranch::Clear => "clear",
+                        StorageStoreBranch::Reset => "reset",
+                        StorageStoreBranch::DirtyRewrite => "dirty_rewrite",
+                        StorageStoreBranch::RestoreOriginal => "restore_original",
+                    };
+                    Some(format!(
+                        "storage_store:opcode:0x{opcode:02x}:access:{}:branch:{branch}",
+                        access_name(access),
+                    ))
+                }
+                _ => None,
+            };
+            if let Some(key) = key {
+                let count = counts.entry(key).or_default();
+                *count = count
+                    .checked_add(1)
+                    .ok_or_else(|| anyhow::anyhow!("controlled storage feature count overflow"))?;
             }
         }
     }
@@ -1050,6 +1218,7 @@ enum CandidateKind {
         target_profile: ControlledContextAddressProfile,
         value: u64,
         timestamp_delta: u64,
+        storage: Option<ControlledContractStorage>,
     },
     NativeZero,
     NativeValue(u64),
@@ -1057,6 +1226,12 @@ enum CandidateKind {
         value: u64,
         distinct_recipients: bool,
     },
+}
+
+#[derive(Clone)]
+struct ControlledContractStorage {
+    slot: u64,
+    original_value: u64,
 }
 
 struct BuiltOverheadGuestInput {
@@ -1361,6 +1536,7 @@ fn overhead_prestate(
     chain_spec: &raiko2_primitives::ChainSpec,
     candidates: &[TransactionSigned],
     controlled_contract_code: Option<&Bytes>,
+    controlled_contract_storage: Option<&ControlledContractStorage>,
     extra_prestate_accounts: &[Address],
 ) -> Result<(ControlledTrieState, Vec<Bytes>)> {
     let anchor_address = chain_spec
@@ -1393,6 +1569,18 @@ fn overhead_prestate(
                 .to()
                 .ok_or_else(|| anyhow::anyhow!("controlled candidate must be a call"))?;
             state.insert_account(recipient, U256::ZERO, 0, code_hash);
+            if let Some(storage) = controlled_contract_storage
+                && storage.original_value != 0
+            {
+                state
+                    .storages
+                    .entry(keccak256(recipient))
+                    .or_default()
+                    .insert(
+                        keccak256(U256::from(storage.slot).to_be_bytes::<32>()),
+                        U256::from(storage.original_value),
+                    );
+            }
         }
     }
     for address in extra_prestate_accounts {
@@ -1493,6 +1681,10 @@ fn build_overhead_guest_input_with_topology(
         CandidateKind::ControlledContract { code, .. } => Some(code),
         _ => None,
     };
+    let controlled_contract_storage = match &kind {
+        CandidateKind::ControlledContract { storage, .. } => storage.as_ref(),
+        _ => None,
+    };
     let fee_neutral = matches!(
         &kind,
         CandidateKind::ControlledContract {
@@ -1520,6 +1712,7 @@ fn build_overhead_guest_input_with_topology(
         &chain_spec,
         &candidates,
         controlled_contract_code,
+        controlled_contract_storage,
         extra_prestate_accounts,
     )?;
     let (mut prestate_root, mut state_nodes) = controlled_state.witness();
@@ -1762,6 +1955,12 @@ const CONTROLLED_OPCODE_GAS_LIMIT: u64 = 100_000;
 const CONTROLLED_OPCODE_MAX_COUNT: u64 = 32;
 const CONTROLLED_CONTEXT_MAX_COUNT: u64 = 64;
 const CONTROLLED_CONTEXT_MAX_CALLDATA_LENGTH: u64 = 255;
+const CONTROLLED_COMPARISON_MAX_TRANSACTION_COUNT: u64 = 16;
+const CONTROLLED_COMPARISON_MAX_BLOCK_COUNT: usize = 128;
+const CONTROLLED_COMPARISON_MAX_MEMORY_WORD_OFFSET: u64 = 256;
+const CONTROLLED_COMPARISON_MAX_SLOT: u64 = 255;
+const CONTROLLED_COMPARISON_BYTECODE_LENGTH: usize = 1_024;
+const CONTROLLED_COMPARISON_GAS_LIMIT: u64 = 5_000_000;
 
 #[derive(Clone, Debug)]
 struct ControlledContextParameters {
@@ -1935,6 +2134,257 @@ fn controlled_context_bytecode(
     Ok(code.into())
 }
 
+#[derive(Clone)]
+struct ControlledComparisonParameters {
+    code: Bytes,
+    input: Bytes,
+    value: u64,
+    timestamp_delta: u64,
+    storage: Option<ControlledContractStorage>,
+}
+
+fn comparison_push_u64(code: &mut Vec<u8>, value: u64) {
+    code.push(0x67); // PUSH8 keeps the encoding fixed across the bounded matrix.
+    code.extend(value.to_be_bytes());
+}
+
+fn comparison_arithmetic_body(code: &mut Vec<u8>, seed: u64) -> Result<()> {
+    comparison_push_u64(code, seed);
+    comparison_push_u64(
+        code,
+        seed.checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("controlled arithmetic seed overflow"))?,
+    );
+    code.extend([0x01, 0x60, 0x03, 0x02, 0x50]); // ADD; PUSH1 3; MUL; POP
+    Ok(())
+}
+
+fn comparison_context_body(code: &mut Vec<u8>) {
+    code.extend([0x30, 0x50, 0x33, 0x50, 0x34, 0x50]);
+    comparison_push_u64(code, 0);
+    code.extend([0x35, 0x50, 0x36, 0x50, 0x42, 0x50]);
+}
+
+fn comparison_calldata_memory_body(
+    code: &mut Vec<u8>,
+    calldata_offset: u64,
+    memory_word_offset: u64,
+) -> Result<()> {
+    comparison_push_u64(code, calldata_offset);
+    code.push(0x35); // CALLDATALOAD leaves the value below the MSTORE offset.
+    let memory_offset = memory_word_offset
+        .checked_mul(32)
+        .ok_or_else(|| anyhow::anyhow!("controlled memory byte offset overflow"))?;
+    comparison_push_u64(code, memory_offset);
+    code.push(0x52); // MSTORE
+    Ok(())
+}
+
+fn comparison_storage_body(code: &mut Vec<u8>, slot: u64, original_value: u64, written_value: u64) {
+    comparison_push_u64(code, written_value);
+    comparison_push_u64(code, slot);
+    code.push(0x55); // SSTORE original -> written
+    comparison_push_u64(code, slot);
+    code.extend([0x54, 0x50]); // SLOAD; POP
+    comparison_push_u64(code, original_value);
+    comparison_push_u64(code, slot);
+    code.push(0x55); // SSTORE written -> original
+}
+
+fn controlled_comparison_parameters(
+    scenario: &ControlledBlockComparisonScenario,
+) -> Result<ControlledComparisonParameters> {
+    let (repeat_count, calldata_length, value, timestamp_delta, storage, body): (
+        u64,
+        u64,
+        u64,
+        u64,
+        Option<ControlledContractStorage>,
+        Box<dyn FnOnce(&mut Vec<u8>) -> Result<()>>,
+    ) = match scenario {
+        ControlledBlockComparisonScenario::Arithmetic { repeat_count, seed } => {
+            if *seed > 1_000_000 {
+                bail!("controlled arithmetic seed is outside the frozen range");
+            }
+            let seed = *seed;
+            (
+                *repeat_count,
+                0,
+                0,
+                1,
+                None,
+                Box::new(move |code| comparison_arithmetic_body(code, seed)),
+            )
+        }
+        ControlledBlockComparisonScenario::ContextHeavy {
+            repeat_count,
+            calldata_length,
+            call_value,
+            timestamp_delta,
+        } => (
+            *repeat_count,
+            *calldata_length,
+            *call_value,
+            *timestamp_delta,
+            None,
+            Box::new(|code| {
+                comparison_context_body(code);
+                Ok(())
+            }),
+        ),
+        ControlledBlockComparisonScenario::CalldataMemory {
+            repeat_count,
+            calldata_length,
+            calldata_offset,
+            memory_word_offset,
+        } => {
+            let calldata_offset = *calldata_offset;
+            let memory_word_offset = *memory_word_offset;
+            (
+                *repeat_count,
+                *calldata_length,
+                0,
+                1,
+                None,
+                Box::new(move |code| {
+                    comparison_calldata_memory_body(code, calldata_offset, memory_word_offset)
+                }),
+            )
+        }
+        ControlledBlockComparisonScenario::StorageRoundTrip {
+            repeat_count,
+            slot,
+            original_value,
+            written_value,
+        } => {
+            let storage = ControlledContractStorage {
+                slot: *slot,
+                original_value: *original_value,
+            };
+            let (slot, original_value, written_value) = (*slot, *original_value, *written_value);
+            (
+                *repeat_count,
+                0,
+                0,
+                1,
+                Some(storage),
+                Box::new(move |code| {
+                    comparison_storage_body(code, slot, original_value, written_value);
+                    Ok(())
+                }),
+            )
+        }
+        ControlledBlockComparisonScenario::Mixed {
+            repeat_count,
+            calldata_length,
+            calldata_offset,
+            memory_word_offset,
+            slot,
+            original_value,
+            written_value,
+            call_value,
+            timestamp_delta,
+        } => {
+            let storage = ControlledContractStorage {
+                slot: *slot,
+                original_value: *original_value,
+            };
+            let (calldata_offset, memory_word_offset, slot, original_value, written_value) = (
+                *calldata_offset,
+                *memory_word_offset,
+                *slot,
+                *original_value,
+                *written_value,
+            );
+            (
+                *repeat_count,
+                *calldata_length,
+                *call_value,
+                *timestamp_delta,
+                Some(storage),
+                Box::new(move |code| {
+                    comparison_arithmetic_body(code, 7)?;
+                    comparison_context_body(code);
+                    comparison_calldata_memory_body(code, calldata_offset, memory_word_offset)?;
+                    comparison_storage_body(code, slot, original_value, written_value);
+                    Ok(())
+                }),
+            )
+        }
+    };
+    if !(1..=CONTROLLED_CONTEXT_MAX_COUNT).contains(&repeat_count) {
+        bail!("controlled comparison repeat count is outside the frozen 1..=64 range");
+    }
+    if calldata_length > CONTROLLED_CONTEXT_MAX_CALLDATA_LENGTH {
+        bail!("controlled comparison calldata length is outside the frozen 0..=255 range");
+    }
+    if timestamp_delta == 0 {
+        bail!("controlled comparison timestamp must be strictly post-Unzen");
+    }
+    match scenario {
+        ControlledBlockComparisonScenario::CalldataMemory {
+            calldata_offset,
+            memory_word_offset,
+            ..
+        }
+        | ControlledBlockComparisonScenario::Mixed {
+            calldata_offset,
+            memory_word_offset,
+            ..
+        } => {
+            if *calldata_offset > CONTROLLED_CONTEXT_MAX_CALLDATA_LENGTH {
+                bail!("controlled comparison calldata offset is outside the frozen range");
+            }
+            if *memory_word_offset > CONTROLLED_COMPARISON_MAX_MEMORY_WORD_OFFSET {
+                bail!("controlled comparison memory offset is outside the frozen range");
+            }
+        }
+        _ => {}
+    }
+    if let Some(storage) = &storage {
+        let written_value = match scenario {
+            ControlledBlockComparisonScenario::StorageRoundTrip { written_value, .. }
+            | ControlledBlockComparisonScenario::Mixed { written_value, .. } => *written_value,
+            _ => unreachable!(),
+        };
+        if storage.slot > CONTROLLED_COMPARISON_MAX_SLOT {
+            bail!("controlled comparison storage slot is outside the frozen range");
+        }
+        if storage.original_value == written_value {
+            bail!("controlled comparison storage round trip requires distinct values");
+        }
+    }
+    let mut code = Vec::new();
+    push3(&mut code, repeat_count, "comparison repeat count")?;
+    let loop_offset = code.len();
+    code.extend([0x5b, 0x80, 0x15, 0x61, 0x00, 0x00, 0x57]);
+    let done_immediate_index = loop_offset + 4;
+    body(&mut code)?;
+    code.extend([0x60, 0x01, 0x90, 0x03, 0x61]);
+    let loop_offset = u16::try_from(loop_offset)?.to_be_bytes();
+    code.extend([loop_offset[0], loop_offset[1], 0x56]);
+    let done_offset = u16::try_from(code.len())?;
+    code.extend([0x5b, 0x50, 0x00]);
+    let done_offset = done_offset.to_be_bytes();
+    code[done_immediate_index] = done_offset[0];
+    code[done_immediate_index + 1] = done_offset[1];
+    if code.len() > CONTROLLED_COMPARISON_BYTECODE_LENGTH {
+        bail!("controlled comparison bytecode exceeds frozen code-length class");
+    }
+    code.resize(CONTROLLED_COMPARISON_BYTECODE_LENGTH, 0x00);
+    let input = (0..usize::try_from(calldata_length)?)
+        .map(|index| u8::try_from((index * 17 + 3) % 251).expect("modulo 251 fits u8"))
+        .collect::<Vec<_>>()
+        .into();
+    Ok(ControlledComparisonParameters {
+        code: code.into(),
+        input,
+        value,
+        timestamp_delta,
+        storage,
+    })
+}
+
 fn controlled_opcode_bytecode(family: &str, scenario: &str, count: u64) -> Result<Bytes> {
     let count = u32::try_from(count)?;
     if count > 0x00ff_ffff {
@@ -1999,6 +2449,14 @@ fn build_controlled_block_fixture_with_topology(
     spec: &ControlledBlockRowSpec,
     extra_prestate_accounts: &[Address],
 ) -> Result<ControlledBlockFixture> {
+    if let Some(workload_id) = &spec.workload_id {
+        let derived_workload_id = controlled_block_workload_id(spec)?;
+        if workload_id != &derived_workload_id {
+            bail!(
+                "controlled block workload ID differs from semantic content: declared={workload_id}, derived={derived_workload_id}",
+            );
+        }
+    }
     let derived_row_id = controlled_block_row_id(spec)?;
     if spec.row_id != derived_row_id {
         bail!(
@@ -2047,6 +2505,7 @@ fn build_controlled_block_fixture_with_topology(
                     target_profile: ControlledContextAddressProfile::Canonical,
                     value: 0,
                     timestamp_delta: 1,
+                    storage: None,
                 },
                 bytecode_length,
             )
@@ -2083,6 +2542,58 @@ fn build_controlled_block_fixture_with_topology(
                     target_profile: parameters.target_profile,
                     value: parameters.value,
                     timestamp_delta: parameters.timestamp_delta,
+                    storage: None,
+                },
+                bytecode_length,
+            )
+        }
+        ControlledProgram::BlockComparison { scenario } => {
+            if spec.workload_id.is_none() {
+                bail!("structured comparison row requires a canonical workload ID");
+            }
+            if !(1..=CONTROLLED_COMPARISON_MAX_BLOCK_COUNT).contains(&spec.block_count) {
+                bail!("structured comparison block count is outside the frozen 1..=128 range");
+            }
+            if !(1..=CONTROLLED_COMPARISON_MAX_TRANSACTION_COUNT).contains(&spec.transaction_count)
+            {
+                bail!("structured comparison transaction count is outside the frozen 1..=16 range");
+            }
+            let valid_family = match scenario {
+                ControlledBlockComparisonScenario::Arithmetic { .. } => {
+                    matches!(
+                        spec.workload_family.as_str(),
+                        "arithmetic" | "transaction_count"
+                    )
+                }
+                ControlledBlockComparisonScenario::ContextHeavy { .. } => {
+                    spec.workload_family == "context_heavy"
+                }
+                ControlledBlockComparisonScenario::CalldataMemory { .. } => matches!(
+                    spec.workload_family.as_str(),
+                    "calldata_memory" | "calldata_boundary" | "memory_expansion"
+                ),
+                ControlledBlockComparisonScenario::StorageRoundTrip { .. } => matches!(
+                    spec.workload_family.as_str(),
+                    "storage" | "storage_round_trip"
+                ),
+                ControlledBlockComparisonScenario::Mixed { .. } => spec.workload_family == "mixed",
+            };
+            if !valid_family {
+                bail!("structured comparison scenario differs from workload family");
+            }
+            let parameters = controlled_comparison_parameters(scenario)?;
+            let bytecode_length = parameters.code.len();
+            (
+                CandidateKind::ControlledContract {
+                    code: parameters.code,
+                    input: parameters.input,
+                    fee_neutral: true,
+                    gas_limit: CONTROLLED_COMPARISON_GAS_LIMIT,
+                    signer_profile: ControlledContextCallerProfile::Canonical,
+                    target_profile: ControlledContextAddressProfile::Canonical,
+                    value: parameters.value,
+                    timestamp_delta: parameters.timestamp_delta,
+                    storage: parameters.storage,
                 },
                 bytecode_length,
             )
@@ -2132,21 +2643,23 @@ pub fn observe_controlled_block_fixture(
     let host_trace_sha256 = canonical_serde_sha256(&trace)?;
     let operation_units = absolute_transaction_operation_units(&trace)?;
     let actual_context_features = absolute_context_feature_counts(&trace)?;
-    if operation_units
-        .values()
-        .any(|units| units.pricing_basis != PricingBasis::RawGasSlope)
-    {
-        bail!("controlled block row contains spawned fixed-per-event work");
-    }
+    let actual_storage_features = absolute_storage_feature_counts(&trace)?;
     let actual_raw_gas_by_key = operation_units
         .iter()
+        .filter(|(_, value)| value.pricing_basis == PricingBasis::RawGasSlope)
         .map(|(key, value)| (key.clone(), value.units))
         .collect::<BTreeMap<_, _>>();
     let actual_operation_event_count_by_key = operation_units
-        .into_iter()
-        .map(|(key, value)| (key, value.event_count))
+        .iter()
+        .map(|(key, value)| (key.clone(), value.event_count))
         .collect::<BTreeMap<_, _>>();
     if actual_raw_gas_by_key
+        .keys()
+        .any(|key| key.starts_with("precompile:") || key.ends_with(":spawned"))
+    {
+        bail!("controlled block row contains precompile or spawned work");
+    }
+    if operation_units
         .keys()
         .any(|key| key.starts_with("precompile:") || key.ends_with(":spawned"))
     {
@@ -2258,6 +2771,15 @@ pub fn observe_controlled_block_fixture(
     if minimum_block_timestamp <= unzen_activation_timestamp {
         bail!("controlled block row is not strictly post-Unzen");
     }
+    let finalized_block_zkgas = trace.blocks.iter().try_fold(0u64, |total, block| {
+        total
+            .checked_add(block.finalized_block_zkgas)
+            .ok_or_else(|| anyhow::anyhow!("controlled finalized block zkGas overflow"))
+    })?;
+    let exposes_block_comparison_evidence = !matches!(
+        &fixture.spec.program,
+        ControlledProgram::ContextOpcodeLoop { .. }
+    );
     Ok(ControlledBlockObservation {
         row_id: fixture.spec.row_id.clone(),
         workload_family: fixture.spec.workload_family.clone(),
@@ -2282,6 +2804,7 @@ pub fn observe_controlled_block_fixture(
         actual_raw_gas_by_key,
         actual_operation_event_count_by_key,
         actual_context_features,
+        actual_storage_features,
         actual_features,
         actual_diagnostics,
         unzen_activation_timestamp,
@@ -2289,6 +2812,7 @@ pub fn observe_controlled_block_fixture(
         operation_phase_ownership: "transaction_non_anchor_only",
         system_operation_ownership: "block_base",
         anchor_operation_ownership: "block_base",
+        finalized_block_zkgas: exposes_block_comparison_evidence.then_some(finalized_block_zkgas),
     })
 }
 
@@ -2297,7 +2821,7 @@ pub fn validate_controlled_block_fixture(
 ) -> Result<ControlledBlockObservation> {
     if matches!(
         &fixture.spec.program,
-        ControlledProgram::ContextOpcodeLoop { .. }
+        ControlledProgram::ContextOpcodeLoop { .. } | ControlledProgram::BlockComparison { .. }
     ) {
         let missing = match (
             fixture.spec.expected_backend_input_sha256.is_none(),
@@ -2362,6 +2886,14 @@ pub fn validate_controlled_block_fixture(
             observation.actual_context_features
         );
     }
+    if observation.actual_storage_features != fixture.spec.expected_storage_features {
+        bail!(
+            "controlled block row {} storage-feature mismatch: declared={:?}, observed={:?}",
+            fixture.spec.row_id,
+            fixture.spec.expected_storage_features,
+            observation.actual_storage_features
+        );
+    }
     if observation.actual_features != fixture.spec.expected_features {
         bail!(
             "controlled block row {} feature mismatch: declared={:?}, observed={:?}",
@@ -2386,23 +2918,45 @@ pub fn validate_controlled_block_fixture(
             observation.actual_final_state_root,
         );
     }
+    if fixture.spec.expected_finalized_block_zkgas.is_some()
+        && observation.finalized_block_zkgas != fixture.spec.expected_finalized_block_zkgas
+    {
+        bail!(
+            "controlled block row {} finalized zkGas mismatch: declared={:?}, observed={:?}",
+            fixture.spec.row_id,
+            fixture.spec.expected_finalized_block_zkgas,
+            observation.finalized_block_zkgas,
+        );
+    }
     Ok(observation)
 }
 
-pub fn freeze_controlled_context_block_fixture(
+pub fn freeze_controlled_block_fixture(
     source: &ControlledBlockRowSpec,
 ) -> Result<ControlledBlockIdentityBundle> {
-    if !matches!(&source.program, ControlledProgram::ContextOpcodeLoop { .. }) {
-        bail!("controlled block identity accepts only structured context opcode rows");
+    let mut canonical_source = source.clone();
+    if !matches!(
+        &canonical_source.program,
+        ControlledProgram::ContextOpcodeLoop { .. }
+    ) {
+        if canonical_source.workload_id.as_deref() == Some("0".repeat(64).as_str()) {
+            canonical_source.workload_id = Some(controlled_block_workload_id(&canonical_source)?);
+        }
+        if canonical_source.row_id == "0".repeat(64) {
+            canonical_source.row_id = controlled_block_row_id(&canonical_source)?;
+        }
     }
+    let source = &canonical_source;
     if source.expected_final_state_root != B256::ZERO
         || !source.expected_raw_gas_by_key.is_empty()
         || !source.expected_operation_event_count_by_key.is_empty()
         || !source.expected_context_features.is_empty()
+        || !source.expected_storage_features.is_empty()
         || !source.expected_features.is_empty()
         || !source.expected_diagnostics.is_empty()
         || source.expected_backend_input_sha256.is_some()
         || source.expected_host_trace_sha256.is_some()
+        || source.expected_finalized_block_zkgas.is_some()
     {
         bail!("controlled block identity source request must not predeclare observed evidence");
     }
@@ -2414,22 +2968,51 @@ pub fn freeze_controlled_context_block_fixture(
     spec.expected_operation_event_count_by_key =
         observed.actual_operation_event_count_by_key.clone();
     spec.expected_context_features = observed.actual_context_features.clone();
+    spec.expected_storage_features = observed.actual_storage_features.clone();
     spec.expected_features = observed.actual_features.clone();
     spec.expected_diagnostics = observed.actual_diagnostics.clone();
     spec.expected_backend_input_sha256 = Some(observed.backend_input_sha256.clone());
     spec.expected_host_trace_sha256 = Some(observed.host_trace_sha256.clone());
-    if controlled_block_row_id(&spec)? != source.row_id {
-        bail!("controlled context evidence changed the manifest-owned row identity");
+    spec.expected_finalized_block_zkgas = observed.finalized_block_zkgas;
+    if matches!(
+        &source.program,
+        ControlledProgram::ContextOpcodeLoop { .. } | ControlledProgram::BlockComparison { .. }
+    ) {
+        if controlled_block_row_id(&spec)? != source.row_id {
+            bail!("controlled structured evidence changed the manifest-owned row identity");
+        }
+    } else {
+        spec.row_id = controlled_block_row_id(&spec)?;
     }
     let frozen = build_controlled_block_fixture(&spec)?;
     let observation = validate_controlled_block_fixture(&frozen)?;
     let fixture_spec_sha256 = canonical_serde_sha256(&spec)?;
+    let candidate_trace = if !matches!(&source.program, ControlledProgram::ContextOpcodeLoop { .. })
+    {
+        let trace = trace_shasta_proposal(&fixture.guest_input)?;
+        if canonical_serde_sha256(&trace)? != observation.host_trace_sha256 {
+            bail!("controlled comparison candidate trace differs from frozen host trace");
+        }
+        Some(serde_json::to_value(trace)?)
+    } else {
+        None
+    };
     Ok(ControlledBlockIdentityBundle {
         schema_version: 1,
         fixture_spec_sha256,
         spec,
         observation,
+        candidate_trace,
     })
+}
+
+pub fn freeze_controlled_context_block_fixture(
+    source: &ControlledBlockRowSpec,
+) -> Result<ControlledBlockIdentityBundle> {
+    if !matches!(&source.program, ControlledProgram::ContextOpcodeLoop { .. }) {
+        bail!("controlled context identity accepts only structured context opcode rows");
+    }
+    freeze_controlled_block_fixture(source)
 }
 
 impl ControlledStateHoldoutPairSpec {
@@ -2831,6 +3414,7 @@ pub fn build_required_overhead_fixtures(
             target_profile: ControlledContextAddressProfile::Canonical,
             value: 0,
             timestamp_delta: 1,
+            storage: None,
         },
         1,
         target_count,

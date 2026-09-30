@@ -1046,7 +1046,7 @@ fn run_controlled_block_identity(args: Args) -> Result<()> {
         &fs::read(input_path).with_context(|| format!("read {}", input_path.display()))?,
     )
     .context("parse controlled-block-identity input")?;
-    let bundle = controlled_workload::freeze_controlled_context_block_fixture(&spec)?;
+    let bundle = controlled_workload::freeze_controlled_block_fixture(&spec)?;
     let canonical =
         serde_json::to_value(&bundle).context("canonicalize controlled block identity bundle")?;
     let mut contents =

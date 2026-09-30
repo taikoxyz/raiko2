@@ -6,19 +6,20 @@ use std::collections::BTreeMap;
 use alloy_consensus::{Transaction as _, transaction::SignerRecoverable};
 use alloy_primitives::{Address, B256};
 use controlled_workload::{
-    ControlledBlockRowSpec, ControlledBlockSplit, ControlledContextAddressProfile,
-    ControlledContextCallerProfile, ControlledContextOpcode, ControlledContextProfile,
-    ControlledExecutionIdentity, ControlledFootprint, ControlledLane, ControlledOperationUnits,
-    ControlledOverheadLane, ControlledProgram, ControlledStateHoldoutLane,
-    ControlledStateHoldoutPairSpec, ControlledTrace, ControlledWorkloadSpec, PairedPrecompileShape,
-    block_environment_sha256, build_controlled_block_fixture,
+    ControlledBlockComparisonScenario, ControlledBlockRowSpec, ControlledBlockSplit,
+    ControlledContextAddressProfile, ControlledContextCallerProfile, ControlledContextOpcode,
+    ControlledContextProfile, ControlledExecutionIdentity, ControlledFootprint, ControlledLane,
+    ControlledOperationUnits, ControlledOverheadLane, ControlledProgram,
+    ControlledStateHoldoutLane, ControlledStateHoldoutPairSpec, ControlledTrace,
+    ControlledWorkloadSpec, PairedPrecompileShape, block_environment_sha256,
+    build_controlled_block_fixture,
     build_controlled_block_fixture_with_extra_prestate_account_for_test,
     build_controlled_state_holdout_fixtures, build_required_overhead_fixtures,
-    check_revm_opcode_semantics, controlled_block_row_id,
+    check_revm_opcode_semantics, controlled_block_row_id, controlled_block_workload_id,
     controlled_context_opcode_identity_bundle, controlled_context_opcode_workload_spec,
     controlled_execution_row_id, controlled_opcode_identity, controlled_opcode_identity_bundle,
     controlled_opcode_workload_spec, controlled_overhead_workload_id,
-    controlled_precompile_workload_spec, controlled_workload_id,
+    controlled_precompile_workload_spec, controlled_workload_id, freeze_controlled_block_fixture,
     freeze_controlled_context_block_fixture, observe_controlled_block_fixture,
     operation_units_delta, trace_precompile_workload, trace_revm_opcode_workload,
     validate_controlled_block_fixture, validate_controlled_state_holdout_fixtures,
@@ -111,6 +112,7 @@ fn stateful_input(
 fn block_row_spec() -> ControlledBlockRowSpec {
     ControlledBlockRowSpec {
         row_id: String::new(),
+        workload_id: None,
         workload_family: "pop_family".into(),
         split: ControlledBlockSplit::Fit,
         block_count: 1,
@@ -151,6 +153,7 @@ fn block_row_spec() -> ControlledBlockRowSpec {
             ("opcode:0x90".into(), 1),
         ]),
         expected_context_features: BTreeMap::new(),
+        expected_storage_features: BTreeMap::new(),
         expected_features: BTreeMap::from([
             ("proposal_startup".into(), 1),
             ("block_base".into(), 1),
@@ -169,7 +172,89 @@ fn block_row_spec() -> ControlledBlockRowSpec {
         ]),
         expected_backend_input_sha256: None,
         expected_host_trace_sha256: None,
+        expected_finalized_block_zkgas: None,
     }
+}
+
+fn structured_block_row(
+    workload_family: &str,
+    scenario: ControlledBlockComparisonScenario,
+) -> ControlledBlockRowSpec {
+    let mut spec = ControlledBlockRowSpec {
+        row_id: String::new(),
+        workload_id: None,
+        workload_family: workload_family.into(),
+        split: ControlledBlockSplit::Fit,
+        block_count: 1,
+        transaction_count: 1,
+        program: ControlledProgram::BlockComparison { scenario },
+        expected_final_state_root: B256::ZERO,
+        expected_raw_gas_by_key: BTreeMap::new(),
+        expected_operation_event_count_by_key: BTreeMap::new(),
+        expected_context_features: BTreeMap::new(),
+        expected_storage_features: BTreeMap::new(),
+        expected_features: BTreeMap::new(),
+        expected_diagnostics: BTreeMap::new(),
+        expected_backend_input_sha256: None,
+        expected_host_trace_sha256: None,
+        expected_finalized_block_zkgas: None,
+    };
+    spec.workload_id = Some(controlled_block_workload_id(&spec).unwrap());
+    spec.row_id = controlled_block_row_id(&spec).unwrap();
+    spec
+}
+
+fn structured_scenarios() -> Vec<(&'static str, ControlledBlockComparisonScenario)> {
+    vec![
+        (
+            "arithmetic",
+            ControlledBlockComparisonScenario::Arithmetic {
+                repeat_count: 3,
+                seed: 7,
+            },
+        ),
+        (
+            "context_heavy",
+            ControlledBlockComparisonScenario::ContextHeavy {
+                repeat_count: 2,
+                calldata_length: 33,
+                call_value: 7,
+                timestamp_delta: 17,
+            },
+        ),
+        (
+            "calldata_memory",
+            ControlledBlockComparisonScenario::CalldataMemory {
+                repeat_count: 2,
+                calldata_length: 33,
+                calldata_offset: 17,
+                memory_word_offset: 4,
+            },
+        ),
+        (
+            "storage_round_trip",
+            ControlledBlockComparisonScenario::StorageRoundTrip {
+                repeat_count: 2,
+                slot: 3,
+                original_value: 5,
+                written_value: 9,
+            },
+        ),
+        (
+            "mixed",
+            ControlledBlockComparisonScenario::Mixed {
+                repeat_count: 2,
+                calldata_length: 47,
+                calldata_offset: 16,
+                memory_word_offset: 129,
+                slot: 5,
+                original_value: 7,
+                written_value: 11,
+                call_value: 13,
+                timestamp_delta: 31,
+            },
+        ),
+    ]
 }
 
 fn witness_topology_pair(extra_account_count: usize) -> ControlledStateHoldoutPairSpec {
@@ -494,6 +579,7 @@ fn materialize_opcode_block_row(
 ) {
     let mut spec = ControlledBlockRowSpec {
         row_id: String::new(),
+        workload_id: None,
         workload_family: family.into(),
         split: if family == "static_count_control" {
             ControlledBlockSplit::Diagnostic
@@ -513,10 +599,12 @@ fn materialize_opcode_block_row(
         expected_raw_gas_by_key: BTreeMap::new(),
         expected_operation_event_count_by_key: BTreeMap::new(),
         expected_context_features: BTreeMap::new(),
+        expected_storage_features: BTreeMap::new(),
         expected_features: BTreeMap::new(),
         expected_diagnostics: BTreeMap::new(),
         expected_backend_input_sha256: None,
         expected_host_trace_sha256: None,
+        expected_finalized_block_zkgas: None,
     };
     spec.row_id = controlled_block_row_id(&spec).unwrap();
     let fixture = build_controlled_block_fixture(&spec).expect("build production GuestInput");
@@ -560,6 +648,7 @@ fn materialize_context_block_row(
 ) {
     let mut spec = ControlledBlockRowSpec {
         row_id: String::new(),
+        workload_id: None,
         workload_family: "context_opcode".into(),
         split: ControlledBlockSplit::Fit,
         block_count: 1,
@@ -576,10 +665,12 @@ fn materialize_context_block_row(
         expected_raw_gas_by_key: BTreeMap::new(),
         expected_operation_event_count_by_key: BTreeMap::new(),
         expected_context_features: BTreeMap::new(),
+        expected_storage_features: BTreeMap::new(),
         expected_features: BTreeMap::new(),
         expected_diagnostics: BTreeMap::new(),
         expected_backend_input_sha256: None,
         expected_host_trace_sha256: None,
+        expected_finalized_block_zkgas: None,
     };
     spec.row_id = controlled_block_row_id(&spec).unwrap();
     let fixture = build_controlled_block_fixture(&spec).expect("build context production input");
@@ -687,6 +778,364 @@ fn context_opcode_program_schema_is_structured_and_rejects_mismatched_profiles()
     let error = build_controlled_block_fixture(&mismatched)
         .expect_err("calldata beyond the frozen profiles must fail before allocation");
     assert!(error.to_string().contains("0..=255"));
+}
+
+#[test]
+fn block_comparison_program_schema_is_closed_and_bounded_before_building() {
+    let program = ControlledProgram::BlockComparison {
+        scenario: ControlledBlockComparisonScenario::Mixed {
+            repeat_count: 2,
+            calldata_length: 47,
+            calldata_offset: 16,
+            memory_word_offset: 129,
+            slot: 5,
+            original_value: 7,
+            written_value: 11,
+            call_value: 13,
+            timestamp_delta: 31,
+        },
+    };
+    assert_eq!(
+        serde_json::to_value(&program).unwrap(),
+        json!({
+            "kind": "block_comparison",
+            "scenario": {
+                "kind": "mixed",
+                "repeat_count": 2,
+                "calldata_length": 47,
+                "calldata_offset": 16,
+                "memory_word_offset": 129,
+                "slot": 5,
+                "original_value": 7,
+                "written_value": 11,
+                "call_value": 13,
+                "timestamp_delta": 31,
+            },
+        })
+    );
+    let mut unknown = serde_json::to_value(&program).unwrap();
+    unknown["scenario"]["bytecode"] = json!("0x6000");
+    assert!(serde_json::from_value::<ControlledProgram>(unknown).is_err());
+    assert!(
+        serde_json::from_value::<ControlledProgram>(json!({
+            "kind": "block_comparison",
+            "scenario": {"kind": "caller_supplied", "bytecode": "0x6000"},
+        }))
+        .is_err()
+    );
+
+    let invalid = [
+        structured_block_row(
+            "arithmetic",
+            ControlledBlockComparisonScenario::Arithmetic {
+                repeat_count: 0,
+                seed: 1,
+            },
+        ),
+        structured_block_row(
+            "context_heavy",
+            ControlledBlockComparisonScenario::ContextHeavy {
+                repeat_count: 65,
+                calldata_length: 1,
+                call_value: 0,
+                timestamp_delta: 1,
+            },
+        ),
+        structured_block_row(
+            "calldata_memory",
+            ControlledBlockComparisonScenario::CalldataMemory {
+                repeat_count: 1,
+                calldata_length: 256,
+                calldata_offset: 0,
+                memory_word_offset: 1,
+            },
+        ),
+        structured_block_row(
+            "storage_round_trip",
+            ControlledBlockComparisonScenario::StorageRoundTrip {
+                repeat_count: 1,
+                slot: 256,
+                original_value: 1,
+                written_value: 2,
+            },
+        ),
+    ];
+    for spec in invalid {
+        assert!(
+            build_controlled_block_fixture(&spec).is_err(),
+            "invalid structured parameters must fail before fixture construction: {:?}",
+            spec.program,
+        );
+    }
+
+    let mut excessive_blocks = structured_block_row(
+        "arithmetic",
+        ControlledBlockComparisonScenario::Arithmetic {
+            repeat_count: 1,
+            seed: 1,
+        },
+    );
+    excessive_blocks.block_count = 129;
+    excessive_blocks.row_id = controlled_block_row_id(&excessive_blocks).unwrap();
+    assert!(build_controlled_block_fixture(&excessive_blocks).is_err());
+    let mut excessive_transactions = structured_block_row(
+        "arithmetic",
+        ControlledBlockComparisonScenario::Arithmetic {
+            repeat_count: 1,
+            seed: 1,
+        },
+    );
+    excessive_transactions.transaction_count = 17;
+    excessive_transactions.row_id = controlled_block_row_id(&excessive_transactions).unwrap();
+    assert!(build_controlled_block_fixture(&excessive_transactions).is_err());
+}
+
+#[test]
+fn structured_block_comparison_rows_freeze_real_candidate_traces_deterministically() {
+    for (family, scenario) in structured_scenarios() {
+        let source = structured_block_row(family, scenario);
+        let first = freeze_controlled_block_fixture(&source)
+            .unwrap_or_else(|error| panic!("freeze {family}: {error:#}"));
+        let second = freeze_controlled_block_fixture(&source)
+            .unwrap_or_else(|error| panic!("refreeze {family}: {error:#}"));
+        assert_eq!(
+            first, second,
+            "{family} fixture identity must be deterministic"
+        );
+        assert_eq!(first.spec.row_id, source.row_id);
+        assert_eq!(
+            first.spec.expected_backend_input_sha256.as_deref(),
+            Some(first.observation.backend_input_sha256.as_str())
+        );
+        assert_eq!(
+            first.spec.expected_host_trace_sha256.as_deref(),
+            Some(first.observation.host_trace_sha256.as_str())
+        );
+        assert!(first.observation.finalized_block_zkgas.unwrap() > 0);
+        let trace = first
+            .candidate_trace
+            .as_ref()
+            .expect("structured identity must retain the real evaluator trace");
+        assert_eq!(trace["status"], json!("complete"));
+        assert_eq!(trace["parity"]["passed"], json!(true));
+        for block in trace["blocks"].as_array().unwrap() {
+            let anchor_indices = block["transactions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|transaction| transaction["is_anchor"] == json!(true))
+                .map(|transaction| transaction["started_tx_index"].as_u64().unwrap())
+                .collect::<std::collections::BTreeSet<_>>();
+            for operation in block["operations"].as_array().unwrap() {
+                if operation["tx_index"]
+                    .as_u64()
+                    .is_some_and(|index| anchor_indices.contains(&index))
+                {
+                    continue;
+                }
+                assert_ne!(
+                    operation["component"]["kind"],
+                    json!("opcode_feature_error")
+                );
+                assert_ne!(operation["component"]["kind"], json!("precompile"));
+                assert_ne!(operation["component"]["spawned"], json!(true));
+            }
+        }
+        assert!(
+            !first
+                .spec
+                .expected_raw_gas_by_key
+                .contains_key("opcode:0x00"),
+            "zero-cost STOP is retained in the candidate trace but contributes no raw-gas units"
+        );
+        assert!(trace["blocks"].as_array().unwrap().iter().any(|block| {
+            block["operations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|operation| {
+                    operation["component"]["kind"] == json!("opcode")
+                        && operation["component"]["opcode"] == json!(0)
+                        && operation["component"]["interpreter_raw_gas"] == json!(0)
+                        && operation["component"]["model_input"]
+                            == json!({"kind": "static_raw_gas", "raw_gas": 0})
+                })
+        }));
+
+        let fixture = build_controlled_block_fixture(&first.spec).unwrap();
+        let replay = validate_controlled_block_fixture(&fixture).unwrap();
+        assert_eq!(replay, first.observation);
+    }
+}
+
+#[test]
+fn structured_freeze_derives_only_a_zero_placeholder_row_id() {
+    let mut source = structured_block_row(
+        "arithmetic",
+        ControlledBlockComparisonScenario::Arithmetic {
+            repeat_count: 2,
+            seed: 17,
+        },
+    );
+    let canonical_row_id = source.row_id.clone();
+    let canonical_workload_id = source.workload_id.clone();
+    source.row_id = "0".repeat(64);
+    source.workload_id = Some("0".repeat(64));
+    assert!(
+        build_controlled_block_fixture(&source).is_err(),
+        "normal fixture construction must keep strict row identity validation"
+    );
+    let frozen = freeze_controlled_block_fixture(&source).unwrap();
+    assert_eq!(frozen.spec.row_id, canonical_row_id);
+    assert_eq!(frozen.spec.workload_id, canonical_workload_id);
+
+    source.row_id = "1".repeat(64);
+    source.workload_id = canonical_workload_id;
+    assert!(freeze_controlled_block_fixture(&source).is_err());
+}
+
+#[test]
+fn block_workload_identity_is_partition_independent_for_structured_native_and_empty() {
+    let cases = [
+        structured_block_row(
+            "arithmetic",
+            ControlledBlockComparisonScenario::Arithmetic {
+                repeat_count: 2,
+                seed: 17,
+            },
+        ),
+        {
+            let mut spec = block_row_spec();
+            spec.workload_family = "native_transfer".into();
+            spec.program = ControlledProgram::NativeTransfer { value: 2 };
+            spec.workload_id = Some(controlled_block_workload_id(&spec).unwrap());
+            spec.row_id = controlled_block_row_id(&spec).unwrap();
+            spec
+        },
+        {
+            let mut spec = block_row_spec();
+            spec.workload_family = "block_count".into();
+            spec.program = ControlledProgram::Empty;
+            spec.transaction_count = 0;
+            spec.workload_id = Some(controlled_block_workload_id(&spec).unwrap());
+            spec.row_id = controlled_block_row_id(&spec).unwrap();
+            spec
+        },
+    ];
+    for fit in cases {
+        let mut holdout = fit.clone();
+        holdout.split = ControlledBlockSplit::Holdout;
+        holdout.row_id = controlled_block_row_id(&holdout).unwrap();
+        assert_eq!(fit.workload_id, holdout.workload_id);
+        assert_ne!(fit.row_id, holdout.row_id);
+    }
+}
+
+#[test]
+fn legacy_empty_fixture_keeps_the_historical_768_block_bound() {
+    let mut spec = block_row_spec();
+    spec.workload_family = "block_count".into();
+    spec.block_count = 129;
+    spec.transaction_count = 0;
+    spec.program = ControlledProgram::Empty;
+    spec.expected_final_state_root = B256::ZERO;
+    spec.expected_raw_gas_by_key.clear();
+    spec.expected_operation_event_count_by_key.clear();
+    spec.expected_context_features.clear();
+    spec.expected_storage_features.clear();
+    spec.expected_features.clear();
+    spec.expected_diagnostics.clear();
+    spec.expected_backend_input_sha256 = None;
+    spec.expected_host_trace_sha256 = None;
+    spec.expected_finalized_block_zkgas = None;
+    spec.row_id = controlled_block_row_id(&spec).unwrap();
+    build_controlled_block_fixture(&spec).expect("legacy 129-block fixture remains supported");
+}
+
+#[test]
+fn storage_and_mixed_rows_keep_storage_events_separate_from_coarse_trie_ownership() {
+    for (family, scenario) in structured_scenarios()
+        .into_iter()
+        .filter(|(family, _)| matches!(*family, "storage_round_trip" | "mixed"))
+    {
+        let source = structured_block_row(family, scenario);
+        let frozen = freeze_controlled_block_fixture(&source).unwrap();
+        assert!(
+            frozen
+                .spec
+                .expected_storage_features
+                .keys()
+                .any(|key| key.starts_with("storage_load:")),
+        );
+        assert!(
+            frozen
+                .spec
+                .expected_storage_features
+                .keys()
+                .any(|key| key.starts_with("storage_store:")),
+        );
+        assert_eq!(
+            frozen
+                .spec
+                .expected_features
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec![
+                "block_base".to_string(),
+                "native_value_transfer".to_string(),
+                "proposal_startup".to_string(),
+                "tx_base".to_string(),
+            ],
+            "state/trie finalization remains owned by the coarse block model",
+        );
+        assert_eq!(
+            frozen.observation.actual_final_state_root,
+            frozen.spec.expected_final_state_root
+        );
+    }
+}
+
+#[test]
+fn storage_round_trip_covers_exact_set_clear_and_reset_branches() {
+    let cases = [
+        (0, 9, "set", "restore_original"),
+        (5, 0, "clear", "restore_original"),
+        (5, 9, "reset", "restore_original"),
+    ];
+    for (original_value, written_value, first_branch, restore_branch) in cases {
+        let source = structured_block_row(
+            "storage",
+            ControlledBlockComparisonScenario::StorageRoundTrip {
+                repeat_count: 1,
+                slot: 3,
+                original_value,
+                written_value,
+            },
+        );
+        let frozen = freeze_controlled_block_fixture(&source).unwrap();
+        let features = &frozen.spec.expected_storage_features;
+        assert_eq!(
+            features.get(&format!(
+                "storage_store:opcode:0x55:access:cold:branch:{first_branch}"
+            )),
+            Some(&1),
+        );
+        assert_eq!(
+            features.get("storage_load:opcode:0x54:access:warm"),
+            Some(&1),
+        );
+        assert_eq!(
+            features.get(&format!(
+                "storage_store:opcode:0x55:access:warm:branch:{restore_branch}"
+            )),
+            Some(&1),
+        );
+        assert_eq!(
+            frozen.observation.actual_final_state_root,
+            frozen.spec.expected_final_state_root
+        );
+    }
 }
 
 #[test]
@@ -875,6 +1324,7 @@ fn context_profiles_bind_source_builder_environment_and_positive_value_state() {
     let caller_signer = |profile| {
         let mut spec = ControlledBlockRowSpec {
             row_id: String::new(),
+            workload_id: None,
             workload_family: "context_opcode".into(),
             split: ControlledBlockSplit::Holdout,
             block_count: 1,
@@ -891,10 +1341,12 @@ fn context_profiles_bind_source_builder_environment_and_positive_value_state() {
             expected_raw_gas_by_key: BTreeMap::new(),
             expected_operation_event_count_by_key: BTreeMap::new(),
             expected_context_features: BTreeMap::new(),
+            expected_storage_features: BTreeMap::new(),
             expected_features: BTreeMap::new(),
             expected_diagnostics: BTreeMap::new(),
             expected_backend_input_sha256: None,
             expected_host_trace_sha256: None,
+            expected_finalized_block_zkgas: None,
         };
         spec.row_id = controlled_block_row_id(&spec).unwrap();
         let fixture = build_controlled_block_fixture(&spec).unwrap();
@@ -976,6 +1428,7 @@ fn context_profiles_bind_source_builder_environment_and_positive_value_state() {
 fn context_identity_freezes_the_same_trace_that_controlled_block_validates() {
     let mut source = ControlledBlockRowSpec {
         row_id: String::new(),
+        workload_id: None,
         workload_family: "context_opcode".into(),
         split: ControlledBlockSplit::Fit,
         block_count: 1,
@@ -992,10 +1445,12 @@ fn context_identity_freezes_the_same_trace_that_controlled_block_validates() {
         expected_raw_gas_by_key: BTreeMap::new(),
         expected_operation_event_count_by_key: BTreeMap::new(),
         expected_context_features: BTreeMap::new(),
+        expected_storage_features: BTreeMap::new(),
         expected_features: BTreeMap::new(),
         expected_diagnostics: BTreeMap::new(),
         expected_backend_input_sha256: None,
         expected_host_trace_sha256: None,
+        expected_finalized_block_zkgas: None,
     };
     source.row_id = controlled_block_row_id(&source).unwrap();
     assert_eq!(
@@ -1065,6 +1520,7 @@ fn context_identity_freezes_the_same_trace_that_controlled_block_validates() {
 fn zero_count_control_identity_serializes_empty_context_feature_evidence() {
     let mut source = ControlledBlockRowSpec {
         row_id: String::new(),
+        workload_id: None,
         workload_family: "context_opcode".into(),
         split: ControlledBlockSplit::Fit,
         block_count: 1,
@@ -1083,10 +1539,12 @@ fn zero_count_control_identity_serializes_empty_context_feature_evidence() {
         expected_raw_gas_by_key: BTreeMap::new(),
         expected_operation_event_count_by_key: BTreeMap::new(),
         expected_context_features: BTreeMap::new(),
+        expected_storage_features: BTreeMap::new(),
         expected_features: BTreeMap::new(),
         expected_diagnostics: BTreeMap::new(),
         expected_backend_input_sha256: None,
         expected_host_trace_sha256: None,
+        expected_finalized_block_zkgas: None,
     };
     source.row_id = controlled_block_row_id(&source).unwrap();
 

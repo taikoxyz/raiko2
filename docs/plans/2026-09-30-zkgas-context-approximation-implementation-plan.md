@@ -154,6 +154,9 @@ the existing schema-4 host-native trace.
 
 - Modify: `experiments/opcode-gas/context_approximation.py`
 - Modify: `experiments/opcode-gas/opcode_gas.py`
+- Create: `experiments/opcode-gas/block_comparison.py`
+- Modify: `bin/guest-launcher/src/controlled_workload.rs`
+- Modify: `bin/guest-launcher/tests/controlled_workload.rs`
 - Modify: `experiments/opcode-gas/tests/test_context_production.py`
 - Create after verification: one content-addressed directory under
   `experiments/opcode-gas/derivations/`
@@ -247,19 +250,41 @@ the existing schema-4 host-native trace.
   arithmetic, nearest-rank p95, strict MAPE improvement, max-APE regression, signed-bias failure,
   p95/max underprediction failures, and changed candidate/manifest/source hashes.
 
-- [ ] **Step 2: Implement and seal the review-only estimator extension**
+- [ ] **Step 2: Complete structured fixture support, then seal the final candidate**
 
-  Keep candidate evaluation deterministic and side-effect free. Seal its complete identity before
-  either block partition executes. Unzen normalization later reads only the calibration partition;
+  Implement the bounded arithmetic, context-heavy, calldata/memory, storage, and mixed fixture
+  scenarios first. Run their native trace/parity tests and rebuild the launcher before sealing the
+  final review-only candidate. Keep candidate evaluation deterministic and side-effect free. The
+  candidate must bind that rebuilt launcher and the exact fixture/trace sources before either block
+  partition executes. Any later launcher, fixture, or trace-source change requires a create-only
+  successor candidate before data-open; an earlier candidate remains immutable but is not eligible
+  for the final manifest. Unzen normalization later reads only the calibration partition;
   comparison reads only the sealed scalar, frozen candidate, and untouched validation rows.
+  The successor uses schema 5: it preserves the V5 registry byte-for-byte, retains the schema-4
+  context overlay, and adds a separate zero-cost terminal overlay for exactly `STOP` (`0x00`). The
+  terminal overlay accepts only `static_raw_gas(raw_gas=0)`, binds current inspector provenance,
+  and states that any residual terminal work is conservatively absorbed by `tx_base` and tested by
+  the block gate. It does not add `STOP` to the historical registry.
 
 - [ ] **Step 3: Freeze the controlled-block manifest before execution**
 
-  Use separate calibration and validation workload IDs, cover simple arithmetic, context-heavy,
+  Use the reviewed source-only manifest builder and separate calibration and validation workload
+  IDs, cover simple arithmetic, context-heavy,
   calldata-boundary, memory-expansion, storage, mixed transaction, and native-transfer blocks, and
   bind Osaka execution, Unzen schedule, production ELF/VK, launcher, trace schema, all source
   artifacts, and the exact sealed candidate identity. The manifest must contain no final-proposal
-  ID, and every emitted row must repeat the candidate identity.
+  ID, and every emitted row must repeat the candidate identity. Before sealing, run the exact
+  candidate evaluator over every frozen native trace and require complete coverage with zero gaps.
+  Generate all 32 rows through the native `controlled-block-identity` stage from zero-evidence
+  structured specs. The manifest builder must independently replay every Rust identity cross-link,
+  including workload/row/backend IDs, fixture-spec hash, expected-versus-observed ledgers, final
+  state, finalized zkGas, and candidate-trace hash. `calibration` maps to the Rust `fit` split and
+  `validation` maps to `holdout`; workload IDs exclude that split while row IDs bind it. Before the
+  create-only write, the public sealer must rerun all 32 zero-evidence specs with the exact
+  candidate-bound release launcher, byte-compare the resulting canonical bundles with the prepared
+  bundles, and replay every candidate prediction. Sealed verification repeats the same native
+  launcher and candidate replay; internally consistent caller-supplied bundle JSON is not evidence
+  that the bound launcher emitted it.
 
 - [ ] **Step 4: Execute and seal calibration, then seal Unzen normalization**
 

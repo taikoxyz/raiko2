@@ -20,9 +20,317 @@ sys.path.insert(0, str(OPCODE_GAS))
 
 import context_production_campaign as production
 import context_opcode_campaign as discovery_campaign
+import context_approximation as approximation
 
 
 MANIFEST = OPCODE_GAS / "manifests" / "sp1-context-production-v1.json"
+
+
+class ContextDiagnosticTests(unittest.TestCase):
+    def _source_result(self):
+        source = json.loads(
+            (
+                OPCODE_GAS
+                / "derivations"
+                / "a41befb63e663890896ba67d"
+                / "result.json"
+            ).read_text()
+        )
+        source["rows"] = self._all_rows()
+        return source
+
+    @staticmethod
+    def _report(row):
+        return {
+            "stage": "controlled-block",
+            "mode": "execute",
+            "sp1_execution_engine": "gas-estimator",
+            "exit_code": 0,
+            "guest_input_sha256": "0x" + row["backend_input_sha256"],
+            "sp1_proposal_elf_sha256": row["sp1_proposal_elf_sha256"],
+            "guest_launcher_sha256": row["guest_launcher_sha256"],
+            "controlled_block": {
+                "status": "accepted",
+                "row_id": row["row_id"],
+                "observation": {
+                    "backend_input_sha256": row["backend_input_sha256"],
+                },
+            },
+            "total_instruction_count": 5,
+            "total_syscall_count": 2,
+            "touched_memory_addresses": 0,
+            "opcode_counts": [
+                {"label": "ADD", "count": 2},
+                {"label": "MUL", "count": 3},
+            ],
+            "syscall_counts": [
+                {"label": "COMMIT", "count": 2},
+            ],
+        }
+
+    @staticmethod
+    def _all_rows():
+        return [
+            json.loads(line)
+            for line in (
+                OPCODE_GAS
+                / "derivations"
+                / "a41befb63e663890896ba67d"
+                / "rows.jsonl"
+            ).read_text().splitlines()
+        ]
+
+    def _selected_rows(self):
+        return approximation.select_context_diagnostic_rows(self._all_rows())
+
+    def test_diagnostic_selector_is_exact_88_row_repeat_zero_panel(self):
+        rows = self._selected_rows()
+        self.assertEqual(len(rows), 88)
+        self.assertEqual({row["repeat_index"] for row in rows}, {0})
+        self.assertEqual({row["lane"] for row in rows}, {"target", "control"})
+        self.assertEqual(
+            {(row["scenario"], row["count"]) for row in rows},
+            set(approximation.CONTEXT_DIAGNOSTIC_PANEL),
+        )
+
+    def test_extractor_canonicalizes_sorted_counts_and_rejects_bad_metrics(self):
+        report = self._report(self._selected_rows()[0])
+        report["opcode_counts"] = list(reversed(report["opcode_counts"]))
+        extracted = approximation.extract_sp1_diagnostics(report)
+        self.assertEqual(
+            extracted,
+            {
+                "total_instruction_count": 5,
+                "total_syscall_count": 2,
+                "touched_memory_addresses": 0,
+                "opcode_counts": [
+                    {"label": "ADD", "count": 2},
+                    {"label": "MUL", "count": 3},
+                ],
+                "syscall_counts": [{"label": "COMMIT", "count": 2}],
+            },
+        )
+        for field, value, error in (
+            ("total_instruction_count", 5.0, "nonnegative integer"),
+            ("touched_memory_addresses", -1, "nonnegative integer"),
+            ("opcode_counts", [{"label": "ADD", "count": 5}], "duplicate"),
+            ("opcode_counts", [{"label": "ADD", "count": 4}], "total"),
+            ("syscall_counts", [{"label": "COMMIT", "count": 2.0}], "nonnegative integer"),
+        ):
+            mutated = copy.deepcopy(report)
+            if error == "duplicate":
+                mutated[field].append({"label": "ADD", "count": 0})
+            else:
+                mutated[field] = value
+            with self.subTest(field=field, value=value), self.assertRaisesRegex(ValueError, error):
+                approximation.extract_sp1_diagnostics(mutated)
+        missing = copy.deepcopy(report)
+        missing.pop("syscall_counts")
+        with self.assertRaisesRegex(ValueError, "missing"):
+            approximation.extract_sp1_diagnostics(missing)
+
+    def test_sidecar_binds_source_identity_rows_and_reports_without_fit_inputs(self):
+        rows = self._selected_rows()
+        result = self._source_result()
+        reports = [self._report(row) for row in rows]
+        sidecar = approximation.build_context_diagnostic_sidecar(result, reports)
+        self.assertEqual(sidecar["source_result_identity"], result["result_identity"])
+        self.assertEqual(
+            sidecar["source_result_identity_sha256"],
+            result["result_identity_sha256"],
+        )
+        self.assertEqual(
+            list(sidecar["rows"]),
+            [row["row_id"] for row in rows],
+        )
+        self.assertTrue(
+            all(
+                not ({"total_instruction_count", "total_syscall_count", "touched_memory_addresses", "opcode_counts", "syscall_counts"} & set(row))
+                for row in rows
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "source row"):
+            approximation.build_context_diagnostic_sidecar(
+                result, reports[:-1]
+            )
+        mismatched = copy.deepcopy(reports)
+        mismatched[0]["controlled_block"]["row_id"] = "1" * 64
+        with self.assertRaisesRegex(ValueError, "source row"):
+            approximation.build_context_diagnostic_sidecar(result, mismatched)
+
+    def test_sidecar_verifier_rejects_result_identity_mismatch_and_diagnostic_fit_input(self):
+        rows = self._selected_rows()
+        result = self._source_result()
+        sidecar = approximation.build_context_diagnostic_sidecar(
+            result, [self._report(row) for row in rows]
+        )
+        approximation.verify_context_diagnostic_sidecar(sidecar, result)
+        persisted = json.loads(production.canonical_json(sidecar))
+        approximation.verify_context_diagnostic_sidecar(persisted, result)
+        rehashed = copy.deepcopy(sidecar)
+        rehashed["source_result_identity"]["implementation_revision"] = "0" * 40
+        unhashed = dict(rehashed)
+        unhashed.pop("artifact_sha256")
+        unhashed.pop("diagnostic_id")
+        unhashed.pop("diagnostic_identity_sha256")
+        rehashed["diagnostic_identity_sha256"] = production.sha256_bytes(
+            production.canonical_json(unhashed)
+        )
+        rehashed["diagnostic_id"] = rehashed["diagnostic_identity_sha256"][:24]
+        rehashed["artifact_sha256"] = production.sha256_bytes(
+            production.canonical_json(
+                {
+                    **unhashed,
+                    "diagnostic_identity_sha256": rehashed[
+                        "diagnostic_identity_sha256"
+                    ],
+                    "diagnostic_id": rehashed["diagnostic_id"],
+                }
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "strict source"):
+            approximation.verify_context_diagnostic_sidecar(rehashed)
+        changed_result = copy.deepcopy(result)
+        changed_result["result_identity_sha256"] = "1" * 64
+        with self.assertRaisesRegex(ValueError, "source result"):
+            approximation.verify_context_diagnostic_sidecar(sidecar, changed_result)
+        coefficient_input = {"rows": rows, "diagnostics": sidecar["rows"]}
+        with self.assertRaisesRegex(ValueError, "diagnostic"):
+            approximation.reject_context_diagnostics_from_coefficient_input(coefficient_input)
+
+    def test_runner_resumes_atomic_reports_and_directory_verify_requires_all_reports(self):
+        rows = self._selected_rows()
+        source = self._source_result()
+        source["manifest"] = production.load_production_context_manifest(MANIFEST)
+        launcher_sha256 = rows[0]["guest_launcher_sha256"]
+        elf_sha256 = rows[0]["sp1_proposal_elf_sha256"]
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            launcher = root / "guest-launcher"
+            launcher.write_bytes(b"launcher")
+            out = root / "diagnostics"
+            calls = []
+
+            def interrupted_runner(*, row, output, **_kwargs):
+                calls.append(row["row_id"])
+                if len(calls) == 2:
+                    raise RuntimeError("interrupted")
+                report = self._report(row)
+                approximation._write_create_only(
+                    output, production.canonical_json(report) + b"\n"
+                )
+                return report
+
+            def complete_runner(*, row, output, **_kwargs):
+                report = self._report(row)
+                approximation._write_create_only(
+                    output, production.canonical_json(report) + b"\n"
+                )
+                return report
+
+            with mock.patch.object(
+                approximation,
+                "load_context_diagnostic_source_result",
+                return_value=source,
+            ), mock.patch.object(
+                approximation,
+                "sha256_file",
+                side_effect=lambda path: (
+                    elf_sha256
+                    if pathlib.Path(path).name == "sp1_shasta_proposal.elf"
+                    else launcher_sha256
+                ),
+            ), mock.patch.object(
+                approximation,
+                "_run_diagnostic_report",
+                side_effect=interrupted_runner,
+            ), self.assertRaisesRegex(RuntimeError, "interrupted"):
+                approximation.run_context_diagnostics(
+                    result_directory=ROOT / "experiments/opcode-gas/derivations/a41befb63e663890896ba67d",
+                    launcher=launcher,
+                    out=out,
+                )
+            self.assertEqual(len(list((out / "reports").iterdir())), 1)
+            unrelated_temp = out / "reports" / ".important.tmp"
+            unrelated_temp.write_bytes(b"do-not-delete")
+            with mock.patch.object(
+                approximation,
+                "load_context_diagnostic_source_result",
+                return_value=source,
+            ), mock.patch.object(
+                approximation,
+                "sha256_file",
+                side_effect=lambda path: (
+                    elf_sha256
+                    if pathlib.Path(path).name == "sp1_shasta_proposal.elf"
+                    else launcher_sha256
+                ),
+            ), self.assertRaisesRegex(ValueError, "inventory"):
+                approximation.run_context_diagnostics(
+                    result_directory=ROOT / "experiments/opcode-gas/derivations/a41befb63e663890896ba67d",
+                    launcher=launcher,
+                    out=out,
+                )
+            unrelated_temp.unlink()
+
+            with mock.patch.object(
+                approximation,
+                "load_context_diagnostic_source_result",
+                return_value=source,
+            ), mock.patch.object(
+                approximation,
+                "sha256_file",
+                side_effect=lambda path: (
+                    elf_sha256
+                    if pathlib.Path(path).name == "sp1_shasta_proposal.elf"
+                    else launcher_sha256
+                ),
+            ), mock.patch.object(
+                approximation,
+                "_run_diagnostic_report",
+                side_effect=complete_runner,
+            ):
+                sidecar = approximation.run_context_diagnostics(
+                    result_directory=ROOT / "experiments/opcode-gas/derivations/a41befb63e663890896ba67d",
+                    launcher=launcher,
+                    out=out,
+                )
+            self.assertEqual(len(sidecar["rows"]), 88)
+            approximation.verify_context_diagnostics_path(out)
+            tampered = copy.deepcopy(sidecar)
+            first_row = next(iter(tampered["rows"].values()))
+            first_row["diagnostics"]["touched_memory_addresses"] = 1
+            unhashed = dict(tampered)
+            unhashed.pop("artifact_sha256")
+            unhashed.pop("diagnostic_id")
+            unhashed.pop("diagnostic_identity_sha256")
+            tampered["diagnostic_identity_sha256"] = production.sha256_bytes(
+                production.canonical_json(unhashed)
+            )
+            tampered["diagnostic_id"] = tampered["diagnostic_identity_sha256"][:24]
+            tampered["artifact_sha256"] = production.sha256_bytes(
+                production.canonical_json(
+                    {
+                        **unhashed,
+                        "diagnostic_identity_sha256": tampered[
+                            "diagnostic_identity_sha256"
+                        ],
+                        "diagnostic_id": tampered["diagnostic_id"],
+                    }
+                )
+            )
+            (out / "diagnostics.json").write_bytes(
+                production.canonical_json(tampered) + b"\n"
+            )
+            with self.assertRaisesRegex(ValueError, "diagnostics"):
+                approximation.verify_context_diagnostics_path(out)
+            (out / "diagnostics.json").write_bytes(
+                production.canonical_json(sidecar) + b"\n"
+            )
+            (out / "reports" / f"{rows[0]['row_id']}.json").unlink()
+            with self.assertRaisesRegex(ValueError, "inventory"):
+                approximation.verify_context_diagnostics_path(out)
 
 
 class ProductionContextManifestTests(unittest.TestCase):
@@ -922,6 +1230,8 @@ class ProductionContextCliTests(unittest.TestCase):
             "fit-context-production",
             "verify-context-production-result",
             "seal-context-production-result",
+            "run-context-diagnostics",
+            "verify-context-diagnostics",
         ):
             self.assertIn(live, completed.stdout)
 

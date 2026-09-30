@@ -25815,6 +25815,24 @@ def cmd_verify_context_production_result(args: argparse.Namespace) -> None:
     )
 
 
+def cmd_run_context_diagnostics(args: argparse.Namespace) -> None:
+    from context_approximation import run_context_diagnostics
+
+    sidecar = run_context_diagnostics(
+        result_directory=args.result,
+        launcher=args.launcher,
+        out=args.out,
+    )
+    print(f"wrote context diagnostics {sidecar['diagnostic_id']} to {args.out}")
+
+
+def cmd_verify_context_diagnostics(args: argparse.Namespace) -> None:
+    from context_approximation import verify_context_diagnostics_path
+
+    sidecar = verify_context_diagnostics_path(args.diagnostics)
+    print(f"verified context diagnostics {sidecar['diagnostic_id']}")
+
+
 def _add_context_production_asset_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--guest-launcher",
@@ -25904,6 +25922,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     context_verify.add_argument("--result", type=pathlib.Path, required=True)
     context_verify.set_defaults(func=cmd_verify_context_production_result)
+
+    context_diagnostics_run = subcommands.add_parser(
+        "run-context-diagnostics",
+        help="run or exactly resume the frozen 88-row SP1 diagnostics panel",
+    )
+    context_diagnostics_run.add_argument("--result", type=pathlib.Path, required=True)
+    context_diagnostics_run.add_argument("--launcher", type=pathlib.Path, required=True)
+    context_diagnostics_run.add_argument("--out", type=pathlib.Path, required=True)
+    context_diagnostics_run.set_defaults(func=cmd_run_context_diagnostics)
+
+    context_diagnostics_verify = subcommands.add_parser(
+        "verify-context-diagnostics",
+        help="verify a content-addressed context SP1 diagnostics sidecar",
+    )
+    context_diagnostics_verify.add_argument(
+        "--diagnostics", type=pathlib.Path, required=True
+    )
+    context_diagnostics_verify.set_defaults(func=cmd_verify_context_diagnostics)
 
     higher_prepare = subcommands.add_parser(
         "prepare-higher-layer-calibration",

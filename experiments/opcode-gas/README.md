@@ -101,6 +101,30 @@ preserves accepted, partial, and rejected raw evidence. The discovery result def
 feature vocabulary and candidate function shapes: none of its numeric coefficients, the historical
 `body_scale`, or a cross-ELF scale is a production-model input.
 
+### Context SP1 Diagnostic Sidecar
+
+The rejected context result remains immutable. To collect explanatory SP1 metadata, run the
+separate 88-row diagnostic panel: repeat zero, both target and control lanes, counts `0,16` for
+the eleven frozen fit scenarios and `0,64` for the eleven frozen final-holdout scenarios. The
+runner reconstructs portable source inputs, executes the unchanged production ELF with the
+gas-estimator, persists each completed report for exact resume, and writes a create-only sidecar.
+
+```bash
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py \
+  run-context-diagnostics \
+  --result experiments/opcode-gas/derivations/<context-result-id> \
+  --launcher target/release/guest-launcher \
+  --out /path/to/context-diagnostics
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py \
+  verify-context-diagnostics \
+  --diagnostics /path/to/context-diagnostics
+```
+
+The sidecar binds the complete source-result identity, immutable source row IDs, launcher and
+production-ELF hashes, report hashes, RISC-V opcode/syscall counts, instruction/syscall totals,
+and touched-memory-address total. Those metrics are post-execution diagnostics only: they never
+enter a coefficient input, an online estimator, or result sealing.
+
 ### Synthetic Four-Anchor Ratio Probe
 
 The dedicated `sp1-opcode-lab` guest has an independent diagnostic mode for the four free relation

@@ -411,7 +411,7 @@ class RunManifestTests(unittest.TestCase):
 
     def test_integration_smoke_binds_and_verifies_embedded_post_unzen_chain_spec(self):
         network, proposal_id, activation = "taiko_hoodi", 79852, 100
-        chain_spec = actual_chain_spec_list(network, activation)[0]
+        chain_spec = smoke_chain_spec(network, activation)
         guest_input_payload = {
             "taiko": {
                 "proposal_id": proposal_id,
@@ -536,6 +536,75 @@ class RunManifestTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, message):
                         opcode_gas.prepare_integration_smoke(
                             "taiko_hoodi", 79852, guest_input=guest_input
+                        )
+
+    def test_integration_smoke_rejects_partial_and_non_u64_witness_values(self):
+        u64_overflow = 1 << 64
+        base = smoke_guest_input_payload("taiko_hoodi", 79852)
+        cases = []
+
+        partial = json.loads(json.dumps(base))
+        partial["witnesses"][0]["chain_spec"] = {
+            "name": "taiko_hoodi",
+            "hard_forks": {"UNZEN": {"Timestamp": 1}},
+        }
+        cases.append(("partial", partial, "full ChainSpec"))
+
+        activation_overflow = smoke_guest_input_payload(
+            "taiko_hoodi", 79852, u64_overflow
+        )
+        cases.append(("activation_overflow", activation_overflow, "invalid UNZEN activation"))
+
+        for name, value in (
+            ("header_overflow", u64_overflow),
+            ("header_boolean", True),
+            ("header_float", 1.0),
+            ("header_negative", -1),
+        ):
+            invalid_header = json.loads(json.dumps(base))
+            invalid_header["witnesses"][0]["block"]["header"]["timestamp"] = value
+            cases.append((name, invalid_header, "invalid post-Unzen header"))
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            opcode_gas, "select_final_validation_corpus", return_value=[]
+        ):
+            guest_input = pathlib.Path(tmp) / "guest-input.json"
+            for name, payload, message in cases:
+                with self.subTest(case=name):
+                    guest_input.write_text(json.dumps(payload) + "\n")
+                    with self.assertRaisesRegex(ValueError, message):
+                        opcode_gas.prepare_integration_smoke(
+                            "taiko_hoodi", 79852, guest_input=guest_input
+                        )
+
+    def test_integration_smoke_rejects_type_confused_record_activation(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            opcode_gas, "select_final_validation_corpus", return_value=[]
+        ):
+            root = pathlib.Path(tmp)
+            guest_input = root / "guest-input.json"
+            record_path = root / "smoke-record.json"
+            guest_input.write_text(
+                json.dumps(smoke_guest_input_payload("taiko_hoodi", 79852)) + "\n"
+            )
+            record = opcode_gas.prepare_integration_smoke(
+                "taiko_hoodi", 79852, guest_input=guest_input
+            )
+            for name, activation in (
+                ("boolean", {"kind": "Timestamp", "value": True}),
+                ("float", {"kind": "Timestamp", "value": 1.0}),
+                ("malformed", {"kind": "Timestamp"}),
+            ):
+                with self.subTest(case=name):
+                    changed = dict(record)
+                    changed["unzen_activation"] = activation
+                    record_path.write_text(json.dumps(changed))
+                    with self.assertRaisesRegex(ValueError, "Unzen activation"):
+                        opcode_gas.verify_prepared_integration_smoke(
+                            record_path,
+                            network="taiko_hoodi",
+                            proposal_id=79852,
+                            guest_input=guest_input,
                         )
 
     def test_calibration_records_exact_formula_checkpoint_versions_and_artifacts(self):
@@ -1485,7 +1554,7 @@ def canonical_sha256(value):
 
 
 def smoke_guest_input_payload(network, proposal_id, unzen_timestamp=1):
-    chain_spec = actual_chain_spec_list(network, unzen_timestamp)[0]
+    chain_spec = smoke_chain_spec(network, unzen_timestamp)
     return {
         "taiko": {
             "proposal_id": proposal_id,
@@ -1498,6 +1567,25 @@ def smoke_guest_input_payload(network, proposal_id, unzen_timestamp=1):
             }
         ],
     }
+
+
+def smoke_chain_spec(network, unzen_timestamp):
+    chain_spec = actual_chain_spec_list(network, unzen_timestamp)[0]
+    chain_spec.update(
+        {
+            "max_spec_id": "OSAKA",
+            "eip_1559_constants": {
+                "base_fee_change_denominator": "0x8",
+                "base_fee_max_increase_denominator": "0x8",
+                "base_fee_max_decrease_denominator": "0x8",
+                "elasticity_multiplier": "0x2",
+            },
+            "l1_contract": {},
+            "l2_contract": None,
+            "checkpoint_store_contract": None,
+        }
+    )
+    return chain_spec
 
 
 def proposal_args(root, *, purpose, smoke_record):

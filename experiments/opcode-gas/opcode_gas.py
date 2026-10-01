@@ -12337,6 +12337,44 @@ def _proposal_guest_input_identity(guest_input: pathlib.Path) -> tuple[str, int,
     return _proposal_guest_input_identity_from_bytes(_guest_input_bytes(guest_input))
 
 
+_U64_MAX = (1 << 64) - 1
+_SERIALIZED_CHAIN_SPEC_FIELDS = frozenset(
+    {
+        "name",
+        "chain_id",
+        "max_spec_id",
+        "hard_forks",
+        "eip_1559_constants",
+        "l1_contract",
+        "l2_contract",
+        "checkpoint_store_contract",
+        "rpc",
+        "beacon_rpc",
+        "verifier_address_forks",
+        "genesis_time",
+        "seconds_per_slot",
+        "is_taiko",
+    }
+)
+
+
+def _is_u64(value: Any) -> bool:
+    return type(value) is int and 0 <= value <= _U64_MAX
+
+
+def _matches_unzen_activation(
+    record_activation: Any, expected_activation: Mapping[str, int | str]
+) -> bool:
+    return (
+        isinstance(record_activation, Mapping)
+        and set(record_activation) == {"kind", "value"}
+        and type(record_activation["kind"]) is str
+        and record_activation["kind"] == expected_activation["kind"]
+        and type(record_activation["value"]) is int
+        and record_activation["value"] == expected_activation["value"]
+    )
+
+
 def _embedded_smoke_chain_spec_identity(
     guest_input_bytes: bytes, expected_network: str
 ) -> tuple[str, dict[str, int | str]]:
@@ -12356,6 +12394,12 @@ def _embedded_smoke_chain_spec_identity(
         chain_spec = witness.get("chain_spec")
         if not isinstance(chain_spec, Mapping):
             raise ValueError(f"GuestInput witness {index} is missing its full chain spec")
+        missing_fields = _SERIALIZED_CHAIN_SPEC_FIELDS.difference(chain_spec)
+        if missing_fields:
+            raise ValueError(
+                f"GuestInput witness {index} is missing full ChainSpec fields: "
+                f"{', '.join(sorted(missing_fields))}"
+            )
         if chain_spec.get("name") != expected_network:
             raise ValueError("GuestInput witness chain spec does not match integration_smoke network")
         hard_forks = chain_spec.get("hard_forks")
@@ -12365,9 +12409,7 @@ def _embedded_smoke_chain_spec_identity(
         kind, activation = next(iter(unzen.items()))
         if (
             kind not in ("Timestamp", "Block")
-            or isinstance(activation, bool)
-            or not isinstance(activation, int)
-            or activation < 0
+            or not _is_u64(activation)
         ):
             raise ValueError("GuestInput witness chain spec has an invalid UNZEN activation")
         current_chain_spec = canonical_json(chain_spec)
@@ -12384,12 +12426,9 @@ def _embedded_smoke_chain_spec_identity(
         if not isinstance(header, Mapping):
             raise ValueError(f"GuestInput witness {index} is missing its block header")
         value = header.get("timestamp") if kind == "Timestamp" else header.get("number")
-        if isinstance(value, str):
-            try:
-                value = int(value, 0)
-            except ValueError as error:
-                raise ValueError(f"GuestInput witness {index} has an invalid post-Unzen header") from error
-        if isinstance(value, bool) or not isinstance(value, int) or value < activation:
+        if not _is_u64(value):
+            raise ValueError(f"GuestInput witness {index} has an invalid post-Unzen header")
+        if value < activation:
             raise ValueError("GuestInput witness block header is pre-Unzen")
 
     assert canonical_chain_spec is not None and unzen_activation is not None
@@ -12464,7 +12503,7 @@ def verify_prepared_integration_smoke(
     )
     if record.get("embedded_chain_spec_sha256") != embedded_chain_spec_sha256:
         raise ValueError("prepared integration_smoke record does not match GuestInput embedded chain spec")
-    if record.get("unzen_activation") != unzen_activation:
+    if not _matches_unzen_activation(record.get("unzen_activation"), unzen_activation):
         raise ValueError("prepared integration_smoke record does not match GuestInput Unzen activation")
     assert_integration_smoke_is_disjoint(
         select_final_validation_corpus(), network, proposal_id

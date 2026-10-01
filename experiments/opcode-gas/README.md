@@ -1334,11 +1334,13 @@ plumbing change has independent review and the two smoke joins complete.
 derived proposal workload identity. An integration smoke accepts only `--proof-type sp1`; a RISC0
 execute run cannot be labelled as this checkpoint.
 
-The smoke GuestInput is also its only acquisition chain-spec source: every witness must embed the
-same full chain spec for the requested network, with a valid `hard_forks.UNZEN` activation, and
-every witness header must be at or after that activation. Preparation records the canonical embedded
-chain-spec SHA-256 and structured Unzen activation. `run-proposal` recomputes both from the exact
-GuestInput bytes and rejects a stale or hand-written smoke record before invoking `guest-launcher`.
+The smoke GuestInput is also its only acquisition chain-spec source. Its top-level
+`taiko.chain_spec` must be the exact ManifestChainSpec identity for the requested network
+(`taiko_hoodi` / `167013` / `true`, or `taiko_mainnet` / `167000` / `true`); every witness must
+embed that same full chain spec, with a valid `hard_forks.UNZEN` activation, and every witness header
+must be at or after that activation. Preparation records the canonical embedded chain-spec SHA-256
+and structured Unzen activation. `run-proposal` recomputes both from the exact GuestInput bytes and
+rejects a stale or hand-written smoke record before invoking `guest-launcher`.
 
 Run the following only from the reviewed clean revision. The two input files are preflight-produced
 `GuestInput` files stored under the ignored smoke directory; acquiring them from RPC is a separate
@@ -1518,10 +1520,12 @@ then supply the same `--network`, `--proposal-id`, and
 record is still purpose-labelled `integration_smoke`, is disjoint from the
 frozen final 60 rows, is one of Hoodi `79852` or Mainnet `38261`, and binds the exact GuestInput
 bytes, derived workload identity, embedded network/proposal identity, canonical witness chain-spec
-digest, and structured Unzen activation before invoking guest-launcher. Every witness must carry the
-same requested-network chain spec with an explicit valid `hard_forks.UNZEN` activation, and its block
-header must be post-Unzen. The normalized JSONL row preserves the five execution identity fields so
-later review can audit that the row never entered final validation.
+digest, and structured Unzen activation before invoking guest-launcher. The top-level
+`taiko.chain_spec` ManifestChainSpec and every witness chain spec must match the requested network's
+exact name, chain ID, and `is_taiko` identity; every witness must also carry the same requested-network
+chain spec with an explicit valid `hard_forks.UNZEN` activation, and its block header must be
+post-Unzen. The normalized JSONL row preserves the five execution identity fields so later review can
+audit that the row never entered final validation.
 
 - Add a Taiko/reth-context revm lab that keeps the `revm-opcode-lab` execution path but uses Taiko
   fork config, block env, and realistic tx env instead of fixed Osaka/mainnet benchmark defaults.

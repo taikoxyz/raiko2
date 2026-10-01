@@ -12364,6 +12364,10 @@ _EIP_1559_CONSTANT_FIELDS = frozenset(
         "elasticity_multiplier",
     }
 )
+_SMOKE_NETWORK_IDENTITIES = {
+    "taiko_hoodi": {"name": "taiko_hoodi", "chain_id": 167013, "is_taiko": True},
+    "taiko_mainnet": {"name": "taiko_mainnet", "chain_id": 167000, "is_taiko": True},
+}
 
 
 def _is_u64(value: Any) -> bool:
@@ -12406,8 +12410,32 @@ def _matches_unzen_activation(
     )
 
 
-def _embedded_smoke_chain_spec_identity(
+def _smoke_manifest_chain_spec_identity(
     guest_input_bytes: bytes, expected_network: str
+) -> Mapping[str, int | str | bool]:
+    try:
+        raw = json.loads(guest_input_bytes)
+        chain_spec = raw["taiko"]["chain_spec"]
+    except (json.JSONDecodeError, KeyError, TypeError) as error:
+        raise ValueError("GuestInput is missing its integration_smoke manifest chain spec") from error
+    if (
+        not isinstance(chain_spec, Mapping)
+        or set(chain_spec) != {"name", "chain_id", "is_taiko"}
+        or type(chain_spec.get("name")) is not str
+        or not _is_u64(chain_spec.get("chain_id"))
+        or type(chain_spec.get("is_taiko")) is not bool
+    ):
+        raise ValueError("GuestInput has an invalid integration_smoke manifest chain spec")
+    expected_identity = _SMOKE_NETWORK_IDENTITIES.get(expected_network)
+    if expected_identity is None:
+        raise ValueError(f"unsupported integration_smoke network: {expected_network}")
+    if dict(chain_spec) != expected_identity:
+        raise ValueError("GuestInput manifest chain spec does not match integration_smoke network")
+    return expected_identity
+
+
+def _embedded_smoke_chain_spec_identity(
+    guest_input_bytes: bytes, expected_identity: Mapping[str, int | str | bool]
 ) -> tuple[str, dict[str, int | str]]:
     try:
         raw = json.loads(guest_input_bytes)
@@ -12433,8 +12461,13 @@ def _embedded_smoke_chain_spec_identity(
             )
         if not _has_serialized_chain_spec_shape(chain_spec):
             raise ValueError(f"GuestInput witness {index} has an invalid full ChainSpec")
-        if chain_spec.get("name") != expected_network:
-            raise ValueError("GuestInput witness chain spec does not match integration_smoke network")
+        witness_identity = {
+            "name": chain_spec["name"],
+            "chain_id": chain_spec["chain_id"],
+            "is_taiko": chain_spec["is_taiko"],
+        }
+        if witness_identity != expected_identity:
+            raise ValueError("GuestInput witness chain spec identity does not match integration_smoke network")
         hard_forks = chain_spec.get("hard_forks")
         unzen = hard_forks.get("UNZEN") if isinstance(hard_forks, Mapping) else None
         if not isinstance(unzen, Mapping) or len(unzen) != 1:
@@ -12484,13 +12517,14 @@ def prepare_integration_smoke(
     if guest_input is None:
         raise ValueError("integration_smoke requires a GuestInput")
     guest_input_bytes = _guest_input_bytes(guest_input)
+    manifest_identity = _smoke_manifest_chain_spec_identity(guest_input_bytes, network)
     input_network, input_proposal_id, fixture_sha256 = _proposal_guest_input_identity_from_bytes(
         guest_input_bytes
     )
     if (input_network, input_proposal_id) != (network, proposal_id):
         raise ValueError("GuestInput does not match integration_smoke identity")
     embedded_chain_spec_sha256, unzen_activation = _embedded_smoke_chain_spec_identity(
-        guest_input_bytes, network
+        guest_input_bytes, manifest_identity
     )
     return freeze_smoke_row(
         {
@@ -12522,6 +12556,7 @@ def verify_prepared_integration_smoke(
         raise ValueError("prepared integration_smoke record does not match run-proposal identity")
     assert_frozen_integration_smoke_identity(network, proposal_id)
     guest_input_bytes = _guest_input_bytes(guest_input)
+    manifest_identity = _smoke_manifest_chain_spec_identity(guest_input_bytes, network)
     input_network, input_proposal_id, fixture_sha256 = _proposal_guest_input_identity_from_bytes(
         guest_input_bytes
     )
@@ -12532,7 +12567,7 @@ def verify_prepared_integration_smoke(
     if record.get("workload_id") != proposal_workload_id(fixture_sha256):
         raise ValueError("prepared integration_smoke record has an invalid workload identity")
     embedded_chain_spec_sha256, unzen_activation = _embedded_smoke_chain_spec_identity(
-        guest_input_bytes, network
+        guest_input_bytes, manifest_identity
     )
     if record.get("embedded_chain_spec_sha256") != embedded_chain_spec_sha256:
         raise ValueError("prepared integration_smoke record does not match GuestInput embedded chain spec")

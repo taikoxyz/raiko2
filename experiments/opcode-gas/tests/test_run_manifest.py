@@ -415,7 +415,7 @@ class RunManifestTests(unittest.TestCase):
         guest_input_payload = {
             "taiko": {
                 "proposal_id": proposal_id,
-                "chain_spec": {"name": network},
+                "chain_spec": smoke_manifest_chain_spec(network),
             },
             "witnesses": [
                 {
@@ -634,6 +634,40 @@ class RunManifestTests(unittest.TestCase):
                     payload["witnesses"][0]["chain_spec"][field] = value
                     guest_input.write_text(json.dumps(payload) + "\n")
                     with self.assertRaisesRegex(ValueError, "invalid full ChainSpec"):
+                        opcode_gas.prepare_integration_smoke(
+                            "taiko_hoodi", 79852, guest_input=guest_input
+                        )
+
+    def test_integration_smoke_rejects_invalid_manifest_and_witness_network_identity(self):
+        base = smoke_guest_input_payload("taiko_hoodi", 79852)
+        cases = []
+
+        missing_manifest = json.loads(json.dumps(base))
+        del missing_manifest["taiko"]["chain_spec"]
+        cases.append(("missing_manifest", missing_manifest, "manifest chain spec"))
+
+        malformed_manifest = json.loads(json.dumps(base))
+        malformed_manifest["taiko"]["chain_spec"] = []
+        cases.append(("malformed_manifest", malformed_manifest, "manifest chain spec"))
+
+        for field, value in (("chain_id", 167000), ("is_taiko", False)):
+            changed = json.loads(json.dumps(base))
+            changed["taiko"]["chain_spec"][field] = value
+            cases.append((f"manifest_{field}", changed, "manifest chain spec"))
+
+        for field, value in (("chain_id", 167000), ("is_taiko", False)):
+            changed = json.loads(json.dumps(base))
+            changed["witnesses"][0]["chain_spec"][field] = value
+            cases.append((f"witness_{field}", changed, "witness chain spec identity"))
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            opcode_gas, "select_final_validation_corpus", return_value=[]
+        ):
+            guest_input = pathlib.Path(tmp) / "guest-input.json"
+            for name, payload, message in cases:
+                with self.subTest(case=name):
+                    guest_input.write_text(json.dumps(payload) + "\n")
+                    with self.assertRaisesRegex(ValueError, message):
                         opcode_gas.prepare_integration_smoke(
                             "taiko_hoodi", 79852, guest_input=guest_input
                         )
@@ -1069,12 +1103,9 @@ class RunManifestTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
             args = proposal_args(root, purpose="integration_smoke", smoke_record=root / "smoke.json")
-            args.guest_input.write_text(json.dumps({
-                "taiko": {
-                    "proposal_id": 79852,
-                    "chain_spec": {"name": "taiko_hoodi"},
-                }
-            }) + "\n")
+            args.guest_input.write_text(
+                json.dumps(smoke_guest_input_payload("taiko_hoodi", 79852)) + "\n"
+            )
             with mock.patch.object(opcode_gas, "REPO_ROOT", root), mock.patch.object(
                 opcode_gas, "run_proposal_guest_input"
             ) as execute:
@@ -1232,12 +1263,9 @@ class RunManifestTests(unittest.TestCase):
             args = proposal_args(
                 root, purpose="integration_smoke", smoke_record=root / "smoke.json"
             )
-            args.guest_input.write_text(json.dumps({
-                "taiko": {
-                    "proposal_id": 79852,
-                    "chain_spec": {"name": "taiko_hoodi"},
-                }
-            }) + "\n")
+            args.guest_input.write_text(
+                json.dumps(smoke_guest_input_payload("taiko_hoodi", 79852)) + "\n"
+            )
             args.smoke_record.write_text(json.dumps({
                 "network": "taiko_hoodi",
                 "proposal_id": 79852,
@@ -1589,7 +1617,7 @@ def smoke_guest_input_payload(network, proposal_id, unzen_timestamp=1):
     return {
         "taiko": {
             "proposal_id": proposal_id,
-            "chain_spec": {"name": network},
+            "chain_spec": smoke_manifest_chain_spec(network),
         },
         "witnesses": [
             {
@@ -1600,8 +1628,17 @@ def smoke_guest_input_payload(network, proposal_id, unzen_timestamp=1):
     }
 
 
+def smoke_manifest_chain_spec(network):
+    return {
+        "name": network,
+        "chain_id": {"taiko_hoodi": 167013, "taiko_mainnet": 167000}[network],
+        "is_taiko": True,
+    }
+
+
 def smoke_chain_spec(network, unzen_timestamp):
     chain_spec = actual_chain_spec_list(network, unzen_timestamp)[0]
+    chain_spec.update(smoke_manifest_chain_spec(network))
     chain_spec.update(
         {
             "max_spec_id": "OSAKA",

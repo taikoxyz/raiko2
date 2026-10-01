@@ -12356,10 +12356,41 @@ _SERIALIZED_CHAIN_SPEC_FIELDS = frozenset(
         "is_taiko",
     }
 )
+_EIP_1559_CONSTANT_FIELDS = frozenset(
+    {
+        "base_fee_change_denominator",
+        "base_fee_max_increase_denominator",
+        "base_fee_max_decrease_denominator",
+        "elasticity_multiplier",
+    }
+)
 
 
 def _is_u64(value: Any) -> bool:
     return type(value) is int and 0 <= value <= _U64_MAX
+
+
+def _has_serialized_chain_spec_shape(chain_spec: Mapping[str, Any]) -> bool:
+    eip_1559_constants = chain_spec["eip_1559_constants"]
+    return (
+        _is_u64(chain_spec["chain_id"])
+        and isinstance(chain_spec["max_spec_id"], str)
+        and isinstance(chain_spec["hard_forks"], Mapping)
+        and isinstance(eip_1559_constants, Mapping)
+        and _EIP_1559_CONSTANT_FIELDS.issubset(eip_1559_constants)
+        and isinstance(chain_spec["l1_contract"], Mapping)
+        and (chain_spec["l2_contract"] is None or isinstance(chain_spec["l2_contract"], str))
+        and (
+            chain_spec["checkpoint_store_contract"] is None
+            or isinstance(chain_spec["checkpoint_store_contract"], str)
+        )
+        and isinstance(chain_spec["rpc"], str)
+        and (chain_spec["beacon_rpc"] is None or isinstance(chain_spec["beacon_rpc"], str))
+        and isinstance(chain_spec["verifier_address_forks"], Mapping)
+        and _is_u64(chain_spec["genesis_time"])
+        and _is_u64(chain_spec["seconds_per_slot"])
+        and type(chain_spec["is_taiko"]) is bool
+    )
 
 
 def _matches_unzen_activation(
@@ -12400,6 +12431,8 @@ def _embedded_smoke_chain_spec_identity(
                 f"GuestInput witness {index} is missing full ChainSpec fields: "
                 f"{', '.join(sorted(missing_fields))}"
             )
+        if not _has_serialized_chain_spec_shape(chain_spec):
+            raise ValueError(f"GuestInput witness {index} has an invalid full ChainSpec")
         if chain_spec.get("name") != expected_network:
             raise ValueError("GuestInput witness chain spec does not match integration_smoke network")
         hard_forks = chain_spec.get("hard_forks")

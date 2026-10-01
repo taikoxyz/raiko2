@@ -607,6 +607,37 @@ class RunManifestTests(unittest.TestCase):
                             guest_input=guest_input,
                         )
 
+    def test_integration_smoke_rejects_wrong_full_chain_spec_field_types(self):
+        base = smoke_guest_input_payload("taiko_hoodi", 79852)
+        cases = (
+            ("chain_id", True),
+            ("max_spec_id", 1),
+            ("eip_1559_constants", []),
+            ("l1_contract", []),
+            ("l2_contract", 1),
+            ("checkpoint_store_contract", 1),
+            ("rpc", None),
+            ("beacon_rpc", 1),
+            ("verifier_address_forks", []),
+            ("genesis_time", 1 << 64),
+            ("seconds_per_slot", -1),
+            ("is_taiko", 1),
+        )
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            opcode_gas, "select_final_validation_corpus", return_value=[]
+        ):
+            guest_input = pathlib.Path(tmp) / "guest-input.json"
+            for field, value in cases:
+                with self.subTest(field=field):
+                    payload = json.loads(json.dumps(base))
+                    payload["witnesses"][0]["chain_spec"][field] = value
+                    guest_input.write_text(json.dumps(payload) + "\n")
+                    with self.assertRaisesRegex(ValueError, "invalid full ChainSpec"):
+                        opcode_gas.prepare_integration_smoke(
+                            "taiko_hoodi", 79852, guest_input=guest_input
+                        )
+
     def test_calibration_records_exact_formula_checkpoint_versions_and_artifacts(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)

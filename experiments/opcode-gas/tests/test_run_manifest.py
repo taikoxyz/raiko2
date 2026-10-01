@@ -379,16 +379,13 @@ class RunManifestTests(unittest.TestCase):
                 ("taiko_mainnet", 38261),
             ):
                 with self.subTest(network=network):
-                    guest_input.write_text(json.dumps({
-                        "taiko": {
-                            "proposal_id": proposal_id,
-                            "chain_spec": {"name": network},
-                        }
-                    }) + "\n")
+                    guest_input_payload = smoke_guest_input_payload(network, proposal_id)
+                    guest_input.write_text(json.dumps(guest_input_payload) + "\n")
                     record = opcode_gas.prepare_integration_smoke(
                         network, proposal_id, guest_input=guest_input
                     )
                     fixture_sha256 = opcode_gas.sha256_file(guest_input)
+                    chain_spec = guest_input_payload["witnesses"][0]["chain_spec"]
                     self.assertEqual(record, {
                         "network": network,
                         "proposal_id": proposal_id,
@@ -397,6 +394,8 @@ class RunManifestTests(unittest.TestCase):
                         "workload_id": opcode_gas.proposal_workload_id(
                             fixture_sha256
                         ),
+                        "embedded_chain_spec_sha256": canonical_sha256(chain_spec),
+                        "unzen_activation": {"kind": "Timestamp", "value": 1},
                     })
 
             guest_input.write_text(json.dumps({
@@ -409,6 +408,135 @@ class RunManifestTests(unittest.TestCase):
                 opcode_gas.prepare_integration_smoke(
                     "taiko_hoodi", 79853, guest_input=guest_input
                 )
+
+    def test_integration_smoke_binds_and_verifies_embedded_post_unzen_chain_spec(self):
+        network, proposal_id, activation = "taiko_hoodi", 79852, 100
+        chain_spec = actual_chain_spec_list(network, activation)[0]
+        guest_input_payload = {
+            "taiko": {
+                "proposal_id": proposal_id,
+                "chain_spec": {"name": network},
+            },
+            "witnesses": [
+                {
+                    "block": {"header": {"timestamp": activation}},
+                    "chain_spec": chain_spec,
+                },
+                {
+                    "block": {"header": {"timestamp": activation + 1}},
+                    "chain_spec": chain_spec,
+                },
+            ],
+        }
+        expected_chain_spec_sha256 = hashlib.sha256(
+            json.dumps(
+                chain_spec, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+            ).encode()
+        ).hexdigest()
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            opcode_gas, "select_final_validation_corpus", return_value=[]
+        ):
+            root = pathlib.Path(tmp)
+            guest_input = root / "guest-input.json"
+            record_path = root / "smoke-record.json"
+            guest_input.write_text(json.dumps(guest_input_payload) + "\n")
+
+            record = opcode_gas.prepare_integration_smoke(
+                network, proposal_id, guest_input=guest_input
+            )
+
+            self.assertEqual(record["embedded_chain_spec_sha256"], expected_chain_spec_sha256)
+            self.assertEqual(
+                record["unzen_activation"], {"kind": "Timestamp", "value": activation}
+            )
+            record_path.write_text(json.dumps(record))
+            self.assertEqual(
+                opcode_gas.verify_prepared_integration_smoke(
+                    record_path,
+                    network=network,
+                    proposal_id=proposal_id,
+                    guest_input=guest_input,
+                ),
+                record,
+            )
+
+            record["embedded_chain_spec_sha256"] = "00" * 32
+            record_path.write_text(json.dumps(record))
+            with self.assertRaisesRegex(ValueError, "embedded chain spec"):
+                opcode_gas.verify_prepared_integration_smoke(
+                    record_path,
+                    network=network,
+                    proposal_id=proposal_id,
+                    guest_input=guest_input,
+                )
+
+            record["embedded_chain_spec_sha256"] = expected_chain_spec_sha256
+            record["unzen_activation"] = {"kind": "Timestamp", "value": activation - 1}
+            record_path.write_text(json.dumps(record))
+            with self.assertRaisesRegex(ValueError, "Unzen activation"):
+                opcode_gas.verify_prepared_integration_smoke(
+                    record_path,
+                    network=network,
+                    proposal_id=proposal_id,
+                    guest_input=guest_input,
+                )
+
+    def test_integration_smoke_rejects_invalid_embedded_unzen_activations(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            opcode_gas, "select_final_validation_corpus", return_value=[]
+        ):
+            root = pathlib.Path(tmp)
+            guest_input = root / "guest-input.json"
+            payload = smoke_guest_input_payload("taiko_hoodi", 79852, -1)
+            guest_input.write_text(json.dumps(payload) + "\n")
+
+            with self.assertRaisesRegex(ValueError, "invalid UNZEN activation"):
+                opcode_gas.prepare_integration_smoke(
+                    "taiko_hoodi", 79852, guest_input=guest_input
+                )
+
+    def test_integration_smoke_rejects_missing_mixed_and_pre_unzen_witnesses(self):
+        base = smoke_guest_input_payload("taiko_hoodi", 79852)
+        cases = []
+
+        missing = json.loads(json.dumps(base))
+        del missing["witnesses"]
+        cases.append(("missing", missing, "witness-embedded chain specs"))
+
+        mixed = json.loads(json.dumps(base))
+        second = json.loads(json.dumps(mixed["witnesses"][0]))
+        second["chain_spec"]["rpc"] = "https://different.invalid"
+        mixed["witnesses"].append(second)
+        cases.append(("mixed", mixed, "same full chain spec"))
+
+        wrong_network = json.loads(json.dumps(base))
+        wrong_network["witnesses"][0]["chain_spec"]["name"] = "taiko_mainnet"
+        cases.append(("wrong_network", wrong_network, "does not match"))
+
+        malformed = json.loads(json.dumps(base))
+        malformed["witnesses"][0]["chain_spec"]["hard_forks"]["UNZEN"] = {}
+        cases.append(("malformed", malformed, "must declare hard_forks.UNZEN"))
+
+        malformed_header = json.loads(json.dumps(base))
+        malformed_header["witnesses"][0]["block"]["header"] = []
+        cases.append(("malformed_header", malformed_header, "missing its block header"))
+
+        pre_unzen = json.loads(json.dumps(base))
+        pre_unzen["witnesses"][0]["block"]["header"]["timestamp"] = 0
+        cases.append(("pre_unzen", pre_unzen, "pre-Unzen"))
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            opcode_gas, "select_final_validation_corpus", return_value=[]
+        ):
+            guest_input = pathlib.Path(tmp) / "guest-input.json"
+            for name, payload, message in cases:
+                with self.subTest(case=name):
+                    guest_input.write_text(json.dumps(payload) + "\n")
+                    with self.assertRaisesRegex(ValueError, message):
+                        opcode_gas.prepare_integration_smoke(
+                            "taiko_hoodi", 79852, guest_input=guest_input
+                        )
 
     def test_calibration_records_exact_formula_checkpoint_versions_and_artifacts(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -886,12 +1014,8 @@ class RunManifestTests(unittest.TestCase):
             args.guest_launcher.write_bytes(b"reviewed launcher")
             proposal_elf = root / "sp1_shasta_proposal.elf"
             proposal_elf.write_bytes(b"reviewed proposal ELF")
-            args.guest_input.write_text(json.dumps({
-                "taiko": {
-                    "proposal_id": 79852,
-                    "chain_spec": {"name": "taiko_hoodi"},
-                }
-            }) + "\n")
+            guest_input_payload = smoke_guest_input_payload("taiko_hoodi", 79852)
+            args.guest_input.write_text(json.dumps(guest_input_payload) + "\n")
             fixture_sha256 = opcode_gas.sha256_file(args.guest_input)
             workload_id = opcode_gas.proposal_workload_id(fixture_sha256)
             args.smoke_record.write_text(json.dumps({
@@ -900,6 +1024,10 @@ class RunManifestTests(unittest.TestCase):
                 "purpose": "integration_smoke",
                 "fixture_sha256": fixture_sha256,
                 "workload_id": workload_id,
+                "embedded_chain_spec_sha256": canonical_sha256(
+                    guest_input_payload["witnesses"][0]["chain_spec"]
+                ),
+                "unzen_activation": {"kind": "Timestamp", "value": 1},
             }))
 
             def fake_run(command, check):
@@ -1348,6 +1476,28 @@ def actual_chain_spec_list(network, unzen_timestamp):
         "genesis_time": 0,
         "seconds_per_slot": 1,
     }]
+
+
+def canonical_sha256(value):
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+    ).hexdigest()
+
+
+def smoke_guest_input_payload(network, proposal_id, unzen_timestamp=1):
+    chain_spec = actual_chain_spec_list(network, unzen_timestamp)[0]
+    return {
+        "taiko": {
+            "proposal_id": proposal_id,
+            "chain_spec": {"name": network},
+        },
+        "witnesses": [
+            {
+                "block": {"header": {"timestamp": unzen_timestamp}},
+                "chain_spec": chain_spec,
+            }
+        ],
+    }
 
 
 def proposal_args(root, *, purpose, smoke_record):

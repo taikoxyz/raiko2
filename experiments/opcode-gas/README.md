@@ -1341,6 +1341,23 @@ Anchor opcode executions, with `BLOCKHASH` dominating the newly visible gaps. Th
 must price Anchor through the ordinary operation layer and refit `block_base`; do not attribute the
 smoke residual to a higher-layer offset before that lower-layer correction.
 
+#### Anchor-correction BLOCKHASH result
+
+The bounded production-guest follow-up is sealed at
+`calibrations/sp1-blockhash-v2/6af515a6377aaf0c2906b151`. Its schema-2 panel uses fit counts
+`0, 128, 256, 512` and an untouched `1024` checkpoint for each of the three required semantic
+classes. The paired fit is affine because target and control are distinct GuestInputs: their
+deterministic fixed difference is an intercept, while the per-event slope may be negative when
+`BLOCKHASH` is cheaper than the measured `ISZERO` control. Promotion uses the reconstructed target
+event cost, requires a nonnegative production static-raw-gas body, and accepts only if all classes
+pass their frozen residual gates.
+
+The result selects the maximum class cost, `recent_ancestor_hit_256`, at approximately
+`32.1176845849` proverGas per event and body/raw-gas `0.9571399947`. It is a reviewed input to the
+Anchor gap-closure and block-refit work, not a production schedule update. The earlier small-count
+result `742514d26f94a9b53337a3af` remains useful only as the fail-closed diagnostic that established
+the signal-amplitude problem; do not use its coefficients.
+
 `prepare-integration-smoke` rejects every other network/proposal pair. Its record and the resulting
 `run.jsonl` bind `purpose`, `network`, `proposal_id`, the exact GuestInput fixture digest, and the
 derived proposal workload identity. An integration smoke accepts only `--proof-type sp1`; a RISC0

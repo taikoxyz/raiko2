@@ -4,7 +4,7 @@
 
 In progress.
 
-Last updated: 2026-10-02.
+Last updated: 2026-10-03.
 
 This document is the execution-status ledger for the ZKGas calibration work. It records what is
 currently proved, what is actively being changed, and which gate opens the next layer. It does not
@@ -62,7 +62,7 @@ Osaka execution semantics while continuing to bind the actual exported Unzen sch
 | --- | --- | --- |
 | Experiment framework | Core scope complete | Preserve its identity and replay invariants |
 | Opcode core | Complete at partial coverage | Preserve sealed 101-plus-2 augmentation |
-| Remaining operations | Reopened: Anchor ownership correction | Route all transaction-phase Anchor work through operation pricing and close material gaps |
+| Remaining operations | Anchor ownership corrected; BLOCKHASH calibrated | Produce the exact remaining Anchor gap histogram and close material keys |
 | Stateful storage execution | Promoted and replayed on two ad-hoc proposals | Preserve sealed typed features while closing the remaining operation families |
 | Context-sensitive operations | Fully evaluable review-only candidate sealed | Freeze the controlled-block split before executing calibration |
 | State/trie | Historical coarse holdout retained, promotion blocked | Replay only after the corrected operation subtraction and block refit |
@@ -1186,8 +1186,32 @@ and file SHA256 `9ef6541f39eaded53e47c0231abb6c062883e211cfea3ae193b7f0c78b20300
 Production controlled-block replay retains the observed Anchor `opcode:0xf1:spawned` wrapper as
 operation evidence. Legacy ownership schemas and estimators remain readable, but no corrected
 composite schema is published yet: the existing `block_base` absorbed Anchor execution and must be
-refitted before Task 5 can seal a replacement estimator. The next executable milestone is Task 2,
-controlled production-guest `BLOCKHASH` calibration.
+refitted before Task 5 can seal a replacement estimator.
+
+Task 2 completed on 2026-10-03. The first schema-1 campaign, result
+`742514d26f94a9b53337a3af` with artifact SHA256
+`34f3e95b07223ec4b6d466ab90ef30707b00e141fd35f1b413c75fee916704c2`, remained `unmeasured`:
+the paired `BLOCKHASH - ISZERO` marginal signal was negative and only about 5--9 proverGas per
+event, while deterministic variation between distinct GuestInputs was about a hundred proverGas.
+The small-count through-origin panel therefore could not distinguish the slope at checkpoint 64.
+This did not invalidate the operation model; it showed that the paired signal needed more
+amplification and an explicit intercept.
+
+The reviewed schema-2 successor at implementation revision
+`21ac9f900d880bb1167b3ca5d2b95be9afe72cd4` froze 90 rows at fit counts
+`0, 128, 256, 512` and untouched checkpoint `1024`. Portable result
+`6af515a6377aaf0c2906b151`, artifact SHA256
+`5fbdf5d26918e57214d70997795b2b41fad3219b8821730a08b0430f890c1d0c`, passed all three semantic
+classes. Their reconstructed event costs are approximately `31.8116577992`, `32.1176845849`, and
+`32.0234881563` proverGas. The candidate conservatively selects `recent_ancestor_hit_256`, with
+event cost `32.1176845848884320240254558356373098678173382785828993091774668388588542362321046142857142857142857142857142857142857143`
+and nonnegative static-raw-gas body
+`0.957139994670078565508206595586800812006602184702643158778941490794523949133365380714285714285714285714285714285714285715`.
+Independent review and Decimal replay verified the affine fits, repeat stability, exact operation
+ledger differences, holdout isolation, identities, and conservative maximum. No production table,
+composite estimator, runtime configuration, or final-validation proposal changed. The next
+executable milestone is Task 3: apply this reviewed candidate input to an exact Anchor gap histogram
+and close every remaining material operation key before refitting `block_base`.
 
 ## Next Milestones
 

@@ -2,7 +2,7 @@
 
 ## Status
 
-In progress.
+In progress. Tasks 1 and 2 are complete; Task 3 is the active gate.
 
 ## Purpose
 
@@ -93,17 +93,34 @@ window:
 - `recent_ancestor_hit_256`, using `NUMBER - 256`;
 - `out_of_range_zero`, using the current block number.
 
-Use fit counts `0, 1, 2, 4, 8, 16, 32` and the fixed extrapolation checkpoint `64`, with three exact
-repeats per row. The target/control raw-gas and operation ledgers must match the declared signed
-delta exactly. Solve the target event cost using the already sealed `ISZERO` control cost. Require
-positive signal, stable repeats, fit/checkpoint APE at most 10%, and exact production guest/launcher
-identity.
+The first frozen panel used fit counts `0, 1, 2, 4, 8, 16, 32` and checkpoint `64`. It failed
+closed because `BLOCKHASH - ISZERO` is a small negative marginal difference and deterministic
+cross-input proverGas variation dominated that difference at small counts. Preserve that result as
+diagnostic evidence; a negative paired slope does not imply a negative target cost.
+
+The reviewed schema-2 successor uses fit counts `0, 128, 256, 512` and fixed checkpoint `1024`,
+with three exact repeats per row. Fit the paired difference as `intercept + slope * count`. Allow a
+negative paired slope, reconstruct the target event cost by adding the sealed `ISZERO` event cost,
+and require the reconstructed static-raw-gas body to be nonnegative. Every fit point and the
+checkpoint must satisfy `abs(residual) <= max(200 proverGas, 10% * abs(slope * count))`. The
+target/control raw-gas and operation ledgers must match the declared signed delta exactly, and all
+three semantic classes must pass before selecting a result.
 
 Because the current production trace does not encode the requested block number or hit/miss result,
 the first candidate is a conservative static approximation applied to `opcode:0x40`: use the
 maximum accepted per-event cost across the required semantic classes. Record both class estimates
 and the selected maximum. If a required class fails, `BLOCKHASH` stays unmeasured; do not infer it
 from the proposal smokes.
+
+Task 2 completed on 2026-10-03. The accepted portable result is
+`experiments/opcode-gas/calibrations/sp1-blockhash-v2/6af515a6377aaf0c2906b151`, with artifact
+SHA256 `5fbdf5d26918e57214d70997795b2b41fad3219b8821730a08b0430f890c1d0c`. It binds implementation
+revision `21ac9f900d880bb1167b3ca5d2b95be9afe72cd4` and the production SP1 proposal ELF. All three
+classes passed; the conservative maximum is the `recent_ancestor_hit_256` event cost
+`32.1176845848884320240254558356373098678173382785828993091774668388588542362321046142857142857142857142857142857142857143`
+proverGas, represented by static-raw-gas body
+`0.957139994670078565508206595586800812006602184702643158778941490794523949133365380714285714285714285714285714285714285715`.
+This is a reviewed candidate input only; it does not update the production Unzen schedule.
 
 ## Task 3: Close Remaining Material Anchor Gaps
 

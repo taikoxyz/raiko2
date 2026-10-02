@@ -4,7 +4,7 @@
 
 In progress.
 
-Last updated: 2026-09-30.
+Last updated: 2026-10-02.
 
 This document is the execution-status ledger for the ZKGas calibration work. It records what is
 currently proved, what is actively being changed, and which gate opens the next layer. It does not
@@ -1075,10 +1075,48 @@ After this context family, close the remaining ordinary returndata/copy/LOG/EXTC
 wrappers and direct precompiles. Reuse sealed controlled evidence where its execution semantics and
 model inputs are sufficient; otherwise predeclare the smallest additional controlled campaign.
 
-The frozen Hoodi `80907` and Mainnet `39339` integration smokes remain required once a
-witness-capable RPC or immutable GuestInputs are available. Record their exact trace/report joins,
-predictions, actual `proverGas`, APE, per-layer contributions, coverage, and gaps without changing a
-coefficient. The final 60-row corpus remains unopened.
+## Completed Milestone: Integration-Smoke Checkpoint
+
+The two preflight-validated smoke joins completed on 2026-10-02 with the sealed schema-5 terminal
+candidate `experiments/opcode-gas/estimators/36614e3963955da7cbefb944/estimator.json`
+(`36614e3963955da7cbefb94468352ef2f62e53921a18489bafa71536bb4e208c`). It binds implementation
+revision `1f5d05777172001b96122e4675a7abc0eb74fe60`, launcher SHA256
+`46bed3a3a31a165199f29e36e8ac64b07c3bc60b70ee4886afb850973d41e4de`, proposal ELF SHA256
+`ba5ab7026643730c4416550a069fd0776f0e11ae09155ec5fce413acbe5e59c7`, and proposal VK SHA256
+`bd71c1f1cbd72387aa057ae6e936afd6dcb0bc170c6a91193c6d1a0b47507102`. Its model content is the
+same as `c3f243...`; only revision/provenance/source hashes, projection identity, launcher hash, and
+artifact identity changed.
+
+- Hoodi `80907` completed its trace and parity join for 378 blocks. Its GuestInput JSON SHA256 is
+  `f04d297060e42c74540233c84bc44514bc2a5eb0dbc13111d85bb0522bc93d8f`; the guest report's bincode
+  hash is `0x64083abb0a43a73654b75ce4d8856083fdbc98657856f0bc9886a812ed07d7a2`. The input has 2,257
+  transactions: 378 Anchor plus 1,879 non-Anchor native transfers. All 4,632,511 operations are
+  Anchor/block-owned, so the candidate operation-coverage denominator is zero. Actual `proverGas`
+  is `2,318,475,174`; predicted `proverGas` is
+  `1,437,555,380.9303051854641007206113351763106672341486303454488711019759931168028533`; APE is
+  `0.37995653477275267754749712035892812354493331566351706578641540287806717019310499`; wall time
+  is 152,194 ms. The non-gating diagnostic totals are 2,102,180,920 instructions and 3,017,404
+  syscalls. The plumbing and join passed, but model validation failed: the large residual shows that
+  the fixed block/native/transaction approximation does not transport to this real proposal. A new
+  predeclared higher-layer/state-witness experiment is required; this candidate must not be retuned
+  from this smoke.
+- Mainnet `39339` completed its trace and parity join for 192 blocks. Its GuestInput JSON SHA256 is
+  `c92dbb3c9f5c5142bc145dfa322162c2a100007641f20f81f705e8d6e273dc95`; the guest report's bincode
+  hash is `0x7e79d122ff315a200b9e5362b2614d961e52cd09ead8935ff875169d3fcb8c0a`. The input has 198
+  transactions: 192 Anchor plus 6 non-Anchor contracts. Actual `proverGas` is `2,123,206,252` and
+  the modeled subtotal is
+  `642,506,644.86162051361197726710081468582625339056952960491739497663687256083429844`; it is not
+  a prediction and has no APE because the run has 270 gaps: 149 unsupported opcodes, 76 spawn
+  wrappers, and 45 precompiles. Operation coverage is 35,359/35,629 (`0.9924219035`), raw-gas
+  coverage is 427,564/968,870 (`0.4413017226`), typed-feature coverage is 1, and precompile/spawn
+  coverage is 0; wall time is 114,237 ms. The non-gating diagnostic totals are 2,261,698,066
+  instructions and 1,074,671 syscalls. The principal gap keys are `0x37` (50), `0x3d` (27), `0xf3`
+  (25), wrapper `0xfa` (62), and precompiles `01`/`02`/`06`/`07`/`08` (45 total). The subtotal must
+  not be treated as a prediction.
+
+The final 60-row corpus remains unopened. Neither smoke result changes a coefficient, production
+configuration, or the candidate's eligibility. Instruction count remains only a cycle proxy: these
+diagnostics do not fit or justify a temporary bridge.
 
 ## Next Milestones
 

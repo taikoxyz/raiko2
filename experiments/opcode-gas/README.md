@@ -1275,9 +1275,9 @@ binds the exact opcode registry, operation coverage ledger, corrected higher-lay
 typed-storage result, trace schema, ownership policy, implementation revision, and source hashes.
 Sealing is create-only: an existing content-addressed directory is never replaced.
 
-The composite estimator derives a coverage overlay from `operation-coverage-v4.json`: schema 3
-promotes only SLOAD/SSTORE through sealed result `64065fa462311bdc1848e9d0`; the historical core
-registry remains unchanged. V4 refreshes the exact trace-source hashes after typed-storage tracing.
+The composite estimator derives its coverage overlay from `operation-coverage-v5.json`, the corrected
+core `3fc67063a921182e971e7882`, the declared context approximation, and the sealed typed-storage
+result `64065fa462311bdc1848e9d0`; the historical core registry remains unchanged.
 `operation-coverage-v2.json` remains immutable historical input to the sealed higher-layer
 derivation, and V3 remains the immutable pre-storage trace snapshot; do not substitute either one
 when replaying its original campaign.
@@ -1286,10 +1286,15 @@ when replaying its original campaign.
 ESTIMATOR_PATH_FILE="$(mktemp)"
 ~/.venv/bin/python experiments/opcode-gas/opcode_gas.py \
   seal-composite-estimator \
-  --augmented-core experiments/opcode-gas/derivations/f945e67bb2c38c9c8ef50530/core-opcode-submodel.json \
-  --operation-coverage experiments/opcode-gas/manifests/operation-coverage-v4.json \
+  --augmented-core experiments/opcode-gas/derivations/3fc67063a921182e971e7882/core-opcode-submodel.json \
+  --operation-coverage experiments/opcode-gas/manifests/operation-coverage-v5.json \
   --higher-layer experiments/opcode-gas/derivations/3e4de6eecb5e92aa59a6a4b9 \
   --stateful-result experiments/opcode-gas/derivations/64065fa462311bdc1848e9d0 \
+  --context-approximation experiments/opcode-gas/derivations/1d2758bcb7aa3ae7f09d14eb \
+  --guest-launcher target/release/guest-launcher \
+  --proposal-elf crates/guests/elf/sp1_shasta_proposal.elf \
+  --proposal-vk crates/guests/elf/sp1_shasta_proposal.vk.bin \
+  --terminal-approximation \
   --out-root experiments/opcode-gas/estimators \
   --estimator-path-file "$ESTIMATOR_PATH_FILE"
 ESTIMATOR_PATH="$(<"$ESTIMATOR_PATH_FILE")"
@@ -1328,8 +1333,9 @@ The two frozen integration-smoke proposals are Hoodi `80907` and Mainnet `39339`
 the previous pair aged out of bounded witness proof-history; these replacements were preflight
 validated and confirmed outside the final 40-Hoodi/20-Mainnet corpus. Do not substitute another
 proposal, add either smoke row to the final corpus, or tune a coefficient from its result. The final
-corpus remains unopened until this plumbing change has independent review and the two smoke joins
-complete.
+corpus remains unopened. Both smoke joins completed with sealed schema-5 terminal estimator
+`36614e3963955da7cbefb944`; Hoodi's complete join exposed a large residual and Mainnet retained
+coverage gaps, so neither result validates the model or permits a coefficient change.
 
 `prepare-integration-smoke` rejects every other network/proposal pair. Its record and the resulting
 `run.jsonl` bind `purpose`, `network`, `proposal_id`, the exact GuestInput fixture digest, and the
@@ -1360,10 +1366,15 @@ cargo build --release -p preflight -p guest-launcher --features sp1-sdk/profilin
 ESTIMATOR_PATH_FILE="$(mktemp)"
 ~/.venv/bin/python experiments/opcode-gas/opcode_gas.py \
   seal-composite-estimator \
-  --augmented-core experiments/opcode-gas/derivations/f945e67bb2c38c9c8ef50530/core-opcode-submodel.json \
-  --operation-coverage experiments/opcode-gas/manifests/operation-coverage-v4.json \
+  --augmented-core experiments/opcode-gas/derivations/3fc67063a921182e971e7882/core-opcode-submodel.json \
+  --operation-coverage experiments/opcode-gas/manifests/operation-coverage-v5.json \
   --higher-layer experiments/opcode-gas/derivations/3e4de6eecb5e92aa59a6a4b9 \
   --stateful-result experiments/opcode-gas/derivations/64065fa462311bdc1848e9d0 \
+  --context-approximation experiments/opcode-gas/derivations/1d2758bcb7aa3ae7f09d14eb \
+  --guest-launcher target/release/guest-launcher \
+  --proposal-elf crates/guests/elf/sp1_shasta_proposal.elf \
+  --proposal-vk crates/guests/elf/sp1_shasta_proposal.vk.bin \
+  --terminal-approximation \
   --out-root experiments/opcode-gas/estimators \
   --estimator-path-file "$ESTIMATOR_PATH_FILE"
 ESTIMATOR_PATH="$(<"$ESTIMATOR_PATH_FILE")"

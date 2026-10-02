@@ -62,13 +62,13 @@ Osaka execution semantics while continuing to bind the actual exported Unzen sch
 | --- | --- | --- |
 | Experiment framework | Core scope complete | Preserve its identity and replay invariants |
 | Opcode core | Complete at partial coverage | Preserve sealed 101-plus-2 augmentation |
-| Remaining operations | Complete at frozen classification | Preserve the sealed coverage and ownership ledgers |
+| Remaining operations | Reopened: Anchor ownership correction | Route all transaction-phase Anchor work through operation pricing and close material gaps |
 | Stateful storage execution | Promoted and replayed on two ad-hoc proposals | Preserve sealed typed features while closing the remaining operation families |
 | Context-sensitive operations | Fully evaluable review-only candidate sealed | Freeze the controlled-block split before executing calibration |
-| State/trie | Coarse model accepted | Preserve the sealed holdout evidence; split only after a new predeclared experiment |
-| Transaction | Declared approximation accepted and sealed | Preserve `5017` and its `0.002` materiality budget |
-| Block | Fixed base accepted and sealed | Preserve the selected round-128 fixed-cost artifact |
-| Proposal | Plumbing reviewed; two existing-fixture ad-hoc diagnostics opened | Promote reviewed operation families, then rerun the two diagnostics before opening frozen smoke rows |
+| State/trie | Historical coarse holdout retained, promotion blocked | Replay only after the corrected operation subtraction and block refit |
+| Transaction | Historical evidence retained, replay required | Verify non-Anchor `tx_base` and native-transfer terms under corrected ownership metadata |
+| Block | Historical fixed base invalidated | Refit after subtracting Anchor operation work |
+| Proposal | Two integration smokes diagnosed the ownership error | Seal the corrected lower-layer candidate, then rerun the same smokes without tuning |
 | Other ZKVM backends | Future | Measure natively or validate an explicit bridge |
 
 ## Sealed Baseline
@@ -148,7 +148,13 @@ implementation revision and replayed the sealed augmentation from the staged pac
 verifier intentionally rejects later documentation edits; portable post-result verification uses
 the self-contained augmentation verifier.
 
-## Completed Milestone: Operation Coverage Ownership
+## Invalidated Historical Milestone: Operation Coverage Ownership
+
+This milestone is retained for provenance but its transaction-scope ownership is wrong. It excluded
+all `is_anchor=true` transaction-phase operations from the operation registry. The correction plan
+is [Anchor Operation Ownership Correction](2026-10-02-zkgas-anchor-operation-correction-implementation-plan.md).
+The opcode/precompile inventory remains useful; the execution selector and every downstream
+artifact that consumed it are not promotion-eligible.
 
 The operation boundary is frozen in
 `experiments/opcode-gas/manifests/operation-coverage-v1.json`, artifact SHA256
@@ -288,7 +294,12 @@ native counts are equal. A later holdout failure remains evidence for a predecla
 split; it cannot tune this approximation. Final proposal validation and production changes remain
 closed.
 
-## Completed Milestone: Higher-Layer Fixed Costs And Coarse State Holdouts
+## Invalidated Historical Milestone: Higher-Layer Fixed Costs And Coarse State Holdouts
+
+The raw observations remain immutable evidence, but the accepted `block_base` absorbed Anchor EVM
+execution. It is therefore invalid for the authoritative decomposition and must not be reused as a
+coefficient or prior. The non-Anchor transaction/native terms and coarse-state pairs require exact
+replay under corrected ownership metadata before reuse; none is currently promotion-eligible.
 
 Fresh production-SP1 calibration run `91d461f0a817446a80223798` accepted the frozen native-transfer
 approximation, all three ordinary fixed costs, and all six coarse state holdout pairs. It sealed
@@ -1147,6 +1158,25 @@ offset.
 The final 60-row corpus remains unopened. Neither smoke result changes a coefficient, production
 configuration, or the candidate's eligibility. Instruction count remains only a cycle proxy: these
 diagnostics do not fit or justify a temporary bridge.
+
+## Active Correction: Anchor Operation Ownership
+
+The smoke did not discover a new architectural choice; it exposed an implementation regression
+against the previously agreed decomposition. Commit `dad31dbb` first stated that Anchor execution
+belonged to the block layer, `28729c18` encoded that statement in coverage generation and tests, and
+`5f9fff4b` made the composite estimator skip joined Anchor operations. The tests passed because they
+replayed the same incorrect ownership declaration.
+
+The corrected invariant is now authoritative: the Anchor envelope is block-owned, but every
+`phase=transaction` opcode, precompile, and confirmed wrapper inside Anchor is operation-owned.
+True `phase=system` work remains block-owned. Existing content-addressed artifacts are preserved,
+but the affected coverage manifests, higher-layer derivation, block candidate, and composite
+estimators are marked invalid for promotion.
+
+Implementation follows
+[the accepted correction plan](2026-10-02-zkgas-anchor-operation-correction-implementation-plan.md):
+correct ownership, calibrate `BLOCKHASH` and remaining material operation gaps, refit `block_base`,
+then rerun the frozen integration smokes without tuning.
 
 ## Next Milestones
 

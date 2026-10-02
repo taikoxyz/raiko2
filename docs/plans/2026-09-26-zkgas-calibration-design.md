@@ -93,9 +93,21 @@ Intrinsic or pre-validation failures and the unattempted tail after block trunca
 
 ### Operation Layer
 
-The operation layer owns EVM interpreter execution, direct precompile bodies, and confirmed
-CALL/CREATE wrapper events. It does not own final state-trie commit, transaction-envelope work,
-Anchor/system execution, or proposal startup.
+The operation layer owns every EVM interpreter execution, direct precompile body, and confirmed
+CALL/CREATE wrapper event from a started transaction. This is independent of whether the enclosing
+transaction is the protocol Anchor transaction or an ordinary candidate transaction. Anchor is an
+execution context, not a second opcode-pricing domain.
+
+The operation layer does not own final state-trie commit, transaction-envelope work,
+pre-transaction `phase=system` execution, or proposal startup. In particular, do not use
+`TransactionTrace.is_anchor` to exclude transaction-phase `OperationTrace` rows from the operation
+registry. The exact split is:
+
+- the Anchor transaction envelope and protocol orchestration are block-owned;
+- operations with `phase=transaction` and a valid `tx_index` are operation-owned, including Anchor;
+- operations with `phase=system` and no `tx_index` are block-owned;
+- an Anchor operation is never charged both through the operation registry and through
+  `block_base`.
 
 The fit keeps lab-body parameters and a cross-environment `body_scale` separate. Promotion applies
 that scale exactly once and stores production-scaled parameters in the typed registry. Runtime and
@@ -162,7 +174,9 @@ not select those features.
 
 ### Transaction Layer
 
-`tx_base` is charged once when the executor starts a non-Anchor candidate transaction. A committed,
+`tx_base` is charged once when the executor starts a non-Anchor candidate transaction. The Anchor
+transaction does not receive `tx_base`; its envelope remains block-owned. This envelope exception
+does not suppress the Anchor transaction's operation rows. A committed,
 successful, non-create native value transfer with no executable recipient or precompile dispatch
 adds `native_transfer_cost`.
 
@@ -178,9 +192,16 @@ isolated `SSTORE` coefficient.
 
 ### Block Layer
 
-`block_base` owns pre-transaction system work, the Anchor transaction, block context, and the coarse
-fixed state/trie/hash baseline until controlled evidence justifies a separate variable term. Those
-events cannot also enter the non-Anchor operation sum.
+`block_base` owns pre-transaction system work, the Anchor transaction envelope and protocol
+orchestration, block context, and the coarse fixed state/trie/hash baseline until controlled
+evidence justifies a separate variable term. It does not own opcode, precompile, or confirmed
+CALL/CREATE-wrapper execution inside Anchor. A block coefficient is fitted only after subtracting
+all measured transaction-phase operation work, including Anchor work; otherwise it is contaminated
+by a workload that varies with the Anchor program and fork.
+
+Historical block candidates that fitted `block_base` while excluding Anchor operations remain
+immutable evidence, but are invalid for this decomposition and cannot be promoted or used as a
+calibration prior.
 
 ### Proposal Layer
 

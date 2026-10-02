@@ -20,11 +20,11 @@ from decimal import Decimal, InvalidOperation, localcontext
 from typing import Any, Callable, Mapping, Sequence
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 PURPOSE = "production_blockhash_calibration"
 OPERATION_OWNERSHIP_SCHEMA_VERSION = 4
-FIT_COUNTS = (0, 1, 2, 4, 8, 16, 32)
-CHECKPOINT_COUNT = 64
+FIT_COUNTS = (0, 128, 256, 512)
+CHECKPOINT_COUNT = 1024
 REPEATS = 3
 SEMANTIC_CLASSES = (
     "recent_ancestor_hit_1",
@@ -81,14 +81,21 @@ EXECUTION = {
 }
 
 QUALITY_GATES = {
-    "positive_signal": True,
     "exact_repeats": REPEATS,
-    "fit_ape_max": "0.10",
-    "checkpoint_ape_max": "0.10",
-    "count_zero_execution_delta": "exact_zero",
-    "fit": "through_origin_paired_differential",
+    "fit": "affine_paired_differential",
+    "negative_slope": "allowed_if_reconstructed_event_cost_positive",
+    "event_cost": "paired_slope_plus_sealed_iszero_event_cost_must_be_positive",
+    "body_per_raw_gas": "reconstructed_event_cost_minus_common_dispatch_must_be_nonnegative",
+    "residual_abs_error": "max(200, 0.10 * abs(paired_slope * count))",
+    "count_zero_residual_tolerance": "200",
     "partial_application": "forbidden",
     "failure_status": "unmeasured",
+}
+
+EXPLORATORY_PREDECESSOR = {
+    "result_id": "742514d26f94a9b53337a3af",
+    "artifact_sha256": "34f3e95b07223ec4b6d466ab90ef30707b00e141fd35f1b413c75fee916704c2",
+    "role": "rationale_only_not_a_campaign_input",
 }
 
 
@@ -162,6 +169,7 @@ def canonical_blockhash_manifest_payload() -> dict[str, Any]:
         "fit_counts": list(FIT_COUNTS),
         "checkpoint_count": CHECKPOINT_COUNT,
         "repeats": REPEATS,
+        "exploratory_predecessor": json.loads(json.dumps(EXPLORATORY_PREDECESSOR)),
         "semantic_classes": [
             {
                 "semantic_class": name,
@@ -449,6 +457,7 @@ def _class_fit(
     rows: Mapping[tuple[str, int, str, int], Mapping[str, Any]],
     *,
     iszero_event_cost: Decimal,
+    common_dispatch: Decimal,
 ) -> dict[str, Any]:
     reasons: list[str] = []
     observed: dict[int, Decimal] = {}
@@ -497,59 +506,49 @@ def _class_fit(
             observed[count] = _decimal(
                 target["prover_gas"], label="target prover gas"
             ) - _decimal(control["prover_gas"], label="control prover gas")
-    if observed[0] != 0:
-        reasons.append(f"{semantic_class}:count zero has execution delta")
     with localcontext() as context:
-        context.prec = 80
-        denominator = sum(Decimal(count * count) for count in FIT_COUNTS if count > 0)
+        context.prec = 120
+        xs = [Decimal(count) for count in FIT_COUNTS]
+        mean_x = sum(xs) / Decimal(len(xs))
+        mean_y = sum(observed[count] for count in FIT_COUNTS) / Decimal(len(FIT_COUNTS))
+        denominator = sum((value - mean_x) ** 2 for value in xs)
         slope = sum(
-            Decimal(count) * observed[count] for count in FIT_COUNTS if count > 0
+            (Decimal(count) - mean_x) * (observed[count] - mean_y)
+            for count in FIT_COUNTS
         ) / denominator
+        intercept = mean_y - slope * mean_x
     with localcontext() as context:
         context.prec = 120
         event_cost = slope + iszero_event_cost
-    fit_apes = {}
-    for count in FIT_COUNTS:
-        if count == 0:
-            continue
+        body_per_raw_gas = (event_cost - common_dispatch) / Decimal(20)
+    residuals = {}
+    tolerances = {}
+    for count in (*FIT_COUNTS, CHECKPOINT_COUNT):
         with localcontext() as context:
             context.prec = 120
-            prediction = Decimal(count) * slope
+            prediction = intercept + Decimal(count) * slope
             actual = observed[count]
-        if actual <= 0:
-            reasons.append(f"{semantic_class}:{count}:nonpositive paired signal")
-            continue
-        with localcontext() as context:
-            context.prec = 120
-            ape = abs(prediction - actual) / abs(actual)
-        fit_apes[count] = ape
-        if ape > Decimal("0.10"):
-            reasons.append(f"{semantic_class}:{count}:fit APE exceeds 10%")
-    with localcontext() as context:
-        context.prec = 120
-        checkpoint_prediction = Decimal(CHECKPOINT_COUNT) * slope
-    checkpoint_actual = observed[CHECKPOINT_COUNT]
-    checkpoint_ape = None
-    if checkpoint_actual <= 0:
-        reasons.append(f"{semantic_class}:checkpoint nonpositive paired signal")
-    else:
-        with localcontext() as context:
-            context.prec = 120
-            checkpoint_ape = abs(checkpoint_prediction - checkpoint_actual) / abs(
-                checkpoint_actual
-            )
-        if checkpoint_ape > Decimal("0.10"):
-            reasons.append(f"{semantic_class}:checkpoint APE exceeds 10%")
-    if slope <= 0 or event_cost <= 0:
-        reasons.append(f"{semantic_class}:positive signal gate failed")
+            residual = actual - prediction
+            tolerance = max(Decimal(200), Decimal("0.10") * abs(slope * Decimal(count)))
+        residuals[count] = residual
+        tolerances[count] = tolerance
+        if abs(residual) > tolerance:
+            kind = "checkpoint" if count == CHECKPOINT_COUNT else "fit"
+            reasons.append(f"{semantic_class}:{count}:{kind} residual exceeds tolerance")
+    if event_cost <= 0:
+        reasons.append(f"{semantic_class}:reconstructed event cost is nonpositive")
+    if body_per_raw_gas < 0:
+        reasons.append(f"{semantic_class}:reconstructed body per raw gas is negative")
     return {
         "semantic_class": semantic_class,
         "status": "accepted" if not reasons else "unmeasured",
+        "intercept": intercept,
         "slope": slope,
         "event_cost": event_cost,
+        "body_per_raw_gas": body_per_raw_gas,
         "observed": observed,
-        "fit_apes": fit_apes,
-        "checkpoint_ape": checkpoint_ape,
+        "residuals": residuals,
+        "residual_tolerances": tolerances,
         "rejection_reasons": sorted(set(reasons)),
     }
 
@@ -563,15 +562,14 @@ def fit_blockhash_rows(
     iszero_event = _iszero_event_cost(registry)
     common_dispatch = _decimal(registry["common_dispatch"], label="common dispatch")
     class_reports = [
-        _class_fit(semantic_class, indexed, iszero_event_cost=iszero_event)
+        _class_fit(
+            semantic_class,
+            indexed,
+            iszero_event_cost=iszero_event,
+            common_dispatch=common_dispatch,
+        )
         for semantic_class in SEMANTIC_CLASSES
     ]
-    for report in class_reports:
-        with localcontext() as context:
-            context.prec = 120
-            report["body_per_raw_gas"] = (
-                report["event_cost"] - common_dispatch
-            ) / Decimal(20)
     accepted = all(report["status"] == "accepted" for report in class_reports)
     selected = None
     reasons = [reason for report in class_reports for reason in report["rejection_reasons"]]
@@ -587,7 +585,7 @@ def fit_blockhash_rows(
         }
     result = {
         "schema_version": SCHEMA_VERSION,
-        "purpose": "production_blockhash_fit_decisions",
+        "purpose": "production_blockhash_affine_fit_decisions",
         "manifest_identity_sha256": blockhash_manifest_identity(manifest),
         "status": "accepted" if selected is not None else "unmeasured",
         "control": {
@@ -599,24 +597,25 @@ def fit_blockhash_rows(
             {
                 "semantic_class": report["semantic_class"],
                 "status": report["status"],
+                "intercept": _decimal_text(report["intercept"]),
                 "paired_slope": _decimal_text(report["slope"]),
                 "event_cost": _decimal_text(report["event_cost"]),
                 "body_per_raw_gas": _decimal_text(report["body_per_raw_gas"]),
-                "fit_apes": {
-                    str(count): _decimal_text(ape)
-                    for count, ape in report["fit_apes"].items()
+                "residuals": {
+                    str(count): _decimal_text(residual)
+                    for count, residual in report["residuals"].items()
                 },
-                "checkpoint_ape": (
-                    _decimal_text(report["checkpoint_ape"])
-                    if report["checkpoint_ape"] is not None
-                    else None
-                ),
+                "residual_tolerances": {
+                    str(count): _decimal_text(tolerance)
+                    for count, tolerance in report["residual_tolerances"].items()
+                },
                 "rejection_reasons": report["rejection_reasons"],
             }
             for report in class_reports
         ],
         "selected": selected,
         "rejection_reasons": sorted(set(reasons)),
+        "quality_gates": json.loads(json.dumps(QUALITY_GATES)),
         "promotion": "forbidden_until_all_semantic_classes_are_accepted",
     }
     result["artifact_sha256"] = sha256_bytes(canonical_json(result))

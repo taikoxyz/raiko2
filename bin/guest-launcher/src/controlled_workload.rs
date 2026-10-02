@@ -2694,7 +2694,7 @@ fn build_controlled_block_fixture_with_topology(
             profile,
             ..
         } => {
-            if !matches!(*count, 0 | 1 | 2 | 4 | 8 | 16 | 32 | 64) {
+            if !matches!(*count, 0 | 128 | 256 | 512 | 1024) {
                 bail!("controlled BLOCKHASH count is outside the frozen fit/checkpoint panel");
             }
             if spec.workload_family != "blockhash_context" {

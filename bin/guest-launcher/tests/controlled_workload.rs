@@ -829,7 +829,7 @@ fn blockhash_program_schema_is_closed_and_declares_the_complete_ancestor_window(
         workload_id: "b".repeat(64),
         repeat_index: 0,
         lane: ControlledLane::Target,
-        count: 32,
+        count: 512,
         profile: ControlledBlockHashProfile {
             semantic_class: ControlledBlockHashSemanticClass::RecentAncestorHit256,
         },
@@ -841,7 +841,7 @@ fn blockhash_program_schema_is_closed_and_declares_the_complete_ancestor_window(
             "workload_id": "b".repeat(64),
             "repeat_index": 0,
             "lane": "target",
-            "count": 32,
+            "count": 512,
             "profile": {"semantic_class": "recent_ancestor_hit_256"},
         })
     );
@@ -851,7 +851,7 @@ fn blockhash_program_schema_is_closed_and_declares_the_complete_ancestor_window(
             "workload_id": "b".repeat(64),
             "repeat_index": 0,
             "lane": "target",
-            "count": 32,
+            "count": 512,
             "profile": {"semantic_class": "caller_supplied_offset"},
         }))
         .is_err(),
@@ -868,13 +868,13 @@ fn blockhash_target_and_control_have_one_measurement_byte_difference_and_a_full_
     ] {
         let target = build_controlled_block_fixture(&blockhash_row(
             ControlledLane::Target,
-            1,
+            128,
             semantic_class,
         ))
         .expect("build BLOCKHASH target");
         let control = build_controlled_block_fixture(&blockhash_row(
             ControlledLane::Control,
-            1,
+            128,
             semantic_class,
         ))
         .expect("build BLOCKHASH control");
@@ -957,7 +957,7 @@ fn blockhash_target_and_control_have_one_measurement_byte_difference_and_a_full_
 fn blockhash_fixture_freezes_and_replays_the_raw_gas_and_event_ledgers() {
     let source = blockhash_row(
         ControlledLane::Target,
-        2,
+        1024,
         ControlledBlockHashSemanticClass::RecentAncestorHit1,
     );
     let bundle = controlled_workload::freeze_controlled_blockhash_block_fixture(&source)
@@ -979,7 +979,7 @@ fn blockhash_fixture_freezes_and_replays_the_raw_gas_and_event_ledgers() {
 
     let control = controlled_workload::freeze_controlled_blockhash_block_fixture(&blockhash_row(
         ControlledLane::Control,
-        2,
+        1024,
         ControlledBlockHashSemanticClass::RecentAncestorHit1,
     ))
     .expect("freeze paired BLOCKHASH control fixture");
@@ -1002,19 +1002,27 @@ fn blockhash_fixture_freezes_and_replays_the_raw_gas_and_event_ledgers() {
             &bundle.spec.expected_raw_gas_by_key,
             &control.spec.expected_raw_gas_by_key,
         ),
-        BTreeMap::from([("opcode:0x15".into(), -6), ("opcode:0x40".into(), 40)]),
+        BTreeMap::from([("opcode:0x15".into(), -3072), ("opcode:0x40".into(), 20480),]),
     );
     assert_eq!(
         signed_delta(
             &bundle.spec.expected_operation_event_count_by_key,
             &control.spec.expected_operation_event_count_by_key,
         ),
-        BTreeMap::from([("opcode:0x15".into(), -2), ("opcode:0x40".into(), 2)]),
+        BTreeMap::from([("opcode:0x15".into(), -1024), ("opcode:0x40".into(), 1024),]),
     );
 }
 
 #[test]
 fn blockhash_panel_rejects_noncampaign_counts_and_wrong_fixture_shape() {
+    for count in [0, 128, 256, 512, 1024] {
+        build_controlled_block_fixture(&blockhash_row(
+            ControlledLane::Target,
+            count,
+            ControlledBlockHashSemanticClass::RecentAncestorHit1,
+        ))
+        .expect("the V2 BLOCKHASH panel must remain buildable");
+    }
     let mut count = blockhash_row(
         ControlledLane::Target,
         3,
@@ -1027,7 +1035,7 @@ fn blockhash_panel_rejects_noncampaign_counts_and_wrong_fixture_shape() {
     );
     let mut shape = blockhash_row(
         ControlledLane::Target,
-        1,
+        128,
         ControlledBlockHashSemanticClass::RecentAncestorHit1,
     );
     shape.transaction_count = 2;

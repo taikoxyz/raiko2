@@ -88,8 +88,8 @@ class BlockHashCampaignTests(unittest.TestCase):
         elf_sha256: str = "f" * 64,
         launcher_sha256: str = "e" * 64,
         iszero_event_cost: Decimal = Decimal("16"),
+        intercept: Decimal = Decimal("0"),
     ):
-        common = Decimal("10")
         rows = []
         for count in (*blockhash.FIT_COUNTS, blockhash.CHECKPOINT_COUNT):
             for lane in ("control", "target"):
@@ -114,9 +114,11 @@ class BlockHashCampaignTests(unittest.TestCase):
                         if lane == "control"
                         else {"opcode:0x40": count}
                     )
-                    gas = Decimal("100000") + (
-                        Decimal(count)
-                        * (iszero_event_cost if lane == "control" else event_cost)
+                    control_gas = Decimal("100000") + Decimal(count) * iszero_event_cost
+                    gas = (
+                        control_gas
+                        if lane == "control"
+                        else control_gas + intercept + Decimal(count) * (event_cost - iszero_event_cost)
                     )
                     row = {
                         "row_id": row_id,
@@ -148,10 +150,11 @@ class BlockHashCampaignTests(unittest.TestCase):
 
     def test_manifest_freezes_closed_classes_rows_and_v7_source(self):
         manifest = blockhash.canonical_blockhash_manifest_payload()
+        self.assertEqual(manifest["schema_version"], 2)
         self.assertEqual(manifest["purpose"], "production_blockhash_calibration")
         self.assertEqual(manifest["operation_ownership_schema_version"], 4)
-        self.assertEqual(manifest["fit_counts"], [0, 1, 2, 4, 8, 16, 32])
-        self.assertEqual(manifest["checkpoint_count"], 64)
+        self.assertEqual(manifest["fit_counts"], [0, 128, 256, 512])
+        self.assertEqual(manifest["checkpoint_count"], 1024)
         self.assertEqual(manifest["repeats"], 3)
         self.assertEqual(
             [entry["semantic_class"] for entry in manifest["semantic_classes"]],
@@ -165,7 +168,15 @@ class BlockHashCampaignTests(unittest.TestCase):
             manifest["sources"]["operation_coverage_v7"]["path"],
             "experiments/opcode-gas/manifests/operation-coverage-v7.json",
         )
-        self.assertEqual(len(blockhash.blockhash_row_specs(manifest)), 144)
+        self.assertEqual(len(blockhash.blockhash_row_specs(manifest)), 90)
+        self.assertEqual(
+            manifest["exploratory_predecessor"]["result_id"],
+            "742514d26f94a9b53337a3af",
+        )
+        self.assertEqual(
+            manifest["exploratory_predecessor"]["artifact_sha256"],
+            "34f3e95b07223ec4b6d466ab90ef30707b00e141fd35f1b413c75fee916704c2",
+        )
 
     def test_fit_requires_every_class_and_uses_conservative_maximum(self):
         rows = []
@@ -210,6 +221,112 @@ class BlockHashCampaignTests(unittest.TestCase):
         )
         self.assertEqual(result["status"], "unmeasured")
         self.assertTrue(result["rejection_reasons"])
+
+    def test_affine_fit_accepts_negative_slope_when_reconstructed_event_cost_is_positive(self):
+        rows = []
+        for semantic_class in blockhash.SEMANTIC_CLASSES:
+            rows.extend(
+                self._rows(
+                    semantic_class,
+                    Decimal("10"),
+                    iszero_event_cost=Decimal("16"),
+                    intercept=Decimal("-7"),
+                )
+            )
+        result = blockhash.fit_blockhash_rows(
+            rows,
+            manifest=blockhash.canonical_blockhash_manifest_payload(),
+            registry={
+                "common_dispatch": "10",
+                "models": {
+                    "opcode:0x15": {
+                        "kind": "static_raw_gas",
+                        "parameters": {"body_per_raw_gas": "2"},
+                    }
+                },
+            },
+        )
+        self.assertEqual(result["status"], "accepted")
+        self.assertEqual(result["classes"][0]["intercept"], "-7")
+        self.assertEqual(result["classes"][0]["paired_slope"], "-6")
+        self.assertEqual(result["selected"]["event_cost"], "10")
+
+    def test_affine_fit_rejects_invalid_candidate_costs_and_checkpoint_residual(self):
+        registry = {
+            "common_dispatch": "10",
+            "models": {
+                "opcode:0x15": {
+                    "kind": "static_raw_gas",
+                    "parameters": {"body_per_raw_gas": "2"},
+                }
+            },
+        }
+        nonpositive = []
+        for semantic_class in blockhash.SEMANTIC_CLASSES:
+            nonpositive.extend(
+                self._rows(
+                    semantic_class,
+                    Decimal("0"),
+                    iszero_event_cost=Decimal("16"),
+                )
+            )
+        self.assertEqual(
+            blockhash.fit_blockhash_rows(
+                nonpositive,
+                manifest=blockhash.canonical_blockhash_manifest_payload(),
+                registry=registry,
+            )["status"],
+            "unmeasured",
+        )
+
+        negative_body = []
+        for semantic_class in blockhash.SEMANTIC_CLASSES:
+            negative_body.extend(
+                self._rows(
+                    semantic_class,
+                    Decimal("5"),
+                    iszero_event_cost=Decimal("16"),
+                )
+            )
+        negative_body_result = blockhash.fit_blockhash_rows(
+            negative_body,
+            manifest=blockhash.canonical_blockhash_manifest_payload(),
+            registry=registry,
+        )
+        self.assertEqual(negative_body_result["status"], "unmeasured")
+        self.assertTrue(
+            any(
+                "reconstructed body per raw gas is negative" in reason
+                for reason in negative_body_result["rejection_reasons"]
+            )
+        )
+
+        residual = []
+        for semantic_class in blockhash.SEMANTIC_CLASSES:
+            residual.extend(
+                self._rows(
+                    semantic_class,
+                    Decimal("10"),
+                    iszero_event_cost=Decimal("16"),
+                    intercept=Decimal("-7"),
+                )
+            )
+        for row in residual:
+            if row["count"] == blockhash.CHECKPOINT_COUNT and row["lane"] == "target":
+                row["prover_gas"] = str(Decimal(row["prover_gas"]) + Decimal("1000"))
+                row.pop("evidence_sha256")
+                row["evidence_sha256"] = blockhash.sha256_bytes(
+                    blockhash.canonical_json(row)
+                )
+        result = blockhash.fit_blockhash_rows(
+            residual,
+            manifest=blockhash.canonical_blockhash_manifest_payload(),
+            registry=registry,
+        )
+        self.assertEqual(result["status"], "unmeasured")
+        self.assertTrue(
+            any("checkpoint residual exceeds tolerance" in reason for reason in result["rejection_reasons"])
+        )
 
     def test_seal_binds_v7_sources_assets_and_rejects_partial_candidates(self):
         sources = blockhash.validate_blockhash_sources(ROOT)
@@ -358,7 +475,7 @@ class BlockHashCampaignTests(unittest.TestCase):
                     identity_runner=identity_runner,
                 )
 
-            self.assertEqual(len(calls), 144)
+            self.assertEqual(len(calls), 90)
             self.assertEqual(identity["implementation_revision"], "d" * 40)
             self.assertEqual(
                 identity["assets"]["launcher"]["path"],
@@ -414,7 +531,7 @@ class BlockHashCampaignTests(unittest.TestCase):
             def replacing_runner(request):
                 nonlocal calls
                 calls += 1
-                if calls == 144:
+                if calls == 90:
                     launcher.write_bytes(b"replacement launcher")
                 return {
                     "spec": request,

@@ -414,6 +414,39 @@ pub enum ControlledContextProfile {
     },
 }
 
+/// Closed semantic classes for the production-guest BLOCKHASH calibration.
+///
+/// The profile deliberately carries no arbitrary block-number input: the fixture
+/// builder owns the complete 256-header ancestor window and derives the requested
+/// number from `NUMBER` using the fixed offset for this class.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlledBlockHashSemanticClass {
+    #[serde(rename = "recent_ancestor_hit_1")]
+    RecentAncestorHit1,
+    #[serde(rename = "recent_ancestor_hit_256")]
+    RecentAncestorHit256,
+    #[serde(rename = "out_of_range_zero")]
+    OutOfRangeZero,
+}
+
+impl ControlledBlockHashSemanticClass {
+    const fn offset(self) -> u64 {
+        match self {
+            Self::RecentAncestorHit1 => 1,
+            Self::RecentAncestorHit256 => 256,
+            // NUMBER - 0 is the current block, which BLOCKHASH must return as zero.
+            Self::OutOfRangeZero => 0,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ControlledBlockHashProfile {
+    pub semantic_class: ControlledBlockHashSemanticClass,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "snake_case", tag = "kind")]
 pub enum ControlledProgram {
@@ -433,6 +466,14 @@ pub enum ControlledProgram {
         lane: ControlledLane,
         count: u64,
         profile: ControlledContextProfile,
+    },
+    #[serde(rename = "blockhash_loop")]
+    BlockHashLoop {
+        workload_id: String,
+        repeat_index: u32,
+        lane: ControlledLane,
+        count: u64,
+        profile: ControlledBlockHashProfile,
     },
     BlockComparison {
         scenario: ControlledBlockComparisonScenario,
@@ -656,13 +697,21 @@ pub struct ControlledStateHoldoutObservation {
 }
 
 pub fn controlled_block_row_id(spec: &ControlledBlockRowSpec) -> Result<String> {
-    if let ControlledProgram::ContextOpcodeLoop {
-        workload_id,
-        repeat_index,
-        lane,
-        ..
-    } = &spec.program
-    {
+    if let Some((kind, workload_id, repeat_index, lane)) = match &spec.program {
+        ControlledProgram::ContextOpcodeLoop {
+            workload_id,
+            repeat_index,
+            lane,
+            ..
+        } => Some(("production_context_row_v1", workload_id, repeat_index, lane)),
+        ControlledProgram::BlockHashLoop {
+            workload_id,
+            repeat_index,
+            lane,
+            ..
+        } => Some(("blockhash_context_row_v1", workload_id, repeat_index, lane)),
+        _ => None,
+    } {
         if workload_id.len() != 64
             || !workload_id
                 .bytes()
@@ -674,7 +723,7 @@ pub fn controlled_block_row_id(spec: &ControlledBlockRowSpec) -> Result<String> 
             bail!("controlled context repeat index is outside the frozen range");
         }
         return sha256_json(&BTreeMap::from([
-            ("kind", Value::String("production_context_row_v1".into())),
+            ("kind", Value::String(kind.into())),
             ("workload_id", Value::String(workload_id.clone())),
             ("lane", serde_json::to_value(lane)?),
             ("repeat_index", Value::from(*repeat_index)),
@@ -722,8 +771,11 @@ pub fn controlled_block_row_id(spec: &ControlledBlockRowSpec) -> Result<String> 
 }
 
 pub fn controlled_block_workload_id(spec: &ControlledBlockRowSpec) -> Result<String> {
-    if matches!(&spec.program, ControlledProgram::ContextOpcodeLoop { .. }) {
-        bail!("context opcode rows carry their campaign workload identity in the program");
+    if matches!(
+        &spec.program,
+        ControlledProgram::ContextOpcodeLoop { .. } | ControlledProgram::BlockHashLoop { .. }
+    ) {
+        bail!("structured context rows carry their campaign workload identity in the program");
     }
     sha256_json(&BTreeMap::from([
         ("block_count", serde_json::to_value(spec.block_count)?),
@@ -2181,6 +2233,48 @@ fn controlled_context_bytecode(
     Ok(code.into())
 }
 
+/// Build the fixed-footprint production BLOCKHASH calibration program.
+///
+/// Target and control differ at exactly one byte per loop body:
+/// `BLOCKHASH` versus `ISZERO`. Both paths retain NUMBER, PUSH3, SUB, POP,
+/// loop/stack operations, gas limit, and padded bytecode length.
+fn controlled_blockhash_bytecode(
+    lane: ControlledLane,
+    count: u64,
+    semantic_class: ControlledBlockHashSemanticClass,
+) -> Result<Bytes> {
+    let mut code = Vec::new();
+    push3(&mut code, count, "BLOCKHASH count")?;
+    let loop_offset = code.len();
+    code.extend([0x5b, 0x80, 0x15, 0x60, 0x00, 0x57]);
+    let done_immediate_index = loop_offset + 4;
+    code.push(0x43); // NUMBER
+    push3(&mut code, semantic_class.offset(), "BLOCKHASH offset")?;
+    code.push(0x03); // SUB
+    code.push(match lane {
+        ControlledLane::Target => 0x40,  // BLOCKHASH
+        ControlledLane::Control => 0x15, // ISZERO
+    });
+    code.push(0x50); // POP
+    code.extend([
+        0x60,
+        0x01,
+        0x90,
+        0x03,
+        0x60,
+        u8::try_from(loop_offset)?,
+        0x56,
+    ]);
+    let done_offset = code.len();
+    code.extend([0x5b, 0x50, 0x00]);
+    code[done_immediate_index] = u8::try_from(done_offset)?;
+    if code.len() > CONTROLLED_BLOCK_BYTECODE_LENGTH {
+        bail!("controlled BLOCKHASH bytecode exceeds frozen code-length class");
+    }
+    code.resize(CONTROLLED_BLOCK_BYTECODE_LENGTH, 0x00);
+    Ok(code.into())
+}
+
 #[derive(Clone)]
 struct ControlledComparisonParameters {
     code: Bytes,
@@ -2594,6 +2688,38 @@ fn build_controlled_block_fixture_with_topology(
                 bytecode_length,
             )
         }
+        ControlledProgram::BlockHashLoop {
+            lane,
+            count,
+            profile,
+            ..
+        } => {
+            if !matches!(*count, 0 | 1 | 2 | 4 | 8 | 16 | 32 | 64) {
+                bail!("controlled BLOCKHASH count is outside the frozen fit/checkpoint panel");
+            }
+            if spec.workload_family != "blockhash_context" {
+                bail!("controlled BLOCKHASH program requires blockhash_context workload family");
+            }
+            if spec.transaction_count != 1 || spec.block_count != 1 {
+                bail!("controlled BLOCKHASH program requires exactly one block and transaction");
+            }
+            let bytecode = controlled_blockhash_bytecode(*lane, *count, profile.semantic_class)?;
+            let bytecode_length = bytecode.len();
+            (
+                CandidateKind::ControlledContract {
+                    code: bytecode,
+                    input: Bytes::new(),
+                    fee_neutral: true,
+                    gas_limit: CONTROLLED_OPCODE_GAS_LIMIT,
+                    signer_profile: ControlledContextCallerProfile::Canonical,
+                    target_profile: ControlledContextAddressProfile::Canonical,
+                    value: 0,
+                    timestamp_delta: 1,
+                    storage: None,
+                },
+                bytecode_length,
+            )
+        }
         ControlledProgram::BlockComparison { scenario } => {
             if spec.workload_id.is_none() {
                 bail!("structured comparison row requires a canonical workload ID");
@@ -2652,12 +2778,64 @@ fn build_controlled_block_fixture_with_topology(
         spec.transaction_count,
         extra_prestate_accounts,
     )?;
+    if let ControlledProgram::BlockHashLoop { profile, .. } = &spec.program {
+        validate_controlled_blockhash_window(&built.guest_input, profile.semantic_class)?;
+    }
     Ok(ControlledBlockFixture {
         spec: spec.clone(),
         guest_input: built.guest_input,
         controlled_bytecode_length: bytecode_length,
         touched_state_key_count: built.touched_state_key_count,
     })
+}
+
+fn validate_controlled_blockhash_window(
+    guest_input: &GuestInput,
+    semantic_class: ControlledBlockHashSemanticClass,
+) -> Result<()> {
+    let witness = guest_input
+        .witnesses
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("controlled BLOCKHASH fixture has no block witness"))?;
+    let current_number = witness.block.header.number;
+    if witness.witness.headers.len() != 256 || guest_input.proposal_ancestor_headers.len() != 256 {
+        bail!("controlled BLOCKHASH fixture must retain the complete 256-header ancestor window");
+    }
+    let first_number = current_number
+        .checked_sub(256)
+        .ok_or_else(|| anyhow::anyhow!("controlled BLOCKHASH ancestor window underflows"))?;
+    for headers in [
+        &witness.witness.headers,
+        &guest_input.proposal_ancestor_headers,
+    ] {
+        for (index, header) in headers.iter().enumerate() {
+            let header = header.header.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("controlled BLOCKHASH ancestor header is incomplete")
+            })?;
+            let expected = first_number
+                .checked_add(u64::try_from(index)?)
+                .ok_or_else(|| anyhow::anyhow!("controlled BLOCKHASH ancestor window overflows"))?;
+            if header.number != expected {
+                bail!("controlled BLOCKHASH ancestor window is not contiguous");
+            }
+        }
+    }
+    let requested = current_number
+        .checked_sub(semantic_class.offset())
+        .ok_or_else(|| anyhow::anyhow!("controlled BLOCKHASH requested number underflows"))?;
+    match semantic_class {
+        ControlledBlockHashSemanticClass::RecentAncestorHit1
+        | ControlledBlockHashSemanticClass::RecentAncestorHit256 => {
+            if requested < first_number || requested >= current_number {
+                bail!("controlled BLOCKHASH hit class falls outside the retained ancestor window");
+            }
+        }
+        ControlledBlockHashSemanticClass::OutOfRangeZero if requested != current_number => {
+            bail!("controlled BLOCKHASH zero class must request the current block number");
+        }
+        ControlledBlockHashSemanticClass::OutOfRangeZero => {}
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -2874,7 +3052,9 @@ pub fn validate_controlled_block_fixture(
 ) -> Result<ControlledBlockObservation> {
     if matches!(
         &fixture.spec.program,
-        ControlledProgram::ContextOpcodeLoop { .. } | ControlledProgram::BlockComparison { .. }
+        ControlledProgram::ContextOpcodeLoop { .. }
+            | ControlledProgram::BlockHashLoop { .. }
+            | ControlledProgram::BlockComparison { .. }
     ) {
         let missing = match (
             fixture.spec.expected_backend_input_sha256.is_none(),
@@ -2990,7 +3170,7 @@ pub fn freeze_controlled_block_fixture(
     let mut canonical_source = source.clone();
     if !matches!(
         &canonical_source.program,
-        ControlledProgram::ContextOpcodeLoop { .. }
+        ControlledProgram::ContextOpcodeLoop { .. } | ControlledProgram::BlockHashLoop { .. }
     ) {
         if canonical_source.workload_id.as_deref() == Some("0".repeat(64).as_str()) {
             canonical_source.workload_id = Some(controlled_block_workload_id(&canonical_source)?);
@@ -3029,7 +3209,9 @@ pub fn freeze_controlled_block_fixture(
     spec.expected_finalized_block_zkgas = observed.finalized_block_zkgas;
     if matches!(
         &source.program,
-        ControlledProgram::ContextOpcodeLoop { .. } | ControlledProgram::BlockComparison { .. }
+        ControlledProgram::ContextOpcodeLoop { .. }
+            | ControlledProgram::BlockHashLoop { .. }
+            | ControlledProgram::BlockComparison { .. }
     ) {
         if controlled_block_row_id(&spec)? != source.row_id {
             bail!("controlled structured evidence changed the manifest-owned row identity");
@@ -3040,8 +3222,10 @@ pub fn freeze_controlled_block_fixture(
     let frozen = build_controlled_block_fixture(&spec)?;
     let observation = validate_controlled_block_fixture(&frozen)?;
     let fixture_spec_sha256 = canonical_serde_sha256(&spec)?;
-    let candidate_trace = if !matches!(&source.program, ControlledProgram::ContextOpcodeLoop { .. })
-    {
+    let candidate_trace = if !matches!(
+        &source.program,
+        ControlledProgram::ContextOpcodeLoop { .. } | ControlledProgram::BlockHashLoop { .. }
+    ) {
         let trace = trace_shasta_proposal(&fixture.guest_input)?;
         if canonical_serde_sha256(&trace)? != observation.host_trace_sha256 {
             bail!("controlled comparison candidate trace differs from frozen host trace");
@@ -3064,6 +3248,15 @@ pub fn freeze_controlled_context_block_fixture(
 ) -> Result<ControlledBlockIdentityBundle> {
     if !matches!(&source.program, ControlledProgram::ContextOpcodeLoop { .. }) {
         bail!("controlled context identity accepts only structured context opcode rows");
+    }
+    freeze_controlled_block_fixture(source)
+}
+
+pub fn freeze_controlled_blockhash_block_fixture(
+    source: &ControlledBlockRowSpec,
+) -> Result<ControlledBlockIdentityBundle> {
+    if !matches!(&source.program, ControlledProgram::BlockHashLoop { .. }) {
+        bail!("controlled BLOCKHASH identity accepts only structured BLOCKHASH rows");
     }
     freeze_controlled_block_fixture(source)
 }

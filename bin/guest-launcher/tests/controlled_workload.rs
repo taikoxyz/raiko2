@@ -6,7 +6,8 @@ use std::collections::BTreeMap;
 use alloy_consensus::{Transaction as _, transaction::SignerRecoverable};
 use alloy_primitives::{Address, B256};
 use controlled_workload::{
-    ControlledBlockComparisonScenario, ControlledBlockRowSpec, ControlledBlockSplit,
+    ControlledBlockComparisonScenario, ControlledBlockHashProfile,
+    ControlledBlockHashSemanticClass, ControlledBlockRowSpec, ControlledBlockSplit,
     ControlledContextAddressProfile, ControlledContextCallerProfile, ControlledContextOpcode,
     ControlledContextProfile, ControlledExecutionIdentity, ControlledFootprint, ControlledLane,
     ControlledOperationUnits, ControlledOverheadLane, ControlledProgram,
@@ -711,6 +712,41 @@ fn materialize_context_block_row(
     (spec, validated, shape)
 }
 
+fn blockhash_row(
+    lane: ControlledLane,
+    count: u64,
+    semantic_class: ControlledBlockHashSemanticClass,
+) -> ControlledBlockRowSpec {
+    let mut spec = ControlledBlockRowSpec {
+        row_id: String::new(),
+        operation_ownership_schema_version: 4,
+        workload_id: None,
+        workload_family: "blockhash_context".into(),
+        split: ControlledBlockSplit::Fit,
+        block_count: 1,
+        transaction_count: 1,
+        program: ControlledProgram::BlockHashLoop {
+            workload_id: "b".repeat(64),
+            repeat_index: 0,
+            lane,
+            count,
+            profile: ControlledBlockHashProfile { semantic_class },
+        },
+        expected_final_state_root: B256::ZERO,
+        expected_raw_gas_by_key: BTreeMap::new(),
+        expected_operation_event_count_by_key: BTreeMap::new(),
+        expected_context_features: BTreeMap::new(),
+        expected_storage_features: BTreeMap::new(),
+        expected_features: BTreeMap::new(),
+        expected_diagnostics: BTreeMap::new(),
+        expected_backend_input_sha256: None,
+        expected_host_trace_sha256: None,
+        expected_finalized_block_zkgas: None,
+    };
+    spec.row_id = controlled_block_row_id(&spec).expect("BLOCKHASH row identity");
+    spec
+}
+
 #[test]
 fn context_opcode_program_schema_is_structured_and_rejects_mismatched_profiles() {
     let program = ControlledProgram::ContextOpcodeLoop {
@@ -785,6 +821,221 @@ fn context_opcode_program_schema_is_structured_and_rejects_mismatched_profiles()
     let error = build_controlled_block_fixture(&mismatched)
         .expect_err("calldata beyond the frozen profiles must fail before allocation");
     assert!(error.to_string().contains("0..=255"));
+}
+
+#[test]
+fn blockhash_program_schema_is_closed_and_declares_the_complete_ancestor_window() {
+    let program = ControlledProgram::BlockHashLoop {
+        workload_id: "b".repeat(64),
+        repeat_index: 0,
+        lane: ControlledLane::Target,
+        count: 32,
+        profile: ControlledBlockHashProfile {
+            semantic_class: ControlledBlockHashSemanticClass::RecentAncestorHit256,
+        },
+    };
+    assert_eq!(
+        serde_json::to_value(&program).unwrap(),
+        json!({
+            "kind": "blockhash_loop",
+            "workload_id": "b".repeat(64),
+            "repeat_index": 0,
+            "lane": "target",
+            "count": 32,
+            "profile": {"semantic_class": "recent_ancestor_hit_256"},
+        })
+    );
+    assert!(
+        serde_json::from_value::<ControlledProgram>(json!({
+            "kind": "blockhash_loop",
+            "workload_id": "b".repeat(64),
+            "repeat_index": 0,
+            "lane": "target",
+            "count": 32,
+            "profile": {"semantic_class": "caller_supplied_offset"},
+        }))
+        .is_err(),
+        "the profile must not accept a caller-supplied BLOCKHASH offset",
+    );
+}
+
+#[test]
+fn blockhash_target_and_control_have_one_measurement_byte_difference_and_a_full_window() {
+    for semantic_class in [
+        ControlledBlockHashSemanticClass::RecentAncestorHit1,
+        ControlledBlockHashSemanticClass::RecentAncestorHit256,
+        ControlledBlockHashSemanticClass::OutOfRangeZero,
+    ] {
+        let target = build_controlled_block_fixture(&blockhash_row(
+            ControlledLane::Target,
+            1,
+            semantic_class,
+        ))
+        .expect("build BLOCKHASH target");
+        let control = build_controlled_block_fixture(&blockhash_row(
+            ControlledLane::Control,
+            1,
+            semantic_class,
+        ))
+        .expect("build BLOCKHASH control");
+        let target_code = target.guest_input.witnesses[0]
+            .witness
+            .codes
+            .iter()
+            .find(|code| code.len() == 256)
+            .expect("controlled BLOCKHASH target code");
+        let control_code = control.guest_input.witnesses[0]
+            .witness
+            .codes
+            .iter()
+            .find(|code| code.len() == 256)
+            .expect("controlled BLOCKHASH control code");
+        let differences = target_code
+            .iter()
+            .zip(control_code)
+            .enumerate()
+            .filter(|(_, (target, control))| target != control)
+            .collect::<Vec<_>>();
+        assert_eq!(differences.len(), 1);
+        assert_eq!(*differences[0].1.0, 0x40);
+        assert_eq!(*differences[0].1.1, 0x15);
+        let headers = &target.guest_input.witnesses[0].witness.headers;
+        assert_eq!(headers.len(), 256);
+        let current = target.guest_input.witnesses[0].block.header.number;
+        assert_eq!(
+            headers.first().unwrap().header.as_ref().unwrap().number,
+            current - 256
+        );
+        assert_eq!(
+            headers.last().unwrap().header.as_ref().unwrap().number,
+            current - 1
+        );
+        let proposal_headers = &target.guest_input.proposal_ancestor_headers;
+        assert_eq!(proposal_headers.len(), 256);
+        assert_eq!(
+            proposal_headers
+                .first()
+                .unwrap()
+                .header
+                .as_ref()
+                .unwrap()
+                .number,
+            current - 256
+        );
+        assert_eq!(
+            proposal_headers
+                .last()
+                .unwrap()
+                .header
+                .as_ref()
+                .unwrap()
+                .number,
+            current - 1
+        );
+        let target_candidate = target.guest_input.witnesses[0]
+            .block
+            .body
+            .transactions
+            .last()
+            .expect("BLOCKHASH target candidate");
+        let control_candidate = control.guest_input.witnesses[0]
+            .block
+            .body
+            .transactions
+            .last()
+            .expect("BLOCKHASH control candidate");
+        assert_eq!(target_candidate.input(), control_candidate.input());
+        assert_eq!(target_candidate.gas_limit(), control_candidate.gas_limit());
+        assert_eq!(
+            target.guest_input.taiko.chain_spec, control.guest_input.taiko.chain_spec,
+            "the paired rows must use the same production chain envelope",
+        );
+    }
+}
+
+#[test]
+fn blockhash_fixture_freezes_and_replays_the_raw_gas_and_event_ledgers() {
+    let source = blockhash_row(
+        ControlledLane::Target,
+        2,
+        ControlledBlockHashSemanticClass::RecentAncestorHit1,
+    );
+    let bundle = controlled_workload::freeze_controlled_blockhash_block_fixture(&source)
+        .expect("freeze BLOCKHASH production fixture");
+    assert_eq!(bundle.spec.row_id, source.row_id);
+    assert_eq!(
+        bundle.observation.actual_raw_gas_by_key,
+        bundle.spec.expected_raw_gas_by_key
+    );
+    assert_eq!(
+        bundle.observation.actual_operation_event_count_by_key,
+        bundle.spec.expected_operation_event_count_by_key
+    );
+    let fixture = build_controlled_block_fixture(&bundle.spec).expect("rebuild frozen BLOCKHASH");
+    assert_eq!(
+        validate_controlled_block_fixture(&fixture).expect("replay frozen BLOCKHASH"),
+        bundle.observation
+    );
+
+    let control = controlled_workload::freeze_controlled_blockhash_block_fixture(&blockhash_row(
+        ControlledLane::Control,
+        2,
+        ControlledBlockHashSemanticClass::RecentAncestorHit1,
+    ))
+    .expect("freeze paired BLOCKHASH control fixture");
+    let signed_delta = |target: &BTreeMap<String, i64>, control: &BTreeMap<String, i64>| {
+        target
+            .keys()
+            .chain(control.keys())
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .filter_map(|key| {
+                let value = target.get(&key).copied().unwrap_or_default()
+                    - control.get(&key).copied().unwrap_or_default();
+                (value != 0).then_some((key, value))
+            })
+            .collect::<BTreeMap<_, _>>()
+    };
+    assert_eq!(
+        signed_delta(
+            &bundle.spec.expected_raw_gas_by_key,
+            &control.spec.expected_raw_gas_by_key,
+        ),
+        BTreeMap::from([("opcode:0x15".into(), -6), ("opcode:0x40".into(), 40)]),
+    );
+    assert_eq!(
+        signed_delta(
+            &bundle.spec.expected_operation_event_count_by_key,
+            &control.spec.expected_operation_event_count_by_key,
+        ),
+        BTreeMap::from([("opcode:0x15".into(), -2), ("opcode:0x40".into(), 2)]),
+    );
+}
+
+#[test]
+fn blockhash_panel_rejects_noncampaign_counts_and_wrong_fixture_shape() {
+    let mut count = blockhash_row(
+        ControlledLane::Target,
+        3,
+        ControlledBlockHashSemanticClass::RecentAncestorHit1,
+    );
+    count.row_id = controlled_block_row_id(&count).unwrap();
+    assert!(
+        build_controlled_block_fixture(&count).is_err(),
+        "the BLOCKHASH campaign must not silently add fit counts"
+    );
+    let mut shape = blockhash_row(
+        ControlledLane::Target,
+        1,
+        ControlledBlockHashSemanticClass::RecentAncestorHit1,
+    );
+    shape.transaction_count = 2;
+    shape.row_id = controlled_block_row_id(&shape).unwrap();
+    assert!(
+        build_controlled_block_fixture(&shape).is_err(),
+        "the BLOCKHASH pair must retain exactly one candidate transaction"
+    );
 }
 
 #[test]

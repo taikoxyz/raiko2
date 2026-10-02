@@ -68,6 +68,22 @@ workflows, and treat `docs/API.md` as the source of truth for HTTP/API behavior.
 
 ## Stable Command Entry Points
 
+Before running workspace Cargo commands from the primary checkout or a linked worktree, share the
+primary checkout's ignored `target/` directory unless the caller has explicitly selected another
+target directory for isolation or a validated release cache:
+
+```bash
+if [ -z "${CARGO_TARGET_DIR:-}" ]; then
+  export CARGO_TARGET_DIR="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")/target"
+fi
+```
+
+The Git common directory is shared by every linked worktree, so this avoids duplicating compiled
+dependencies without introducing a machine-specific path. Do not create a worktree-local `target/`
+by default. This rule applies to workspace Cargo and host-side `xtask` compilation; keep guest and
+container-internal cache locations under their existing build workflows. Never remove a shared or
+worktree-local target directory while a build, test, or editor process may still be using it.
+
 - Main server: `cargo run -r -p raiko2 -- --config config.toml`
 - Config path override: `RAIKO2_CONFIG=/path/to/config.toml`
 - Workspace checks:

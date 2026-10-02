@@ -387,8 +387,12 @@ evidence:
   status, positive gas, and primary metric are valid;
 - `prepare-corpus` discovery now passes L1 network `hoodi` for `taiko_hoodi` and `ethereum` for
   `taiko_mainnet` rather than relying on the discovery script's default.
-- Smoke preparation accepts only Hoodi `79852` and Mainnet `38261`; normalized output keeps purpose,
-  network, proposal ID, fixture digest, and workload identity, and non-SP1 smoke labels fail closed.
+- On 2026-10-02, bounded witness proof-history had expired the original smoke pair. Smoke preparation
+  now accepts only preflight-validated Hoodi `80907` (L2 `20889658..20890035`, L1 inclusion
+  `3736986`, last anchor `3736925`, 378 blocks) and Mainnet `39339` (L2
+  `12149863..12150054`, L1 inclusion `26104557`, last anchor `26104488`, 192 blocks). Both were
+  confirmed outside the final 60; normalized output keeps purpose, network, proposal ID, fixture
+  digest, and workload identity, and non-SP1 smoke labels fail closed.
 - Proposal reports bind the exact production proposal ELF and executing launcher digests. The
   launcher rejects `RAIKO2_GUEST_ELF_DIR`, hashes `/proc/self/exe` on Linux, and Python rejects wrong
   or mid-run-changing artifact hashes.
@@ -397,9 +401,10 @@ evidence:
   after smoke verification.
 
 No proposal execution, RPC acquisition, coefficient tuning, production schedule/config change, or
-corpus publication occurred in this implementation checkpoint. Hoodi proposal `79852` and Mainnet
-proposal `38261` are frozen only as the later integration-smoke pair and are disjoint from the still
-unopened final corpus. The exact post-review smoke sequence is documented in the experiment README.
+corpus publication occurred in this implementation checkpoint. The original smoke pair later expired
+from bounded witness proof-history; on 2026-10-02, preflight validation replaced it with Hoodi
+proposal `80907` and Mainnet proposal `39339`, both disjoint from the still unopened final corpus.
+The exact post-review smoke sequence is documented in the experiment README.
 
 ## Diagnostic Milestone: First Composite Proposal Replays
 
@@ -414,7 +419,7 @@ ELF remained
 Composite estimator artifact
 `6431ef06ace0ae748551b6d42312690b692322e1f28276460c71b79ddb7515f7` sealed and replayed exactly
 at that revision. Two existing repository fixtures were then executed as `purpose=ad_hoc`
-diagnostics. They are not substitutes for the frozen Hoodi `79852` and Mainnet `38261` integration
+diagnostics. They are not substitutes for the frozen Hoodi `80907` and Mainnet `39339` integration
 smokes, are not final-validation rows, and did not tune any coefficient:
 
 | Network / proposal | Blocks | Actual proverGas | Modeled subtotal | Modeled / actual | Operation-count coverage | Raw-gas coverage | Result |
@@ -1070,7 +1075,7 @@ After this context family, close the remaining ordinary returndata/copy/LOG/EXTC
 wrappers and direct precompiles. Reuse sealed controlled evidence where its execution semantics and
 model inputs are sufficient; otherwise predeclare the smallest additional controlled campaign.
 
-The frozen Hoodi `79852` and Mainnet `38261` integration smokes remain required once a
+The frozen Hoodi `80907` and Mainnet `39339` integration smokes remain required once a
 witness-capable RPC or immutable GuestInputs are available. Record their exact trace/report joins,
 predictions, actual `proverGas`, APE, per-layer contributions, coverage, and gaps without changing a
 coefficient. The final 60-row corpus remains unopened.

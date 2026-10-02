@@ -375,8 +375,8 @@ class RunManifestTests(unittest.TestCase):
             root = pathlib.Path(tmp)
             guest_input = root / "guest-input.json"
             for network, proposal_id in (
-                ("taiko_hoodi", 79852),
-                ("taiko_mainnet", 38261),
+                ("taiko_hoodi", 80907),
+                ("taiko_mainnet", 39339),
             ):
                 with self.subTest(network=network):
                     guest_input_payload = smoke_guest_input_payload(network, proposal_id)
@@ -398,19 +398,28 @@ class RunManifestTests(unittest.TestCase):
                         "unzen_activation": {"kind": "Timestamp", "value": 1},
                     })
 
-            guest_input.write_text(json.dumps({
-                "taiko": {
-                    "proposal_id": 79853,
-                    "chain_spec": {"name": "taiko_hoodi"},
-                }
-            }) + "\n")
-            with self.assertRaisesRegex(ValueError, "frozen integration_smoke"):
-                opcode_gas.prepare_integration_smoke(
-                    "taiko_hoodi", 79853, guest_input=guest_input
-                )
+            for network, proposal_id in (
+                ("taiko_hoodi", 79852),
+                ("taiko_mainnet", 38261),
+            ):
+                with self.subTest(expired_network=network):
+                    guest_input.write_text(
+                        json.dumps(smoke_guest_input_payload(network, proposal_id)) + "\n"
+                    )
+                    with self.assertRaisesRegex(ValueError, "frozen integration_smoke"):
+                        opcode_gas.prepare_integration_smoke(
+                            network, proposal_id, guest_input=guest_input
+                        )
+
+        final_members = opcode_gas.final_validation_membership(
+            opcode_gas.select_final_validation_corpus()
+        )
+        self.assertTrue(
+            opcode_gas.FROZEN_INTEGRATION_SMOKE_PROPOSALS.isdisjoint(final_members)
+        )
 
     def test_integration_smoke_binds_and_verifies_embedded_post_unzen_chain_spec(self):
-        network, proposal_id, activation = "taiko_hoodi", 79852, 100
+        network, proposal_id, activation = "taiko_hoodi", 80907, 100
         chain_spec = smoke_chain_spec(network, activation)
         guest_input_payload = {
             "taiko": {
@@ -488,16 +497,16 @@ class RunManifestTests(unittest.TestCase):
         ):
             root = pathlib.Path(tmp)
             guest_input = root / "guest-input.json"
-            payload = smoke_guest_input_payload("taiko_hoodi", 79852, -1)
+            payload = smoke_guest_input_payload("taiko_hoodi", 80907, -1)
             guest_input.write_text(json.dumps(payload) + "\n")
 
             with self.assertRaisesRegex(ValueError, "invalid UNZEN activation"):
                 opcode_gas.prepare_integration_smoke(
-                    "taiko_hoodi", 79852, guest_input=guest_input
+                    "taiko_hoodi", 80907, guest_input=guest_input
                 )
 
     def test_integration_smoke_rejects_missing_mixed_and_pre_unzen_witnesses(self):
-        base = smoke_guest_input_payload("taiko_hoodi", 79852)
+        base = smoke_guest_input_payload("taiko_hoodi", 80907)
         cases = []
 
         missing = json.loads(json.dumps(base))
@@ -535,12 +544,12 @@ class RunManifestTests(unittest.TestCase):
                     guest_input.write_text(json.dumps(payload) + "\n")
                     with self.assertRaisesRegex(ValueError, message):
                         opcode_gas.prepare_integration_smoke(
-                            "taiko_hoodi", 79852, guest_input=guest_input
+                            "taiko_hoodi", 80907, guest_input=guest_input
                         )
 
     def test_integration_smoke_rejects_partial_and_non_u64_witness_values(self):
         u64_overflow = 1 << 64
-        base = smoke_guest_input_payload("taiko_hoodi", 79852)
+        base = smoke_guest_input_payload("taiko_hoodi", 80907)
         cases = []
 
         partial = json.loads(json.dumps(base))
@@ -551,7 +560,7 @@ class RunManifestTests(unittest.TestCase):
         cases.append(("partial", partial, "full ChainSpec"))
 
         activation_overflow = smoke_guest_input_payload(
-            "taiko_hoodi", 79852, u64_overflow
+            "taiko_hoodi", 80907, u64_overflow
         )
         cases.append(("activation_overflow", activation_overflow, "invalid UNZEN activation"))
 
@@ -574,7 +583,7 @@ class RunManifestTests(unittest.TestCase):
                     guest_input.write_text(json.dumps(payload) + "\n")
                     with self.assertRaisesRegex(ValueError, message):
                         opcode_gas.prepare_integration_smoke(
-                            "taiko_hoodi", 79852, guest_input=guest_input
+                            "taiko_hoodi", 80907, guest_input=guest_input
                         )
 
     def test_integration_smoke_rejects_type_confused_record_activation(self):
@@ -585,10 +594,10 @@ class RunManifestTests(unittest.TestCase):
             guest_input = root / "guest-input.json"
             record_path = root / "smoke-record.json"
             guest_input.write_text(
-                json.dumps(smoke_guest_input_payload("taiko_hoodi", 79852)) + "\n"
+                json.dumps(smoke_guest_input_payload("taiko_hoodi", 80907)) + "\n"
             )
             record = opcode_gas.prepare_integration_smoke(
-                "taiko_hoodi", 79852, guest_input=guest_input
+                "taiko_hoodi", 80907, guest_input=guest_input
             )
             for name, activation in (
                 ("boolean", {"kind": "Timestamp", "value": True}),
@@ -603,12 +612,12 @@ class RunManifestTests(unittest.TestCase):
                         opcode_gas.verify_prepared_integration_smoke(
                             record_path,
                             network="taiko_hoodi",
-                            proposal_id=79852,
+                            proposal_id=80907,
                             guest_input=guest_input,
                         )
 
     def test_integration_smoke_rejects_wrong_full_chain_spec_field_types(self):
-        base = smoke_guest_input_payload("taiko_hoodi", 79852)
+        base = smoke_guest_input_payload("taiko_hoodi", 80907)
         cases = (
             ("chain_id", True),
             ("max_spec_id", 1),
@@ -635,11 +644,11 @@ class RunManifestTests(unittest.TestCase):
                     guest_input.write_text(json.dumps(payload) + "\n")
                     with self.assertRaisesRegex(ValueError, "invalid full ChainSpec"):
                         opcode_gas.prepare_integration_smoke(
-                            "taiko_hoodi", 79852, guest_input=guest_input
+                            "taiko_hoodi", 80907, guest_input=guest_input
                         )
 
     def test_integration_smoke_rejects_invalid_manifest_and_witness_network_identity(self):
-        base = smoke_guest_input_payload("taiko_hoodi", 79852)
+        base = smoke_guest_input_payload("taiko_hoodi", 80907)
         cases = []
 
         missing_manifest = json.loads(json.dumps(base))
@@ -669,7 +678,7 @@ class RunManifestTests(unittest.TestCase):
                     guest_input.write_text(json.dumps(payload) + "\n")
                     with self.assertRaisesRegex(ValueError, message):
                         opcode_gas.prepare_integration_smoke(
-                            "taiko_hoodi", 79852, guest_input=guest_input
+                            "taiko_hoodi", 80907, guest_input=guest_input
                         )
 
     def test_calibration_records_exact_formula_checkpoint_versions_and_artifacts(self):
@@ -1104,7 +1113,7 @@ class RunManifestTests(unittest.TestCase):
             root = pathlib.Path(tmp)
             args = proposal_args(root, purpose="integration_smoke", smoke_record=root / "smoke.json")
             args.guest_input.write_text(
-                json.dumps(smoke_guest_input_payload("taiko_hoodi", 79852)) + "\n"
+                json.dumps(smoke_guest_input_payload("taiko_hoodi", 80907)) + "\n"
             )
             with mock.patch.object(opcode_gas, "REPO_ROOT", root), mock.patch.object(
                 opcode_gas, "run_proposal_guest_input"
@@ -1145,13 +1154,13 @@ class RunManifestTests(unittest.TestCase):
             args.guest_launcher.write_bytes(b"reviewed launcher")
             proposal_elf = root / "sp1_shasta_proposal.elf"
             proposal_elf.write_bytes(b"reviewed proposal ELF")
-            guest_input_payload = smoke_guest_input_payload("taiko_hoodi", 79852)
+            guest_input_payload = smoke_guest_input_payload("taiko_hoodi", 80907)
             args.guest_input.write_text(json.dumps(guest_input_payload) + "\n")
             fixture_sha256 = opcode_gas.sha256_file(args.guest_input)
             workload_id = opcode_gas.proposal_workload_id(fixture_sha256)
             args.smoke_record.write_text(json.dumps({
                 "network": "taiko_hoodi",
-                "proposal_id": 79852,
+                "proposal_id": 80907,
                 "purpose": "integration_smoke",
                 "fixture_sha256": fixture_sha256,
                 "workload_id": workload_id,
@@ -1169,7 +1178,7 @@ class RunManifestTests(unittest.TestCase):
                     args.guest_input.write_text(json.dumps({
                         "taiko": {
                             "proposal_id": 99999,
-                            "chain_spec": {"name": "taiko_hoodi"},
+                            "chain_spec": smoke_manifest_chain_spec("taiko_hoodi"),
                         }
                     }) + "\n")
                     json_out.write_bytes(b"\x1f\x8btrace")
@@ -1213,7 +1222,7 @@ class RunManifestTests(unittest.TestCase):
             row = json.loads(args.out.read_text())
             self.assertEqual(row["purpose"], "integration_smoke")
             self.assertEqual(row["network"], "taiko_hoodi")
-            self.assertEqual(row["proposal_id"], 79852)
+            self.assertEqual(row["proposal_id"], 80907)
             self.assertEqual(row["input"], str(args.guest_input))
             self.assertEqual(row["fixture_sha256"], fixture_sha256)
             self.assertEqual(row["workload_id"], workload_id)
@@ -1227,22 +1236,16 @@ class RunManifestTests(unittest.TestCase):
             root = pathlib.Path(tmp)
             prepared_input = root / "prepared.json"
             executed_input = root / "executed.json"
-            prepared_input.write_text(json.dumps({
-                "taiko": {
-                    "proposal_id": 79852,
-                    "chain_spec": {"name": "taiko_hoodi"},
-                }
-            }) + "\n")
-            executed_input.write_text(json.dumps({
-                "taiko": {
-                    "proposal_id": 2,
-                    "chain_spec": {"name": "taiko_hoodi"},
-                }
-            }) + "\n")
+            prepared_input.write_text(
+                json.dumps(smoke_guest_input_payload("taiko_hoodi", 80907)) + "\n"
+            )
+            executed_input.write_text(
+                json.dumps(smoke_guest_input_payload("taiko_hoodi", 2)) + "\n"
+            )
             smoke_record = root / "smoke.json"
             smoke_record.write_text(json.dumps({
                 "network": "taiko_hoodi",
-                "proposal_id": 79852,
+                "proposal_id": 80907,
                 "purpose": "integration_smoke",
                 "fixture_sha256": opcode_gas.sha256_file(prepared_input),
             }))
@@ -1264,11 +1267,11 @@ class RunManifestTests(unittest.TestCase):
                 root, purpose="integration_smoke", smoke_record=root / "smoke.json"
             )
             args.guest_input.write_text(
-                json.dumps(smoke_guest_input_payload("taiko_hoodi", 79852)) + "\n"
+                json.dumps(smoke_guest_input_payload("taiko_hoodi", 80907)) + "\n"
             )
             args.smoke_record.write_text(json.dumps({
                 "network": "taiko_hoodi",
-                "proposal_id": 79852,
+                "proposal_id": 80907,
                 "purpose": "integration_smoke",
                 "fixture_sha256": opcode_gas.sha256_file(args.guest_input),
                 "workload_id": "00" * 32,
@@ -1669,7 +1672,7 @@ def proposal_args(root, *, purpose, smoke_record):
         purpose=purpose,
         smoke_record=smoke_record,
         network="taiko_hoodi",
-        proposal_id=79852,
+        proposal_id=80907,
     )
 
 

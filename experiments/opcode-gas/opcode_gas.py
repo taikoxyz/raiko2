@@ -12291,8 +12291,8 @@ def assert_integration_smoke_is_disjoint(final_rows: Iterable[Mapping[str, Any]]
 
 FROZEN_INTEGRATION_SMOKE_PROPOSALS = frozenset(
     {
-        ("taiko_hoodi", 79852),
-        ("taiko_mainnet", 38261),
+        ("taiko_hoodi", 80907),
+        ("taiko_mainnet", 39339),
     }
 )
 

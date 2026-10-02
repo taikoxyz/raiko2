@@ -1324,10 +1324,12 @@ or its bound source-artifact directories are rejected.
 
 ### Task 4 Integration Smoke Checkpoint
 
-The two frozen integration-smoke proposals are Hoodi `79852` and Mainnet `38261`. They are outside
-the final 40-Hoodi/20-Mainnet corpus. Do not substitute another proposal, add either smoke row to the
-final corpus, or tune a coefficient from its result. The final corpus remains unopened until this
-plumbing change has independent review and the two smoke joins complete.
+The two frozen integration-smoke proposals are Hoodi `80907` and Mainnet `39339`. On 2026-10-02,
+the previous pair aged out of bounded witness proof-history; these replacements were preflight
+validated and confirmed outside the final 40-Hoodi/20-Mainnet corpus. Do not substitute another
+proposal, add either smoke row to the final corpus, or tune a coefficient from its result. The final
+corpus remains unopened until this plumbing change has independent review and the two smoke joins
+complete.
 
 `prepare-integration-smoke` rejects every other network/proposal pair. Its record and the resulting
 `run.jsonl` bind `purpose`, `network`, `proposal_id`, the exact GuestInput fixture digest, and the
@@ -1349,8 +1351,8 @@ the composite estimate.
 
 ```bash
 SMOKE_ROOT=experiments/opcode-gas/runs/task-4-integration-smoke
-HOODI_INPUT="$SMOKE_ROOT/inputs/taiko_hoodi-proposal-79852.json"
-MAINNET_INPUT="$SMOKE_ROOT/inputs/taiko_mainnet-proposal-38261.json"
+HOODI_INPUT="$SMOKE_ROOT/inputs/taiko_hoodi-proposal-80907.json"
+MAINNET_INPUT="$SMOKE_ROOT/inputs/taiko_mainnet-proposal-39339.json"
 mkdir -p "$SMOKE_ROOT/inputs" "$SMOKE_ROOT/hoodi" "$SMOKE_ROOT/mainnet"
 
 cargo build --release -p preflight -p guest-launcher --features sp1-sdk/profiling
@@ -1369,13 +1371,13 @@ ESTIMATOR_PATH="$(<"$ESTIMATOR_PATH_FILE")"
   verify-composite-estimator --estimator "$ESTIMATOR_PATH"
 
 ~/.venv/bin/python experiments/opcode-gas/opcode_gas.py prepare-integration-smoke \
-  --network taiko_hoodi --proposal-id 79852 --guest-input "$HOODI_INPUT" \
+  --network taiko_hoodi --proposal-id 80907 --guest-input "$HOODI_INPUT" \
   --out "$SMOKE_ROOT/hoodi/record.json"
 ~/.venv/bin/python experiments/opcode-gas/opcode_gas.py run-proposal \
   --guest-launcher target/release/guest-launcher --guest-input "$HOODI_INPUT" \
-  --proof-type sp1 --case integration-smoke-hoodi-79852 \
+  --proof-type sp1 --case integration-smoke-hoodi-80907 \
   --target-raw-gas 1 --purpose integration_smoke \
-  --network taiko_hoodi --proposal-id 79852 \
+  --network taiko_hoodi --proposal-id 80907 \
   --smoke-record "$SMOKE_ROOT/hoodi/record.json" \
   --out "$SMOKE_ROOT/hoodi/run.jsonl"
 ~/.venv/bin/python experiments/opcode-gas/opcode_gas.py estimate-composite-trace \
@@ -1385,13 +1387,13 @@ ESTIMATOR_PATH="$(<"$ESTIMATOR_PATH_FILE")"
   --out "$SMOKE_ROOT/hoodi/estimate.json"
 
 ~/.venv/bin/python experiments/opcode-gas/opcode_gas.py prepare-integration-smoke \
-  --network taiko_mainnet --proposal-id 38261 --guest-input "$MAINNET_INPUT" \
+  --network taiko_mainnet --proposal-id 39339 --guest-input "$MAINNET_INPUT" \
   --out "$SMOKE_ROOT/mainnet/record.json"
 ~/.venv/bin/python experiments/opcode-gas/opcode_gas.py run-proposal \
   --guest-launcher target/release/guest-launcher --guest-input "$MAINNET_INPUT" \
-  --proof-type sp1 --case integration-smoke-mainnet-38261 \
+  --proof-type sp1 --case integration-smoke-mainnet-39339 \
   --target-raw-gas 1 --purpose integration_smoke \
-  --network taiko_mainnet --proposal-id 38261 \
+  --network taiko_mainnet --proposal-id 39339 \
   --smoke-record "$SMOKE_ROOT/mainnet/record.json" \
   --out "$SMOKE_ROOT/mainnet/run.jsonl"
 ~/.venv/bin/python experiments/opcode-gas/opcode_gas.py estimate-composite-trace \
@@ -1518,7 +1520,7 @@ then supply the same `--network`, `--proposal-id`, and
 `--smoke-record <record.json>` to
 `run-proposal --purpose integration_smoke`. The command validates that the
 record is still purpose-labelled `integration_smoke`, is disjoint from the
-frozen final 60 rows, is one of Hoodi `79852` or Mainnet `38261`, and binds the exact GuestInput
+frozen final 60 rows, is one of Hoodi `80907` or Mainnet `39339`, and binds the exact GuestInput
 bytes, derived workload identity, embedded network/proposal identity, canonical witness chain-spec
 digest, and structured Unzen activation before invoking guest-launcher. The top-level
 `taiko.chain_spec` ManifestChainSpec and every witness chain spec must match the requested network's

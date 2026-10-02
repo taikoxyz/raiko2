@@ -1096,10 +1096,10 @@ artifact identity changed.
   `1,437,555,380.9303051854641007206113351763106672341486303454488711019759931168028533`; APE is
   `0.37995653477275267754749712035892812354493331566351706578641540287806717019310499`; wall time
   is 152,194 ms. The non-gating diagnostic totals are 2,102,180,920 instructions and 3,017,404
-  syscalls. The plumbing and join passed, but model validation failed: the large residual shows that
-  the fixed block/native/transaction approximation does not transport to this real proposal. A new
-  predeclared higher-layer/state-witness experiment is required; this candidate must not be retuned
-  from this smoke.
+  syscalls. The plumbing and join passed, but model validation failed. The residual must not yet be
+  assigned to state/witness work: the current ownership policy excludes every Anchor operation from
+  operation pricing and absorbs it into one fixed `block_base`. This candidate must not be retuned
+  from the smoke.
 - Mainnet `39339` completed its trace and parity join for 192 blocks. Its GuestInput JSON SHA256 is
   `c92dbb3c9f5c5142bc145dfa322162c2a100007641f20f81f705e8d6e273dc95`; the guest report's bincode
   hash is `0x7e79d122ff315a200b9e5362b2614d961e52cd09ead8935ff875169d3fcb8c0a`. The input has 198
@@ -1113,6 +1113,36 @@ artifact identity changed.
   instructions and 1,074,671 syscalls. The principal gap keys are `0x37` (50), `0x3d` (27), `0xf3`
   (25), wrapper `0xfa` (62), and precompiles `01`/`02`/`06`/`07`/`08` (45 total). The subtotal must
   not be treated as a prediction.
+
+A read-only counterfactual then routed Anchor operations through the existing operation models while
+leaving the sealed estimator and traces unchanged. This is diagnostic only: the current `block_base`
+was calibrated with Anchor work absorbed, so the counterfactual subtotal would double count an
+unknown part of that work and is not a prediction or APE.
+
+- Hoodi could price 4,531,198 of 4,632,511 Anchor operations. Those measured operations contributed
+  `442,549,195.55475755606099353352076871289646630467862313559203551012186682522449474`
+  proverGas. After removing the synthetic transaction-base charge used only to exercise the strict
+  evaluator, the diagnostic subtotal was
+  `1,880,104,576.485062741525094254`. Its 101,313 gaps were dominated by 97,146 `BLOCKHASH`
+  (`0x40`) executions; measured operation-count coverage was `0.9781300033` and raw-gas coverage was
+  `0.9071043264`.
+- Mainnet could price 2,337,161 of 2,388,896 total operations after the same routing. The resulting
+  measured-operation contribution was
+  `228,591,481.82078628227567617629357122107379116773921893094205616600009756413095467`
+  proverGas, of which
+  `224,822,414.8296976280594355414210140270273718720364299731418537421530608679864806128`
+  was newly visible Anchor work relative to the formal smoke subtotal. The diagnostic subtotal was
+  `867,329,059.6913181416714128085` after removing the synthetic transaction-base charge. Its 51,735
+  gaps were dominated by 49,344 `BLOCKHASH` executions, alongside wrapper, precompile, and
+  returndata/copy/LOG gaps.
+
+This closes the interpretation question, not the model: Anchor is an opcode workload, not a fixed
+opaque block charge. The next bounded experiment must first price Anchor operations through the
+ordinary operation layer and calibrate `BLOCKHASH` plus the remaining material operation families.
+Only after refitting `block_base` without absorbed Anchor opcode cost may a remaining residual open a
+new state/witness or proposal-level model. This preserves the opcode -> state/trie -> transaction ->
+block -> proposal boundary instead of explaining a lower-layer coverage hole with a higher-layer
+offset.
 
 The final 60-row corpus remains unopened. Neither smoke result changes a coefficient, production
 configuration, or the candidate's eligibility. Instruction count remains only a cycle proxy: these

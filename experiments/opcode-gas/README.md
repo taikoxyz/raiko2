@@ -1335,7 +1335,11 @@ validated and confirmed outside the final 40-Hoodi/20-Mainnet corpus. Do not sub
 proposal, add either smoke row to the final corpus, or tune a coefficient from its result. The final
 corpus remains unopened. Both smoke joins completed with sealed schema-5 terminal estimator
 `36614e3963955da7cbefb944`; Hoodi's complete join exposed a large residual and Mainnet retained
-coverage gaps, so neither result validates the model or permits a coefficient change.
+coverage gaps, so neither result validates the model or permits a coefficient change. A subsequent
+read-only counterfactual showed that the estimator's fixed-block ownership was hiding millions of
+Anchor opcode executions, with `BLOCKHASH` dominating the newly visible gaps. The next experiment
+must price Anchor through the ordinary operation layer and refit `block_base`; do not attribute the
+smoke residual to a higher-layer offset before that lower-layer correction.
 
 `prepare-integration-smoke` rejects every other network/proposal pair. Its record and the resulting
 `run.jsonl` bind `purpose`, `network`, `proposal_id`, the exact GuestInput fixture digest, and the

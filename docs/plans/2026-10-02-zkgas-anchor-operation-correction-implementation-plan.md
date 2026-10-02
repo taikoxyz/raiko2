@@ -48,10 +48,8 @@ invalidated predecessor and carry new identities.
 **Primary files:**
 
 - `experiments/opcode-gas/opcode_gas.py`
-- `experiments/opcode-gas/composite_estimator.py`
 - `bin/guest-launcher/src/controlled_workload.rs`
 - `experiments/opcode-gas/tests/test_operation_coverage.py`
-- `experiments/opcode-gas/tests/test_sp1_composite_estimator.py`
 - `bin/guest-launcher/tests/controlled_workload.rs`
 
 Write failing tests first for these invariants:
@@ -62,8 +60,8 @@ Write failing tests first for these invariants:
 - an unattempted transaction cannot contribute an operation;
 - a confirmed Anchor CALL/CREATE wrapper is charged once through the wrapper model;
 - child execution inside Anchor uses ordinary operation coverage with zero extra child charge;
-- the composite estimator does not skip Anchor operations and does not synthesize a transaction
-  base for them.
+- corrected operation coverage cannot be sealed into a composite estimator until Task 4 has
+  refitted the higher-layer costs.
 
 Replace `non_anchor_started_transaction` with a started-transaction execution selector. Keep the
 non-Anchor predicate only on transaction-envelope and native-transfer features. Replace ownership
@@ -71,6 +69,9 @@ metadata such as `transaction_non_anchor_only` / `anchor_operation_ownership=blo
 values that distinguish transaction execution from the Anchor envelope.
 
 Generate a new operation-coverage artifact from source. Do not edit a sealed JSON file by hand.
+Do not publish a corrected composite schema in this task: the old `block_base` absorbed Anchor work,
+so combining it with corrected operation ownership would double-charge Anchor execution. Task 5
+introduces the next composite schema only after Task 4 seals the replacement higher-layer fit.
 
 ## Task 2: Add Controlled `BLOCKHASH` Calibration
 
@@ -85,9 +86,11 @@ target:  NUMBER; PUSH offset; SUB; BLOCKHASH; POP
 control: NUMBER; PUSH offset; SUB; ISZERO;    POP
 ```
 
-Predeclare at least two semantic classes:
+Predeclare these three semantic classes against the controlled fixture's complete 256-header
+window:
 
-- `recent_ancestor_hit`, using a valid recent ancestor;
+- `recent_ancestor_hit_1`, using `NUMBER - 1`;
+- `recent_ancestor_hit_256`, using `NUMBER - 256`;
 - `out_of_range_zero`, using the current block number.
 
 Use fit counts `0, 1, 2, 4, 8, 16, 32` and the fixed extrapolation checkpoint `64`, with three exact

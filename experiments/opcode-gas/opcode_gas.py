@@ -5302,6 +5302,7 @@ def inventory_report(manifest_path: pathlib.Path, out_dir: pathlib.Path) -> list
 
 
 _OPERATION_COVERAGE_SCHEMA_VERSION = 1
+_CORRECTED_OPERATION_COVERAGE_SCHEMA_VERSION = 4
 _OPERATION_COVERAGE_PURPOSE = "operation_coverage_ownership"
 _OPERATION_EXECUTION_CLASSIFICATIONS = frozenset(
     {
@@ -5416,6 +5417,37 @@ _OPERATION_TRACE_SELECTORS = {
         ],
     },
 }
+_CORRECTED_OPERATION_TRACE_SELECTORS = json.loads(
+    json.dumps(_OPERATION_TRACE_SELECTORS)
+)
+_CORRECTED_OPERATION_TRACE_SELECTORS["started_transaction_execution"] = (
+    _CORRECTED_OPERATION_TRACE_SELECTORS.pop("non_anchor_started_transaction")
+)
+del _CORRECTED_OPERATION_TRACE_SELECTORS["started_transaction_execution"][
+    "transaction_is_anchor"
+]
+for _selector_name in (
+    "opcode_raw_gas_execution",
+    "precompile_raw_gas_execution",
+    "confirmed_spawn_wrapper",
+    "selected_not_dispatched_spawn",
+):
+    _CORRECTED_OPERATION_TRACE_SELECTORS[_selector_name]["scope"] = (
+        "started_transaction_execution"
+    )
+_CORRECTED_OPERATION_TRACE_SELECTORS["system_operation"][
+    "mutually_exclusive_with"
+][0] = "started_transaction_execution"
+
+
+def _operation_ownership_schema(schema_version: int) -> tuple[Mapping[str, Any], str]:
+    if type(schema_version) is not int:
+        raise ValueError("operation coverage ownership schema must be an integer")
+    if schema_version in {1, 2, 3}:
+        return _OPERATION_TRACE_SELECTORS, "non_anchor_started_transaction"
+    if schema_version == _CORRECTED_OPERATION_COVERAGE_SCHEMA_VERSION:
+        return _CORRECTED_OPERATION_TRACE_SELECTORS, "started_transaction_execution"
+    raise ValueError("operation coverage ownership schema is unsupported")
 _OPERATION_SIDE_EFFECT_DECLARATIONS = (
     {
         "event_id": "confirmed_spawn_wrapper",
@@ -5752,7 +5784,10 @@ def classify_transaction_trace_ownership(
 
 
 def _joined_operation_transaction(
-    operation: Mapping[str, Any], transactions: Iterable[Mapping[str, Any]]
+    operation: Mapping[str, Any],
+    transactions: Iterable[Mapping[str, Any]],
+    *,
+    ownership_schema_version: int,
 ) -> tuple[Mapping[str, Any] | None, dict[str, Any] | None]:
     phase = operation.get("phase")
     tx_index = operation.get("tx_index")
@@ -5777,26 +5812,37 @@ def _joined_operation_transaction(
     if len(joined) != 1:
         raise ValueError("operation must join exactly one started transaction")
     ownership = classify_transaction_trace_ownership(joined[0])
-    if ownership["anchor_transaction"]:
+    if (
+        ownership_schema_version in {1, 2, 3}
+        and ownership["anchor_transaction"]
+    ):
         return joined[0], {
             "matches_execution_coverage": False,
             "charge_source": "block",
             "charge_count": 0,
             "side_effect_event": "anchor_transaction",
         }
-    if not ownership["transaction_envelope"]:
+    if not (
+        ownership["transaction_envelope"] or ownership["anchor_transaction"]
+    ):
         raise ValueError("operation cannot join an unattempted transaction")
     return joined[0], None
 
 
 def classify_operation_trace_charge(
-    operation: Mapping[str, Any], transactions: Iterable[Mapping[str, Any]]
+    operation: Mapping[str, Any],
+    transactions: Iterable[Mapping[str, Any]],
+    *,
+    ownership_schema_version: int = _OPERATION_COVERAGE_SCHEMA_VERSION,
 ) -> dict[str, Any]:
     """Classify one serialized OperationTrace without double-charging derived groups."""
+    _operation_ownership_schema(ownership_schema_version)
     if not isinstance(operation, Mapping):
         raise ValueError("operation trace must be an object")
     _transaction, scoped_result = _joined_operation_transaction(
-        operation, transactions
+        operation,
+        transactions,
+        ownership_schema_version=ownership_schema_version,
     )
     if scoped_result is not None:
         return scoped_result
@@ -6008,8 +6054,12 @@ def build_operation_coverage_manifest(
     schedule: UnzenSchedule,
     augmented_core: Mapping[str, Any],
     augmented_core_ref: str,
+    ownership_schema_version: int = _OPERATION_COVERAGE_SCHEMA_VERSION,
 ) -> dict[str, Any]:
     """Build the exact operation and side-effect ownership boundary from sealed inputs."""
+    trace_selectors, transaction_scope_selector_ref = _operation_ownership_schema(
+        ownership_schema_version
+    )
     expected_version = {
         "taiko_fork": "Unzen",
         "production_schedule": "UNZEN_ZK_GAS_SCHEDULE",
@@ -6069,7 +6119,7 @@ def build_operation_coverage_manifest(
                 if component == "opcode"
                 else UZEN_PRECOMPILE_NAMES[value]
             ),
-            "transaction_scope_selector_ref": "non_anchor_started_transaction",
+            "transaction_scope_selector_ref": transaction_scope_selector_ref,
             "trace_selector_ref": trace_evidence["selector_ref"],
             "source_evidence": [schedule_evidence, trace_evidence],
         }
@@ -6158,7 +6208,7 @@ def build_operation_coverage_manifest(
         for owner in sorted(_OPERATION_SIDE_EFFECT_OWNERS)
     }
     artifact = {
-        "schema_version": _OPERATION_COVERAGE_SCHEMA_VERSION,
+        "schema_version": ownership_schema_version,
         "purpose": _OPERATION_COVERAGE_PURPOSE,
         "status": "ownership_frozen",
         "candidate_eligible": False,
@@ -6189,7 +6239,7 @@ def build_operation_coverage_manifest(
                 "schema_sha256": trace_schema_hash,
             },
         },
-        "trace_selectors": json.loads(json.dumps(_OPERATION_TRACE_SELECTORS)),
+        "trace_selectors": json.loads(json.dumps(trace_selectors)),
         "execution_coverage": execution_rows,
         "side_effect_ownership": side_effect_rows,
         "summary": {
@@ -6214,8 +6264,40 @@ def validate_operation_coverage_manifest(
 ) -> None:
     """Fail closed unless the ownership manifest exactly replays its source inputs."""
     _validate_content_addressed_artifact(artifact, label="operation coverage")
+    schema_version = artifact.get("schema_version")
+    if type(schema_version) is not int:
+        raise ValueError("operation coverage schema version must be an integer")
+    if schema_version == _CORRECTED_OPERATION_COVERAGE_SCHEMA_VERSION:
+        predecessor_ref = artifact.get("ownership_predecessor")
+        if (
+            not isinstance(predecessor_ref, Mapping)
+            or predecessor_ref.get("path")
+            != "experiments/opcode-gas/manifests/operation-coverage-v5.json"
+            or predecessor_ref.get("file_sha256")
+            != _COMPOSITE_DECLARED_CONTEXT_COVERAGE_REF["file_sha256"]
+            or not _is_sha256(predecessor_ref.get("artifact_sha256"))
+        ):
+            raise ValueError("corrected operation coverage predecessor is missing")
+        predecessor_path = REPO_ROOT / predecessor_ref["path"]
+        predecessor = json.loads(predecessor_path.read_text())
+        if (
+            sha256_file(predecessor_path) != predecessor_ref["file_sha256"]
+            or predecessor.get("artifact_sha256")
+            != predecessor_ref["artifact_sha256"]
+        ):
+            raise ValueError("corrected operation coverage predecessor differs")
+        expected = build_corrected_operation_coverage_successor(predecessor)
+        if not _exact_json_equal(artifact, expected):
+            raise ValueError("corrected operation coverage differs from predecessor replay")
+        return
     if (
-        artifact.get("schema_version") != _OPERATION_COVERAGE_SCHEMA_VERSION
+        schema_version
+        not in {
+            1,
+            2,
+            3,
+            _CORRECTED_OPERATION_COVERAGE_SCHEMA_VERSION,
+        }
         or artifact.get("purpose") != _OPERATION_COVERAGE_PURPOSE
         or artifact.get("status") != "ownership_frozen"
         or artifact.get("candidate_eligible") is not False
@@ -6287,6 +6369,7 @@ def validate_operation_coverage_manifest(
         schedule=schedule,
         augmented_core=augmented_core,
         augmented_core_ref=augmented_core_ref,
+        ownership_schema_version=artifact["schema_version"],
     )
     sources = artifact.get("sources")
     expected_sources = expected["sources"]
@@ -6301,6 +6384,37 @@ def validate_operation_coverage_manifest(
         if actual_rows != expected["side_effect_ownership"]:
             raise ValueError("side-effect declaration differs from exact source replay")
         raise ValueError("execution coverage differs from exact source replay")
+
+
+def build_corrected_operation_coverage_successor(
+    predecessor: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Derive the schema-4 Anchor ownership successor without changing coverage evidence."""
+    _validate_content_addressed_artifact(predecessor, label="operation coverage predecessor")
+    if (
+        type(predecessor.get("schema_version")) is not int
+        or predecessor.get("schema_version") != 2
+        or predecessor.get("status") != "ownership_frozen"
+        or predecessor.get("candidate_eligible") is not False
+        or predecessor.get("trace_selectors") != _OPERATION_TRACE_SELECTORS
+    ):
+        raise ValueError("corrected operation coverage predecessor differs")
+    successor = json.loads(json.dumps(predecessor))
+    successor.pop("artifact_sha256")
+    successor["schema_version"] = _CORRECTED_OPERATION_COVERAGE_SCHEMA_VERSION
+    successor["status"] = "ownership_corrected_successor"
+    successor["ownership_predecessor"] = {
+        "path": "experiments/opcode-gas/manifests/operation-coverage-v5.json",
+        "file_sha256": _COMPOSITE_DECLARED_CONTEXT_COVERAGE_REF["file_sha256"],
+        "artifact_sha256": predecessor["artifact_sha256"],
+    }
+    successor["trace_selectors"] = json.loads(
+        json.dumps(_CORRECTED_OPERATION_TRACE_SELECTORS)
+    )
+    for row in successor["execution_coverage"]:
+        row["transaction_scope_selector_ref"] = "started_transaction_execution"
+    successor["artifact_sha256"] = sha256_bytes(canonical_json(successor))
+    return successor
 
 
 _HIGHER_LAYER_SCHEMA_VERSION = 2
@@ -23609,7 +23723,8 @@ def _validate_higher_layer_state_row(
         or observation.get("operation_phase_ownership")
         != "transaction_non_anchor_only"
         or observation.get("system_operation_ownership") != "block_base"
-        or observation.get("anchor_operation_ownership") != "block_base"
+        or observation.get("anchor_operation_ownership")
+        != "block_base"
     ):
         raise ValueError("higher-layer state observation identity differs")
     if not _higher_layer_is_canonical_b256(
@@ -25455,6 +25570,10 @@ def build_composite_estimator_artifact(
         label="composite operation coverage",
         expected_sha256=coverage_ref["file_sha256"],
     )
+    if coverage.get("schema_version") == _CORRECTED_OPERATION_COVERAGE_SCHEMA_VERSION:
+        raise ValueError(
+            "corrected Anchor coverage requires a refitted higher-layer source before composite sealing"
+        )
     _require_pinned_operation_artifact(
         core,
         expected_sha256=core_ref["artifact_sha256"],

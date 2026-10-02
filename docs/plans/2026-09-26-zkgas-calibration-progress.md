@@ -1178,6 +1178,17 @@ Implementation follows
 correct ownership, calibrate `BLOCKHASH` and remaining material operation gaps, refit `block_base`,
 then rerun the frozen integration smokes without tuning.
 
+Task 1 completed on 2026-10-03. Operation-coverage schema 4 now selects all started-transaction
+execution, while `tx_base` remains non-Anchor-only and true system work remains block-owned. The
+sealed successor is `operation-coverage-v7.json`, derived exactly from the v5 predecessor, with
+artifact SHA256 `4a84dc8289de2ce7ca1e0e93faf8d91611b0e47f12d257ed59f14e7d3aa21353`
+and file SHA256 `9ef6541f39eaded53e47c0231abb6c062883e211cfea3ae193b7f0c78b203009`.
+Production controlled-block replay retains the observed Anchor `opcode:0xf1:spawned` wrapper as
+operation evidence. Legacy ownership schemas and estimators remain readable, but no corrected
+composite schema is published yet: the existing `block_base` absorbed Anchor execution and must be
+refitted before Task 5 can seal a replacement estimator. The next executable milestone is Task 2,
+controlled production-guest `BLOCKHASH` calibration.
+
 ## Next Milestones
 
 ### 1. Close Operation-Layer Coverage

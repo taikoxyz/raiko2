@@ -112,6 +112,7 @@ fn stateful_input(
 fn block_row_spec() -> ControlledBlockRowSpec {
     ControlledBlockRowSpec {
         row_id: String::new(),
+        operation_ownership_schema_version: 0,
         workload_id: None,
         workload_family: "pop_family".into(),
         split: ControlledBlockSplit::Fit,
@@ -182,6 +183,7 @@ fn structured_block_row(
 ) -> ControlledBlockRowSpec {
     let mut spec = ControlledBlockRowSpec {
         row_id: String::new(),
+        operation_ownership_schema_version: 0,
         workload_id: None,
         workload_family: workload_family.into(),
         split: ControlledBlockSplit::Fit,
@@ -495,6 +497,9 @@ fn controlled_block_row_id_binds_every_semantic_field() {
 
     let mut mutations = Vec::new();
     let mut changed = original.clone();
+    changed.operation_ownership_schema_version = 4;
+    mutations.push(changed);
+    let mut changed = original.clone();
     changed.workload_family = "push_family".into();
     mutations.push(changed);
     let mut changed = original.clone();
@@ -579,6 +584,7 @@ fn materialize_opcode_block_row(
 ) {
     let mut spec = ControlledBlockRowSpec {
         row_id: String::new(),
+        operation_ownership_schema_version: 0,
         workload_id: None,
         workload_family: family.into(),
         split: if family == "static_count_control" {
@@ -648,6 +654,7 @@ fn materialize_context_block_row(
 ) {
     let mut spec = ControlledBlockRowSpec {
         row_id: String::new(),
+        operation_ownership_schema_version: 0,
         workload_id: None,
         workload_family: "context_opcode".into(),
         split: ControlledBlockSplit::Fit,
@@ -1324,6 +1331,7 @@ fn context_profiles_bind_source_builder_environment_and_positive_value_state() {
     let caller_signer = |profile| {
         let mut spec = ControlledBlockRowSpec {
             row_id: String::new(),
+            operation_ownership_schema_version: 0,
             workload_id: None,
             workload_family: "context_opcode".into(),
             split: ControlledBlockSplit::Holdout,
@@ -1428,6 +1436,7 @@ fn context_profiles_bind_source_builder_environment_and_positive_value_state() {
 fn context_identity_freezes_the_same_trace_that_controlled_block_validates() {
     let mut source = ControlledBlockRowSpec {
         row_id: String::new(),
+        operation_ownership_schema_version: 0,
         workload_id: None,
         workload_family: "context_opcode".into(),
         split: ControlledBlockSplit::Fit,
@@ -1520,6 +1529,7 @@ fn context_identity_freezes_the_same_trace_that_controlled_block_validates() {
 fn zero_count_control_identity_serializes_empty_context_feature_evidence() {
     let mut source = ControlledBlockRowSpec {
         row_id: String::new(),
+        operation_ownership_schema_version: 0,
         workload_id: None,
         workload_family: "context_opcode".into(),
         split: ControlledBlockSplit::Fit,
@@ -1732,6 +1742,48 @@ fn controlled_block_fixture_uses_post_unzen_trace_and_matches_frozen_row() {
     );
     assert_eq!(observation.system_operation_ownership, "block_base");
     assert_eq!(observation.anchor_operation_ownership, "block_base");
+}
+
+#[test]
+fn corrected_schema4_block_row_retains_anchor_spawned_wrapper_evidence() {
+    let mut source = block_row_spec();
+    source.operation_ownership_schema_version = 4;
+    source.expected_final_state_root = B256::ZERO;
+    source.expected_raw_gas_by_key.clear();
+    source.expected_operation_event_count_by_key.clear();
+    source.expected_context_features.clear();
+    source.expected_storage_features.clear();
+    source.expected_features.clear();
+    source.expected_diagnostics.clear();
+    source.expected_backend_input_sha256 = None;
+    source.expected_host_trace_sha256 = None;
+    source.expected_finalized_block_zkgas = None;
+    source.row_id = controlled_block_row_id(&source).expect("schema4 row identity");
+
+    let bundle = freeze_controlled_block_fixture(&source)
+        .expect("schema4 row must retain Anchor operation evidence");
+    assert_eq!(
+        bundle.observation.operation_phase_ownership,
+        "started_transaction_execution"
+    );
+    assert_eq!(
+        bundle.observation.anchor_operation_ownership,
+        "operation_registry"
+    );
+    assert!(
+        bundle
+            .observation
+            .actual_operation_event_count_by_key
+            .contains_key("opcode:0xf1:spawned"),
+        "Anchor spawned-wrapper work must remain operation evidence; keys={:?}",
+        bundle
+            .observation
+            .actual_operation_event_count_by_key
+            .keys()
+            .collect::<Vec<_>>(),
+    );
+    let fixture = build_controlled_block_fixture(&bundle.spec).expect("build schema4 row");
+    validate_controlled_block_fixture(&fixture).expect("validate schema4 row");
 }
 
 #[test]
@@ -2576,10 +2628,10 @@ fn fixed_footprint_add_sweep_has_constant_real_non_target_execution() {
 }
 
 #[test]
-fn required_overhead_fixtures_reconstruct_through_the_production_proposal_path() {
+fn legacy_block_base_overhead_fixture_preserves_historical_non_anchor_ownership() {
     let fixtures = build_required_overhead_fixtures(2).expect("build controlled overhead fixtures");
     let observations = validate_required_overhead_fixtures(&fixtures)
-        .expect("real executor observations must match declared overhead deltas");
+        .expect("legacy block-base declarations must replay their non-Anchor ownership");
     assert_eq!(fixtures.len(), 10);
     for key in [
         "proposal_startup",
@@ -2590,8 +2642,7 @@ fn required_overhead_fixtures_reconstruct_through_the_production_proposal_path()
         assert!(
             fixtures
                 .iter()
-                .any(|fixture| fixture.overhead_key_id == key),
-            "missing required overhead key {key}",
+                .any(|fixture| fixture.overhead_key_id == key)
         );
     }
     assert_eq!(
@@ -2611,6 +2662,26 @@ fn required_overhead_fixtures_reconstruct_through_the_production_proposal_path()
             .filter(|fixture| fixture.overhead_key_id == "proposal_startup")
             .all(|fixture| fixture.baseline_kind.as_deref() == Some("mathematical_zero_baseline"))
     );
+    assert!(observations.iter().all(|observation| {
+        observation.operation_phase_ownership == "transaction_non_anchor_only"
+            && observation.anchor_operation_ownership == "block_base"
+    }));
+    let contract = observations
+        .iter()
+        .find(|observation| {
+            observation.case_id == "tx_base_minimal_contract_call"
+                && observation.lane == ControlledOverheadLane::Target
+        })
+        .expect("minimal-contract target observation");
+    assert_eq!(
+        contract.observed_operation_deltas,
+        contract.expected_operation_deltas
+    );
+    assert_eq!(
+        contract.observed_operation_deltas["opcode:0x5f"].event_count,
+        2
+    );
+    assert_eq!(contract.absolute_feature_counts["tx_base"], 2);
     for observation in &observations {
         if matches!(
             observation.case_id.as_str(),
@@ -2636,7 +2707,6 @@ fn required_overhead_fixtures_reconstruct_through_the_production_proposal_path()
                         "event_count": 2,
                     }
                 }),
-                "two PUSH0 events consume two raw-gas units each; zero-gas implicit STOP is omitted",
             );
             assert_eq!(
                 serialized["observed_operation_deltas"],
@@ -2647,6 +2717,7 @@ fn required_overhead_fixtures_reconstruct_through_the_production_proposal_path()
                 "transaction_non_anchor_only"
             );
             assert_eq!(serialized["system_operation_ownership"], "block_base");
+            assert_eq!(serialized["anchor_operation_ownership"], "block_base");
             assert!(serialized.get("absolute_operation_counts").is_none());
         }
         match observation.case_id.as_str() {
@@ -2665,19 +2736,52 @@ fn required_overhead_fixtures_reconstruct_through_the_production_proposal_path()
         }
     }
     for fixture in fixtures {
-        raiko2_guest_common::prove_shasta_proposal(&fixture.guest_input).unwrap_or_else(|error| {
-            let traced = raiko2_zkgas_trace::trace_shasta_proposal(&fixture.guest_input);
-            panic!(
-                "{} {:?} failed production proposal reconstruction: {error:?}; traced={traced:?}",
-                fixture.case_id, fixture.lane
-            )
-        });
+        raiko2_guest_common::prove_shasta_proposal(&fixture.guest_input)
+            .expect("legacy overhead fixture must reconstruct through the production guest");
     }
 }
 
 #[test]
-fn controlled_overhead_identity_uses_the_backend_guest_input_serialization() {
+fn equal_block_envelope_overhead_pair_preserves_and_cancels_anchor_units() {
     let fixtures = build_required_overhead_fixtures(2).expect("build controlled overhead fixtures");
+    let pair = fixtures
+        .into_iter()
+        .filter(|fixture| fixture.case_id == "tx_base_no_code_no_value")
+        .map(|mut fixture| {
+            fixture.operation_ownership_schema_version = 4;
+            fixture
+        })
+        .collect::<Vec<_>>();
+    let observations = validate_required_overhead_fixtures(&pair)
+        .expect("equal block envelopes must cancel their shared Anchor operations");
+    let control = observations
+        .iter()
+        .find(|observation| observation.lane == ControlledOverheadLane::Control)
+        .expect("overhead control observation");
+    let target = observations
+        .iter()
+        .find(|observation| observation.lane == ControlledOverheadLane::Target)
+        .expect("overhead target observation");
+    assert_eq!(
+        control.absolute_operation_pricing_units,
+        target.absolute_operation_pricing_units
+    );
+    assert!(
+        !control.absolute_operation_pricing_units.is_empty(),
+        "Anchor transaction operation units must remain absolute evidence before pairwise deltas cancel them",
+    );
+    assert!(target.observed_operation_deltas.is_empty());
+    assert_eq!(target.absolute_feature_counts["tx_base"], 2);
+    assert_eq!(control.absolute_feature_counts["tx_base"], 0);
+}
+
+#[test]
+fn controlled_overhead_identity_uses_the_backend_guest_input_serialization() {
+    let fixtures = build_required_overhead_fixtures(2)
+        .expect("build controlled overhead fixtures")
+        .into_iter()
+        .filter(|fixture| fixture.case_id == "tx_base_no_code_no_value")
+        .collect::<Vec<_>>();
     let observations = validate_required_overhead_fixtures(&fixtures)
         .expect("real executor observations must match declared overhead deltas");
     let fixture = fixtures.first().expect("at least one overhead fixture");
@@ -2718,7 +2822,11 @@ fn controlled_overhead_identity_uses_the_backend_guest_input_serialization() {
         expected_workload_id
     );
 
-    let rebuilt = build_required_overhead_fixtures(2).expect("rebuild overhead fixtures");
+    let rebuilt = build_required_overhead_fixtures(2)
+        .expect("rebuild overhead fixtures")
+        .into_iter()
+        .filter(|fixture| fixture.case_id == "tx_base_no_code_no_value")
+        .collect::<Vec<_>>();
     let rebuilt_observations =
         validate_required_overhead_fixtures(&rebuilt).expect("rebuild real executor observations");
     assert_eq!(
@@ -2730,7 +2838,11 @@ fn controlled_overhead_identity_uses_the_backend_guest_input_serialization() {
 
 #[test]
 fn controlled_operation_units_preserve_event_count_and_exclude_synthetic_eof_stop() {
-    let fixtures = build_required_overhead_fixtures(2).expect("build controlled overhead fixtures");
+    let fixtures = build_required_overhead_fixtures(2)
+        .expect("build controlled overhead fixtures")
+        .into_iter()
+        .filter(|fixture| fixture.case_id == "tx_base_minimal_contract_call")
+        .collect::<Vec<_>>();
     let observations = validate_required_overhead_fixtures(&fixtures)
         .expect("real executor observations must match declared overhead deltas");
     let contract = observations
@@ -2999,7 +3111,11 @@ fn controlled_overhead_rejects_an_unexpected_transaction_operation() {
 
 #[test]
 fn zero_count_overhead_fixtures_omit_zero_operation_units() {
-    let fixtures = build_required_overhead_fixtures(0).expect("build zero-count fixtures");
+    let fixtures = build_required_overhead_fixtures(0)
+        .expect("build zero-count fixtures")
+        .into_iter()
+        .filter(|fixture| fixture.case_id == "tx_base_minimal_contract_call")
+        .collect::<Vec<_>>();
     let observations = validate_required_overhead_fixtures(&fixtures)
         .expect("zero-count fixtures must pass the real proposal trace path");
     let contract = observations

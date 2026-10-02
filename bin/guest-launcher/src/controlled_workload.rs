@@ -271,6 +271,7 @@ pub struct ControlledOperationUnits {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct ControlledOverheadFixture {
+    pub operation_ownership_schema_version: u32,
     pub case_id: String,
     pub overhead_key_id: String,
     pub lane: ControlledOverheadLane,
@@ -480,6 +481,11 @@ pub enum ControlledBlockComparisonScenario {
 #[serde(deny_unknown_fields)]
 pub struct ControlledBlockRowSpec {
     pub row_id: String,
+    #[serde(
+        default,
+        skip_serializing_if = "operation_ownership_schema_version_is_legacy"
+    )]
+    pub operation_ownership_schema_version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workload_id: Option<String>,
     pub workload_family: String,
@@ -503,6 +509,26 @@ pub struct ControlledBlockRowSpec {
     pub expected_host_trace_sha256: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_finalized_block_zkgas: Option<u64>,
+}
+
+fn operation_ownership_schema_version_is_legacy(value: &u32) -> bool {
+    *value == 0
+}
+
+fn operation_ownership_includes_anchor(schema_version: u32) -> Result<bool> {
+    match schema_version {
+        0 => Ok(false),
+        4 => Ok(true),
+        _ => bail!("controlled operation ownership schema version is unsupported"),
+    }
+}
+
+fn operation_ownership_metadata(schema_version: u32) -> Result<(&'static str, &'static str)> {
+    Ok(if operation_ownership_includes_anchor(schema_version)? {
+        ("started_transaction_execution", "operation_registry")
+    } else {
+        ("transaction_non_anchor_only", "block_base")
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -712,9 +738,15 @@ pub fn controlled_block_workload_id(spec: &ControlledBlockRowSpec) -> Result<Str
 fn controlled_overhead_workload_spec(
     fixture: &ControlledOverheadFixture,
 ) -> Result<ControlledOverheadWorkloadSpec> {
+    let (operation_phase_ownership, anchor_operation_ownership) =
+        operation_ownership_metadata(fixture.operation_ownership_schema_version)?;
     let guest_input_canonical = bincode::serialize(&fixture.guest_input)?;
     Ok(ControlledOverheadWorkloadSpec {
-        schema_version: 2,
+        schema_version: if fixture.operation_ownership_schema_version == 0 {
+            2
+        } else {
+            4
+        },
         overhead_key_id: fixture.overhead_key_id.clone(),
         case_id: fixture.case_id.clone(),
         lane: fixture.lane,
@@ -725,9 +757,9 @@ fn controlled_overhead_workload_spec(
         )),
         expected_operation_deltas: fixture.expected_operation_deltas.clone(),
         expected_feature_deltas: fixture.expected_feature_deltas.clone(),
-        operation_phase_ownership: "transaction_non_anchor_only",
+        operation_phase_ownership,
         system_operation_ownership: "block_base",
-        anchor_operation_ownership: "block_base",
+        anchor_operation_ownership,
     })
 }
 
@@ -744,6 +776,7 @@ pub fn controlled_overhead_workload_id(fixture: &ControlledOverheadFixture) -> R
 
 fn absolute_transaction_operation_units(
     trace: &ProposalTrace,
+    include_anchor: bool,
 ) -> Result<BTreeMap<String, ControlledOperationUnits>> {
     let mut absolute = BTreeMap::new();
     for block in &trace.blocks {
@@ -755,9 +788,10 @@ fn absolute_transaction_operation_units(
             .collect::<std::collections::BTreeSet<_>>();
         for operation in &block.operations {
             if operation.phase != OperationPhase::Transaction
-                || operation
-                    .tx_index
-                    .is_some_and(|index| anchor_started_indices.contains(&index))
+                || (!include_anchor
+                    && operation
+                        .tx_index
+                        .is_some_and(|index| anchor_started_indices.contains(&index)))
             {
                 continue;
             }
@@ -853,7 +887,10 @@ fn absolute_transaction_operation_units(
     Ok(absolute)
 }
 
-fn absolute_context_feature_counts(trace: &ProposalTrace) -> Result<BTreeMap<String, i64>> {
+fn absolute_context_feature_counts(
+    trace: &ProposalTrace,
+    include_anchor: bool,
+) -> Result<BTreeMap<String, i64>> {
     let mut counts = BTreeMap::<String, i64>::new();
     for block in &trace.blocks {
         let anchor_started_indices = block
@@ -864,9 +901,10 @@ fn absolute_context_feature_counts(trace: &ProposalTrace) -> Result<BTreeMap<Str
             .collect::<std::collections::BTreeSet<_>>();
         for operation in &block.operations {
             if operation.phase != OperationPhase::Transaction
-                || operation
-                    .tx_index
-                    .is_some_and(|index| anchor_started_indices.contains(&index))
+                || (!include_anchor
+                    && operation
+                        .tx_index
+                        .is_some_and(|index| anchor_started_indices.contains(&index)))
             {
                 continue;
             }
@@ -913,7 +951,10 @@ fn absolute_context_feature_counts(trace: &ProposalTrace) -> Result<BTreeMap<Str
     Ok(counts)
 }
 
-fn absolute_storage_feature_counts(trace: &ProposalTrace) -> Result<BTreeMap<String, i64>> {
+fn absolute_storage_feature_counts(
+    trace: &ProposalTrace,
+    include_anchor: bool,
+) -> Result<BTreeMap<String, i64>> {
     let mut counts = BTreeMap::<String, i64>::new();
     for block in &trace.blocks {
         let anchor_started_indices = block
@@ -924,9 +965,10 @@ fn absolute_storage_feature_counts(trace: &ProposalTrace) -> Result<BTreeMap<Str
             .collect::<std::collections::BTreeSet<_>>();
         for operation in &block.operations {
             if operation.phase != OperationPhase::Transaction
-                || operation
-                    .tx_index
-                    .is_some_and(|index| anchor_started_indices.contains(&index))
+                || (!include_anchor
+                    && operation
+                        .tx_index
+                        .is_some_and(|index| anchor_started_indices.contains(&index)))
             {
                 continue;
             }
@@ -994,7 +1036,12 @@ fn observe_overhead_fixture(
             fixture.lane,
         );
     }
-    let absolute_operation_pricing_units = absolute_transaction_operation_units(&trace)?;
+    let include_anchor =
+        operation_ownership_includes_anchor(fixture.operation_ownership_schema_version)?;
+    let (operation_phase_ownership, anchor_operation_ownership) =
+        operation_ownership_metadata(fixture.operation_ownership_schema_version)?;
+    let absolute_operation_pricing_units =
+        absolute_transaction_operation_units(&trace, include_anchor)?;
     let transactions = trace.blocks.iter().flat_map(|block| &block.transactions);
     let transaction_rows = transactions.collect::<Vec<_>>();
     let started_candidate_transaction_count = transaction_rows
@@ -1054,9 +1101,9 @@ fn observe_overhead_fixture(
         ]),
         observed_operation_deltas: BTreeMap::new(),
         expected_operation_deltas: fixture.expected_operation_deltas.clone(),
-        operation_phase_ownership: "transaction_non_anchor_only",
+        operation_phase_ownership,
         system_operation_ownership: "block_base",
-        anchor_operation_ownership: "block_base",
+        anchor_operation_ownership,
         expected_feature_deltas: fixture.expected_feature_deltas.clone(),
         started_candidate_transaction_count,
         committed_candidate_transaction_count,
@@ -2641,9 +2688,13 @@ pub fn observe_controlled_block_fixture(
         );
     }
     let host_trace_sha256 = canonical_serde_sha256(&trace)?;
-    let operation_units = absolute_transaction_operation_units(&trace)?;
-    let actual_context_features = absolute_context_feature_counts(&trace)?;
-    let actual_storage_features = absolute_storage_feature_counts(&trace)?;
+    let include_anchor =
+        operation_ownership_includes_anchor(fixture.spec.operation_ownership_schema_version)?;
+    let (operation_phase_ownership, anchor_operation_ownership) =
+        operation_ownership_metadata(fixture.spec.operation_ownership_schema_version)?;
+    let operation_units = absolute_transaction_operation_units(&trace, include_anchor)?;
+    let actual_context_features = absolute_context_feature_counts(&trace, include_anchor)?;
+    let actual_storage_features = absolute_storage_feature_counts(&trace, include_anchor)?;
     let actual_raw_gas_by_key = operation_units
         .iter()
         .filter(|(_, value)| value.pricing_basis == PricingBasis::RawGasSlope)
@@ -2653,15 +2704,17 @@ pub fn observe_controlled_block_fixture(
         .iter()
         .map(|(key, value)| (key.clone(), value.event_count))
         .collect::<BTreeMap<_, _>>();
-    if actual_raw_gas_by_key
-        .keys()
-        .any(|key| key.starts_with("precompile:") || key.ends_with(":spawned"))
+    if !include_anchor
+        && actual_raw_gas_by_key
+            .keys()
+            .any(|key| key.starts_with("precompile:") || key.ends_with(":spawned"))
     {
         bail!("controlled block row contains precompile or spawned work");
     }
-    if operation_units
-        .keys()
-        .any(|key| key.starts_with("precompile:") || key.ends_with(":spawned"))
+    if !include_anchor
+        && operation_units
+            .keys()
+            .any(|key| key.starts_with("precompile:") || key.ends_with(":spawned"))
     {
         bail!("controlled block row contains precompile or spawned work");
     }
@@ -2809,9 +2862,9 @@ pub fn observe_controlled_block_fixture(
         actual_diagnostics,
         unzen_activation_timestamp,
         minimum_block_timestamp,
-        operation_phase_ownership: "transaction_non_anchor_only",
+        operation_phase_ownership,
         system_operation_ownership: "block_base",
-        anchor_operation_ownership: "block_base",
+        anchor_operation_ownership,
         finalized_block_zkgas: exposes_block_comparison_evidence.then_some(finalized_block_zkgas),
     })
 }
@@ -3171,7 +3224,7 @@ fn observe_controlled_state_holdout_fixture(
             fixture.lane,
         );
     }
-    let operation_units = absolute_transaction_operation_units(&trace)?;
+    let operation_units = absolute_transaction_operation_units(&trace, false)?;
     if !operation_units.is_empty() {
         bail!(
             "controlled state holdout {} {:?} contains transaction operation work: {:?}",
@@ -3440,6 +3493,7 @@ pub fn build_required_overhead_fixtures(
     };
     let fixtures = vec![
         ControlledOverheadFixture {
+            operation_ownership_schema_version: 0,
             case_id: "tx_base_no_code_no_value".into(),
             overhead_key_id: "tx_base".into(),
             lane: ControlledOverheadLane::Target,
@@ -3450,6 +3504,7 @@ pub fn build_required_overhead_fixtures(
             guest_input: no_code.clone(),
         },
         ControlledOverheadFixture {
+            operation_ownership_schema_version: 0,
             case_id: "tx_base_no_code_no_value".into(),
             overhead_key_id: "tx_base".into(),
             lane: ControlledOverheadLane::Control,
@@ -3460,6 +3515,7 @@ pub fn build_required_overhead_fixtures(
             guest_input: one_block.clone(),
         },
         ControlledOverheadFixture {
+            operation_ownership_schema_version: 0,
             case_id: "tx_base_minimal_contract_call".into(),
             overhead_key_id: "tx_base".into(),
             lane: ControlledOverheadLane::Target,
@@ -3472,6 +3528,7 @@ pub fn build_required_overhead_fixtures(
             guest_input: contract,
         },
         ControlledOverheadFixture {
+            operation_ownership_schema_version: 0,
             case_id: "tx_base_minimal_contract_call".into(),
             overhead_key_id: "tx_base".into(),
             lane: ControlledOverheadLane::Control,
@@ -3482,6 +3539,7 @@ pub fn build_required_overhead_fixtures(
             guest_input: one_block.clone(),
         },
         ControlledOverheadFixture {
+            operation_ownership_schema_version: 0,
             case_id: "native_transfer_positive_vs_zero".into(),
             overhead_key_id: "native_value_transfer".into(),
             lane: ControlledOverheadLane::Target,
@@ -3495,6 +3553,7 @@ pub fn build_required_overhead_fixtures(
             guest_input: native_value,
         },
         ControlledOverheadFixture {
+            operation_ownership_schema_version: 0,
             case_id: "native_transfer_positive_vs_zero".into(),
             overhead_key_id: "native_value_transfer".into(),
             lane: ControlledOverheadLane::Control,
@@ -3505,6 +3564,7 @@ pub fn build_required_overhead_fixtures(
             guest_input: native_zero,
         },
         ControlledOverheadFixture {
+            operation_ownership_schema_version: 0,
             case_id: "block_base_one_vs_two_minimal_blocks".into(),
             overhead_key_id: "block_base".into(),
             lane: ControlledOverheadLane::Target,
@@ -3519,6 +3579,7 @@ pub fn build_required_overhead_fixtures(
             guest_input: target_blocks,
         },
         ControlledOverheadFixture {
+            operation_ownership_schema_version: 0,
             case_id: "block_base_one_vs_two_minimal_blocks".into(),
             overhead_key_id: "block_base".into(),
             lane: ControlledOverheadLane::Control,
@@ -3529,6 +3590,7 @@ pub fn build_required_overhead_fixtures(
             guest_input: one_block.clone(),
         },
         ControlledOverheadFixture {
+            operation_ownership_schema_version: 0,
             case_id: "startup_minimal_no_candidate_tx".into(),
             overhead_key_id: "proposal_startup".into(),
             lane: ControlledOverheadLane::Target,
@@ -3544,6 +3606,7 @@ pub fn build_required_overhead_fixtures(
             guest_input: one_block,
         },
         ControlledOverheadFixture {
+            operation_ownership_schema_version: 0,
             case_id: "startup_minimal_one_no_code_tx".into(),
             overhead_key_id: "proposal_startup".into(),
             lane: ControlledOverheadLane::Target,

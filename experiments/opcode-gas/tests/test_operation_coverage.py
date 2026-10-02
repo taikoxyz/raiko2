@@ -698,7 +698,7 @@ class OperationCoverageTests(unittest.TestCase):
             design,
         )
 
-    def test_anchor_and_system_operations_never_match_execution_coverage(self):
+    def test_anchor_transaction_operations_match_execution_coverage_but_system_stays_block_owned(self):
         raw_add = {
             "kind": "opcode",
             "opcode": 0x01,
@@ -709,26 +709,123 @@ class OperationCoverageTests(unittest.TestCase):
         }
         anchor = transaction_trace(started_tx_index=0, is_anchor=True)
         anchor_result = opcode_gas.classify_operation_trace_charge(
-            operation_trace(raw_add), [anchor]
+            operation_trace(raw_add),
+            [anchor],
+            ownership_schema_version=4,
+        )
+        schema_3_result = opcode_gas.classify_operation_trace_charge(
+            operation_trace(raw_add),
+            [anchor],
+            ownership_schema_version=3,
         )
         system_result = opcode_gas.classify_operation_trace_charge(
             operation_trace(raw_add, phase="system", tx_index=None), []
         )
 
-        self.assertFalse(anchor_result["matches_execution_coverage"])
-        self.assertEqual(anchor_result["charge_source"], "block")
+        self.assertTrue(anchor_result["matches_execution_coverage"])
+        self.assertEqual(anchor_result["execution_key"], "opcode:0x01")
+        self.assertEqual(anchor_result["charge_source"], "execution_coverage")
+        self.assertEqual(anchor_result["charge_count"], 1)
+        self.assertFalse(schema_3_result["matches_execution_coverage"])
+        self.assertEqual(schema_3_result["charge_source"], "block")
         self.assertFalse(system_result["matches_execution_coverage"])
         self.assertEqual(system_result["charge_source"], "block")
 
-    def test_committed_manifest_is_exact_source_replay(self):
+    def test_anchor_child_and_wrapper_use_execution_ownership_without_double_charge(self):
+        anchor = transaction_trace(started_tx_index=0, is_anchor=True)
+        child_add = operation_trace(
+            {
+                "kind": "opcode",
+                "opcode": 0x01,
+                "pricing_basis": "raw_gas_slope",
+                "interpreter_raw_gas": 3,
+                "spawned": False,
+                "dispatch_status": "not_applicable",
+            },
+            frame_depth=1,
+        )
+        wrapper = operation_trace(
+            {
+                "kind": "opcode",
+                "opcode": 0xF1,
+                "pricing_basis": "fixed_per_event",
+                "spawned": True,
+                "dispatch_status": "confirmed",
+            }
+        )
+
+        child_result = opcode_gas.classify_operation_trace_charge(
+            child_add, [anchor], ownership_schema_version=4
+        )
+        wrapper_result = opcode_gas.classify_operation_trace_charge(
+            wrapper, [anchor], ownership_schema_version=4
+        )
+
+        self.assertTrue(child_result["matches_execution_coverage"])
+        self.assertEqual(child_result["charge_count"], 1)
+        self.assertEqual(child_result["child_grouping_extra_charge"], 0)
+        self.assertFalse(wrapper_result["matches_execution_coverage"])
+        self.assertEqual(wrapper_result["side_effect_event"], "confirmed_spawn_wrapper")
+        self.assertEqual(wrapper_result["charge_source"], "operation_wrapper")
+        self.assertEqual(wrapper_result["charge_count"], 1)
+
+    def test_unattempted_transaction_operation_cannot_match_execution_coverage(self):
+        unattempted = transaction_trace(
+            started_tx_index=None, disposition="unattempted"
+        )
+        operation = operation_trace(
+            {
+                "kind": "opcode",
+                "opcode": 0x01,
+                "pricing_basis": "raw_gas_slope",
+                "interpreter_raw_gas": 3,
+                "spawned": False,
+                "dispatch_status": "not_applicable",
+            }
+        )
+
+        with self.assertRaisesRegex(ValueError, "started transaction"):
+            opcode_gas.classify_operation_trace_charge(operation, [unattempted])
+
+    def test_operation_ownership_schema_requires_an_exact_integer(self):
+        for value in (True, 2.0, 3.0, 4.0):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "integer"):
+                opcode_gas._operation_ownership_schema(value)
+
+    def test_operation_coverage_schema_requires_an_exact_integer_before_dispatch(self):
+        legacy = self.build()
+        corrected = json.loads(
+            (ROOT / "experiments/opcode-gas/manifests/operation-coverage-v7.json").read_text()
+        )
+        for artifact, values in ((legacy, (True, 1.0)), (corrected, (True, 4.0))):
+            for value in values:
+                with self.subTest(schema=value):
+                    mutated = json.loads(json.dumps(artifact))
+                    mutated["schema_version"] = value
+                    reseal(mutated)
+                    with self.assertRaisesRegex(ValueError, "schema version.*integer"):
+                        opcode_gas.validate_operation_coverage_manifest(
+                            mutated,
+                            schedule=self.schedule,
+                            augmented_core=self.core,
+                            augmented_core_ref=CORE_REF,
+                        )
+
+    def test_corrected_successor_rejects_noninteger_predecessor_schema(self):
+        predecessor = json.loads(
+            (ROOT / "experiments/opcode-gas/manifests/operation-coverage-v5.json").read_text()
+        )
+        for value in (True, 2.0):
+            with self.subTest(schema=value):
+                mutated = json.loads(json.dumps(predecessor))
+                mutated["schema_version"] = value
+                reseal(mutated)
+                with self.assertRaisesRegex(ValueError, "predecessor differs"):
+                    opcode_gas.build_corrected_operation_coverage_successor(mutated)
+
+    def test_historical_v4_manifest_is_sealed_without_replaying_current_sources(self):
         self.assertTrue(MANIFEST_PATH.is_file(), "canonical v4 manifest is missing")
         committed = json.loads(MANIFEST_PATH.read_text())
-        schedule = opcode_gas.load_current_uzen_schedule()
-        expected = opcode_gas.build_operation_coverage_manifest(
-            schedule=schedule,
-            augmented_core=self.core,
-            augmented_core_ref=CORE_REF,
-        )
 
         self.assertEqual(committed["artifact_sha256"], V4_ARTIFACT_SHA256)
         self.assertEqual(opcode_gas.sha256_file(MANIFEST_PATH), V4_FILE_SHA256)
@@ -736,10 +833,19 @@ class OperationCoverageTests(unittest.TestCase):
             MANIFEST_PATH.read_bytes(),
             opcode_gas._canonical_json_file_bytes(committed),
         )
-        self.assertEqual(committed, expected)
+        self.assertEqual(committed["schema_version"], 1)
+        self.assertIn("non_anchor_started_transaction", committed["trace_selectors"])
+        opcode_gas._validate_content_addressed_artifact(
+            committed, label="historical operation coverage"
+        )
+
+    def test_schema4_successor_replays_the_sealed_v5_predecessor(self):
+        successor = json.loads(
+            (ROOT / "experiments/opcode-gas/manifests/operation-coverage-v7.json").read_text()
+        )
         opcode_gas.validate_operation_coverage_manifest(
-            committed,
-            schedule=schedule,
+            successor,
+            schedule=self.schedule,
             augmented_core=self.core,
             augmented_core_ref=CORE_REF,
         )

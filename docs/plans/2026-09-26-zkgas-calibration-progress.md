@@ -62,7 +62,7 @@ Osaka execution semantics while continuing to bind the actual exported Unzen sch
 | --- | --- | --- |
 | Experiment framework | Core scope complete | Preserve its identity and replay invariants |
 | Opcode core | Complete at partial coverage | Preserve sealed 101-plus-2 augmentation |
-| Remaining operations | Anchor ownership corrected; BLOCKHASH calibrated | Produce the exact remaining Anchor gap histogram and close material keys |
+| Remaining operations | Exact Anchor histogram sealed; 12 keys remain | Close the measured gap inventory without hiding it in `block_base` |
 | Stateful storage execution | Promoted and replayed on two ad-hoc proposals | Preserve sealed typed features while closing the remaining operation families |
 | Context-sensitive operations | Fully evaluable review-only candidate sealed | Freeze the controlled-block split before executing calibration |
 | State/trie | Historical coarse holdout retained, promotion blocked | Replay only after the corrected operation subtraction and block refit |
@@ -1209,9 +1209,42 @@ and nonnegative static-raw-gas body
 `0.957139994670078565508206595586800812006602184702643158778941490794523949133365380714285714285714285714285714285714285715`.
 Independent review and Decimal replay verified the affine fits, repeat stability, exact operation
 ledger differences, holdout isolation, identities, and conservative maximum. No production table,
-composite estimator, runtime configuration, or final-validation proposal changed. The next
-executable milestone is Task 3: apply this reviewed candidate input to an exact Anchor gap histogram
-and close every remaining material operation key before refitting `block_base`.
+composite estimator, runtime configuration, or final-validation proposal changed.
+
+Task 3's exact histogram completed on 2026-10-03. The portable diagnostic is
+`experiments/opcode-gas/derivations/6b2d6662438d4aa0d13d28e2/anchor-gap-histogram.json`, with
+artifact SHA256 `6b2d6662438d4aa0d13d28e2f8740b7c4ce1820a3a77ed1821e290b85d56401b`
+and file SHA256 `5948286d416bd9298b881c37b0d3a0d29e4f4f9a64a27503bd5b9d3900e27ba0`.
+It binds the exact Hoodi `80907` and Mainnet `39339` smoke bundles, all reviewed operation-model
+sources, and corrected ownership schema 4. It fitted no coefficients and changed no production
+table, composite estimator, runtime configuration, or final-validation corpus.
+
+The two traces contain `6,985,778` Anchor transaction-phase operations across 61 aggregate keys.
+The exact remaining inventory is:
+
+| Key | Hoodi count / raw gas | Mainnet count / raw gas | Combined count / raw gas |
+| --- | ---: | ---: | ---: |
+| `opcode:0x00` | 379 / 0 | 193 / 0 | 572 / 0 |
+| `opcode:0x37` | 757 / 639594 | 385 / 324882 | 1142 / 964476 |
+| `opcode:0x3b` | 1 / 2600 | 1 / 2600 | 2 / 5200 |
+| `opcode:0x3d` | 758 / 1516 | 386 / 772 | 1144 / 2288 |
+| `opcode:0x3e` | 379 / 1137 | 193 / 579 | 572 / 1716 |
+| `opcode:0x43` | 756 / 1512 | 384 / 768 | 1140 / 2280 |
+| `opcode:0x46` | 378 / 756 | 192 / 384 | 570 / 1140 |
+| `opcode:0xa1` | 378 / 573804 | 192 / 291456 | 570 / 865260 |
+| `opcode:0xa2` | 1 / 1637 | 1 / 1637 | 2 / 3274 |
+| `opcode:0xf1:confirmed_spawn_wrapper` | 1 / 0 | 1 / 0 | 2 / 0 |
+| `opcode:0xf3` | 379 / 0 | 193 / 0 | 572 / 0 |
+| `opcode:0xf4:confirmed_spawn_wrapper` | 379 / 0 | 193 / 0 | 572 / 0 |
+
+These 6,860 events are `0.0981995%` of the Anchor operation count. This small fraction prioritizes
+the closure work but does not make the keys zero-cost: `STOP`, `RETURN`, and confirmed wrappers have
+zero interpreter raw gas yet still execute guest logic. There were no direct-precompile gaps in
+these two Anchor traces. Independent review approved the analyzer after two fix rounds, and an
+independent schema-4 trace scan reproduced all 61 keys, record totals, source/input pins, and tamper
+rejections. The next executable milestone remains inside Task 3: assign each of these 12 keys a
+sealed reuse, controlled calibration, bounded conservative approximation, or explicit blocker
+before opening the corrected block refit.
 
 ## Next Milestones
 

@@ -2,7 +2,8 @@
 
 ## Status
 
-In progress. Tasks 1 and 2 are complete; Task 3 is the active gate.
+In progress. Tasks 1 and 2 are complete. Task 3's exact histogram is complete; closing its 12
+remaining operation keys is the active gate.
 
 ## Purpose
 
@@ -138,6 +139,24 @@ For each remaining material Anchor key, choose one explicit outcome:
 Direct precompiles and confirmed wrappers remain separate operation families. Do not hide either in
 `block_base`. The operation gate closes only when every operation in the controlled higher-layer
 fixtures is either priced or intentionally absent by construction.
+
+The reviewed diagnostic completed on 2026-10-03. Portable artifact
+`experiments/opcode-gas/derivations/6b2d6662438d4aa0d13d28e2/anchor-gap-histogram.json`, artifact
+SHA256 `6b2d6662438d4aa0d13d28e2f8740b7c4ce1820a3a77ed1821e290b85d56401b`, binds the exact Hoodi
+`80907` and Mainnet `39339` record, summary, compressed-trace, and GuestInput identities. It routed
+all `6,985,778` Anchor transaction-phase operations through ownership schema 4 and reported 61
+aggregate keys. Twelve keys remain unmeasured on both networks, totaling 6,860 events
+(`0.0981995%`): `STOP`, `CALLDATACOPY`, `EXTCODESIZE`, `RETURNDATASIZE`, `RETURNDATACOPY`,
+`NUMBER`, `CHAINID`, `LOG1`, `LOG2`, `RETURN`, and separate confirmed `CALL` and `DELEGATECALL`
+wrapper events. There were no direct-precompile gaps in these two Anchor traces.
+
+Independent review closed wrapper-key separation, exact input joins, portable semantic replay,
+reviewed-source pinning, high-precision Decimal evaluation, and single-snapshot loading. An
+independent trace scan reproduced every per-key count and raw/native-gas total and passed coherent
+tamper tests. The artifact remains diagnostic-only: it fitted no coefficient, updated no table or
+estimator, and did not open the final-60 corpus. The operation gate therefore remains open until
+each of the 12 keys receives one of the explicit outcomes above; a zero raw-gas total is not by
+itself evidence of zero proving cost.
 
 ## Task 4: Refit Higher-Layer Costs
 

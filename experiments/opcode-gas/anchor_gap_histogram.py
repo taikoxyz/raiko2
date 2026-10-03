@@ -588,14 +588,18 @@ def _validate_key_row(row: Mapping[str, Any]) -> None:
         raise ValueError("analysis key row schema differs")
     for field in ("event_count", "charge_count", "raw_gas_total", "native_gas_total"):
         _checked_count(row.get(field), label=f"analysis {field}")
-    if row["charge_count"] > row["event_count"]:
+    if row["event_count"] == 0 or row["charge_count"] > row["event_count"]:
         raise ValueError("analysis key charge count exceeds event count")
     family = row.get("family")
     outcome = row.get("outcome")
     if not isinstance(row.get("reason"), str) or not row["reason"]:
         raise ValueError("analysis key reason differs")
     if family == "confirmed_spawn_wrapper":
-        if not row["key"].endswith(":confirmed_spawn_wrapper") or outcome != "unmeasured":
+        if (
+            not row["key"].endswith(":confirmed_spawn_wrapper")
+            or outcome != "unmeasured"
+            or row["charge_count"] != row["event_count"]
+        ):
             raise ValueError("confirmed wrapper key outcome differs")
     elif family == "selected_not_dispatched_spawn":
         if (
@@ -604,7 +608,13 @@ def _validate_key_row(row: Mapping[str, Any]) -> None:
             or row["charge_count"] != 0
         ):
             raise ValueError("selected-not-dispatched key outcome differs")
-    elif family not in {"opcode_execution", "direct_precompile"}:
+    elif family == "direct_precompile":
+        if outcome != "unmeasured" or row["charge_count"] != row["event_count"]:
+            raise ValueError("direct precompile key outcome differs")
+    elif family == "opcode_execution":
+        if outcome == "intentionally_absent" or row["charge_count"] != row["event_count"]:
+            raise ValueError("opcode execution key outcome differs")
+    else:
         raise ValueError("analysis key family differs")
     if outcome == "priced":
         if not isinstance(row.get("model_source"), str) or not row["model_source"]:

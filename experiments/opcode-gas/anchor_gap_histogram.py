@@ -11,7 +11,7 @@ import argparse
 import gzip
 import hashlib
 import json
-from decimal import Decimal
+from decimal import Context, Decimal, localcontext
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -24,12 +24,52 @@ SCHEMA_VERSION = 1
 PURPOSE = "anchor_operation_gap_histogram"
 OWNERSHIP_SCHEMA_VERSION = 4
 _SHA256_LENGTH = 64
+_DECIMAL_CONTEXT = Context(prec=160)
 _SOURCE_PATHS = {
     "operation_coverage": "experiments/opcode-gas/manifests/operation-coverage-v7.json",
     "core": "experiments/opcode-gas/derivations/3fc67063a921182e971e7882/core-opcode-submodel.json",
     "storage_result": "experiments/opcode-gas/derivations/64065fa462311bdc1848e9d0/result.json",
     "context": "experiments/opcode-gas/derivations/1d2758bcb7aa3ae7f09d14eb/context-approximation.json",
     "blockhash_result": "experiments/opcode-gas/calibrations/sp1-blockhash-v2/6af515a6377aaf0c2906b151/result.json",
+}
+_REVIEWED_SOURCES = {
+    "operation_coverage": {
+        "file_sha256": "9ef6541f39eaded53e47c0231abb6c062883e211cfea3ae193b7f0c78b203009",
+        "artifact_sha256": "4a84dc8289de2ce7ca1e0e93faf8d91611b0e47f12d257ed59f14e7d3aa21353",
+    },
+    "core": {
+        "file_sha256": "0a85afe5f21af2599823cb0031087f4701e598acc3f7ca48896769b32b518234",
+        "artifact_sha256": "1c05166e674a66ed51e3b1991c597ede479657e3195774a2960b1ff1cdd5ba4a",
+    },
+    "storage_result": {
+        "file_sha256": "dde37295a7c34bb7bb4621a4e30e3b989352fa30060b1b17c69c73a1b59b493b",
+        "artifact_sha256": "185dedb58925304433a0e591016d049abf2bf23aa6807e2165a49e5880ceb953",
+    },
+    "context": {
+        "file_sha256": "346c2ac112357872f4a981737469c39639d7cc845ae97b0cc8bb77ddfc8a5b58",
+        "artifact_sha256": "357a6c47bad8e6def3280be77a300e113e350fa673e08c39af13034861aee3d8",
+    },
+    "blockhash_result": {
+        "file_sha256": "180ba27117966710ede6d4cf8f56cfe1beb729e2be72552ad6879ce35a3ed9b8",
+        "artifact_sha256": "5fbdf5d26918e57214d70997795b2b41fad3219b8821730a08b0430f890c1d0c",
+    },
+}
+_STORAGE_MODEL_REPORT_SHA256 = "124676b34172bd5715b73107eecc4174c9fb99310298143fe58ce420afeabf89"
+_SMOKE_BUNDLES = {
+    "taiko_hoodi": {
+        "proposal_id": 80907,
+        "record_sha256": "27d7f7c49e8edfcfb4efd03cdab640284ab2809b7c6d13d2e00a7334d0acef87",
+        "summary_sha256": "cacdfa1fe6489bb1ffe25bdcd23428464abb06b6d247ed68d5c1f9d3634b7034",
+        "compressed_trace_sha256": "bb25e90d2bc0bed1b0dec20f24fae41df38bbe63583eabfc8837f7ccd5f425a9",
+        "guest_input_sha256": "64083abb0a43a73654b75ce4d8856083fdbc98657856f0bc9886a812ed07d7a2",
+    },
+    "taiko_mainnet": {
+        "proposal_id": 39339,
+        "record_sha256": "5d6d9f67ef38bb6661a568949f7a5e625b0a70748b2a24b3caa589265164a750",
+        "summary_sha256": "34665671d06a1f9df737d70f58d3d574522f6b0482e6d35a5002e7b1b9bbdbd4",
+        "compressed_trace_sha256": "aff03938bc4bc12c172edb7465e141f5059a801348c51681bcd423668d7b7f04",
+        "guest_input_sha256": "7e79d122ff315a200b9e5362b2614d961e52cd09ead8935ff875169d3fcb8c0a",
+    },
 }
 
 
@@ -43,6 +83,27 @@ def _sha256(value: Any) -> str:
 
 def _file_sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _sha256_bytes(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+def _load_json_bytes(data: bytes, *, label: str) -> dict[str, Any]:
+    try:
+        value = json.loads(data)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError(f"{label} JSON is invalid") from error
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} JSON must be an object")
+    return value
+
+
+def _normalize_guest_input_sha256(value: Any, *, label: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{label} must be a GuestInput SHA256")
+    normalized = value[2:] if value.startswith("0x") else value
+    return _require_sha256(normalized, label=label)
 
 
 def _require_sha256(value: Any, *, label: str) -> str:
@@ -82,14 +143,18 @@ def _content_addressed(payload: Mapping[str, Any], *, label: str) -> None:
 def _load_json(path: Path, *, label: str) -> dict[str, Any]:
     if not path.is_file():
         raise ValueError(f"{label} source is missing")
-    try:
-        value = json.loads(path.read_text())
-    except json.JSONDecodeError as error:
-        raise ValueError(f"{label} source JSON is invalid") from error
-    if not isinstance(value, dict):
-        raise ValueError(f"{label} source must be an object")
+    value = _load_json_bytes(path.read_bytes(), label=label)
     _content_addressed(value, label=label)
     return value
+
+
+def _reviewed_source_metadata(name: str, path: Path, payload: Mapping[str, Any]) -> dict[str, str]:
+    reviewed = _REVIEWED_SOURCES[name]
+    if _file_sha256(path) != reviewed["file_sha256"]:
+        raise ValueError(f"{name} reviewed file SHA256 differs")
+    if payload.get("artifact_sha256") != reviewed["artifact_sha256"]:
+        raise ValueError(f"{name} reviewed artifact differs")
+    return {"path": _SOURCE_PATHS[name], **reviewed}
 
 
 def load_sources(repo_root: Path) -> dict[str, Any]:
@@ -97,6 +162,7 @@ def load_sources(repo_root: Path) -> dict[str, Any]:
     root = Path(repo_root).resolve()
     paths = {name: root / relative for name, relative in _SOURCE_PATHS.items()}
     coverage = _load_json(paths["operation_coverage"], label="operation coverage")
+    coverage_metadata = _reviewed_source_metadata("operation_coverage", paths["operation_coverage"], coverage)
     if (
         coverage.get("schema_version") != OWNERSHIP_SCHEMA_VERSION
         or coverage.get("purpose") != "operation_coverage_ownership"
@@ -104,16 +170,21 @@ def load_sources(repo_root: Path) -> dict[str, Any]:
     ):
         raise ValueError("corrected operation coverage identity differs")
     core = _load_json(paths["core"], label="core opcode")
+    core_metadata = _reviewed_source_metadata("core", paths["core"], core)
     registry = core.get("registry")
     typed_registry = composite_estimator.load_registry_payload(registry)
     storage_result = _load_json(paths["storage_result"], label="typed storage result")
+    storage_metadata = _reviewed_source_metadata("storage_result", paths["storage_result"], storage_result)
     storage_report_path = paths["storage_result"].with_name("model-report.json")
     try:
         storage = json.loads(storage_report_path.read_text())
     except (OSError, json.JSONDecodeError) as error:
         raise ValueError("typed storage model report is invalid") from error
     expected_report_hash = storage_result.get("output_hashes", {}).get("model_report_file_sha256")
-    if _file_sha256(storage_report_path) != expected_report_hash:
+    if (
+        expected_report_hash != _STORAGE_MODEL_REPORT_SHA256
+        or _file_sha256(storage_report_path) != _STORAGE_MODEL_REPORT_SHA256
+    ):
         raise ValueError("typed storage model report hash differs")
     selected = storage.get("selection", {}).get("selected_model")
     model = storage.get("frozen_fit_models", {}).get(selected)
@@ -133,6 +204,7 @@ def load_sources(repo_root: Path) -> dict[str, Any]:
     if set(storage_parameters) != required_storage:
         raise ValueError("typed storage selected parameter schema differs")
     context = _load_json(paths["context"], label="context approximation")
+    context_metadata = _reviewed_source_metadata("context", paths["context"], context)
     context_rows = context.get("classes")
     if not isinstance(context_rows, Mapping):
         raise ValueError("context approximation classes are missing")
@@ -146,6 +218,7 @@ def load_sources(repo_root: Path) -> dict[str, Any]:
         context_costs[name] = _decimal(exact.get("decimal"), label=f"context {name}")
     blockhash_dir = paths["blockhash_result"].parent
     blockhash = blockhash_campaign.verify_blockhash_result(blockhash_dir)
+    blockhash_metadata = _reviewed_source_metadata("blockhash_result", paths["blockhash_result"], blockhash)
     selected_blockhash = blockhash.get("decision", {}).get("selected")
     if (
         not isinstance(selected_blockhash, Mapping)
@@ -169,17 +242,102 @@ def load_sources(repo_root: Path) -> dict[str, Any]:
         "context_costs": context_costs,
         "blockhash_event_cost": blockhash_event_cost,
         "source_artifacts": {
-            name: {
-                "path": relative,
-                "file_sha256": _file_sha256(paths[name]),
-                "artifact_sha256": (
-                    blockhash.get("artifact_sha256") if name == "blockhash_result"
-                    else {"operation_coverage": coverage, "core": core, "storage_result": storage_result, "context": context}[name]["artifact_sha256"]
-                ),
-            }
-            for name, relative in _SOURCE_PATHS.items()
+            "operation_coverage": coverage_metadata,
+            "core": core_metadata,
+            "storage_result": {
+                **storage_metadata,
+                "model_report_file_sha256": _STORAGE_MODEL_REPORT_SHA256,
+            },
+            "context": context_metadata,
+            "blockhash_result": blockhash_metadata,
         },
     }
+
+
+def _checked_count(value: Any, *, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{label} is invalid")
+    return value
+
+
+def _bundle_identity(network: str) -> dict[str, Any]:
+    expected = _SMOKE_BUNDLES[network]
+    return {"network": network, **expected}
+
+
+def load_smoke_bundle(record_path: Path, *, repo_root: Path) -> dict[str, Any]:
+    """Read one reviewed smoke bundle once and join its record, summary, and trace."""
+    root = Path(repo_root).resolve()
+    path = Path(record_path).resolve()
+    for network, expected in _SMOKE_BUNDLES.items():
+        canonical = (root / "experiments/opcode-gas/runs/task-4-integration-smoke" /
+                     network.removeprefix("taiko_") / "record.json").resolve()
+        if path != canonical:
+            continue
+        record_bytes = path.read_bytes()
+        record = _load_json_bytes(record_bytes, label="smoke record")
+        if (
+            _sha256_bytes(record_bytes) != expected["record_sha256"]
+            or record.get("network") != network
+            or record.get("proposal_id") != expected["proposal_id"]
+            or record.get("purpose") != "integration_smoke"
+        ):
+            raise ValueError("smoke record identity differs")
+        summary_path = path.with_name("run.proposal-trace.summary.json")
+        trace_path = path.with_name("run.proposal-trace.json.gz")
+        summary_bytes = summary_path.read_bytes()
+        trace_bytes = trace_path.read_bytes()
+        summary = _load_json_bytes(summary_bytes, label="smoke trace summary")
+        if _sha256_bytes(summary_bytes) != expected["summary_sha256"]:
+            raise ValueError("smoke trace summary SHA256 differs")
+        if _sha256_bytes(trace_bytes) != expected["compressed_trace_sha256"]:
+            raise ValueError("smoke compressed trace SHA256 differs")
+        try:
+            trace = _load_json_bytes(gzip.decompress(trace_bytes), label="smoke trace")
+        except OSError as error:
+            raise ValueError("smoke trace gzip is invalid") from error
+        guest = expected["guest_input_sha256"]
+        summary_fields = {
+            "schema_version": 4,
+            "full_trace_encoding": "json+gzip",
+            "status": "complete",
+            "parity_passed": True,
+            "partial_block_count": 0,
+            "recovery_failure_count": 0,
+        }
+        if any(summary.get(key) != value for key, value in summary_fields.items()):
+            raise ValueError("smoke trace summary schema differs")
+        if _normalize_guest_input_sha256(summary.get("guest_input_sha256"), label="summary GuestInput") != guest:
+            raise ValueError("smoke trace summary GuestInput differs")
+        if (
+            trace.get("schema_version") != 4
+            or trace.get("status") != "complete"
+            or _normalize_guest_input_sha256(trace.get("guest_input_sha256"), label="trace GuestInput") != guest
+            or trace.get("guest_input_bincode_length") != summary.get("guest_input_bincode_length")
+            or trace.get("public_output") != summary.get("public_output")
+            or trace.get("parity", {}).get("passed") is not True
+            or trace.get("parity", {}).get("mismatch_fields") != []
+        ):
+            raise ValueError("smoke trace and summary join differs")
+        blocks = trace.get("blocks")
+        if not isinstance(blocks, list):
+            raise ValueError("smoke trace blocks are missing")
+        if len(blocks) != _checked_count(summary.get("block_count"), label="summary block count"):
+            raise ValueError("smoke trace block count differs")
+        operation_count = 0
+        for block in blocks:
+            if not isinstance(block, Mapping) or not isinstance(block.get("operations"), list):
+                raise ValueError("smoke trace block operation schema differs")
+            operation_count += len(block["operations"])
+        if operation_count != _checked_count(summary.get("operation_count"), label="summary operation count"):
+            raise ValueError("smoke trace operation count differs")
+        return {
+            "record": record,
+            "summary": summary,
+            "trace": trace,
+            "identity": _bundle_identity(network),
+        }
+    raise ValueError("record path is not a reviewed integration-smoke bundle")
 
 
 def _trace_ready(trace: Any) -> list[Mapping[str, Any]]:
@@ -258,16 +416,24 @@ def analyze_anchor_trace(
     summary_sha256: str, sources: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Classify exactly the Anchor transaction-phase operations in one complete trace."""
-    if network not in {"taiko_hoodi", "taiko_mainnet"}:
-        raise ValueError("network is unsupported")
-    if isinstance(proposal_id, bool) or not isinstance(proposal_id, int) or proposal_id < 0:
-        raise ValueError("proposal id is invalid")
+    expected = _SMOKE_BUNDLES.get(network)
+    if expected is None or proposal_id != expected["proposal_id"]:
+        raise ValueError("reviewed smoke record identity differs")
     identities = {
-        "guest_input_sha256": _require_sha256(guest_input_sha256, label="GuestInput"),
+        "guest_input_sha256": _normalize_guest_input_sha256(guest_input_sha256, label="GuestInput"),
         "compressed_trace_sha256": _require_sha256(compressed_trace_sha256, label="compressed trace"),
         "record_sha256": _require_sha256(record_sha256, label="record"),
         "summary_sha256": _require_sha256(summary_sha256, label="summary"),
     }
+    for key, value in identities.items():
+        if value != expected[key]:
+            raise ValueError("reviewed smoke input identity differs")
+    if (
+        trace.get("schema_version") != 4
+        or _normalize_guest_input_sha256(trace.get("guest_input_sha256"), label="trace GuestInput")
+        != identities["guest_input_sha256"]
+    ):
+        raise ValueError("trace schema or GuestInput identity differs")
     totals: dict[str, dict[str, Any]] = {}
     operation_count = 0
     for block in _trace_ready(trace):
@@ -321,14 +487,14 @@ def analyze_anchor_trace(
                     family = "opcode_execution"
             elif charge.get("side_effect_event") == "confirmed_spawn_wrapper":
                 opcode = component["opcode"]
-                key = f"opcode:0x{opcode:02x}:spawned"
+                key = f"opcode:0x{opcode:02x}:confirmed_spawn_wrapper"
                 outcome, model_source, reason, predicted = (
                     "unmeasured", None, "confirmed spawn wrapper remains a separate operation family", None
                 )
                 family = "confirmed_spawn_wrapper"
             elif charge.get("side_effect_event") == "selected_not_dispatched_spawn":
                 opcode = component["opcode"]
-                key = f"opcode:0x{opcode:02x}:spawned"
+                key = f"opcode:0x{opcode:02x}:selected_not_dispatched_spawn"
                 outcome, model_source, reason, predicted = (
                     "intentionally_absent", None, "selected_not_dispatched is zero-charge by declared selector", Decimal(0)
                 )
@@ -347,7 +513,8 @@ def analyze_anchor_trace(
             row["raw_gas_total"] += raw_gas
             row["native_gas_total"] += native_gas
             if row["predicted_prover_gas"] is not None:
-                row["predicted_prover_gas"] += predicted
+                with localcontext(_DECIMAL_CONTEXT):
+                    row["predicted_prover_gas"] += predicted
             operation_count += 1
     rows = []
     for key in sorted(totals):
@@ -395,7 +562,8 @@ def _aggregate_rows(records: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]
                     raise ValueError("analysis key numeric total is invalid")
                 output[field] += row[field]
             if output["predicted_prover_gas"] is not None:
-                output["predicted_prover_gas"] += _decimal(row["predicted_prover_gas"], label="analysis prediction")
+                with localcontext(_DECIMAL_CONTEXT):
+                    output["predicted_prover_gas"] += _decimal(row["predicted_prover_gas"], label="analysis prediction")
     rows = []
     for key in sorted(aggregate):
         row = aggregate[key]
@@ -405,12 +573,108 @@ def _aggregate_rows(records: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]
     return rows
 
 
+_KEY_FIELDS = frozenset({
+    "key", "family", "event_count", "charge_count", "raw_gas_total", "native_gas_total",
+    "outcome", "model_source", "reason", "predicted_prover_gas",
+})
+_AGGREGATE_FIELDS = frozenset({
+    "anchor_operation_count", "event_count", "charge_count", "raw_gas_total",
+    "native_gas_total", "unmeasured_key_count",
+})
+
+
+def _validate_key_row(row: Mapping[str, Any]) -> None:
+    if set(row) != _KEY_FIELDS or not isinstance(row.get("key"), str) or not row["key"]:
+        raise ValueError("analysis key row schema differs")
+    for field in ("event_count", "charge_count", "raw_gas_total", "native_gas_total"):
+        _checked_count(row.get(field), label=f"analysis {field}")
+    if row["charge_count"] > row["event_count"]:
+        raise ValueError("analysis key charge count exceeds event count")
+    family = row.get("family")
+    outcome = row.get("outcome")
+    if not isinstance(row.get("reason"), str) or not row["reason"]:
+        raise ValueError("analysis key reason differs")
+    if family == "confirmed_spawn_wrapper":
+        if not row["key"].endswith(":confirmed_spawn_wrapper") or outcome != "unmeasured":
+            raise ValueError("confirmed wrapper key outcome differs")
+    elif family == "selected_not_dispatched_spawn":
+        if (
+            not row["key"].endswith(":selected_not_dispatched_spawn")
+            or outcome != "intentionally_absent"
+            or row["charge_count"] != 0
+        ):
+            raise ValueError("selected-not-dispatched key outcome differs")
+    elif family not in {"opcode_execution", "direct_precompile"}:
+        raise ValueError("analysis key family differs")
+    if outcome == "priced":
+        if not isinstance(row.get("model_source"), str) or not row["model_source"]:
+            raise ValueError("priced key model source differs")
+        if _decimal(row.get("predicted_prover_gas"), label="priced prediction") < 0:
+            raise ValueError("priced prediction must be nonnegative")
+    elif outcome == "unmeasured":
+        if row.get("model_source") is not None or row.get("predicted_prover_gas") is not None:
+            raise ValueError("unmeasured key cannot carry a model prediction")
+    elif outcome == "intentionally_absent":
+        if row.get("model_source") is not None or row.get("predicted_prover_gas") != "0":
+            raise ValueError("intentionally absent key must be zero-charge")
+    else:
+        raise ValueError("analysis key outcome differs")
+
+
+def _record_aggregate(record: Mapping[str, Any]) -> dict[str, int]:
+    keys = record.get("keys")
+    if not isinstance(keys, list) or not keys:
+        raise ValueError("analysis record keys are missing")
+    seen = set()
+    for row in keys:
+        if not isinstance(row, Mapping):
+            raise ValueError("analysis key row is invalid")
+        _validate_key_row(row)
+        if row["key"] in seen:
+            raise ValueError("analysis record keys must be unique")
+        seen.add(row["key"])
+    if [row["key"] for row in keys] != sorted(seen):
+        raise ValueError("analysis record keys must be sorted")
+    return {
+        "anchor_operation_count": sum(row["event_count"] for row in keys),
+        "event_count": sum(row["event_count"] for row in keys),
+        "charge_count": sum(row["charge_count"] for row in keys),
+        "raw_gas_total": sum(row["raw_gas_total"] for row in keys),
+        "native_gas_total": sum(row["native_gas_total"] for row in keys),
+        "unmeasured_key_count": sum(row["outcome"] == "unmeasured" for row in keys),
+    }
+
+
+def _validate_records(records: Sequence[Mapping[str, Any]]) -> None:
+    if not isinstance(records, list) or len(records) != len(_SMOKE_BUNDLES):
+        raise ValueError("analysis must contain exactly the reviewed two-network smoke pair")
+    networks = []
+    for record in records:
+        if not isinstance(record, Mapping) or set(record) != {
+            "network", "proposal_id", "input_identity", "ownership_schema_version", "keys", "aggregate"
+        }:
+            raise ValueError("analysis record schema differs")
+        network = record.get("network")
+        expected = _SMOKE_BUNDLES.get(network)
+        if expected is None or record.get("proposal_id") != expected["proposal_id"]:
+            raise ValueError("analysis record identity differs")
+        identity = record.get("input_identity")
+        expected_identity = {key: expected[key] for key in expected if key.endswith("sha256")}
+        if record.get("ownership_schema_version") != OWNERSHIP_SCHEMA_VERSION or identity != expected_identity:
+            raise ValueError("analysis record input identity differs")
+        aggregate = record.get("aggregate")
+        if not isinstance(aggregate, Mapping) or set(aggregate) != _AGGREGATE_FIELDS:
+            raise ValueError("analysis record aggregate schema differs")
+        expected_aggregate = _record_aggregate(record)
+        if aggregate != expected_aggregate:
+            raise ValueError("analysis record aggregate replay differs")
+        networks.append(network)
+    if networks != sorted(_SMOKE_BUNDLES) or len(set(networks)) != len(networks):
+        raise ValueError("analysis record network order differs")
+
+
 def build_analysis_artifact(records: Sequence[Mapping[str, Any]], *, sources: Mapping[str, Any]) -> dict[str, Any]:
-    if not records:
-        raise ValueError("analysis requires at least one network record")
-    networks = [record.get("network") for record in records]
-    if len(networks) != len(set(networks)):
-        raise ValueError("analysis network records must be unique")
+    _validate_records(records)
     aggregate_rows = _aggregate_rows(records)
     payload = {
         "schema_version": SCHEMA_VERSION, "purpose": PURPOSE, "status": "diagnostic_only",
@@ -441,24 +705,22 @@ def verify_analysis_artifact(artifact: Mapping[str, Any], *, repo_root: Path | N
         raise ValueError("Anchor gap histogram source set differs")
     for name, relative_path in _SOURCE_PATHS.items():
         source = sources[name]
-        if not isinstance(source, Mapping) or source.get("path") != relative_path:
+        expected_fields = {"path", "file_sha256", "artifact_sha256"}
+        if name == "storage_result":
+            expected_fields.add("model_report_file_sha256")
+        if (
+            not isinstance(source, Mapping)
+            or set(source) != expected_fields
+            or source.get("path") != relative_path
+            or source.get("file_sha256") != _REVIEWED_SOURCES[name]["file_sha256"]
+            or source.get("artifact_sha256") != _REVIEWED_SOURCES[name]["artifact_sha256"]
+        ):
             raise ValueError("Anchor gap histogram source path differs")
         _require_sha256(source.get("file_sha256"), label=f"{name} file")
         _require_sha256(source.get("artifact_sha256"), label=f"{name} artifact")
-    for record in records:
-        if not isinstance(record, Mapping) or record.get("ownership_schema_version") != OWNERSHIP_SCHEMA_VERSION:
-            raise ValueError("Anchor gap histogram record schema differs")
-        if record.get("network") not in {"taiko_hoodi", "taiko_mainnet"}:
-            raise ValueError("Anchor gap histogram record network differs")
-        if isinstance(record.get("proposal_id"), bool) or not isinstance(record.get("proposal_id"), int):
-            raise ValueError("Anchor gap histogram proposal differs")
-        identity = record.get("input_identity")
-        if not isinstance(identity, Mapping) or set(identity) != {
-            "guest_input_sha256", "compressed_trace_sha256", "record_sha256", "summary_sha256"
-        }:
-            raise ValueError("Anchor gap histogram record identity differs")
-        for name, value in identity.items():
-            _require_sha256(value, label=name)
+        if name == "storage_result" and source.get("model_report_file_sha256") != _STORAGE_MODEL_REPORT_SHA256:
+            raise ValueError("Anchor gap histogram storage model report differs")
+    _validate_records(records)
     if _aggregate_rows(records) != artifact.get("aggregate_keys"):
         raise ValueError("Anchor gap histogram aggregate replay differs")
     if repo_root is not None:
@@ -475,17 +737,9 @@ def write_analysis_artifact(artifact: Mapping[str, Any], output_root: Path) -> P
     return path
 
 
-def _load_trace(path: Path) -> Mapping[str, Any]:
-    data = gzip.open(path, "rt").read() if path.suffix == ".gz" else path.read_text()
-    value = json.loads(data)
-    if not isinstance(value, Mapping):
-        raise ValueError("trace must be an object")
-    return value
-
-
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--record", action="append", type=Path, help="identity JSON with network/proposal/GuestInput/summary and trace_path")
+    parser.add_argument("--record", action="append", type=Path, help="reviewed task-4 integration-smoke record.json")
     parser.add_argument("--output-root", type=Path)
     parser.add_argument("--verify", type=Path, help="verify an existing analysis artifact")
     args = parser.parse_args(argv)
@@ -500,14 +754,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     sources = load_sources(root)
     records = []
     for record_path in args.record:
-        record = json.loads(record_path.read_text())
-        if not isinstance(record, Mapping) or not isinstance(record.get("trace_path"), str):
-            raise ValueError("record must name a trace_path")
-        trace_path = (root / record["trace_path"]).resolve()
+        bundle = load_smoke_bundle(record_path, repo_root=root)
+        identity = bundle["identity"]
         records.append(analyze_anchor_trace(
-            _load_trace(trace_path), network=record.get("network"), proposal_id=record.get("proposal_id"),
-            guest_input_sha256=record.get("guest_input_sha256"), compressed_trace_sha256=_file_sha256(trace_path),
-            record_sha256=_file_sha256(record_path), summary_sha256=record.get("summary_sha256"), sources=sources,
+            bundle["trace"], sources=sources, **identity,
         ))
     path = write_analysis_artifact(build_analysis_artifact(records, sources=sources), args.output_root)
     print(path)

@@ -15,7 +15,6 @@ from decimal import Context, Decimal, localcontext
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-import blockhash_campaign
 import composite_estimator
 import opcode_gas
 
@@ -81,10 +80,6 @@ def _sha256(value: Any) -> str:
     return hashlib.sha256(_canonical_json(value)).hexdigest()
 
 
-def _file_sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
 def _sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
@@ -140,50 +135,54 @@ def _content_addressed(payload: Mapping[str, Any], *, label: str) -> None:
         raise ValueError(f"{label} artifact SHA256 differs")
 
 
-def _load_json(path: Path, *, label: str) -> dict[str, Any]:
+def _read_reviewed_json_source(
+    name: str, path: Path, *, label: str
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """Read one source snapshot once, then hash and parse that same byte string."""
     if not path.is_file():
         raise ValueError(f"{label} source is missing")
-    value = _load_json_bytes(path.read_bytes(), label=label)
-    _content_addressed(value, label=label)
-    return value
-
-
-def _reviewed_source_metadata(name: str, path: Path, payload: Mapping[str, Any]) -> dict[str, str]:
+    snapshot = path.read_bytes()
+    payload = _load_json_bytes(snapshot, label=label)
+    _content_addressed(payload, label=label)
     reviewed = _REVIEWED_SOURCES[name]
-    if _file_sha256(path) != reviewed["file_sha256"]:
+    if _sha256_bytes(snapshot) != reviewed["file_sha256"]:
         raise ValueError(f"{name} reviewed file SHA256 differs")
     if payload.get("artifact_sha256") != reviewed["artifact_sha256"]:
         raise ValueError(f"{name} reviewed artifact differs")
-    return {"path": _SOURCE_PATHS[name], **reviewed}
+    return payload, {"path": _SOURCE_PATHS[name], **reviewed}
 
 
 def load_sources(repo_root: Path) -> dict[str, Any]:
     """Load the reviewed, content-addressed models used by this diagnostic."""
     root = Path(repo_root).resolve()
     paths = {name: root / relative for name, relative in _SOURCE_PATHS.items()}
-    coverage = _load_json(paths["operation_coverage"], label="operation coverage")
-    coverage_metadata = _reviewed_source_metadata("operation_coverage", paths["operation_coverage"], coverage)
+    coverage, coverage_metadata = _read_reviewed_json_source(
+        "operation_coverage", paths["operation_coverage"], label="operation coverage"
+    )
     if (
         coverage.get("schema_version") != OWNERSHIP_SCHEMA_VERSION
         or coverage.get("purpose") != "operation_coverage_ownership"
         or coverage.get("candidate_eligible") is not False
     ):
         raise ValueError("corrected operation coverage identity differs")
-    core = _load_json(paths["core"], label="core opcode")
-    core_metadata = _reviewed_source_metadata("core", paths["core"], core)
+    core, core_metadata = _read_reviewed_json_source(
+        "core", paths["core"], label="core opcode"
+    )
     registry = core.get("registry")
     typed_registry = composite_estimator.load_registry_payload(registry)
-    storage_result = _load_json(paths["storage_result"], label="typed storage result")
-    storage_metadata = _reviewed_source_metadata("storage_result", paths["storage_result"], storage_result)
+    storage_result, storage_metadata = _read_reviewed_json_source(
+        "storage_result", paths["storage_result"], label="typed storage result"
+    )
     storage_report_path = paths["storage_result"].with_name("model-report.json")
     try:
-        storage = json.loads(storage_report_path.read_text())
-    except (OSError, json.JSONDecodeError) as error:
+        storage_report_snapshot = storage_report_path.read_bytes()
+        storage = _load_json_bytes(storage_report_snapshot, label="typed storage model report")
+    except OSError as error:
         raise ValueError("typed storage model report is invalid") from error
     expected_report_hash = storage_result.get("output_hashes", {}).get("model_report_file_sha256")
     if (
         expected_report_hash != _STORAGE_MODEL_REPORT_SHA256
-        or _file_sha256(storage_report_path) != _STORAGE_MODEL_REPORT_SHA256
+        or _sha256_bytes(storage_report_snapshot) != _STORAGE_MODEL_REPORT_SHA256
     ):
         raise ValueError("typed storage model report hash differs")
     selected = storage.get("selection", {}).get("selected_model")
@@ -203,8 +202,9 @@ def load_sources(repo_root: Path) -> dict[str, Any]:
     }
     if set(storage_parameters) != required_storage:
         raise ValueError("typed storage selected parameter schema differs")
-    context = _load_json(paths["context"], label="context approximation")
-    context_metadata = _reviewed_source_metadata("context", paths["context"], context)
+    context, context_metadata = _read_reviewed_json_source(
+        "context", paths["context"], label="context approximation"
+    )
     context_rows = context.get("classes")
     if not isinstance(context_rows, Mapping):
         raise ValueError("context approximation classes are missing")
@@ -216,9 +216,9 @@ def load_sources(repo_root: Path) -> dict[str, Any]:
         if not isinstance(exact, Mapping):
             raise ValueError("context approximation cost is missing")
         context_costs[name] = _decimal(exact.get("decimal"), label=f"context {name}")
-    blockhash_dir = paths["blockhash_result"].parent
-    blockhash = blockhash_campaign.verify_blockhash_result(blockhash_dir)
-    blockhash_metadata = _reviewed_source_metadata("blockhash_result", paths["blockhash_result"], blockhash)
+    blockhash, blockhash_metadata = _read_reviewed_json_source(
+        "blockhash_result", paths["blockhash_result"], label="BLOCKHASH result"
+    )
     selected_blockhash = blockhash.get("decision", {}).get("selected")
     if (
         not isinstance(selected_blockhash, Mapping)
@@ -366,7 +366,9 @@ def _operation_totals(component: Mapping[str, Any]) -> tuple[int, int]:
     return raw, native
 
 
-def _price_opcode(key: str, component: Mapping[str, Any], sources: Mapping[str, Any]) -> tuple[str, str | None, str, Decimal | None]:
+def _price_opcode_in_context(
+    key: str, component: Mapping[str, Any], sources: Mapping[str, Any]
+) -> tuple[str, str | None, str, Decimal | None]:
     if key == "opcode:0x40":
         return (
             "priced",
@@ -408,6 +410,14 @@ def _price_opcode(key: str, component: Mapping[str, Any], sources: Mapping[str, 
     except (KeyError, ValueError) as error:
         return "unmeasured", None, f"model input rejected: {error}", None
     return "unmeasured", None, f"unsupported corrected coverage classification: {classification}", None
+
+
+def _price_opcode(
+    key: str, component: Mapping[str, Any], sources: Mapping[str, Any]
+) -> tuple[str, str | None, str, Decimal | None]:
+    """Evaluate every event under the histogram's explicit high-precision context."""
+    with localcontext(_DECIMAL_CONTEXT):
+        return _price_opcode_in_context(key, component, sources)
 
 
 def analyze_anchor_trace(

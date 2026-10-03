@@ -3,6 +3,7 @@ import sys
 import tempfile
 import unittest
 import copy
+from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
@@ -271,6 +272,55 @@ class AnchorGapHistogramTests(unittest.TestCase):
         expected = "24.691357802469135780246913578024691357802469135780246913578024691357802469135780246913578024691357802469135780246913578000"
         self.assertEqual(histogram._aggregate_rows(records)[0]["predicted_prover_gas"], expected)
 
+    def test_cold_storage_pricing_uses_the_campaign_decimal_context(self):
+        trace = _trace()
+        trace["blocks"][0]["operations"][6]["component"]["model_input"]["access"] = "cold"
+        result = histogram.analyze_anchor_trace(trace, sources=histogram.load_sources(ROOT), **HOODI)
+        rows = {row["key"]: row for row in result["keys"]}
+        self.assertEqual(
+            rows["opcode:0x54"]["predicted_prover_gas"],
+            "3336.31829866998148436977530241852494954166378920818595011209326067888235374818845291",
+        )
+
+    def test_reviewed_source_snapshot_is_read_once_before_hash_and_parse(self):
+        payload = {"purpose": "snapshot-test"}
+        payload["artifact_sha256"] = histogram._sha256(payload)
+        first = histogram._canonical_json(payload)
+        second = histogram._canonical_json({"purpose": "swapped"})
+        reviewed = {
+            "file_sha256": histogram._sha256_bytes(first),
+            "artifact_sha256": payload["artifact_sha256"],
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            path = pathlib.Path(temporary) / "core.json"
+            path.write_bytes(first)
+            with mock.patch.dict(histogram._REVIEWED_SOURCES, {"core": reviewed}), mock.patch.object(
+                pathlib.Path, "read_bytes", side_effect=[first, second]
+            ) as read_bytes:
+                loaded, metadata = histogram._read_reviewed_json_source("core", path, label="test core")
+        self.assertEqual(loaded, payload)
+        self.assertEqual(metadata["file_sha256"], reviewed["file_sha256"])
+        self.assertEqual(read_bytes.call_count, 1)
+
+    def test_loader_reads_each_reviewed_input_snapshot_once(self):
+        targets = {
+            ROOT / path for path in histogram._SOURCE_PATHS.values()
+        } | {
+            ROOT / "experiments/opcode-gas/derivations/64065fa462311bdc1848e9d0/model-report.json"
+        }
+        calls = {path: 0 for path in targets}
+        original = pathlib.Path.read_bytes
+
+        def observe(path):
+            resolved = path.resolve()
+            if resolved in calls:
+                calls[resolved] += 1
+            return original(path)
+
+        with mock.patch.object(pathlib.Path, "read_bytes", autospec=True, side_effect=observe):
+            histogram.load_sources(ROOT)
+        self.assertEqual(calls, {path: 1 for path in targets})
+
     def test_self_consistent_source_reseal_cannot_replace_reviewed_core(self):
         payload = {"purpose": "tampered"}
         payload["artifact_sha256"] = histogram._sha256(payload)
@@ -278,7 +328,7 @@ class AnchorGapHistogramTests(unittest.TestCase):
             path = pathlib.Path(temporary) / "core.json"
             path.write_bytes(histogram._canonical_json(payload))
             with self.assertRaisesRegex(ValueError, "reviewed file SHA256"):
-                histogram._reviewed_source_metadata("core", path, payload)
+                histogram._read_reviewed_json_source("core", path, label="test core")
 
 
 if __name__ == "__main__":

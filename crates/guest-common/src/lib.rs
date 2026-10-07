@@ -25,6 +25,7 @@ use raiko2_primitives_shasta::{
     roll_proposal_ancestor_headers_in_place, should_bypass_stalled_anchor_linkage,
     validate_anchor_progression, validate_source_aware_anchor_progression,
     verify_proposal_mode_blob_usage, AnchorSourceSpan, GuestInput, ShastaZkAggregationGuestInput,
+    ANCESTOR_HEADER_WINDOW_LIMIT,
 };
 use raiko2_protocol_shasta::libhash::{hash_proposal, hash_shasta_subproof_input};
 use raiko2_protocol_shasta::shasta::{
@@ -315,6 +316,12 @@ fn validate_l1_anchor_linkage(
 fn initial_proposal_ancestor_headers(guest_input: &GuestInput) -> Result<Vec<WitnessHeader>> {
     let headers = guest_input.initial_proposal_ancestor_headers();
     ensure!(!headers.is_empty(), "missing proposal ancestor headers");
+    ensure!(
+        headers.len() <= ANCESTOR_HEADER_WINDOW_LIMIT,
+        "proposal ancestor header count ({}) exceeds limit ({})",
+        headers.len(),
+        ANCESTOR_HEADER_WINDOW_LIMIT
+    );
     Ok(headers)
 }
 

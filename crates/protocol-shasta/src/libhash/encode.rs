@@ -28,9 +28,6 @@ pub fn address_to_b256(address: Address) -> B256 {
     B256::left_padding_from(address.as_slice())
 }
 
-pub(crate) const EMPTY_BYTES_HASH: B256 =
-    b256!("c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470");
-
 pub const VERIFY_PROOF_B256: B256 =
     b256!("5645524946595f50524f4f460000000000000000000000000000000000000000");
 

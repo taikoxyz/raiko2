@@ -10,6 +10,7 @@ use raiko2_primitives::{
 };
 use raiko2_primitives_shasta::{
     build_proof_carry_data_from_witness_spec, instance::SHASTA_PROPOSAL_ID_MAX, GuestInput,
+    ANCESTOR_HEADER_WINDOW_LIMIT,
 };
 use raiko2_protocol::InputDataSource;
 use raiko2_protocol_shasta::libhash::hash_proposal;
@@ -352,6 +353,27 @@ fn accepts_witness_is_taiko_mismatch_when_chain_id_matches() {
         |stateless_input, _ancestor_headers, _runtime| Ok(stateless_input.block.header.hash_slow()),
     )
     .expect("guest should ignore witness chain_spec.is_taiko when chain_id matches");
+}
+
+#[test]
+fn rejects_oversized_initial_proposal_ancestor_header_window() {
+    let mut guest_input = guest_input_with_single_block();
+    let parent = guest_input.proposal_ancestor_headers[0]
+        .full_header()
+        .expect("fixture parent header")
+        .clone();
+    guest_input.proposal_ancestor_headers = (0..=ANCESTOR_HEADER_WINDOW_LIMIT)
+        .map(|offset| {
+            let mut header = parent.clone();
+            header.number = u64::try_from(offset).expect("test header number");
+            raiko2_primitives::WitnessHeader::from_header(header)
+        })
+        .collect();
+
+    assert_rejected_with_message(
+        &guest_input,
+        "proposal ancestor header count (257) exceeds limit (256)",
+    );
 }
 
 #[test]

@@ -6,11 +6,9 @@
 
 #[cfg(test)]
 use crate::input::ShastaRawAggregationGuestInput;
-use alloy_primitives::{Address, B256, Uint, keccak256};
-use alloy_sol_types::SolValue;
+use alloy_primitives::{Address, B256, Uint};
 use raiko2_protocol_shasta::libhash::{hash_commitment, hash_public_input, hash_two_values};
 use raiko2_protocol_shasta::shasta::{Commitment, ProofCarryData, Transition};
-use serde::{Deserialize, Serialize};
 
 /// Maximum value of Solidity `uint48` used by Shasta protocol fields.
 ///
@@ -187,52 +185,6 @@ pub fn shasta_zk_aggregation_output(sub_image_id: B256, sub_input_hash: B256) ->
     hash_two_values(sub_image_id, sub_input_hash)
 }
 
-/// Transition data for Shasta.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct ShastaTransition {
-    pub parent_hash: B256,
-    pub block_hash: B256,
-    pub state_root: B256,
-}
-
-/// Proposal metadata for Shasta.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct ShastaProposalMetadata {
-    pub info_hash: B256,
-    pub proposer: Address,
-    pub proposal_id: u64,
-    pub proposed_at: u64,
-}
-
-/// Protocol instance for Shasta.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct ProtocolInstance {
-    pub transition: ShastaTransition,
-    pub proposal_metadata: ShastaProposalMetadata,
-    pub prover: Address,
-    pub chain_id: u64,
-    pub verifier_address: Address,
-}
-
-impl ProtocolInstance {
-    /// Calculate the instance hash for the protocol instance.
-    #[must_use]
-    pub fn instance_hash(&self) -> B256 {
-        let data = (
-            self.transition.parent_hash,
-            self.transition.block_hash,
-            self.transition.state_root,
-            self.proposal_metadata.info_hash,
-            self.proposal_metadata.proposer,
-            self.proposal_metadata.proposal_id,
-            self.prover,
-            self.chain_id,
-        )
-            .abi_encode();
-        keccak256(data)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -242,13 +194,6 @@ mod tests {
     use raiko2_protocol_shasta::shasta::{
         Checkpoint, ProofCarryData, ShastaTransitionInput, TransitionInputData,
     };
-
-    #[test]
-    fn test_instance_hash() {
-        let instance = ProtocolInstance::default();
-        let hash = instance.instance_hash();
-        assert_ne!(hash, B256::default());
-    }
 
     fn sample_checkpoint(block_number: u64, block_hash: B256, state_root: B256) -> Checkpoint {
         Checkpoint {

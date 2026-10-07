@@ -17,10 +17,23 @@ use std::{collections::BTreeMap, path::PathBuf, str::FromStr, sync::Arc};
 const DEFAULT_CHAIN_SPECS: &str = include_str!("../../../config/chain_spec_list_default.json");
 #[cfg(not(feature = "chain-spec-json"))]
 const DEFAULT_CHAIN_SPECS: &str = "[]";
+
+/// Storage slot of the checkpoint mapping in the deployed Taiko L2 legacy, single-level
+/// `CheckpointStore` layout.
+///
+/// This value describes the contracts deployed on the supported L2 networks. It must not be
+/// derived from the current L1 `SignalService` source: that contract is a different deployment
+/// version with a different storage layout.
 pub const SHASTA_SIGNAL_SERVICE_CHECKPOINTS_SLOT: u64 = 254;
 const SHASTA_TAIKO_L2_ADDRESS_SUFFIX: &str = "10001";
 const SHASTA_CHECKPOINT_STORE_ADDRESS_SUFFIX: &str = "5";
 
+/// Returns the `blockHash` and `stateRoot` storage slots for `block_number` in the deployed Taiko
+/// L2 legacy, single-level checkpoint mapping.
+///
+/// The formula is Solidity's slot calculation for that deployed L2 layout. The current L1
+/// `SignalService` source is not authoritative for this calculation because it belongs to a
+/// different contract version and layout.
 #[must_use]
 pub fn shasta_checkpoint_storage_slots(block_number: u64) -> (U256, U256) {
     let mut encoded = [0u8; 64];

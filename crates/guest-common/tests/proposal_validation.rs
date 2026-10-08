@@ -358,6 +358,9 @@ fn accepts_witness_is_taiko_mismatch_when_chain_id_matches() {
 #[test]
 fn rejects_oversized_initial_proposal_ancestor_header_window() {
     let mut guest_input = guest_input_with_single_block();
+    // Make blob usage invalid as well. The cheap header-window guard must win before blob/KZG
+    // validation so oversized inputs are rejected without doing proposal blob work.
+    guest_input.taiko.proposal_event.proposal.sources = vec![DerivationSource::default()];
     let parent = guest_input.proposal_ancestor_headers[0]
         .full_header()
         .expect("fixture parent header")

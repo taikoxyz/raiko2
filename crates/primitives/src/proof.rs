@@ -72,9 +72,13 @@ impl std::fmt::Display for Proof {
         write!(
             f,
             "Proof {{ proof: {:?}, input: {:?}, uuid: {:?} }}",
-            self.proof
-                .as_ref()
-                .map(|p| format!("{}...", &p[..std::cmp::min(20, p.len())])),
+            self.proof.as_ref().map(|p| {
+                let mut preview_end = std::cmp::min(20, p.len());
+                while !p.is_char_boundary(preview_end) {
+                    preview_end -= 1;
+                }
+                format!("{}...", &p[..preview_end])
+            }),
             self.input,
             self.uuid
         )
@@ -92,4 +96,22 @@ pub trait IdWrite: Send {
 #[async_trait::async_trait]
 pub trait IdStore: IdWrite {
     async fn read_id(&mut self, key: ProofKey) -> RaikoResult<String>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Proof;
+
+    #[test]
+    fn display_preview_does_not_split_a_multibyte_character_at_twenty_bytes() {
+        let proof = Proof {
+            proof: Some("abcdefghijklmnopqrsé".to_string()),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            proof.to_string(),
+            "Proof { proof: Some(\"abcdefghijklmnopqrs...\"), input: None, uuid: None }"
+        );
+    }
 }

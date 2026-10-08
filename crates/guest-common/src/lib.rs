@@ -25,6 +25,7 @@ use raiko2_primitives_shasta::{
     roll_proposal_ancestor_headers_in_place, should_bypass_stalled_anchor_linkage,
     validate_anchor_progression, validate_source_aware_anchor_progression,
     verify_proposal_mode_blob_usage, AnchorSourceSpan, GuestInput, ShastaZkAggregationGuestInput,
+    ANCESTOR_HEADER_WINDOW_LIMIT,
 };
 use raiko2_protocol_shasta::libhash::{hash_proposal, hash_shasta_subproof_input};
 use raiko2_protocol_shasta::shasta::{
@@ -312,9 +313,21 @@ fn validate_l1_anchor_linkage(
     Ok(())
 }
 
+fn validate_proposal_ancestor_header_count(guest_input: &GuestInput) -> Result<()> {
+    let header_count = guest_input.proposal_ancestor_headers().len();
+    ensure!(header_count != 0, "missing proposal ancestor headers");
+    ensure!(
+        header_count <= ANCESTOR_HEADER_WINDOW_LIMIT,
+        "proposal ancestor header count ({}) exceeds limit ({})",
+        header_count,
+        ANCESTOR_HEADER_WINDOW_LIMIT
+    );
+    Ok(())
+}
+
 fn initial_proposal_ancestor_headers(guest_input: &GuestInput) -> Result<Vec<WitnessHeader>> {
+    validate_proposal_ancestor_header_count(guest_input)?;
     let headers = guest_input.initial_proposal_ancestor_headers();
-    ensure!(!headers.is_empty(), "missing proposal ancestor headers");
     Ok(headers)
 }
 
@@ -788,16 +801,18 @@ where
         &TaikoRuntime,
     ) -> Result<B256>,
 {
+    ensure!(
+        !guest_input.witnesses.is_empty(),
+        "GuestInput must contain at least one witness"
+    );
+    validate_proposal_ancestor_header_count(guest_input)?;
+
     bench_report_start("proposal_blob_usage");
     verify_proposal_mode_blob_usage(guest_input)
         .context("proposal mode blob usage verification failed")?;
     bench_report_end("proposal_blob_usage");
 
     let proof_carry_data = &guest_input.proof_carry_data;
-    ensure!(
-        !guest_input.witnesses.is_empty(),
-        "GuestInput must contain at least one witness"
-    );
 
     bench_report_start("proposal_invariants");
     let first_chain_id = guest_input

@@ -1,11 +1,10 @@
-// rust impl of taiko-mono/packages/protocol/contracts/layer1/shasta/libs/LibHashing.sol
+// Rust implementation of the canonical Shasta hashing rules in
+// taiko-mono/packages/protocol/contracts/layer1/core/libs/LibHashOptimized.sol.
 
-mod derivation;
 mod encode;
 mod shasta;
 mod values;
 
-pub use derivation::{hash_derivation, hash_derivation_source};
 pub use encode::{VERIFY_PROOF_B256, address_to_b256, u48_to_b256, u64_to_b256};
 pub use shasta::{
     hash_checkpoint, hash_commitment, hash_core_state, hash_proposal, hash_public_input,
@@ -18,10 +17,10 @@ pub use values::{
 #[cfg(test)]
 mod test {
     use crate::shasta::{
-        BlobSlice, Checkpoint, Commitment, Derivation, DerivationSource, ProofCarryData, Proposal,
+        BlobSlice, Checkpoint, Commitment, DerivationSource, ProofCarryData, Proposal,
         ShastaTransitionInput, Transition, TransitionInputData,
     };
-    use alloy_primitives::{Address, B256, Uint, address, b256, hex};
+    use alloy_primitives::{Address, Uint, address, b256, hex};
 
     use super::*;
 
@@ -68,58 +67,6 @@ mod test {
             hex::encode(proposal_hash),
             "13af2d05799894db3462512e3ecf5ae8877b80b1e2db3963654ac70f6dd49f88"
         );
-    }
-
-    #[test]
-    fn test_hash_derivation_empty_source() {
-        // Create a test derivation with one source
-        let derivation = Derivation {
-            originBlockNumber: Uint::from(155u64),
-            originBlockHash: b256!(
-                "10746c6d70f2b59483dc2e0a1315758799fb3655f87e430568e71591589f76f9"
-            ),
-            basefeeSharingPctg: 75,
-            sources: Vec::new(),
-        };
-
-        let derivation_hash = hash_derivation(&derivation);
-
-        // The hash should be deterministic and match the expected value
-        // This test verifies the implementation works without errors
-        assert_ne!(derivation_hash, B256::ZERO);
-        assert_eq!(
-            hex::encode(derivation_hash),
-            "1da64d2dd5bda3fb186ecf02433b32f1a24661030600a8ff150ed8c346dcc5ba"
-        );
-    }
-
-    #[test]
-    fn test_hash_derivation() {
-        // Create a test derivation with one source
-        let derivation = Derivation {
-            originBlockNumber: Uint::from(155u64),
-            originBlockHash: b256!(
-                "10746c6d70f2b59483dc2e0a1315758799fb3655f87e430568e71591589f76f9"
-            ),
-            basefeeSharingPctg: 75,
-            sources: vec![DerivationSource {
-                isForcedInclusion: false,
-                blobSlice: BlobSlice {
-                    blobHashes: vec![b256!(
-                        "0189ea2792db70c7d2165c397be7bc37b7d45b1ed082bec866e9cb62e90cb4a0"
-                    )],
-                    offset: Uint::from(0u32),
-                    timestamp: Uint::from(1_758_948_572_u64),
-                },
-            }],
-        };
-
-        let derivation_hash = hash_derivation(&derivation);
-
-        // The hash should be deterministic and match the expected value
-        // This test verifies the implementation works without errors
-        assert_ne!(derivation_hash, B256::ZERO);
-        println!("Derivation hash: 0x{}", hex::encode(derivation_hash));
     }
 
     #[test]

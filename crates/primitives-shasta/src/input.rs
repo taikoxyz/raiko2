@@ -1,7 +1,7 @@
 //! Shasta input types for guest programs.
 
 use alloy_consensus::Header;
-use alloy_primitives::map::B256Map;
+use alloy_primitives::map::{B256Map, B256Set};
 use alloy_primitives::{Address, B256};
 use raiko2_primitives::{
     ExecutionWitness, RawProof, StatelessInput, WitnessHeader, WitnessStateNode,
@@ -40,6 +40,14 @@ struct GuestInputSerde {
 }
 
 impl GuestInput {
+    fn has_positional_proposal_state_pool(&self) -> bool {
+        !self.proposal_state_nodes.is_empty()
+            && self
+                .witnesses
+                .iter()
+                .any(|witness| !witness.witness.state_indices.is_empty())
+    }
+
     #[must_use]
     pub fn proposal_ancestor_headers(&self) -> &[WitnessHeader] {
         if self.proposal_ancestor_headers.is_empty() {
@@ -75,46 +83,57 @@ impl GuestInput {
 
     #[must_use]
     fn initial_proposal_state_pool(&self) -> (Vec<WitnessStateNode>, Vec<Vec<u32>>) {
-        let mut proposal_state_nodes = if self.proposal_state_nodes.is_empty() {
+        let inline_state_nodes = || {
             self.witnesses
                 .iter()
                 .flat_map(|witness| witness.witness.state.iter().cloned())
                 .collect::<Vec<_>>()
-        } else {
-            self.proposal_state_nodes.clone()
         };
-        proposal_state_nodes = ExecutionWitness::canonicalize_state_nodes(proposal_state_nodes);
+        let has_positional_pool = self.has_positional_proposal_state_pool();
+        let proposal_state_nodes = if has_positional_pool {
+            let mut proposal_state_nodes = self.proposal_state_nodes.clone();
+            let mut known_hashes = proposal_state_nodes
+                .iter()
+                .map(|node| node.hash)
+                .collect::<B256Set>();
+            for node in ExecutionWitness::canonicalize_state_nodes(inline_state_nodes()) {
+                if known_hashes.insert(node.hash) {
+                    proposal_state_nodes.push(node);
+                }
+            }
+            proposal_state_nodes
+        } else {
+            let mut state_nodes = self.proposal_state_nodes.clone();
+            state_nodes.extend(inline_state_nodes());
+            ExecutionWitness::canonicalize_state_nodes(state_nodes)
+        };
 
         if proposal_state_nodes.is_empty() {
             return (proposal_state_nodes, vec![Vec::new(); self.witnesses.len()]);
         }
 
-        let index_by_hash = proposal_state_nodes
-            .iter()
-            .enumerate()
-            .map(|(index, node)| {
-                (
-                    node.hash,
-                    u32::try_from(index).expect("proposal state pool index exceeds u32"),
-                )
-            })
-            .collect::<B256Map<_>>();
+        let mut index_by_hash = B256Map::default();
+        for (index, node) in proposal_state_nodes.iter().enumerate() {
+            index_by_hash.entry(node.hash).or_insert_with(|| {
+                u32::try_from(index).expect("proposal state pool index exceeds u32")
+            });
+        }
 
         let witness_state_indices = self
             .witnesses
             .iter()
             .map(|witness| {
-                let indices = if witness.witness.state_indices.is_empty() {
-                    witness
+                if witness.witness.state_indices.is_empty() {
+                    let indices = witness
                         .witness
                         .state
                         .iter()
                         .filter_map(|node| index_by_hash.get(&node.hash).copied())
-                        .collect()
+                        .collect();
+                    ExecutionWitness::canonicalize_state_indices(indices)
                 } else {
                     witness.witness.state_indices.clone()
-                };
-                ExecutionWitness::canonicalize_state_indices(indices)
+                }
             })
             .collect();
 
@@ -159,9 +178,10 @@ pub fn roll_proposal_ancestor_headers_in_place(
     parent_header: &Header,
     parent_hash: B256,
 ) {
-    if current_headers.len() == ANCESTOR_HEADER_WINDOW_LIMIT {
-        current_headers.rotate_left(1);
-        current_headers.pop();
+    let retained_before_push = ANCESTOR_HEADER_WINDOW_LIMIT.saturating_sub(1);
+    if current_headers.len() > retained_before_push {
+        let discard = current_headers.len() - retained_before_push;
+        current_headers.drain(..discard);
     }
     current_headers.push(WitnessHeader::from_header_with_hash(
         parent_header.clone(),
@@ -182,7 +202,7 @@ impl From<GuestInputSerde> for GuestInput {
             input.proposal_ancestor_headers =
                 ExecutionWitness::canonicalize_headers(input.proposal_ancestor_headers);
         }
-        if !input.proposal_state_nodes.is_empty() {
+        if !input.proposal_state_nodes.is_empty() && !input.has_positional_proposal_state_pool() {
             input.proposal_state_nodes =
                 ExecutionWitness::canonicalize_state_nodes(input.proposal_state_nodes);
         }
@@ -265,7 +285,7 @@ pub struct ShastaRisc0AggregationGuestInput {
 
 #[cfg(test)]
 mod tests {
-    use super::{GuestInput, roll_proposal_ancestor_headers};
+    use super::{ANCESTOR_HEADER_WINDOW_LIMIT, GuestInput, roll_proposal_ancestor_headers};
     use alloy_consensus::Header;
     use alloy_primitives::{Address, B256, Bytes};
     use raiko2_primitives::chain_spec::{ForkCondition, ForkId, TaikoFork};
@@ -432,6 +452,140 @@ mod tests {
         );
     }
 
+    fn positional_state_pool_input() -> (GuestInput, Vec<WitnessStateNode>) {
+        let first = sample_state_node(0x11);
+        let second = sample_state_node(0x22);
+        let mut canonical =
+            ExecutionWitness::canonicalize_state_nodes(vec![first.clone(), second.clone()]);
+        canonical.reverse();
+
+        let mut input = GuestInput {
+            proposal_state_nodes: canonical.clone(),
+            ..Default::default()
+        };
+        input.witnesses.push(StatelessInput::default());
+        input.witnesses[0].witness.state_indices = vec![0, 1];
+        (input, canonical)
+    }
+
+    fn assert_positional_state_pool(input: &GuestInput, expected: &[WitnessStateNode]) {
+        assert_eq!(input.proposal_state_nodes, expected);
+        assert_eq!(input.witnesses[0].witness.state_indices, vec![0, 1]);
+        for (index, expected_node) in expected.iter().enumerate() {
+            let actual_index = usize::try_from(input.witnesses[0].witness.state_indices[index])
+                .expect("state index fits usize");
+            assert_eq!(&input.proposal_state_nodes[actual_index], expected_node);
+        }
+    }
+
+    #[test]
+    fn compact_preserves_existing_positional_state_pool_order() {
+        let (mut input, expected) = positional_state_pool_input();
+
+        input.compact_proposal_state_nodes();
+
+        assert_positional_state_pool(&input, &expected);
+    }
+
+    #[test]
+    fn json_roundtrip_preserves_existing_positional_state_pool_order() {
+        let (input, expected) = positional_state_pool_input();
+
+        let encoded = serde_json::to_vec(&input).expect("serialize positional state pool");
+        let decoded: GuestInput =
+            serde_json::from_slice(&encoded).expect("deserialize positional state pool");
+
+        assert_positional_state_pool(&decoded, &expected);
+    }
+
+    #[test]
+    fn bincode_roundtrip_preserves_existing_positional_state_pool_order() {
+        let (input, expected) = positional_state_pool_input();
+
+        let encoded = bincode::serialize(&input).expect("serialize positional state pool");
+        let decoded: GuestInput =
+            bincode::deserialize(&encoded).expect("deserialize positional state pool");
+
+        assert_positional_state_pool(&decoded, &expected);
+    }
+
+    fn mixed_positional_and_inline_state_input() -> (GuestInput, WitnessStateNode, WitnessStateNode)
+    {
+        let indexed = sample_state_node(0x11);
+        let inline = sample_state_node(0x22);
+        let mut input = GuestInput {
+            proposal_state_nodes: vec![indexed.clone()],
+            ..Default::default()
+        };
+        input.witnesses.push(StatelessInput::default());
+        input.witnesses[0].witness.state_indices = vec![0];
+        input.witnesses.push(StatelessInput::default());
+        input.witnesses[1].witness.state = vec![inline.clone()];
+        (input, indexed, inline)
+    }
+
+    fn assert_mixed_positional_and_inline_state(
+        input: &GuestInput,
+        indexed: &WitnessStateNode,
+        inline: &WitnessStateNode,
+    ) {
+        assert_eq!(
+            input.proposal_state_nodes,
+            vec![indexed.clone(), inline.clone()]
+        );
+        assert_eq!(input.witnesses[0].witness.state_indices, vec![0]);
+        assert_eq!(input.witnesses[1].witness.state_indices, vec![1]);
+        assert!(
+            input
+                .witnesses
+                .iter()
+                .all(|witness| witness.witness.state.is_empty())
+        );
+    }
+
+    #[test]
+    fn compact_retains_mixed_positional_and_inline_state_nodes() {
+        let (mut input, indexed, inline) = mixed_positional_and_inline_state_input();
+
+        input.compact_proposal_state_nodes();
+
+        assert_mixed_positional_and_inline_state(&input, &indexed, &inline);
+    }
+
+    #[test]
+    fn json_roundtrip_retains_mixed_positional_and_inline_state_nodes() {
+        let (input, indexed, inline) = mixed_positional_and_inline_state_input();
+
+        let encoded = serde_json::to_vec(&input).expect("serialize mixed state pool");
+        let decoded: GuestInput =
+            serde_json::from_slice(&encoded).expect("deserialize mixed state pool");
+
+        assert_mixed_positional_and_inline_state(&decoded, &indexed, &inline);
+    }
+
+    #[test]
+    fn compact_keeps_existing_duplicate_pool_indices_and_uses_first_for_inline_state() {
+        let indexed = sample_state_node(0x11);
+        let appended = sample_state_node(0x22);
+        let mut input = GuestInput {
+            proposal_state_nodes: vec![indexed.clone(), indexed.clone()],
+            ..Default::default()
+        };
+        input.witnesses.push(StatelessInput::default());
+        input.witnesses[0].witness.state_indices = vec![1];
+        input.witnesses.push(StatelessInput::default());
+        input.witnesses[1].witness.state = vec![appended.clone(), indexed.clone()];
+
+        input.compact_proposal_state_nodes();
+
+        assert_eq!(
+            input.proposal_state_nodes,
+            vec![indexed.clone(), indexed, appended]
+        );
+        assert_eq!(input.witnesses[0].witness.state_indices, vec![1]);
+        assert_eq!(input.witnesses[1].witness.state_indices, vec![0, 2]);
+    }
+
     #[test]
     fn bincode_serialize_preserves_sgxgeth_verifiers() {
         let mut verifiers = BTreeMap::new();
@@ -481,5 +635,19 @@ mod tests {
         assert_eq!(rolled.len(), 2);
         assert_eq!(rolled[0].full_header(), first.full_header());
         assert_eq!(rolled[1].full_header(), Some(&second_header));
+    }
+
+    #[test]
+    fn rolling_window_trims_an_already_oversized_window_before_push() {
+        let current_headers = (0..300)
+            .map(|number| WitnessHeader::from_header(sample_header(number, B256::ZERO)))
+            .collect::<Vec<_>>();
+        let parent_header = sample_header(300, B256::ZERO);
+
+        let rolled = roll_proposal_ancestor_headers(&current_headers, &parent_header);
+
+        assert_eq!(rolled.len(), ANCESTOR_HEADER_WINDOW_LIMIT);
+        assert_eq!(rolled.first().map(|header| header.number), Some(45));
+        assert_eq!(rolled.last().map(|header| header.number), Some(300));
     }
 }

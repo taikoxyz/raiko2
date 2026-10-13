@@ -143,7 +143,7 @@ jobs:
           toolchain: "1.95.0"
           components: clippy
 
-      - uses: rui314/setup-mold@10ca16bf91dc22e05ebdc935cad9c75ea248f621 # v1
+      - uses: rui314/setup-mold@da13e0b42e392e3a45d1215033a2270b849d7d36 # v1
 
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
 
@@ -194,7 +194,7 @@ jobs:
         with:
           toolchain: "1.95.0"
 
-      - uses: rui314/setup-mold@10ca16bf91dc22e05ebdc935cad9c75ea248f621 # v1
+      - uses: rui314/setup-mold@da13e0b42e392e3a45d1215033a2270b849d7d36 # v1
 
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
 
@@ -235,7 +235,7 @@ jobs:
         with:
           toolchain: "1.95.0"
 
-      - uses: rui314/setup-mold@10ca16bf91dc22e05ebdc935cad9c75ea248f621 # v1
+      - uses: rui314/setup-mold@da13e0b42e392e3a45d1215033a2270b849d7d36 # v1
 
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
 
@@ -272,7 +272,7 @@ jobs:
         with:
           toolchain: "1.95.0"
 
-      - uses: rui314/setup-mold@10ca16bf91dc22e05ebdc935cad9c75ea248f621 # v1
+      - uses: rui314/setup-mold@da13e0b42e392e3a45d1215033a2270b849d7d36 # v1
 
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
 
@@ -325,7 +325,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler
 
-      - uses: rui314/setup-mold@10ca16bf91dc22e05ebdc935cad9c75ea248f621 # v1
+      - uses: rui314/setup-mold@da13e0b42e392e3a45d1215033a2270b849d7d36 # v1
 
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
 
@@ -375,7 +375,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler
 
-      - uses: rui314/setup-mold@10ca16bf91dc22e05ebdc935cad9c75ea248f621 # v1
+      - uses: rui314/setup-mold@da13e0b42e392e3a45d1215033a2270b849d7d36 # v1
 
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
 

@@ -253,22 +253,53 @@ impl CheckpointRetrySchedule {
 }
 
 #[cfg(any(feature = "risc0", feature = "sp1", feature = "boundless", test))]
-pub(crate) async fn persist_prover_progress(
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ProgressPersistenceOutcome {
+    Persisted,
+    PersistedAfterDeadline,
+    DeadlineExceeded,
+}
+
+#[cfg(any(feature = "risc0", feature = "sp1", feature = "boundless", test))]
+async fn persist_prover_progress_with_deadline(
     observer: Option<&Arc<dyn ProverProgressObserver>>,
     progress: &ProverProgress,
     checkpoint: &'static str,
     permit: &SubmissionCheckpointPermit,
-) -> RaikoResult<()> {
+    deadline: Option<tokio::time::Instant>,
+) -> RaikoResult<ProgressPersistenceOutcome> {
     let Some(observer) = observer else {
-        return Ok(());
+        return Ok(ProgressPersistenceOutcome::Persisted);
     };
     let schedule = CheckpointRetrySchedule::new();
     let mut retry = 0_u32;
     loop {
+        if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
+            return Ok(ProgressPersistenceOutcome::DeadlineExceeded);
+        }
         match observer.on_progress(progress, permit).await {
-            Ok(()) => return Ok(()),
+            Ok(()) => {
+                return Ok(
+                    if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
+                        ProgressPersistenceOutcome::PersistedAfterDeadline
+                    } else {
+                        ProgressPersistenceOutcome::Persisted
+                    },
+                );
+            }
             Err(ProgressPersistenceError::Retryable(error)) => {
+                let now = tokio::time::Instant::now();
+                if deadline.is_some_and(|deadline| now >= deadline) {
+                    return Ok(ProgressPersistenceOutcome::DeadlineExceeded);
+                }
                 let delay = schedule.delay(retry);
+                if let Some(deadline) = deadline {
+                    let retry_at = now.checked_add(delay).unwrap_or(deadline);
+                    if retry_at >= deadline {
+                        tokio::time::sleep_until(deadline).await;
+                        return Ok(ProgressPersistenceOutcome::DeadlineExceeded);
+                    }
+                }
                 tracing::warn!(
                     %error,
                     checkpoint,
@@ -284,6 +315,34 @@ pub(crate) async fn persist_prover_progress(
             }
         }
     }
+}
+
+#[cfg(any(feature = "risc0", feature = "sp1", feature = "boundless", test))]
+pub(crate) async fn persist_prover_progress(
+    observer: Option<&Arc<dyn ProverProgressObserver>>,
+    progress: &ProverProgress,
+    checkpoint: &'static str,
+    permit: &SubmissionCheckpointPermit,
+) -> RaikoResult<()> {
+    let outcome =
+        persist_prover_progress_with_deadline(observer, progress, checkpoint, permit, None).await?;
+    debug_assert_eq!(outcome, ProgressPersistenceOutcome::Persisted);
+    Ok(())
+}
+
+#[cfg(any(feature = "risc0", feature = "sp1", feature = "boundless", test))]
+pub(crate) async fn persist_prover_progress_until(
+    observer: Option<&Arc<dyn ProverProgressObserver>>,
+    progress: &ProverProgress,
+    checkpoint: &'static str,
+    permit: &SubmissionCheckpointPermit,
+    timeout: Duration,
+) -> RaikoResult<ProgressPersistenceOutcome> {
+    let deadline = tokio::time::Instant::now()
+        .checked_add(timeout)
+        .ok_or_else(|| RaikoError::Guest("checkpoint deadline overflow".to_string()))?;
+    persist_prover_progress_with_deadline(observer, progress, checkpoint, permit, Some(deadline))
+        .await
 }
 
 #[cfg(any(feature = "risc0", feature = "sp1", feature = "boundless", test))]

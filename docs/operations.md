@@ -1536,12 +1536,16 @@ Operator notes:
   `request_digest` and `broadcast_from_block`, even when it has no confirmed predecessor, so rollback
   across one of those records remains one-way unless the record is migrated. Never delete a paid
   provider checkpoint to force rollback.
-- The mandatory pre-broadcast request checkpoint is bounded to ten seconds while the signer lane is
-  serialized. If the runtime store cannot persist it within that budget, the submission fails before
-  reserving a nonce or broadcasting a transaction. A store write can still commit while its caller
-  observes the bounded timeout. That ambiguous outcome leaves a durable but unbroadcast checkpoint,
-  which blocks the signer lane across restart until `lock_expires_at`. The first client retry after
-  that deadline clears the checkpoint; a subsequent retry resumes normal submission.
+- The mandatory pre-broadcast request checkpoint has a thirty-second retry budget while the signer
+  lane is serialized. The deadline prevents a new persistence attempt from starting, but never
+  cancels a runtime-store CAS that is already in flight. The current attempt must finish and install
+  its observed generation locally before the checkpoint call returns, so wall-clock time can exceed
+  thirty seconds by that store operation's remaining duration. If persistence completes after the
+  deadline, the submission still fails before reserving a nonce or broadcasting a transaction. That
+  leaves a durable but unbroadcast checkpoint, which blocks the signer lane across restart until
+  `lock_expires_at`. The first client retry after that deadline clears the checkpoint; a subsequent
+  retry resumes normal submission. The optional post-broadcast transaction-hash checkpoint uses the
+  same non-cancelling rule and reports a warning instead of failing an already-broadcast submission.
 - `prover.risc0.boundless.offer_params.{batch,aggregation}.pricing_mode` defaults to `manual`.
   `manual` requires `max_price_per_mcycle` and optionally accepts `min_price_per_mcycle`;
   `market` omits both price fields and lets the Boundless SDK price provider set the offer price.

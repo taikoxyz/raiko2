@@ -74,7 +74,7 @@ const EXTERNAL_RETRY_INITIAL_DELAY: Duration = Duration::from_secs(1);
 const EXTERNAL_RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
 const BOUNDLESS_RPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const BOUNDLESS_RPC_TOTAL_TIMEOUT: Duration = Duration::from_mins(1);
-const BOUNDLESS_CHECKPOINT_TOTAL_TIMEOUT: Duration = Duration::from_secs(10);
+const BOUNDLESS_CHECKPOINT_TOTAL_TIMEOUT: Duration = Duration::from_secs(30);
 const BOUNDLESS_SUBMIT_SEND_TIMEOUT: Duration = Duration::from_millis(BOUNDLESS_TX_SEND_TIMEOUT_MS);
 const BOUNDLESS_SUBMIT_RECEIPT_CONFIRMATIONS: u64 = 3;
 const BOUNDLESS_RECEIPT_POLL_DELAY: Duration = Duration::from_secs(1);
@@ -2310,7 +2310,19 @@ async fn publish_boundless_progress_with_lineage(
     offchain: bool,
     quote: Option<&QuoteContext>,
 ) -> RaikoResult<()> {
-    let progress = ProverProgress::BoundlessSubmission(BoundlessSubmissionProgress {
+    let progress =
+        boundless_progress_with_lineage(submission, image_ref, deployment, offchain, quote);
+    crate::persist_prover_progress(observer, &progress, "boundless_submission", permit).await
+}
+
+fn boundless_progress_with_lineage(
+    submission: &Submission,
+    image_ref: &str,
+    deployment: &str,
+    offchain: bool,
+    quote: Option<&QuoteContext>,
+) -> ProverProgress {
+    ProverProgress::BoundlessSubmission(BoundlessSubmissionProgress {
         provider_request_id: submission.provider_request_id.clone(),
         remote_tx_hash: submission.remote_tx_hash.clone(),
         request_id_has_confirmed_submission: submission.request_id_has_confirmed_rung,
@@ -2329,8 +2341,7 @@ async fn publish_boundless_progress_with_lineage(
         max_price_multiplier: submission.max_price_multiplier,
         max_price_wei: Some(submission.max_price_wei.to_string()),
         rebid_attempt: u32::try_from(submission.attempt).unwrap_or(u32::MAX),
-    });
-    crate::persist_prover_progress(observer, &progress, "boundless_submission", permit).await
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2343,19 +2354,29 @@ async fn publish_mandatory_boundless_progress(
     quote: &QuoteContext,
     timeout: Duration,
 ) -> RaikoResult<()> {
-    tokio::time::timeout(
+    let progress =
+        boundless_progress_with_lineage(submission, image_ref, deployment, false, Some(quote));
+    let outcome = crate::persist_prover_progress_until(
+        observer,
+        &progress,
+        "boundless_submission",
+        permit,
         timeout,
-        publish_boundless_progress(
-            observer, permit, submission, image_ref, deployment, false, quote,
-        ),
     )
-    .await
-    .map_err(|_| {
-        RaikoError::Guest(format!(
+    .await?;
+    match outcome {
+        crate::ProgressPersistenceOutcome::Persisted => Ok(()),
+        crate::ProgressPersistenceOutcome::PersistedAfterDeadline => {
+            Err(RaikoError::Guest(format!(
+                "Mandatory Boundless submission checkpoint completed after its {} ms deadline; submission was not broadcast",
+                timeout.as_millis()
+            )))
+        }
+        crate::ProgressPersistenceOutcome::DeadlineExceeded => Err(RaikoError::Guest(format!(
             "Timed out persisting mandatory Boundless submission checkpoint after {} ms",
             timeout.as_millis()
-        ))
-    })?
+        ))),
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2463,29 +2484,61 @@ async fn checkpoint_boundless_tx_hash(
     deployment: &str,
     quote: &QuoteContext,
 ) {
-    let checkpoint = async {
-        let tx_hash_permit = crate::acquire_submission_checkpoint_permit(observer).await?;
-        publish_boundless_progress(
-            observer,
-            &tx_hash_permit,
-            submission,
-            image_ref,
-            deployment,
-            false,
-            quote,
-        )
-        .await
+    checkpoint_boundless_tx_hash_with_timeout(
+        observer,
+        submission,
+        image_ref,
+        deployment,
+        quote,
+        BOUNDLESS_CHECKPOINT_TOTAL_TIMEOUT,
+    )
+    .await;
+}
+
+async fn checkpoint_boundless_tx_hash_with_timeout(
+    observer: Option<&Arc<dyn ProverProgressObserver>>,
+    submission: &Submission,
+    image_ref: &str,
+    deployment: &str,
+    quote: &QuoteContext,
+    timeout: Duration,
+) {
+    let tx_hash_permit = match crate::acquire_submission_checkpoint_permit(observer).await {
+        Ok(permit) => permit,
+        Err(error) => {
+            tracing::warn!(
+                provider_request_id = %submission.provider_request_id,
+                error = %redact_urls(&error.to_string()),
+                "Boundless request id is durable but its optional transaction hash was not checkpointed"
+            );
+            return;
+        }
     };
-    match tokio::time::timeout(BOUNDLESS_CHECKPOINT_TOTAL_TIMEOUT, checkpoint).await {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => tracing::warn!(
+    let progress =
+        boundless_progress_with_lineage(submission, image_ref, deployment, false, Some(quote));
+    match crate::persist_prover_progress_until(
+        observer,
+        &progress,
+        "boundless_transaction_hash",
+        &tx_hash_permit,
+        timeout,
+    )
+    .await
+    {
+        Ok(crate::ProgressPersistenceOutcome::Persisted) => {}
+        Ok(crate::ProgressPersistenceOutcome::PersistedAfterDeadline) => tracing::warn!(
+            provider_request_id = %submission.provider_request_id,
+            timeout_secs = timeout.as_secs(),
+            "Optional Boundless transaction hash was checkpointed after its persistence deadline"
+        ),
+        Err(error) => tracing::warn!(
             provider_request_id = %submission.provider_request_id,
             error = %redact_urls(&error.to_string()),
             "Boundless request id is durable but its optional transaction hash was not checkpointed"
         ),
-        Err(_) => tracing::warn!(
+        Ok(crate::ProgressPersistenceOutcome::DeadlineExceeded) => tracing::warn!(
             provider_request_id = %submission.provider_request_id,
-            timeout_secs = BOUNDLESS_CHECKPOINT_TOTAL_TIMEOUT.as_secs(),
+            timeout_secs = timeout.as_secs(),
             "Timed out persisting optional Boundless transaction hash"
         ),
     }
@@ -5815,6 +5868,13 @@ mod tests {
         persisted: Arc<AtomicBool>,
     }
 
+    struct DelayedProgressObserver {
+        delay: Duration,
+        retryable_failure: bool,
+        completed: AtomicBool,
+        calls: AtomicUsize,
+    }
+
     struct RuntimeLifecycleProgressObserver {
         runtime: Arc<RuntimeManager>,
     }
@@ -5878,6 +5938,26 @@ mod tests {
         ) -> Result<(), crate::ProgressPersistenceError> {
             self.persisted.store(true, Ordering::SeqCst);
             Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::ProverProgressObserver for DelayedProgressObserver {
+        async fn on_progress(
+            &self,
+            _progress: &crate::ProverProgress,
+            _permit: &crate::SubmissionCheckpointPermit,
+        ) -> Result<(), crate::ProgressPersistenceError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(self.delay).await;
+            self.completed.store(true, Ordering::SeqCst);
+            if self.retryable_failure {
+                Err(crate::ProgressPersistenceError::Retryable(
+                    "delayed checkpoint failure".to_string(),
+                ))
+            } else {
+                Ok(())
+            }
         }
     }
 
@@ -7129,6 +7209,95 @@ mod tests {
             "{error}"
         );
         assert!(observer.calls.load(Ordering::SeqCst) > 1);
+    }
+
+    #[tokio::test]
+    async fn mandatory_boundless_checkpoint_does_not_cancel_an_in_flight_write() {
+        let observer = Arc::new(DelayedProgressObserver {
+            delay: Duration::from_millis(25),
+            retryable_failure: false,
+            completed: AtomicBool::new(false),
+            calls: AtomicUsize::new(0),
+        });
+        let progress_observer: Arc<dyn crate::ProverProgressObserver> = observer.clone();
+        let permit = crate::SubmissionCheckpointPermit::untracked();
+
+        let error = super::publish_mandatory_boundless_progress(
+            Some(&progress_observer),
+            &permit,
+            &test_submission(),
+            "image",
+            "deployment",
+            &test_quote_context(),
+            Duration::from_millis(5),
+        )
+        .await
+        .expect_err("a checkpoint completed after its deadline must stop submission");
+
+        assert!(
+            error.to_string().to_ascii_lowercase().contains("deadline"),
+            "{error}"
+        );
+        assert!(error.to_string().contains("was not broadcast"), "{error}");
+        assert!(
+            observer.completed.load(Ordering::SeqCst),
+            "the in-flight persistence future must complete before returning"
+        );
+        assert_eq!(observer.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn mandatory_boundless_checkpoint_does_not_retry_a_late_failure() {
+        let observer = Arc::new(DelayedProgressObserver {
+            delay: Duration::from_millis(25),
+            retryable_failure: true,
+            completed: AtomicBool::new(false),
+            calls: AtomicUsize::new(0),
+        });
+        let progress_observer: Arc<dyn crate::ProverProgressObserver> = observer.clone();
+        let permit = crate::SubmissionCheckpointPermit::untracked();
+
+        super::publish_mandatory_boundless_progress(
+            Some(&progress_observer),
+            &permit,
+            &test_submission(),
+            "image",
+            "deployment",
+            &test_quote_context(),
+            Duration::from_millis(5),
+        )
+        .await
+        .expect_err("a retryable failure after the deadline must stop submission");
+
+        assert!(observer.completed.load(Ordering::SeqCst));
+        assert_eq!(observer.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn optional_boundless_checkpoint_does_not_cancel_an_in_flight_write() {
+        let observer = Arc::new(DelayedProgressObserver {
+            delay: Duration::from_millis(25),
+            retryable_failure: false,
+            completed: AtomicBool::new(false),
+            calls: AtomicUsize::new(0),
+        });
+        let progress_observer: Arc<dyn crate::ProverProgressObserver> = observer.clone();
+
+        super::checkpoint_boundless_tx_hash_with_timeout(
+            Some(&progress_observer),
+            &test_submission(),
+            "image",
+            "deployment",
+            &test_quote_context(),
+            Duration::from_millis(5),
+        )
+        .await;
+
+        assert!(
+            observer.completed.load(Ordering::SeqCst),
+            "the optional in-flight persistence future must complete before returning"
+        );
+        assert_eq!(observer.calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

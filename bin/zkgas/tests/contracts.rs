@@ -217,6 +217,22 @@ fn executable_identity_binds_executable_bytes() {
 }
 
 #[test]
+fn executable_identity_hashes_a_pinned_image_not_a_replaceable_path() {
+    let dir = std::env::temp_dir().join(format!("zkgas-executable-test-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&dir).unwrap();
+    let path = dir.join("tool");
+    std::fs::write(&path, b"running-image").unwrap();
+    let pinned = std::fs::File::open(&path).unwrap();
+    std::fs::rename(&path, dir.join("old-tool")).unwrap();
+    std::fs::write(&path, b"replacement-image").unwrap();
+
+    let identity = executable_identity_from_open_file(pinned).unwrap();
+    assert_eq!(identity.sha256, sha256_hex(b"running-image"));
+    assert_ne!(identity.sha256, sha256_hex(&std::fs::read(&path).unwrap()));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn complete_quote_preserves_full_width_embedded_pricing_and_rejects_malformed_values() {
     use raiko2_zkgas_trace::*;
     let quote = CompleteQuoteV1 {

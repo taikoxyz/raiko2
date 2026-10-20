@@ -256,8 +256,18 @@ proposal identity wherever the current data model carries the same fact. It also
 block topology through the canonical proposal-validation path. A disagreement is a typed failure,
 not a separate stratum.
 
+Quote JSONL streams one serialized row at a time into an atomically published sibling staging file.
+Its 64 MiB hard output ceiling is the same as compare's per-file input ceiling, so every successfully
+published quote file is consumable downstream. Compare treats quote files as external input and
+revalidates all duplicated canonical-input, proposal/block/fork/public-output, pricing-model/surface,
+and prediction-arithmetic identities before joining or computing metrics. Empty quote or observation
+populations are structural collection failures and do not publish a comparison run.
+
 This identity prevents mainnet, Hoodi, devnet, and Masaya samples from being confused even when they
 share a requester, program, or block number.
+
+On Linux, executable identity opens `/proc/self/exe` and hashes that pinned running image rather than
+resolving and later reopening a replaceable pathname.
 
 ## Pricing Surfaces
 
@@ -393,7 +403,8 @@ underquote_rate = count_i(prediction_i < actual_i) / row_count
 Zero-actual rows are counted separately and excluded from ratio quantiles. Quantiles use nearest rank
 with the convention and population recorded. Strata include at least:
 
-- chain ID and the full ordered active-fork-segment identity for the proposal range;
+- chain ID and ordered active-fork topology, with every transition represented by its block offset
+  relative to the proposal start (not by an absolute block number);
 - backend, workload unit, and measurement stage;
 - program identity and backend version;
 - pricing model ID and compatibility profile; and

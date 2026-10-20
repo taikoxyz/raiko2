@@ -231,7 +231,7 @@
 
 - [ ] **Step 4: Add failing aggregation tests**
 
-  Cover homogeneous grouping by chain ID plus full ordered fork segments, backend/unit/stage, complete program identity/backend version, model/profile, and normalization identity. Assert adjacent single-fork rows cannot merge with a cross-fork proposal. Cover count-weighted and workload-weighted ratios, underquote rate, zero-actual accounting, nearest-rank quantiles, Pearson/Spearman/Kendall and predeclared bucket amplification for incompatible-unit series, exclusions with reasons, and no compliance/capacity/admission claim fields.
+  Cover homogeneous grouping by chain ID plus ordered fork topology and relative transition offsets, backend/unit/stage, complete program identity/backend version, model/profile, and normalization identity. Absolute block heights for ordinary same-fork proposals must aggregate, while single-fork rows cannot merge with a cross-fork proposal. Cover count-weighted and workload-weighted ratios, underquote rate, zero-actual accounting, nearest-rank quantiles, Pearson/Spearman/Kendall and predeclared bucket amplification for incompatible-unit series, exclusions with reasons, and no compliance/capacity/admission claim fields.
 
 - [ ] **Step 5: Implement deterministic metrics and filtering**
 

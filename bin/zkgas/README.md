@@ -144,6 +144,12 @@ Quote keys are `(corpus_id, sample_id, guest_input_sha256)`; observation keys ar
 quote, including repeated attempts. Any repeated primary key, even byte-identical across files,
 is a structural error. Unmatched rows remain visible rather than being silently dropped.
 
+Before any join or metric, compare revalidates every duplicated complete-quote invariant: canonical
+input hash/length, proof-carry and proposal identities, contiguous block and fork envelopes, public
+output, pricing unit/surface/model, and the embedded node/prove sums and fixed-point totals. An
+inconsistent complete row, or an empty quote or observation population, is a structural failure and
+publishes no run.
+
 ### Compare: cross-program SP1 and incompatible-unit RISC0
 
 For real observations, record the actual ELF SHA-256, backend-native identifier, stage, unit,
@@ -205,9 +211,12 @@ match constrained filters. The entire store is integrity-checked before filterin
 row cannot hide a corrupt file or an upstream partial run.
 
 Reports retain whole-run counts, selected counts, and exclusions with reasons. They always group
-by chain ID, full ordered fork segments (including boundaries), backend, workload unit, stage,
+by chain ID, ordered fork topology with transition offsets relative to the proposal's first block,
+backend, workload unit, stage,
 full program identity, backend version, model, resolved profile, compatibility, and normalization
-identity. Omitting filters never combines heterogeneous strata. Compatible positive-actual rows
+identity. Absolute block numbers therefore do not split ordinary same-fork proposals, while a
+proposal that crosses a fork (and the relative position of that transition) remains an explicit
+stratum distinction. Omitting filters never combines heterogeneous strata. Compatible positive-actual rows
 are eligible for count-weighted ratios, nearest-rank quantiles, and underquote rate. Zero-actual
 rows are accounted separately; workload-weighted ratios use full compatible stratum sums when
 the total actual is positive. Zero prediction with positive actual is infinite underpricing.
@@ -258,13 +267,15 @@ Limits are hard ceilings. Quote's CLI options may tighten their defaults, never 
 
 | Command/contract | Current bounds |
 | --- | --- |
-| Quote | `--max-manifest-bytes` 16 MiB; `--max-input-bytes` 512 MiB; `--max-total-bytes` 8 GiB; `--max-rows` 10,000; `--max-elapsed-seconds` 3,600; `--concurrency` exactly 1 |
+| Quote | `--max-manifest-bytes` 16 MiB; `--max-input-bytes` 512 MiB; `--max-total-bytes` 8 GiB; `--max-rows` 10,000; `--max-elapsed-seconds` 3,600; `--max-output-bytes` 64 MiB; `--concurrency` exactly 1 |
 | Compare | 128 input/config/artifact files; 64 MiB per quote/observation file; 256 MiB aggregate input; 10,000 total quote plus observation rows; 1 MiB per profile config/artifact; 128 profiles; 256 MiB serialized output |
 | Report | 10,000 rows; 4 MiB manifest; 8 MiB per row; 256 MiB manifest plus rows; 64 KiB config; 128 entries per config collection; 32 MiB output |
 | Opaque `metadata`/`source` | 65,536 serialized JSON bytes, depth 16, 1,024 total object/array entries per object |
 
 Quote checks the elapsed budget before and after each native replay; it does not interrupt an
-in-progress replay. Report config additionally bounds semantic depth to 16, nodes to 4,096, and
+in-progress replay. Batch quote rows stream into a sibling staging file under the 64 MiB compare
+input ceiling, retaining only the current serialized row; a limit failure removes staging and
+publishes nothing. Report config additionally bounds semantic depth to 16, nodes to 4,096, and
 keys/strings to 1,024 bytes. Quantiles are unique numeric decimals in `[0,1]` with at most 18
 fractional digits and 32 bytes total; bucket boundaries are `u128` decimal strings of at most
 39 digits, names are at most 128 bytes. Normalization numerator/denominator strings are bounded
@@ -291,7 +302,8 @@ report. Kendall diagnostics use bounded quadratic pair counting, so large strata
 
 Single quotes bind a canonical invocation descriptor without a filesystem path. Batch quotes bind
 the exact raw manifest hash and row ordinal. Every executable is identified by SHA-256 of its
-actual bytes, plus readable package/revision/dirty provenance when available. Rebuilding a binary
+actual running image bytes (a pinned `/proc/self/exe` file on Linux), plus readable
+package/revision/dirty provenance when available. Rebuilding a binary
 can therefore change identities even if its behavior is unchanged.
 
 Comparison IDs bind ordered raw quote/observation hashes, raw profile config hash, executable,

@@ -1,15 +1,15 @@
-# zkGas Quote and Comparison CLI Design
+# zkGas Composable Tools Design
 
 ## Status and Boundary
 
-Approved direction: ship a standalone CLI and test framework for computing and evaluating zkGas.
-It is not a node admission component, prover-runtime integration, service, or deployment. Promotion
-of the pricing model into a real product is a separate future decision made after enough evidence is
-collected.
+Approved direction: add a `bin/zkgas/` workspace package containing small composable command-line
+tools for computing and evaluating zkGas. It is not a node admission component, prover-runtime
+integration, service, or deployment. Promotion of the pricing model into a real product is a
+separate future decision made after enough evidence is collected.
 
-The CLI is source-agnostic. Any producer may supply a valid current-format `GuestInput`: a public
+The tools are source-agnostic. Any producer may supply a valid current-format `GuestInput`: a public
 SP1 task, a local SP1 run, a RISC0 run, a saved fixture, or another source. Succinct is not a trust
-boundary or dependency of the zkGas evaluator.
+boundary or dependency of the zkGas tool suite.
 
 ## Goals
 
@@ -26,7 +26,7 @@ without changing the quote command or coupling it to a collector.
 
 ## Non-Goals
 
-- Do not fetch Succinct, RISC0, RPC, explorer, or cluster data inside the evaluator.
+- Do not fetch Succinct, RISC0, RPC, explorer, or cluster data inside the tools.
 - Do not reconstruct `GuestInput` from proposal or block ranges.
 - Do not run an SP1 or RISC0 guest to obtain truth.
 - Do not add a raiko2 server endpoint, background job, config flag, or runtime persistence path.
@@ -37,11 +37,12 @@ without changing the quote command or coupling it to a collector.
 
 ## Tool Composition
 
-The workflow has three independent roles:
+The workflow consists of independent file-oriented tools:
 
 ```text
-input producer ──> GuestInput bytes ──> zkgas-shadow quote ──> quote rows
-truth producer ──> workload observations ────────────────────> compare/report
+input producer ──> GuestInput ──> zkgas-quote ──> quote rows ───────────────┐
+truth producer ────────────────> workload observations ──> zkgas-compare ──┤
+                                                          comparison rows ──> zkgas-report
 ```
 
 An input producer owns acquisition and retention. A truth producer measures or retrieves backend
@@ -49,36 +50,66 @@ workload. For today's daily SP1 campaign, the existing public-task collector may
 A future RISC0 collector emits the same observation schema with a different backend, unit, and
 program identity.
 
-The evaluator checks byte identity, internal `GuestInput` consistency, join keys, units, and profile
-compatibility. It does not prove that a producer measured the claimed input; that relationship is an
-explicit assertion in the observation row and remains part of corpus provenance.
+`zkgas-quote` checks byte identity and internal `GuestInput` consistency. `zkgas-compare` owns join,
+unit, and compatibility decisions. `zkgas-report` owns filtering and aggregation. None proves that a
+producer measured the claimed input; that relationship is an explicit assertion in the observation
+row and remains part of corpus provenance.
 
-## CLI
+No tool invokes another tool internally. Their versioned JSON/JSONL contracts are the composition
+boundary, so a caller may replace any producer or consume any intermediate output directly.
 
-Add a workspace binary named `zkgas-shadow`.
+## Package Layout
 
-### Quote one input
+Add one workspace package:
 
 ```text
-zkgas-shadow quote \
+bin/zkgas/
+  Cargo.toml
+  README.md
+  src/lib.rs
+  src/bin/zkgas-quote.rs
+  src/bin/zkgas-compare.rs
+  src/bin/zkgas-report.rs
+```
+
+The Cargo package is named `zkgas` and declares the three binary names shown above.
+`src/lib.rs` owns only the shared strict schemas, identity helpers, exact arithmetic, and atomic
+output helpers. Pricing remains in `raiko2-zkgas-trace`; the tools contain no duplicate pricing
+implementation.
+
+`bin/zkgas/README.md` is required. It documents each tool's purpose, inputs, outputs, units, exit
+codes, resource limits, and examples for single-input quote, batch quote, SP1 comparison, RISC0
+comparison, and regenerating a report from existing comparison rows. It also states that data
+acquisition and production admission are out of scope.
+
+## Commands
+
+### `zkgas-quote`
+
+```text
+zkgas-quote \
   --input-bincode ./guest-input.bin \
   --corpus-id ad-hoc-check \
   --sample-id mainnet-proposal-123 \
-  --output ./quote.json
+  --output ./quote.jsonl
 ```
 
-`quote` accepts exactly one current-format canonical bincode `GuestInput`. JSON may be supported as
-a developer convenience, but the CLI re-encodes it and identities always refer to canonical bincode.
-The command calls `raiko2-zkgas-trace::quote_shasta_proposal`; source-specific acquisition logic is
-not linked into the binary.
-
-### Quote a corpus
+The same tool supports a corpus manifest:
 
 ```text
-zkgas-shadow quote-batch \
-  --inputs ./corpus/manifest.json \
+zkgas-quote \
+  --manifest ./corpus/manifest.json \
   --output ./quotes.jsonl
 ```
+
+Exactly one of `--input-bincode` and `--manifest` is accepted. A single input requires explicit
+`--corpus-id` and `--sample-id`; a manifest supplies them. JSON `GuestInput` may be supported as a
+developer convenience, but the tool re-encodes it and identities always refer to canonical bincode.
+The command calls `raiko2-zkgas-trace::quote_shasta_proposal`; source-specific acquisition logic is
+not linked into the package.
+
+Single and batch modes emit the same versioned quote-row JSONL contract, so every downstream tool
+accepts either output without conversion.
 
 Each input-manifest row supplies a unique `sample_id`, a manifest-relative bincode path, SHA-256,
 and byte length. Paths are normalized and must remain beneath the manifest directory. Symlinks,
@@ -86,41 +117,75 @@ non-regular files, absolute paths, and parent traversal are rejected. Rows are p
 bounded concurrency and deterministic output ordering. Every manifest row produces either a
 complete quote row or a typed failure row; failures are never silently dropped.
 
-The quote commands read but do not copy, download, delete, or retain input artifacts. Corpus storage
+`zkgas-quote` reads but does not copy, download, delete, or retain input artifacts. Corpus storage
 is deliberately owned by the input producer. Reports bind the manifest hash and input hashes so a
 caller can determine whether the referenced corpus is still available. A single-quote output and a
-batch output are written atomically. If the exact output path exists, the CLI reuses it only when its
+batch output are written atomically. If the exact output path exists, the tool reuses it only when its
 bytes match the newly computed result; otherwise it fails rather than overwriting it.
 
-### Compare with backend observations
+### `zkgas-compare`
 
 ```text
-zkgas-shadow compare \
+zkgas-compare \
   --quotes ./quotes.jsonl \
   --observations ./sp1-observations.json \
-  --config ./comparison.toml \
+  --profiles ./profiles.toml \
   --output ./comparison-store
 ```
 
-The quote foreign key is `(corpus_id, sample_id, guest_input_sha256)`. Each observation references
-that key but has its own primary key `(observation_set_id, observation_id, attempt_id)`, so one quote
-may join to any number of SP1, RISC0, or repeated observations. Duplicate observation primary keys
-or conflicting quote keys fail closed; unmatched quote and observation rows remain visible in the
-output accounting. The joined-row identity additionally contains the compatibility-profile ID.
+`--quotes` and `--observations` are repeatable, allowing independently produced corpora and backend
+observations to be joined in one comparison run.
 
-The content-addressed comparison config declares compatible backend/program profiles, optional
-normalization artifacts, and any predeclared workload buckets. An embedded initial SP1 profile is
-available for the current pricing model; a file override is explicit and recorded in the report.
+The quote primary key is `(corpus_id, sample_id, guest_input_sha256)`. Each observation references
+that key as a foreign key but has its own primary key
+`(observation_set_id, observation_id, attempt_id)`, so one quote may join to any number of SP1,
+RISC0, or repeated observations. A repeated quote primary key or observation primary key is a
+structural error whether its bytes are identical or conflicting; the tool never silently deduplicates
+them. Unmatched quote and observation rows remain visible in the output accounting. The joined-row
+identity additionally contains the compatibility-profile ID.
 
-Optional filters such as `--chain-id`, `--backend`, and `--program-id` restrict a run explicitly and
-are written into the report. Without a filter, heterogeneous rows remain in the output but are
-stratified; they are never silently combined into one compatibility result.
+The content-addressed profile config declares compatible backend/program profiles and optional
+normalization artifacts. An embedded initial SP1 profile is available for the current pricing model;
+a file override is explicit and recorded in the comparison manifest. The tool emits immutable
+row-level comparison results and accounting; it does not aggregate or filter them.
+
+### `zkgas-report`
+
+```text
+zkgas-report \
+  --comparisons ./comparison-store/runs/<run-id> \
+  --config ./report.toml \
+  --output ./report.json
+```
+
+The content-addressed report config declares filters, grouping, quantiles, and predeclared workload
+buckets. Optional filters such as chain ID, backend, or program ID are recorded in the report.
+Without a filter, heterogeneous rows remain visible but are stratified; they are never silently
+combined into one compatibility result. Re-reporting never reruns native proposal execution or
+changes the row-level compatibility decision.
 
 The existing `guest-launcher proposal-workload-quote` developer interface remains compatible in
-this PR. Both interfaces use the same quote implementation. Removing that interface is a separate
-compatibility decision.
+this PR. It and `zkgas-quote` use the same quote implementation. Removing that interface is a
+separate compatibility decision.
 
-## Portable Input Contracts
+## Versioned Composition Contracts
+
+Every cross-tool file has a required initial `schema_version` and rejects unknown fields. The only
+extension containers are the explicitly bounded input `metadata` and observation `source` objects.
+JSONL repeats its row schema version on every line so a sliced stream remains self-describing. The
+initial contracts are independently versioned:
+
+- input manifest;
+- observation manifest;
+- quote row;
+- compatibility-profile config;
+- comparison manifest;
+- comparison row;
+- report config; and
+- report output.
+
+Changing one contract does not implicitly change another. `bin/zkgas/README.md` contains a contract
+table with the current version, producer, consumer, units, and compatibility rule for every item.
 
 ### Input manifest row
 
@@ -133,7 +198,7 @@ inside the bounded `metadata` object. An input row contains:
 - `guest_input.sha256` and `guest_input.byte_length`; and
 - optional opaque producer metadata that is preserved but not interpreted.
 
-The evaluator opens each path without following symlinks, verifies it is a regular file still
+`zkgas-quote` opens each path without following symlinks, verifies it is a regular file still
 confined under the manifest directory, and then verifies the declared byte identity before decoding.
 It rejects non-canonical bincode, an input that fails proposal validation, an empty proposal,
 arithmetic overflow, and an identity mismatch with a typed row result.
@@ -158,7 +223,7 @@ observation contains:
 - backend and software version when known; and
 - an opaque `source` object identifying how the producer obtained the observation.
 
-The evaluator treats `source` as provenance, not authority. It never contacts that source. Program
+The tools treat `source` as provenance, not authority. They never contact that source. Program
 identifiers with different algorithms are stored separately and are never compared as though they
 were the same digest.
 
@@ -166,9 +231,12 @@ were the same digest.
 
 Each complete quote row contains the full `ProposalWorkloadQuote` and an evaluation envelope with:
 
-- schema version and required evaluator executable SHA-256;
-- CLI package version plus optional source revision and dirty marker as readable provenance;
+- schema version and required `zkgas-quote` executable SHA-256;
+- package version plus optional source revision and dirty marker as readable provenance;
 - `corpus_id`, `sample_id`, canonical GuestInput SHA-256, and byte length;
+- input-source identity: batch mode records the SHA-256 of the exact raw input-manifest bytes and row
+  ordinal, while single mode records a canonical single-input invocation-descriptor SHA-256;
+- the bounded producer metadata from the input row, when present;
 - pricing `model_id` and output schema identity;
 - `taiko.proposal_id`;
 - manifest chain name and chain ID;
@@ -178,7 +246,12 @@ Each complete quote row contains the full `ProposalWorkloadQuote` and an evaluat
 - the ordered active-fork segments across that block range; and
 - status and a typed failure when validation does not complete.
 
-The evaluator requires the manifest, proof-carry data, and every witness to agree on chain and
+The single-input descriptor binds the command schema, corpus ID, sample ID, canonical GuestInput
+identity, and applicable limits without embedding machine-specific paths. Comparison rows retain the
+complete quote envelope; comparison row hashes and the report's verified row-sequence hash therefore
+bind the input manifest or single-input descriptor transitively.
+
+`zkgas-quote` requires the manifest, proof-carry data, and every witness to agree on chain and
 proposal identity wherever the current data model carries the same fact. It also verifies contiguous
 block topology through the canonical proposal-validation path. A disagreement is a typed failure,
 not a separate stratum.
@@ -209,6 +282,17 @@ either backend.
 Every score series and observation has an explicit unit, backend profile, program identity, and
 measurement stage.
 
+For each joined quote/observation pair, profile resolution is exactly one of:
+
+- exactly one matching profile: emit a classified joined row using that profile ID;
+- no matching profile: emit one incompatible row using the profile-config identity and a
+  `no_matching_profile` tag; or
+- more than one matching profile: emit one typed `ambiguous_profile` failure containing the ordered
+  matching profile IDs and make the comparison run partial.
+
+The initial version never expands one observation into multiple profile rows. Profile definitions
+must therefore be disjoint for any quote/observation identity.
+
 Direct prediction-error metrics are enabled only when all of these match a declared compatibility
 profile. For the initial model that means:
 
@@ -221,7 +305,7 @@ The pricing calibration identity is provenance-bound to the pinned Alethia Reth
 `runtime-spec.json` and `RUNTIME_SPEC_SHA256`. Its production ELF SHA-256, serialized-VK artifact
 SHA-256, and any reviewed binding to an SP1 vkey digest remain separately named fields.
 
-For the same unit but an incompatible program, `compare` may expose the numerical ratio only as a
+For the same unit but an incompatible program, `zkgas-compare` may expose the numerical ratio only as a
 cross-program diagnostic and must not classify it as model error, overquote, underquote, or a safety
 result. For a different unit, it does not compute a raw ratio. Both cases may report scale-invariant
 workload-shape metrics such as raw-value Pearson, Spearman, Kendall, and predeclared bucket
@@ -231,7 +315,7 @@ the same unit.
 An optional immutable normalization profile may map one named score unit and program profile to one
 named observation unit and program profile. Normalized results are always labeled diagnostics. The
 profile preserves the original calibration artifact bytes and hash; a wrapper records the exact
-lossless rational interpretation used by the CLI as a separate identity.
+lossless rational interpretation used by the tools as a separate identity.
 
 For the existing Unzen scalar, the only proposal-level conversion is:
 
@@ -242,23 +326,38 @@ calibrated_unzen = ceil(unzen_proposal_sum * numerator / denominator)
 It uses checked integer arithmetic and never sums per-block rounded values or parses through binary
 floating point.
 
-## Comparison Output
+## Comparison Rows
 
 `--output` names a comparison store root. Each run creates an immutable directory containing:
 
 ```text
 runs/<run-id>/manifest.json
-runs/<run-id>/rows/<join-key-sha256>.json
-runs/<run-id>/report.json
+runs/<run-id>/rows/<comparison-row-id>.json
 ```
 
 The run ID is the SHA-256 of a canonical descriptor binding the exact quote, observation, and
-comparison-config file hashes, filter set, required evaluator executable SHA-256, model/profile
-identities, arithmetic policy, and ordered join keys. Package version and source revision do not
-substitute for the executable content identity. Output filenames are derived from hashes, never
-directly from producer-controlled IDs. Files are written through a staging directory and committed
+profile-config file hashes, required `zkgas-compare` executable SHA-256, model/profile identities,
+arithmetic policy, and ordered tagged comparison-row IDs. Package version and source revision do not
+substitute for the executable content identity. Output filenames are the SHA-256 comparison-row IDs,
+never producer-controlled IDs. Files are written through a staging directory and committed
 atomically. Reusing an existing run ID byte-validates every file and never silently overwrites a
 conflict.
+
+Every comparison row has a tagged `comparison_row_id` with a collision-separated canonical input:
+
+- `joined`: quote primary key, observation primary key, and resolved profile ID;
+- `incompatible_profile`: quote primary key, observation primary key, profile-config hash, and the
+  `no_matching_profile` tag;
+- `unmatched_quote`: quote primary key and quote-row content hash;
+- `unmatched_observation`: observation primary key and observation-row content hash;
+- `invalid_quote`: available quote identity fields and quote-row content hash; or
+- `invalid_observation`: available observation identity fields and observation-row content hash.
+
+An `ambiguous_profile` row uses the `joined` identity domain plus the ordered matching profile IDs.
+The comparison manifest records every ordered `(comparison_row_id, row_sha256)` pair and a hash of
+that full sequence, a `complete` or `partial` status, and counts by row category. Before reporting,
+`zkgas-report` verifies the manifest, every row hash, and the sequence hash. Missing, extra,
+reordered, or modified rows are structural failures.
 
 Every joined row records the full quote envelope, observation, compatibility decision, and applicable
 metrics. Unmatched, invalid, incompatible, and failed rows are retained with typed reasons.
@@ -273,8 +372,15 @@ underquoted = prediction < actual
 ```
 
 A positive actual with zero prediction is an explicit infinite underpricing case. A zero actual is
-counted separately and excluded from ratio quantiles. Display ratios use six fractional digits and
-round half to even; classifications use unrounded integers.
+classified separately. Display ratios use six fractional digits and round half to even;
+classifications use unrounded integers.
+
+## Aggregate Report
+
+`zkgas-report` consumes one immutable comparison run. Its output contains a report ID derived from
+the verified comparison manifest hash, bound ordered-row-sequence hash, report-config hash, required
+`zkgas-report` executable SHA-256, arithmetic policy, filters, and grouping rules. The report is
+written atomically; an existing output is reused only when it is byte-identical.
 
 For every homogeneous stratum, the report states the comparison-eligible population and computes:
 
@@ -284,9 +390,10 @@ workload_weighted_prediction_over_actual = sum_i(prediction_i) / sum_i(actual_i)
 underquote_rate = count_i(prediction_i < actual_i) / row_count
 ```
 
-Quantiles use nearest rank with the convention and population recorded. Strata include at least:
+Zero-actual rows are counted separately and excluded from ratio quantiles. Quantiles use nearest rank
+with the convention and population recorded. Strata include at least:
 
-- chain ID and active fork;
+- chain ID and the full ordered active-fork-segment identity for the proposal range;
 - backend, workload unit, and measurement stage;
 - program identity and backend version;
 - pricing model ID and compatibility profile; and
@@ -301,44 +408,66 @@ underquote.
 
 Failures include manifest/schema errors, duplicate join keys, missing files, byte-identity mismatch,
 GuestInput decode or canonicalization failure, proposal validation failure, chain/proposal mismatch,
-quote overflow, incompatible units/profiles, invalid normalization, and output conflict.
+quote overflow, invalid normalization, and output conflict. A valid incompatible unit or profile is
+a classified result, not a processing failure.
 
 Batch input count, individual input bytes, total bytes read, concurrency, and processing time have
 explicit limits. Default concurrency is one because native replay is memory-intensive. Each input is
 released before the next begins; the command never loads the full corpus into memory.
 
 A row-level failure does not erase other results, but a structurally invalid manifest, ambiguous
-join, or inability to commit the report returns nonzero. Partial results remain explicitly marked.
+join, or inability to commit the requested output returns nonzero. Partial results remain explicitly
+marked.
 
 Exit classes are stable for automation:
 
-- `0`: the requested output was committed and every requested row completed; a correctly classified
-  incompatible profile or unavailable metric is not a processing failure;
-- `2`: a structurally valid output was committed with one or more failed or unmatched rows, including
-  the case where every row failed; and
+- `zkgas-quote` returns `0` only when every requested row completes and `2` when it commits a valid
+  stream containing one or more failed rows, including when every row failed;
+- `zkgas-compare` returns `0` only when all input rows are valid, every expected join is resolved, and
+  no ambiguous profile exists; it returns `2` after committing any upstream failure, unmatched row,
+  invalid row, or ambiguous-profile row;
+- `zkgas-report` returns `2` whenever the verified comparison manifest is partial, even if its
+  filters exclude every partial row; it returns `0` only for a complete source run and a successfully
+  committed report; and
 - `1`: usage/configuration error or no structurally valid output could be committed.
+
+A correctly classified incompatible profile or unavailable metric is not a processing failure for
+any tool. Every report records whole-run partial counts before filters as well as selected-population
+counts after filters, so filtering cannot hide or downgrade upstream incompleteness.
 
 ## Verification
 
 Implementation requires focused automated coverage for:
 
-- quote equivalence between `zkgas-shadow` and the existing guest-launcher entry point;
-- strict input/observation schema versions and bounded opaque metadata;
+- quote equivalence between `zkgas-quote` and the existing guest-launcher entry point;
+- `bin/zkgas/README.md` command, schema, unit, composition, limit, and exit-code examples that match
+  the implemented `--help` output;
+- independent strict versions and unknown-field rejection for all eight composition contracts, plus
+  bounded opaque metadata;
 - current bincode canonical round-trip and invalid-input failure;
 - exact input hash/length checks plus absolute, parent-traversal, symlink, and special-file rejection;
+- batch manifest and row-ordinal provenance, canonical single-input descriptors, and a changed
+  manifest with identical GuestInput producing distinct quote/report identities;
 - proposal ID, chain ID, chain-spec, active-fork, block-range, and public-output extraction;
+- cross-fork proposal stratification that cannot merge with either adjacent single-fork stratum;
 - mixed mainnet/Hoodi/dev/Masaya fixtures and mismatch rejection;
 - deterministic batch ordering, bounded memory, and typed partial rows;
-- one-to-many quote/observation joins, repeated-attempt identity, duplicate conflict, and unmatched
-  accounting;
+- one-to-many quote/observation joins, repeated-attempt identity, identical and conflicting duplicate
+  rejection, and unmatched accounting;
+- collision-separated identities for joined, unmatched, invalid, and ambiguous-profile rows;
+- comparison-row-ID filenames and run descriptors covering every complete and partial row variant;
+- zero, exactly-one, and overlapping-profile resolution fixtures;
 - SP1 compatible-unit direct metrics, zero prediction, zero actual, rounding, and quantiles;
 - RISC0 or synthetic incompatible-unit rows that permit only scale-valid recognition metrics;
 - program/digest algorithm mismatch and calibration incompatibility labeling;
 - exact Unzen proposal-sum normalization and a guard against raw Unzen/backend ratios;
 - homogeneous stratification and prevention of cross-chain/program/backend aggregation;
-- atomic/idempotent quote and report output, deterministic run IDs, and stable exit classes;
-- distinct quote/run identities for different evaluator executables with the same package, model,
-  and inputs; and
+- comparison row-sequence hashing, report-time integrity verification, and tampered/missing/extra row
+  rejection;
+- atomic/idempotent quote, comparison, and report output, deterministic IDs, and stable exit classes;
+- report exit-class propagation before and after filters so partial input cannot become success;
+- distinct output identities for different quote, compare, or report executables with the same
+  package, model, and inputs; and
 - multi-transaction EIP-7702 code-identity reconciliation in the quote core.
 
 CI uses only checked-in small protocol fixtures. Live SP1 or RISC0 collection is a separate bounded
@@ -346,10 +475,10 @@ campaign step and is not required for deterministic tests.
 
 ## Promotion Boundary
 
-Merging this CLI means the repository can compute source-independent zkGas quotes and evaluate them
-against separately collected backend observations. It does not activate the model in a node, set a
-zkGas limit, establish prover capacity, or authorize a mainnet admission change.
+Merging these tools means the repository can compute source-independent zkGas quotes and evaluate
+them against separately collected backend observations. It does not activate the model in a node,
+set a zkGas limit, establish prover capacity, or authorize a mainnet admission change.
 
 Promotion requires a later explicit decision against the draft evaluation standard using declared
 natural and controlled corpora, matching backend profiles, compatibility results, and a capacity
-policy. Until then, this CLI remains evaluation and regression tooling.
+policy. Until then, `bin/zkgas/` remains evaluation and regression tooling.

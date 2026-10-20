@@ -200,3 +200,39 @@ fn staging_alias_is_rejected_without_removing_existing_output() {
     assert!(commit_directory(&staging, &alias).is_err());
     assert_eq!(fs::read(staging.join("rows/row.json")).unwrap(), b"row");
 }
+#[test]
+fn bounded_commit_rejects_oversized_existing_files_and_preserves_no_replace_races() {
+    let root = std::env::temp_dir().join(format!("zkgas-bounded-output-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&root).unwrap();
+    let destination = root.join("report.json");
+    std::fs::write(&destination, b"existing").unwrap();
+    assert!(zkgas::output::commit_file_bounded(&destination, b"existing", 4).is_err());
+    assert_eq!(std::fs::read(&destination).unwrap(), b"existing");
+    assert_eq!(
+        zkgas::output::commit_file_bounded(&destination, b"existing", 8).unwrap(),
+        zkgas::output::CommitOutcome::Reused
+    );
+    let raced = root.join("raced.json");
+    let writers: Vec<_> = (0..8)
+        .map(|_| {
+            let raced = raced.clone();
+            std::thread::spawn(move || {
+                zkgas::output::commit_file_bounded(&raced, b"same", 4).unwrap()
+            })
+        })
+        .collect();
+    let outcomes: Vec<_> = writers
+        .into_iter()
+        .map(|writer| writer.join().unwrap())
+        .collect();
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|o| **o == zkgas::output::CommitOutcome::Created)
+            .count(),
+        1
+    );
+    assert_eq!(std::fs::read(&raced).unwrap(), b"same");
+    assert_eq!(std::fs::read_dir(&root).unwrap().count(), 2);
+    std::fs::remove_dir_all(&root).unwrap();
+}

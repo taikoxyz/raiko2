@@ -25,7 +25,11 @@ fn parent(path: &Path) -> Result<&Path> {
 }
 
 fn read_regular(path: &Path) -> Result<Vec<u8>> {
-    let mut file = OpenOptions::new()
+    read_regular_bounded(path, u64::MAX)
+}
+
+fn read_regular_bounded(path: &Path, limit: u64) -> Result<Vec<u8>> {
+    let file = OpenOptions::new()
         .read(true)
         .custom_flags((OFlags::NOFOLLOW | OFlags::NONBLOCK).bits() as i32)
         .open(path)?;
@@ -34,13 +38,30 @@ fn read_regular(path: &Path) -> Result<Vec<u8>> {
         "output is not a regular file: {}",
         path.display()
     );
+    ensure!(
+        file.metadata()?.len() <= limit,
+        "existing output byte limit exceeded"
+    );
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
+    file.take(limit.saturating_add(1)).read_to_end(&mut bytes)?;
+    ensure!(
+        bytes.len() as u64 <= limit,
+        "existing output byte limit exceeded"
+    );
     Ok(bytes)
 }
 
 /// Publish complete bytes atomically without ever overwriting an existing destination.
 pub fn commit_file(path: &Path, bytes: &[u8]) -> Result<CommitOutcome> {
+    commit_file_bounded(path, bytes, u64::MAX)
+}
+
+/// Same atomic publication, with a hard read cap even if a conflicting file appears concurrently.
+pub fn commit_file_bounded(
+    path: &Path,
+    bytes: &[u8],
+    max_existing_bytes: u64,
+) -> Result<CommitOutcome> {
     let parent = parent(path)?;
     let staging = parent.join(format!(".zkgas-file-{}.tmp", uuid::Uuid::new_v4()));
     let mut temporary = OpenOptions::new()
@@ -57,7 +78,7 @@ pub fn commit_file(path: &Path, bytes: &[u8]) -> Result<CommitOutcome> {
             }
             Err(rustix::io::Errno::EXIST) => {
                 ensure!(
-                    read_regular(path)? == bytes,
+                    read_regular_bounded(path, max_existing_bytes)? == bytes,
                     "immutable output conflict: {}",
                     path.display()
                 );

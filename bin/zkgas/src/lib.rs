@@ -5,3 +5,4 @@ pub mod contracts;
 pub mod identity;
 pub mod output;
 pub mod quote;
+pub mod report;

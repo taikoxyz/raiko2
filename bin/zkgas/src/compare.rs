@@ -7,6 +7,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use alethia_reth_evm::zk_gas::pricing::FIXED_POINT_SCALE;
 use anyhow::{Context, Result, ensure};
 use num_bigint::BigUint;
 use num_traits::Zero;
@@ -20,7 +21,7 @@ use crate::{
 };
 
 pub const MAX_COMPARE_FILES: usize = 128;
-pub const MAX_COMPARE_FILE_BYTES: u64 = 64 * 1024 * 1024;
+pub const MAX_COMPARE_FILE_BYTES: u64 = crate::quote::MAX_QUOTE_OUTPUT_BYTES;
 pub const MAX_COMPARE_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_COMPARE_ROWS: usize = MAX_OBSERVATION_ROWS;
 pub const MAX_PROFILE_BYTES: u64 = 1024 * 1024;
@@ -71,6 +72,253 @@ pub enum ProfileResolution {
     Matched(String),
     NoMatch,
     Ambiguous(Vec<String>),
+}
+
+fn checked_sum(values: impl IntoIterator<Item = i128>) -> Result<i128> {
+    values
+        .into_iter()
+        .try_fold(0i128, |sum, value| sum.checked_add(value))
+        .context("pricing scaled sum overflow")
+}
+
+fn ceil_scaled(value: i128) -> Result<u128> {
+    ensure!(
+        value >= 0 && FIXED_POINT_SCALE > 0,
+        "invalid scaled prediction"
+    );
+    let quotient = value / FIXED_POINT_SCALE;
+    let remainder = value % FIXED_POINT_SCALE;
+    u128::try_from(quotient + i128::from(remainder != 0)).context("prediction exceeds u128")
+}
+
+fn validate_pricing_breakdown(
+    pricing: &raiko2_zkgas_trace::PricingBreakdownSnapshot,
+) -> Result<()> {
+    ensure!(
+        pricing.total_scaled
+            == checked_sum([
+                pricing.fixed_scaled,
+                pricing.operations_scaled,
+                pricing.feature_error_scaled,
+                pricing.resources_scaled,
+                pricing.mpt_scaled,
+                pricing.startup_scaled,
+                pricing.transaction_payload_scaled,
+                pricing.blob_source_scaled,
+                pricing.parent_mpt_scaled,
+            ])?,
+        "pricing breakdown total_scaled mismatch"
+    );
+    ensure!(
+        pricing.total_pgu == ceil_scaled(pricing.total_scaled)?,
+        "pricing breakdown total_pgu mismatch"
+    );
+    Ok(())
+}
+
+fn validate_complete_quote(complete: &CompleteQuoteV1) -> Result<()> {
+    let quote = &complete.quote;
+    let proposal = &complete.proposal;
+    ensure!(
+        quote.schema_version == 1,
+        "embedded quote schema_version mismatch"
+    );
+    ensure!(
+        complete.key.guest_input_sha256 == quote.guest_input_sha256,
+        "guest input hash mismatch"
+    );
+    ensure!(
+        usize::try_from(complete.guest_input_byte_length).ok()
+            == Some(quote.guest_input_bincode_length),
+        "guest input length mismatch"
+    );
+    ensure!(
+        proposal.proof_carry_chain_id == proposal.chain.chain_id,
+        "proof-carry chain identity mismatch"
+    );
+    ensure!(
+        proposal.proof_carry_proposal_id == proposal.proposal_id,
+        "proof-carry proposal identity mismatch"
+    );
+    ensure!(
+        proposal.block_count > 0,
+        "proposal block count must be positive"
+    );
+    let block_count = usize::try_from(proposal.block_count).context("block count exceeds usize")?;
+    ensure!(
+        quote.blocks.len() == block_count,
+        "proposal and embedded quote block count mismatch"
+    );
+    ensure!(
+        proposal.witness_chain_spec_sha256.len() == block_count,
+        "witness chain-spec count mismatch"
+    );
+    ensure!(
+        proposal.first_block.checked_add(proposal.block_count - 1) == Some(proposal.last_block),
+        "proposal block range mismatch"
+    );
+    ensure!(
+        proposal.public_output == quote.public_output.to_string(),
+        "public output mismatch"
+    );
+    for (index, block) in quote.blocks.iter().enumerate() {
+        ensure!(block.block_index == index, "embedded block index mismatch");
+        ensure!(
+            proposal.first_block.checked_add(index as u64) == Some(block.block_number),
+            "embedded block number mismatch"
+        );
+        ensure!(
+            block.prove.started_transaction_count <= block.prove.input_transaction_count
+                && block.prove.true_unattempted_transactions
+                    == block.prove.input_transaction_count - block.prove.started_transaction_count,
+            "embedded block transaction topology mismatch"
+        );
+        let node = &block.node.pricing;
+        ensure!(
+            node.known_subtotal_scaled
+                == checked_sum([
+                    node.fixed_scaled,
+                    node.operations_scaled,
+                    node.feature_error_scaled,
+                    node.evm_local_resources_scaled,
+                ])?,
+            "node pricing subtotal mismatch"
+        );
+        ensure!(
+            node.known_subtotal_pgu == ceil_scaled(node.known_subtotal_scaled)?,
+            "node pricing pgu mismatch"
+        );
+        validate_pricing_breakdown(&block.prove.pricing)?;
+    }
+    ensure!(!proposal.fork_segments.is_empty(), "fork envelope is empty");
+    let mut next = proposal.first_block;
+    for segment in &proposal.fork_segments {
+        ensure!(!segment.fork.is_empty(), "fork name is empty");
+        ensure!(
+            segment.first_block == next && segment.first_block <= segment.last_block,
+            "fork envelope is not ordered and contiguous"
+        );
+        next = segment
+            .last_block
+            .checked_add(1)
+            .context("fork envelope end overflow")?;
+    }
+    ensure!(
+        next == proposal
+            .last_block
+            .checked_add(1)
+            .context("proposal range end overflow")?,
+        "fork envelope does not cover proposal range"
+    );
+
+    ensure!(
+        complete.prediction_surface == "prove" && complete.prediction_unit == "sp1_pgu",
+        "unsupported prediction surface or unit"
+    );
+    ensure!(
+        !quote.model_id.is_empty() && complete.calibration_profile == quote.model_id,
+        "prediction model identity mismatch"
+    );
+    let unzen_sum = quote
+        .blocks
+        .iter()
+        .try_fold(0u128, |sum, block| {
+            sum.checked_add(u128::from(block.node.unzen_zkgas))
+        })
+        .context("unzen sum overflow")?;
+    ensure!(
+        quote.node.unzen_zkgas_sum == unzen_sum,
+        "unzen proposal sum mismatch"
+    );
+    let known_scaled = checked_sum(
+        quote
+            .blocks
+            .iter()
+            .map(|b| b.node.pricing.known_subtotal_scaled),
+    )?;
+    ensure!(
+        quote.node.block_local_known_scaled == known_scaled,
+        "node scaled sum mismatch"
+    );
+    ensure!(
+        quote.node.block_local_known_pgu == ceil_scaled(known_scaled)?,
+        "node proposal pgu mismatch"
+    );
+    let known_pgu = quote
+        .blocks
+        .iter()
+        .try_fold(0u128, |sum, block| {
+            sum.checked_add(block.node.pricing.known_subtotal_pgu)
+        })
+        .context("node pgu sum overflow")?;
+    ensure!(
+        quote.node.sum_of_block_known_pgu == known_pgu,
+        "node block pgu sum mismatch"
+    );
+
+    validate_pricing_breakdown(&quote.prove.proposal_once)?;
+    let block_scaled = checked_sum(quote.blocks.iter().map(|b| b.prove.pricing.total_scaled))?;
+    ensure!(
+        quote.prove.block_local_scaled == block_scaled,
+        "prove block scaled sum mismatch"
+    );
+    ensure!(
+        quote.prove.block_local_pgu == ceil_scaled(block_scaled)?,
+        "prove block pgu mismatch"
+    );
+    let block_pgu = quote
+        .blocks
+        .iter()
+        .try_fold(0u128, |sum, block| {
+            sum.checked_add(block.prove.pricing.total_pgu)
+        })
+        .context("prove block pgu sum overflow")?;
+    ensure!(
+        quote.prove.sum_of_block_admission_pgu == block_pgu,
+        "prove block admission sum mismatch"
+    );
+    ensure!(
+        quote.prove.proposal_once_pgu == quote.prove.proposal_once.total_pgu,
+        "proposal-once pgu mismatch"
+    );
+    let total_scaled = block_scaled
+        .checked_add(quote.prove.proposal_once.total_scaled)
+        .context("prove total overflow")?;
+    ensure!(
+        quote.prove.total_scaled == total_scaled,
+        "prove total_scaled mismatch"
+    );
+    ensure!(
+        quote.prove.total_pgu == ceil_scaled(total_scaled)?,
+        "prove total_pgu mismatch"
+    );
+    let input_transactions = quote
+        .blocks
+        .iter()
+        .try_fold(0u64, |sum, block| {
+            sum.checked_add(block.prove.input_transaction_count)
+        })
+        .context("transaction count overflow")?;
+    let unattempted = quote
+        .blocks
+        .iter()
+        .try_fold(0u64, |sum, block| {
+            sum.checked_add(block.prove.true_unattempted_transactions)
+        })
+        .context("unattempted transaction count overflow")?;
+    ensure!(
+        quote.prove.selectors.payload.total_transaction_count == input_transactions,
+        "payload transaction count mismatch"
+    );
+    ensure!(
+        quote.prove.selectors.true_unattempted_transactions == unattempted,
+        "unattempted transaction count mismatch"
+    );
+    ensure!(
+        quote.prove.selectors.payload.nonempty_payload_transactions <= input_transactions,
+        "nonempty payload transaction count mismatch"
+    );
+    Ok(())
 }
 
 /// A profile constrains every algorithm it names. Additional observed algorithms are provenance.
@@ -547,6 +795,9 @@ pub fn run_compare(args: &CompareArgs, executable: &ExecutableIdentity) -> Resul
                 );
                 row_count += 1;
                 let row: QuoteRowV1 = serde_json::from_str(line)?;
+                if let QuoteRowV1::Complete(quote) = &row {
+                    validate_complete_quote(quote).context("complete quote invariant violation")?;
+                }
                 let key = match &row {
                     QuoteRowV1::Complete(q) => Some(&q.key),
                     QuoteRowV1::Failed(q) => q.verified_key.as_ref(),
@@ -588,6 +839,8 @@ pub fn run_compare(args: &CompareArgs, executable: &ExecutableIdentity) -> Resul
             }
         }
     }
+    ensure!(!quotes.is_empty(), "quote population is empty");
+    ensure!(!observations.is_empty(), "observation population is empty");
     let mut builder = RowBuilder::new();
     let mut complete_quotes = BTreeMap::new();
     let mut quote_order = Vec::new();
@@ -676,6 +929,10 @@ pub fn run_compare(args: &CompareArgs, executable: &ExecutableIdentity) -> Resul
             })?;
         }
     }
+    ensure!(
+        !builder.digests.is_empty(),
+        "comparison population is empty"
+    );
     let status = if builder.counts.keys().all(|kind| {
         matches!(
             kind,

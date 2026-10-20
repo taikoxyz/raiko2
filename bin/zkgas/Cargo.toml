@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 alethia-reth-chainspec.workspace = true
+alethia-reth-evm.workspace = true
 anyhow.workspace = true
 bincode.workspace = true
 clap.workspace = true

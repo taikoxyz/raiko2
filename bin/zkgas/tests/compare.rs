@@ -36,15 +36,20 @@ fn executable() -> ExecutableIdentity {
 }
 fn quote() -> CompleteQuoteV1 {
     let p = embedded_profiles().unwrap().profiles.remove(0);
+    let public_output = format!("0x{}", "00".repeat(32));
     serde_json::from_value(json!({
         "schema_version":1,"key":{"corpus_id":"corpus","sample_id":"sample","guest_input_sha256":"input"},
         "executable":executable(),"input_source":{"kind":"single","descriptor_sha256":"descriptor"},"guest_input_byte_length":12,
-        "proposal":{"proposal_id":1,"chain":{"name":"sample-chain","chain_id":167000},"proof_carry_chain_id":167000,"proof_carry_proposal_id":1,"witness_chain_spec_sha256":["spec"],"first_block":2,"last_block":2,"block_count":1,"public_output":"output","fork_segments":[{"fork":"SHASTA","first_block":2,"last_block":2}]},
+        "proposal":{"proposal_id":1,"chain":{"name":"sample-chain","chain_id":167000},"proof_carry_chain_id":167000,"proof_carry_proposal_id":1,"witness_chain_spec_sha256":["spec"],"first_block":2,"last_block":2,"block_count":1,"public_output":public_output,"fork_segments":[{"fork":"SHASTA","first_block":2,"last_block":2}]},
         "prediction_unit":"sp1_pgu","prediction_surface":"prove","calibration_profile":p.model_id,
-        "quote":{"schema_version":1,"model_id":p.model_id,"guest_input_sha256":"input","guest_input_bincode_length":12,"public_output":format!("0x{}", "00".repeat(32)),"blocks":[],
+        "quote":{"schema_version":1,"model_id":p.model_id,"guest_input_sha256":"input","guest_input_bincode_length":12,"public_output":public_output,"blocks":[{
+            "block_index":0,"block_number":2,
+            "node":{"unzen_zkgas":2,"pricing":{"fixed_scaled":"0","operations_scaled":"0","feature_error_scaled":"0","evm_local_resources":{"unique_account_count":0,"unique_storage_slot_access_count":0,"unique_storage_slot_write_count":0,"unique_code_hash_count":0,"unique_code_bytes":0},"evm_local_resources_scaled":"0","known_subtotal_scaled":"0","known_subtotal_pgu":"0"}},
+            "prove":{"input_transaction_count":0,"started_transaction_count":0,"true_unattempted_transactions":0,"exact_resources":{"unique_account_count":0,"unique_storage_slot_access_count":0,"unique_storage_slot_write_count":0,"unique_code_hash_count":0,"unique_code_bytes":0},"mpt":{"path_node_visits":0,"materialization_work_units":0,"hydration_hash_blocks":0,"dirty_encoded_nodes":0,"dirty_hash_blocks":0,"structural_branch_extension_churn_nodes":0,"dropped_trie_nodes":0},"pricing":{"fixed_scaled":"0","operations_scaled":"0","feature_error_scaled":"0","resources_scaled":"0","mpt_scaled":"0","startup_scaled":"0","transaction_payload_scaled":"0","blob_source_scaled":"0","parent_mpt_scaled":"0","total_scaled":"0","total_pgu":"0"}}
+        }],
             "node":{"unzen_zkgas_sum":"2","block_local_known_scaled":"0","block_local_known_pgu":"0","sum_of_block_known_pgu":"0"},
             "prove":{"selectors":{"payload":{"total_transaction_count":0,"canonical_transaction_bytes":0,"nonempty_payload_transactions":0},"true_unattempted_transactions":0,"blobs":{"source_blob_counts":[],"proposal_blob_hash_count":0,"provider_blob_count":0,"provider_commitment_count":0,"provider_proof_count":0},"parent_mpt":{"path_node_visits":0,"materialization_work_units":0,"hydration_hash_blocks":0,"dirty_encoded_nodes":0,"dirty_hash_blocks":0,"structural_branch_extension_churn_nodes":0,"dropped_trie_nodes":0}},
-                "block_local_scaled":"0","block_local_pgu":"0","sum_of_block_admission_pgu":"0","proposal_once":{"fixed_scaled":"0","operations_scaled":"0","feature_error_scaled":"0","resources_scaled":"0","mpt_scaled":"0","startup_scaled":"0","transaction_payload_scaled":"0","blob_source_scaled":"0","parent_mpt_scaled":"0","total_scaled":"0","total_pgu":"0"},"proposal_once_pgu":"0","total_scaled":"0","total_pgu":"10"}}
+                "block_local_scaled":"0","block_local_pgu":"0","sum_of_block_admission_pgu":"0","proposal_once":{"fixed_scaled":"10000000000000000000","operations_scaled":"0","feature_error_scaled":"0","resources_scaled":"0","mpt_scaled":"0","startup_scaled":"0","transaction_payload_scaled":"0","blob_source_scaled":"0","parent_mpt_scaled":"0","total_scaled":"10000000000000000000","total_pgu":"10"},"proposal_once_pgu":"10","total_scaled":"10000000000000000000","total_pgu":"10"}}
     })).unwrap()
 }
 fn observation() -> CompleteObservationV1 {
@@ -219,7 +224,7 @@ fn duplicate_primary_keys_within_and_across_files_are_structural_even_when_ident
                 let mut q = quote();
                 let mut o = observation();
                 if conflicting {
-                    q.quote.prove.total_pgu += 1;
+                    q.executable.sha256 = "different-executable".into();
                     o.workload.value += 1;
                 }
                 let mut args = write_inputs(&dir, &[complete_quote()], &[complete_observation()]);
@@ -272,6 +277,114 @@ fn duplicate_primary_keys_within_and_across_files_are_structural_even_when_ident
                 assert!(!args.output.exists());
             }
         }
+    }
+}
+
+#[test]
+fn complete_quotes_reject_every_inconsistent_embedded_identity_before_joining() {
+    for mutation in [
+        "input-hash",
+        "input-length",
+        "proof-chain",
+        "proof-proposal",
+        "range",
+        "block-count",
+        "witness-count",
+        "public-output",
+        "empty-forks",
+        "fork-start",
+        "fork-end",
+        "fork-gap",
+        "fork-name",
+        "block-index",
+        "block-number",
+        "quote-schema",
+        "prediction-unit",
+        "prediction-surface",
+        "calibration-model",
+        "quote-model",
+        "prediction-total",
+    ] {
+        let dir = TestDir::new();
+        let mut q = quote();
+        match mutation {
+            "input-hash" => q.quote.guest_input_sha256 = "other".into(),
+            "input-length" => q.quote.guest_input_bincode_length += 1,
+            "proof-chain" => q.proposal.proof_carry_chain_id += 1,
+            "proof-proposal" => q.proposal.proof_carry_proposal_id += 1,
+            "range" => q.proposal.last_block += 1,
+            "block-count" => q.proposal.block_count += 1,
+            "witness-count" => q.proposal.witness_chain_spec_sha256.push("extra".into()),
+            "public-output" => q.proposal.public_output = "other".into(),
+            "empty-forks" => q.proposal.fork_segments.clear(),
+            "fork-start" => q.proposal.fork_segments[0].first_block += 1,
+            "fork-end" => q.proposal.fork_segments[0].last_block -= 1,
+            "fork-gap" => {
+                q.proposal.last_block = 4;
+                q.proposal.block_count = 3;
+                q.proposal.witness_chain_spec_sha256 = vec!["a".into(), "b".into(), "c".into()];
+                q.quote.blocks[0].block_number = 2;
+                let mut second = q.quote.blocks[0].clone();
+                second.block_index = 1;
+                second.block_number = 3;
+                let mut third = second.clone();
+                third.block_index = 2;
+                third.block_number = 4;
+                q.quote.blocks.extend([second, third]);
+                q.proposal.fork_segments = vec![
+                    ForkSegmentV1 {
+                        fork: "SHASTA".into(),
+                        first_block: 2,
+                        last_block: 2,
+                    },
+                    ForkSegmentV1 {
+                        fork: "UNZEN".into(),
+                        first_block: 4,
+                        last_block: 4,
+                    },
+                ];
+            }
+            "fork-name" => q.proposal.fork_segments[0].fork.clear(),
+            "block-index" => q.quote.blocks[0].block_index = 1,
+            "block-number" => q.quote.blocks[0].block_number += 1,
+            "quote-schema" => q.quote.schema_version = 2,
+            "prediction-unit" => q.prediction_unit = "other".into(),
+            "prediction-surface" => q.prediction_surface = "node".into(),
+            "calibration-model" => q.calibration_profile = "other".into(),
+            "quote-model" => q.quote.model_id = "other".into(),
+            "prediction-total" => q.quote.prove.total_pgu += 1,
+            _ => unreachable!(),
+        }
+        let args = write_inputs(
+            &dir,
+            &[QuoteRowV1::Complete(Box::new(q))],
+            &[complete_observation()],
+        );
+        let error = run_compare(&args, &executable()).unwrap_err();
+        assert!(
+            error.to_string().contains("complete quote invariant")
+                || error.to_string().contains("embedded quote schema_version"),
+            "wrong error for {mutation}: {error:#}"
+        );
+        assert!(!args.output.exists(), "committed output for {mutation}");
+    }
+}
+
+#[test]
+fn empty_quote_or_observation_populations_are_structural_collection_failures() {
+    for (quotes, observations) in [
+        (vec![], vec![complete_observation()]),
+        (vec![complete_quote()], vec![]),
+        (vec![], vec![]),
+    ] {
+        let dir = TestDir::new();
+        let args = write_inputs(&dir, &quotes, &observations);
+        let error = run_compare(&args, &executable()).unwrap_err();
+        assert!(
+            error.to_string().contains("population is empty"),
+            "{error:#}"
+        );
+        assert!(!args.output.exists());
     }
 }
 
@@ -735,7 +848,7 @@ fn binary_exit_codes_cover_complete_partial_incompatible_and_structural_errors()
 fn unverified_failed_rows_cannot_alias_one_immutable_row_path() {
     let failed:QuoteRowV1=serde_json::from_value(json!({"schema_version":1,"status":"failed","corpus_id":"corpus","sample_id":"failed","observed_guest_input_sha256":"claimed-input","executable":executable(),"input_source":{"kind":"single","descriptor_sha256":"descriptor"},"failure":{"code":"decode","message":"invalid"}})).unwrap();
     let dir = TestDir::new();
-    let args = write_inputs(&dir, &[failed.clone(), failed], &[]);
+    let args = write_inputs(&dir, &[failed.clone(), failed], &[complete_observation()]);
     assert!(
         run_compare(&args, &executable())
             .unwrap_err()

@@ -14832,6 +14832,7 @@ name = "zkgas"
 version = "0.1.0"
 dependencies = [
  "alethia-reth-chainspec 1.4.1 (git+https://github.com/taikoxyz/alethia-reth?rev=37a3366edda050abc6460bfc0f4c27b242a72f5e)",
+ "alethia-reth-evm",
  "anyhow",
  "bincode",
  "clap",

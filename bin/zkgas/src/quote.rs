@@ -22,6 +22,7 @@ use crate::{
 };
 
 /// Replay is deliberately sequential, with a bounded input working set.
+/// Defaults are contract hard ceilings; callers may only tighten them.
 #[derive(Clone, Debug, Args, serde::Serialize)]
 pub struct QuoteLimits {
     #[arg(long, default_value_t = 16 * 1024 * 1024)]
@@ -49,6 +50,45 @@ impl Default for QuoteLimits {
             max_elapsed_seconds: 3_600,
             concurrency: 1,
         }
+    }
+}
+impl QuoteLimits {
+    fn validate(&self) -> Result<()> {
+        let ceilings = Self::default();
+        for (field, requested, ceiling) in [
+            (
+                "max_manifest_bytes",
+                self.max_manifest_bytes,
+                ceilings.max_manifest_bytes,
+            ),
+            (
+                "max_input_bytes",
+                self.max_input_bytes,
+                ceilings.max_input_bytes,
+            ),
+            (
+                "max_total_bytes",
+                self.max_total_bytes,
+                ceilings.max_total_bytes,
+            ),
+            (
+                "max_elapsed_seconds",
+                self.max_elapsed_seconds,
+                ceilings.max_elapsed_seconds,
+            ),
+        ] {
+            ensure!(
+                requested <= ceiling,
+                "{field} exceeds hard ceiling {ceiling}"
+            );
+        }
+        ensure!(
+            self.max_rows <= ceilings.max_rows,
+            "max_rows exceeds hard ceiling {}",
+            ceilings.max_rows
+        );
+        ensure!(self.concurrency == 1, "concurrency must be one");
+        Ok(())
     }
 }
 
@@ -345,8 +385,8 @@ fn quote_input(
 
 /// Errors mean no valid requested output was committed; row failures commit a partial run.
 pub fn run_quote(args: &QuoteArgs, executable: &ExecutableIdentity) -> Result<QuoteRun> {
+    args.limits.validate()?;
     let started = Instant::now();
-    ensure!(args.limits.concurrency == 1, "concurrency must be one");
     ensure!(
         [
             args.input_bincode.is_some(),

@@ -393,7 +393,7 @@ fn single_descriptor_binds_resource_limits() {
     run_quote(&args, &executable()).unwrap();
     let first = rows(&args.output);
     args.output = dir.path().join("other.jsonl");
-    args.limits.max_input_bytes += 1;
+    args.limits.max_input_bytes -= 1;
     run_quote(&args, &executable()).unwrap();
     let second = rows(&args.output);
     let (QuoteRowV1::Complete(first), QuoteRowV1::Complete(second)) = (&first[0], &second[0])
@@ -402,6 +402,79 @@ fn single_descriptor_binds_resource_limits() {
     };
     assert_eq!(first.key, second.key);
     assert_ne!(first.input_source, second.input_source);
+}
+
+#[test]
+fn api_rejects_every_raised_ceiling_before_input_io() {
+    for (field, ceiling) in [
+        ("max_manifest_bytes", 16 * 1024 * 1024u64),
+        ("max_input_bytes", 512 * 1024 * 1024),
+        ("max_total_bytes", 8 * 1024 * 1024 * 1024),
+        ("max_rows", 10_000),
+        ("max_elapsed_seconds", 3_600),
+    ] {
+        let dir = TestDir::new();
+        let mut args = QuoteArgs {
+            manifest: Some(dir.path().join("must-not-be-opened.json")),
+            output: dir.path().join("quotes.jsonl"),
+            ..Default::default()
+        };
+        match field {
+            "max_manifest_bytes" => args.limits.max_manifest_bytes = ceiling + 1,
+            "max_input_bytes" => args.limits.max_input_bytes = ceiling + 1,
+            "max_total_bytes" => args.limits.max_total_bytes = ceiling + 1,
+            "max_rows" => args.limits.max_rows = (ceiling + 1) as usize,
+            "max_elapsed_seconds" => args.limits.max_elapsed_seconds = ceiling + 1,
+            _ => unreachable!(),
+        }
+        let error = run_quote(&args, &executable()).unwrap_err().to_string();
+        assert!(
+            error.contains(&format!("{field} exceeds hard ceiling")),
+            "{field}: {error}"
+        );
+        assert!(!args.output.exists(), "{field}");
+    }
+}
+
+#[test]
+fn cli_rejects_every_raised_ceiling_with_structural_exit() {
+    for (flag, field, value) in [
+        ("--max-manifest-bytes", "max_manifest_bytes", "16777217"),
+        ("--max-input-bytes", "max_input_bytes", "536870913"),
+        ("--max-total-bytes", "max_total_bytes", "8589934593"),
+        ("--max-rows", "max_rows", "10001"),
+        ("--max-elapsed-seconds", "max_elapsed_seconds", "3601"),
+    ] {
+        let dir = TestDir::new();
+        let output = dir.path().join("quotes.jsonl");
+        let result = cli()
+            .arg("--manifest")
+            .arg(dir.path().join("must-not-be-opened.json"))
+            .args([flag, value, "--output"])
+            .arg(&output)
+            .output()
+            .unwrap();
+        assert_eq!(result.status.code(), Some(1), "{field}");
+        let error = String::from_utf8(result.stderr).unwrap();
+        assert!(
+            error.contains(&format!("{field} exceeds hard ceiling")),
+            "{field}: {error}"
+        );
+        assert!(!output.exists(), "{field}");
+    }
+}
+
+#[test]
+fn callers_can_tighten_every_resource_ceiling() {
+    let dir = TestDir::new();
+    let mut args = single_args(&dir, false);
+    args.limits.max_manifest_bytes -= 1;
+    args.limits.max_input_bytes -= 1;
+    args.limits.max_total_bytes -= 1;
+    args.limits.max_rows -= 1;
+    args.limits.max_elapsed_seconds -= 1;
+    assert_eq!(run_quote(&args, &executable()).unwrap().exit_code(), 0);
+    assert!(matches!(rows(&args.output)[0], QuoteRowV1::Complete(_)));
 }
 
 fn batch_args(dir: &TestDir, samples: Vec<InputSampleV1>) -> QuoteArgs {

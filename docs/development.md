@@ -422,6 +422,11 @@ addresses, total cycle-tracker cycles, and per-label cycle medians.
 
 ## Host zkGas Proposal Quote
 
+The pricing implementation below is evaluated separately under the
+[draft zkGas evaluation standard](zkgas-evaluation-standard.md), which defines evidence lanes,
+unit-safe comparisons, scorecard metrics, and promotion criteria without duplicating the pricing
+formula.
+
 Replay one current-format Shasta `GuestInput` through the canonical native validation path and
 complete the sealed Alethia zkGas model with exact resource, MPT, payload, and blob selectors:
 

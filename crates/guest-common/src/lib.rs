@@ -37,7 +37,7 @@ use raiko2_protocol_shasta::shasta::{
 };
 use raiko2_stateless::{
     read_parent_storage_with_witness_resources,
-    reconstruct_block_from_transactions_with_witness_resources,
+    reconstruct_block_from_transactions_with_witness_resources, FilteredBlockExecutionOutcome,
 };
 use std::sync::Arc;
 use taiko_client_protocol::FixedKSigner;
@@ -147,6 +147,7 @@ fn validate_l1_anchor_linkage(
     anchor_checkpoints: &[DecodedAnchorCheckpoint],
     parent_anchor_block_number: u64,
     source_spans: Option<&[AnchorSourceSpan]>,
+    read_parent: &mut impl for<'a> FnMut(ShastaParentStorageRead<'a>) -> Result<U256>,
 ) -> Result<()> {
     let proposal = &guest_input.taiko.proposal_event.proposal;
     let origin_block_number = proposal.originBlockNumber.to::<u64>();
@@ -184,8 +185,11 @@ fn validate_l1_anchor_linkage(
     );
 
     if bypass_stalled_anchor_linkage {
-        let parent_checkpoint =
-            verified_parent_shasta_checkpoint(guest_input, parent_anchor_block_number)?;
+        let parent_checkpoint = verified_parent_shasta_checkpoint(
+            guest_input,
+            parent_anchor_block_number,
+            read_parent,
+        )?;
         for checkpoint in anchor_checkpoints {
             ensure!(
                 checkpoint == &parent_checkpoint,
@@ -211,8 +215,11 @@ fn validate_l1_anchor_linkage(
         )
         .map_err(anyhow::Error::msg)?;
         if plan.requires_parent_checkpoint {
-            let parent_checkpoint =
-                verified_parent_shasta_checkpoint(guest_input, parent_anchor_block_number)?;
+            let parent_checkpoint = verified_parent_shasta_checkpoint(
+                guest_input,
+                parent_anchor_block_number,
+                read_parent,
+            )?;
             let forced_checkpoints = anchor_checkpoints
                 .get(..plan.l1_header_anchor_start_index)
                 .context("invalid forced anchor checkpoint range")?;
@@ -356,6 +363,7 @@ fn storage_word_as_b256(word: U256) -> B256 {
 fn verified_parent_shasta_checkpoint(
     guest_input: &GuestInput,
     block_number: u64,
+    read_parent: &mut impl for<'a> FnMut(ShastaParentStorageRead<'a>) -> Result<U256>,
 ) -> Result<DecodedAnchorCheckpoint> {
     let first_witness = guest_input
         .witnesses
@@ -366,23 +374,23 @@ fn verified_parent_shasta_checkpoint(
     let ancestor_headers = initial_proposal_ancestor_headers(guest_input)?;
     let (block_hash_slot, state_root_slot) = shasta_checkpoint_storage_slots(block_number);
     let block_hash = storage_word_as_b256(
-        read_parent_storage_with_witness_resources(
-            checkpoint_store,
-            block_hash_slot,
-            &first_witness.witness,
-            &ancestor_headers,
-            guest_input.proposal_state_nodes(),
-        )
+        read_parent(ShastaParentStorageRead {
+            address: checkpoint_store,
+            slot: block_hash_slot,
+            witness: &first_witness.witness,
+            ancestor_headers: &ancestor_headers,
+            shared_state_nodes: guest_input.proposal_state_nodes(),
+        })
         .context("failed to read parent CheckpointStore blockHash")?,
     );
     let state_root = storage_word_as_b256(
-        read_parent_storage_with_witness_resources(
-            checkpoint_store,
-            state_root_slot,
-            &first_witness.witness,
-            &ancestor_headers,
-            guest_input.proposal_state_nodes(),
-        )
+        read_parent(ShastaParentStorageRead {
+            address: checkpoint_store,
+            slot: state_root_slot,
+            witness: &first_witness.witness,
+            ancestor_headers: &ancestor_headers,
+            shared_state_nodes: guest_input.proposal_state_nodes(),
+        })
         .context("failed to read parent CheckpointStore stateRoot")?,
     );
     ensure!(
@@ -401,7 +409,10 @@ fn verified_parent_shasta_checkpoint(
     })
 }
 
-fn verified_parent_anchor_block_number(guest_input: &GuestInput) -> Result<u64> {
+fn verified_parent_anchor_block_number(
+    guest_input: &GuestInput,
+    read_parent: &mut impl for<'a> FnMut(ShastaParentStorageRead<'a>) -> Result<U256>,
+) -> Result<u64> {
     let first_witness = guest_input
         .witnesses
         .first()
@@ -409,13 +420,13 @@ fn verified_parent_anchor_block_number(guest_input: &GuestInput) -> Result<u64> 
     let anchor_address = shasta_taiko_l2_address(first_witness.chain_spec.chain_id)
         .context("failed to derive TaikoL2 address")?;
     let ancestor_headers = initial_proposal_ancestor_headers(guest_input)?;
-    let storage_word = read_parent_storage_with_witness_resources(
-        anchor_address,
-        U256::from(ANCHOR_BLOCK_STATE_SLOT),
-        &first_witness.witness,
-        &ancestor_headers,
-        guest_input.proposal_state_nodes(),
-    )
+    let storage_word = read_parent(ShastaParentStorageRead {
+        address: anchor_address,
+        slot: U256::from(ANCHOR_BLOCK_STATE_SLOT),
+        witness: &first_witness.witness,
+        ancestor_headers: &ancestor_headers,
+        shared_state_nodes: guest_input.proposal_state_nodes(),
+    })
     .context("failed to read parent Anchor._blockState.anchorBlockNumber")?;
     let verified_anchor = anchor_block_number_from_storage_word(storage_word);
 
@@ -789,7 +800,7 @@ fn shasta_block_env_attributes(
 
 fn prove_shasta_proposal_with_block_verifier<V>(
     guest_input: &GuestInput,
-    mut verify_block: V,
+    verify_block: V,
 ) -> Result<B256>
 where
     V: FnMut(
@@ -800,6 +811,29 @@ where
         &[WitnessHeader],
         &TaikoRuntime,
     ) -> Result<B256>,
+{
+    prove_shasta_proposal_with_block_verifier_and_parent_reader(
+        guest_input,
+        verify_block,
+        default_parent_storage_reader,
+    )
+}
+
+fn prove_shasta_proposal_with_block_verifier_and_parent_reader<V, P>(
+    guest_input: &GuestInput,
+    mut verify_block: V,
+    mut read_parent: P,
+) -> Result<B256>
+where
+    V: FnMut(
+        usize,
+        &StatelessInput,
+        Option<&BlockManifest>,
+        Option<&Header>,
+        &[WitnessHeader],
+        &TaikoRuntime,
+    ) -> Result<B256>,
+    P: for<'a> FnMut(ShastaParentStorageRead<'a>) -> Result<U256>,
 {
     ensure!(
         !guest_input.witnesses.is_empty(),
@@ -918,7 +952,8 @@ where
     bench_report_end("proposal_runtime");
 
     bench_report_start("proposal_derivation");
-    let parent_anchor_block_number = verified_parent_anchor_block_number(guest_input)?;
+    let parent_anchor_block_number =
+        verified_parent_anchor_block_number(guest_input, &mut read_parent)?;
     let derived_blocks =
         derive_expected_shasta_blocks(guest_input, &runtime, parent_anchor_block_number)?;
     let expected_blocks = derived_blocks
@@ -1010,6 +1045,7 @@ where
         &anchor_checkpoints,
         parent_anchor_block_number,
         source_spans,
+        &mut read_parent,
     )?;
     let first_parent_block_hash = first_parent_block_hash.expect("checked");
     let last_block_number = last_block_number.expect("checked");
@@ -1045,8 +1081,55 @@ where
     Ok(output)
 }
 
-pub fn prove_shasta_proposal(guest_input: &GuestInput) -> Result<B256> {
-    prove_shasta_proposal_with_block_verifier(
+/// Parent-state slot required by canonical Shasta proposal validation.
+pub struct ShastaParentStorageRead<'a> {
+    pub address: Address,
+    pub slot: U256,
+    pub witness: &'a raiko2_primitives::ExecutionWitness,
+    pub ancestor_headers: &'a [WitnessHeader],
+    pub shared_state_nodes: &'a [raiko2_primitives::WitnessStateNode],
+}
+
+fn default_parent_storage_reader(request: ShastaParentStorageRead<'_>) -> Result<U256> {
+    read_parent_storage_with_witness_resources(
+        request.address,
+        request.slot,
+        request.witness,
+        request.ancestor_headers,
+        request.shared_state_nodes,
+    )
+    .map_err(anyhow::Error::from)
+}
+
+/// Inputs prepared by the canonical Shasta proposal wrapper for one block reconstruction.
+pub struct ShastaBlockReconstruction<'a> {
+    pub index: usize,
+    pub anchor_tx:
+        alloy_consensus::transaction::Recovered<reth_ethereum_primitives::TransactionSigned>,
+    pub transactions: Vec<reth_ethereum_primitives::TransactionSigned>,
+    pub block_env: TaikoNextBlockEnvAttributes,
+    pub witness: &'a raiko2_primitives::ExecutionWitness,
+    pub ancestor_headers: &'a [WitnessHeader],
+    pub shared_state_nodes: &'a [raiko2_primitives::WitnessStateNode],
+    pub chain_spec: &'a Arc<TaikoChainSpec>,
+    pub evm_config: &'a TaikoEvmConfig,
+}
+
+/// Validates a Shasta proposal with injected reconstruction and parent-storage observation.
+///
+/// The wrapper retains all proposal validation, canonical-block comparison, ancestor rolling, and
+/// public-output construction. Callbacks can observe the same reads and execution used by the
+/// canonical path without adding work to zkVM guests.
+pub fn prove_shasta_proposal_with_reconstructor_and_parent_reader<R, P>(
+    guest_input: &GuestInput,
+    mut reconstruct: R,
+    read_parent: P,
+) -> Result<B256>
+where
+    R: for<'a> FnMut(ShastaBlockReconstruction<'a>) -> Result<FilteredBlockExecutionOutcome>,
+    P: for<'a> FnMut(ShastaParentStorageRead<'a>) -> Result<U256>,
+{
+    prove_shasta_proposal_with_block_verifier_and_parent_reader(
         guest_input,
         |index, stateless_input, expected_block, _parent_header, ancestor_headers, runtime| {
             let expected_block = expected_block
@@ -1060,24 +1143,56 @@ pub fn prove_shasta_proposal(guest_input: &GuestInput) -> Result<B256> {
                 .context("missing canonical anchor transaction")?
                 .try_into_recovered()
                 .map_err(|_| anyhow::anyhow!("failed to recover canonical anchor transaction"))?;
-            let outcome = reconstruct_block_from_transactions_with_witness_resources(
+            let outcome = reconstruct(ShastaBlockReconstruction {
+                index,
                 anchor_tx,
-                manifest_transactions_for_reconstruction(expected_block)?,
-                shasta_block_env_attributes(stateless_input)?,
-                &stateless_input.witness,
+                transactions: manifest_transactions_for_reconstruction(expected_block)?,
+                block_env: shasta_block_env_attributes(stateless_input)?,
+                witness: &stateless_input.witness,
                 ancestor_headers,
-                guest_input.proposal_state_nodes(),
-                &runtime.chain_spec,
-                &runtime.evm_config,
-            )
-            .map_err(|e| anyhow::anyhow!(e))
+                shared_state_nodes: guest_input.proposal_state_nodes(),
+                chain_spec: &runtime.chain_spec,
+                evm_config: &runtime.evm_config,
+            })
             .with_context(|| format!("failed to reconstruct Shasta block at index {index}"))?;
             let generated_block = outcome.filtered_block.into_block();
             validate_generated_block_matches_canonical(&generated_block, &stateless_input.block)
                 .with_context(|| format!("generated Shasta block mismatch at index {index}"))?;
             Ok(generated_block.header.hash_slow())
         },
+        read_parent,
     )
+}
+
+/// Validates a Shasta proposal with an injected block reconstructor.
+pub fn prove_shasta_proposal_with_reconstructor<R>(
+    guest_input: &GuestInput,
+    reconstruct: R,
+) -> Result<B256>
+where
+    R: for<'a> FnMut(ShastaBlockReconstruction<'a>) -> Result<FilteredBlockExecutionOutcome>,
+{
+    prove_shasta_proposal_with_reconstructor_and_parent_reader(
+        guest_input,
+        reconstruct,
+        default_parent_storage_reader,
+    )
+}
+
+pub fn prove_shasta_proposal(guest_input: &GuestInput) -> Result<B256> {
+    prove_shasta_proposal_with_reconstructor(guest_input, |request| {
+        reconstruct_block_from_transactions_with_witness_resources(
+            request.anchor_tx,
+            request.transactions,
+            request.block_env,
+            request.witness,
+            request.ancestor_headers,
+            request.shared_state_nodes,
+            request.chain_spec,
+            request.evm_config,
+        )
+        .map_err(anyhow::Error::from)
+    })
 }
 
 pub fn prove_shasta_proposal_with_validator<V>(
@@ -2489,6 +2604,7 @@ mod tests {
             &anchor_checkpoints,
             parent_checkpoint.block_number,
             Some(&source_spans),
+            &mut default_parent_storage_reader,
         )
         .expect("forced prefix should validate against parent checkpoint");
     }

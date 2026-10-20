@@ -104,6 +104,8 @@ enum ProofType {
 #[derive(Clone, Copy, Debug, ValueEnum, PartialEq, Eq)]
 enum Stage {
     Proposal,
+    #[value(name = "proposal-workload-quote")]
+    ProposalWorkloadQuote,
     #[value(name = "opcode-lab")]
     OpcodeLab,
     #[value(name = "revm-opcode-lab")]
@@ -271,6 +273,7 @@ impl Stage {
     const fn as_str(self) -> &'static str {
         match self {
             Stage::Proposal => "proposal",
+            Stage::ProposalWorkloadQuote => "proposal-workload-quote",
             Stage::OpcodeLab => "opcode-lab",
             Stage::RevmOpcodeLab => "revm-opcode-lab",
             Stage::PrecompileLab => "precompile-lab",
@@ -365,6 +368,32 @@ impl Args {
 
         Ok(())
     }
+
+    fn validate_proposal_workload_quote(&self) -> Result<()> {
+        if self.proof_type != ProofType::Native || self.mode != Mode::Execute {
+            bail!("proposal-workload-quote supports only --proof-type native --mode execute");
+        }
+        if !self.aggregate.is_empty() || self.input_list.is_some() || self.elf.is_some() {
+            bail!("proposal-workload-quote accepts only one current-format --input");
+        }
+        if self.output.is_some()
+            || self.jsonl_out.is_some()
+            || self.proof_mode.is_some()
+            || self.sp1_prover.is_some()
+            || self.sp1_network_mode != CliSp1NetworkMode::Reserved
+            || self.sp1_fulfillment_strategy != CliSp1FulfillmentStrategy::Reserved
+            || !self.sp1_skip_simulation
+            || self.sp1_cycle_limit != 1_000_000_000_000
+            || self.sp1_timeout_secs != 3_600
+            || self.risc0_execution_po2 != 20
+        {
+            bail!(
+                "proposal-workload-quote does not accept proof or benchmark options; use only \
+                 --input and optional --json-out"
+            );
+        }
+        Ok(())
+    }
 }
 
 impl From<CliSp1ProverMode> for Sp1ProverMode {
@@ -450,7 +479,9 @@ fn opcode_lab_memory_labels(stage: Stage) -> OpcodeLabMemoryLabels {
             after_execute_run: "revm-opcode-lab:after_execute_run",
             after_apply_execution_metadata: "revm-opcode-lab:after_apply_execution_metadata",
         },
-        Stage::Proposal | Stage::PrecompileLab => unreachable!("not an opcode lab stage"),
+        Stage::Proposal | Stage::ProposalWorkloadQuote | Stage::PrecompileLab => {
+            unreachable!("not an opcode lab stage")
+        }
     }
 }
 
@@ -522,6 +553,10 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     args.validate_standard_guest_artifacts()?;
 
+    if args.stage == Stage::ProposalWorkloadQuote {
+        return run_proposal_workload_quote(args);
+    }
+
     if matches!(args.stage, Stage::OpcodeLab | Stage::RevmOpcodeLab) {
         return run_opcode_lab(args).await;
     }
@@ -542,6 +577,27 @@ fn read_input(path: &PathBuf, proof_type: ProofType) -> Result<GuestInput> {
             build_proof_carry_data_from_witness_spec(&input, proof_type.as_raiko())?;
     }
     Ok(input)
+}
+
+fn run_proposal_workload_quote(args: Args) -> Result<()> {
+    args.validate_proposal_workload_quote()?;
+    let input_path = args.input.context("missing --input")?;
+    let contents = fs::read_to_string(&input_path)
+        .with_context(|| format!("read {}", input_path.display()))?;
+    // Do not backfill proof-carry data: the quote validates and identifies the supplied input.
+    let input: GuestInput =
+        serde_json::from_str(&contents).context("parse current GuestInput JSON")?;
+    let quote = raiko2_zkgas_trace::quote_shasta_proposal(&input)?;
+    let output = serde_json::to_vec_pretty(&quote).context("serialize proposal workload quote")?;
+    if let Some(path) = args.json_out {
+        fs::write(&path, output).with_context(|| format!("write {}", path.display()))?;
+    } else {
+        println!(
+            "{}",
+            String::from_utf8(output).context("quote JSON is valid UTF-8")?
+        );
+    }
+    Ok(())
 }
 
 fn read_opcode_lab_input(path: &PathBuf) -> Result<OpcodeLabInput> {
@@ -1268,9 +1324,9 @@ fn write_proof_json(path: &PathBuf, proof: &Proof) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Args, BenchReport, ProofType, Risc0ProposalExecution, Stage,
+        Args, BenchReport, Mode, ProofType, Risc0ProposalExecution, Stage,
         apply_risc0_execution_metadata, apply_sp1_metadata, read_input, read_opcode_lab_input_list,
-        risc0_padded_cycles,
+        risc0_padded_cycles, run_proposal_workload_quote,
     };
     use alloy_primitives::{Address, B256};
     use clap::Parser as _;
@@ -1278,6 +1334,46 @@ mod tests {
     use raiko2_primitives_shasta::{GuestInput, build_proof_carry_data_from_witness_spec};
     use raiko2_prover::sp1::Sp1ExecutionMetadata;
     use std::fs;
+
+    #[test]
+    fn proposal_workload_quote_is_a_native_execute_only_stage() {
+        let args = Args::try_parse_from([
+            "guest-launcher",
+            "--stage",
+            "proposal-workload-quote",
+            "--input",
+            "fixture-data/guest-input.json",
+        ])
+        .expect("parse proposal workload quote stage");
+
+        assert_eq!(args.stage, Stage::ProposalWorkloadQuote);
+        assert_eq!(args.proof_type, ProofType::Native);
+        assert_eq!(args.mode, Mode::Execute);
+    }
+
+    #[test]
+    fn proposal_workload_quote_rejects_proof_output_before_reading_input() {
+        let args = Args::try_parse_from([
+            "guest-launcher",
+            "--stage",
+            "proposal-workload-quote",
+            "--input",
+            "fixture-data/missing-guest-input.json",
+            "--output",
+            "fixture-data/ignored-proof.json",
+        ])
+        .expect("parse proposal workload quote stage");
+
+        let error = run_proposal_workload_quote(args)
+            .expect_err("proof output must be rejected instead of silently ignored");
+
+        assert!(
+            error
+                .to_string()
+                .contains("does not accept proof or benchmark options"),
+            "unexpected error: {error:#}"
+        );
+    }
 
     #[test]
     fn parses_opcode_lab_stage_with_explicit_elf() {

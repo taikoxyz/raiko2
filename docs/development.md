@@ -420,6 +420,28 @@ under `cases[].summary`. The `gas` field is SP1 prover gas from `ExecutionReport
 gas. The summary also preserves wall time, instruction count, syscall count, touched memory
 addresses, total cycle-tracker cycles, and per-label cycle medians.
 
+## Host zkGas Proposal Quote
+
+Replay one current-format Shasta `GuestInput` through the canonical native validation path and
+complete the sealed Alethia zkGas model with exact resource, MPT, payload, and blob selectors:
+
+```bash
+cargo run -r -p guest-launcher -- \
+  --stage proposal-workload-quote \
+  --input ./path/to/current-guest-input.json \
+  --json-out ./proposal-workload-quote.json
+```
+
+This stage does not produce or verify a proof and accepts only native execute mode. It validates the
+supplied input without backfilling proof-carry data, fails if the exact resource observations do not
+cover the EVM-local report, and records both per-block admission PGU and the proposal-once total.
+The reported `model_id` authenticates the pricing specification, not the SP1 ELF used by an external
+proving run. A complete model quote is therefore shadow-comparison output; it becomes admission or
+capacity evidence only after the compared PGU is verified against the proposal ELF/VK identity
+sealed by that model.
+Historical input decoding, raw replay corpora, and daily comparison reports live outside the raiko2
+runtime repository.
+
 ## Opcode Workload-Metric Experiments
 
 The experiment scaffold under `experiments/opcode-gas/` is for opcode and precompile workload

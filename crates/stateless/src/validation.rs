@@ -1,3 +1,5 @@
+#[cfg(feature = "mpt-metrics")]
+use crate::MptWorkloadMetrics;
 use crate::{
     sparse::SparseState,
     trie::StatelessTrie,
@@ -25,6 +27,38 @@ use reth_execution_types::BlockExecutionResult;
 use reth_primitives_traits::{Block as _, RecoveredBlock, SealedHeader, SignerRecoverable};
 use reth_trie_common::{HashedPostState, KeccakKeyHasher};
 use std::sync::Arc;
+
+/// Injection point for derived-block execution during stateless reconstruction.
+pub trait DerivedBlockExecutor {
+    /// Executes the prepared candidate block against the witness-backed database.
+    ///
+    /// # Errors
+    ///
+    /// Returns the block executor's error when the candidate cannot be executed.
+    fn execute<DB: reth_revm::Database + std::fmt::Debug>(
+        &mut self,
+        evm_config: &TaikoEvmConfig,
+        parent_header: &SealedHeader,
+        derived_block: &RecoveredBlock<Block>,
+        db: DB,
+    ) -> Result<alethia_reth_block::derived_block::DerivedBlockExecutionOutcome, BlockExecutionError>;
+}
+
+#[derive(Debug, Default)]
+struct AlethiaDerivedBlockExecutor;
+
+impl DerivedBlockExecutor for AlethiaDerivedBlockExecutor {
+    fn execute<DB: reth_revm::Database + std::fmt::Debug>(
+        &mut self,
+        evm_config: &TaikoEvmConfig,
+        parent_header: &SealedHeader,
+        derived_block: &RecoveredBlock<Block>,
+        db: DB,
+    ) -> Result<alethia_reth_block::derived_block::DerivedBlockExecutionOutcome, BlockExecutionError>
+    {
+        execute_derived_block(evm_config, parent_header, derived_block, db)
+    }
+}
 
 /// Performs stateless validation of a block using the provided witness data.
 ///
@@ -120,11 +154,42 @@ pub fn read_parent_storage_with_witness_resources(
     ancestor_headers: &[WitnessHeader],
     shared_state_nodes: &[WitnessStateNode],
 ) -> Result<U256, StatelessValidationError> {
+    read_parent_storage_core(address, slot, witness, ancestor_headers, shared_state_nodes)
+        .map(|(value, _)| value)
+}
+
+/// Reads a parent-state slot and returns MPT work measured by that same sparse-state read.
+///
+/// # Errors
+///
+/// Returns the same witness, storage proof, and MPT observation errors as the ordinary reader.
+#[cfg(feature = "mpt-metrics")]
+pub fn read_parent_storage_with_mpt_metrics(
+    address: Address,
+    slot: U256,
+    witness: &ExecutionWitness,
+    ancestor_headers: &[WitnessHeader],
+    shared_state_nodes: &[WitnessStateNode],
+) -> Result<(U256, MptWorkloadMetrics), StatelessValidationError> {
+    let (value, trie) =
+        read_parent_storage_core(address, slot, witness, ancestor_headers, shared_state_nodes)?;
+    Ok((value, trie.mpt_workload_metrics()))
+}
+
+fn read_parent_storage_core(
+    address: Address,
+    slot: U256,
+    witness: &ExecutionWitness,
+    ancestor_headers: &[WitnessHeader],
+    shared_state_nodes: &[WitnessStateNode],
+) -> Result<(U256, SparseState), StatelessValidationError> {
     let pre_state_root = determine_pre_state_root(ancestor_headers)?;
     let (mut trie, _) =
         SparseState::new_with_state_pool(witness, shared_state_nodes, pre_state_root)?;
-    trie.storage_from_witness(address, slot)
-        .map_err(|err| StatelessValidationError::StatelessExecutionFailed(err.to_string()))
+    let value = trie
+        .storage_from_witness(address, slot)
+        .map_err(|err| StatelessValidationError::StatelessExecutionFailed(err.to_string()))?;
+    Ok((value, trie))
 }
 
 // Compact witness headers carry host-trusted hash/timestamp metadata (see `WitnessHeader` docs);
@@ -219,6 +284,11 @@ pub struct FilteredBlockExecutionOutcome {
     pub hashed_state: HashedPostState,
 }
 
+#[cfg(feature = "mpt-metrics")]
+type ReconstructionCoreOutput = (FilteredBlockExecutionOutcome, MptWorkloadMetrics);
+#[cfg(not(feature = "mpt-metrics"))]
+type ReconstructionCoreOutput = FilteredBlockExecutionOutcome;
+
 fn build_derived_block(
     parent_header: &SealedHeader,
     anchor_tx: Recovered<TransactionSigned>,
@@ -284,6 +354,138 @@ pub fn reconstruct_block_from_transactions_with_witness_resources(
     chain_spec: &Arc<TaikoChainSpec>,
     evm_config: &TaikoEvmConfig,
 ) -> Result<FilteredBlockExecutionOutcome, StatelessValidationError> {
+    reconstruct_block_from_transactions_with_executor_and_witness_resources(
+        anchor_tx,
+        transactions,
+        block_env,
+        witness,
+        ancestor_headers,
+        shared_state_nodes,
+        chain_spec,
+        evm_config,
+        &mut AlethiaDerivedBlockExecutor,
+    )
+}
+
+/// Reconstructs a candidate block while delegating only the prepared derived-block execution.
+///
+/// Sparse-state creation, state-root calculation, block assembly, and consensus validation remain
+/// owned by this function.
+///
+/// # Errors
+///
+/// Returns the same validation errors as the ordinary reconstruction entrypoint.
+#[allow(clippy::too_many_arguments)]
+pub fn reconstruct_block_from_transactions_with_executor_and_witness_resources<E>(
+    anchor_tx: Recovered<TransactionSigned>,
+    transactions: Vec<TransactionSigned>,
+    block_env: TaikoNextBlockEnvAttributes,
+    witness: &ExecutionWitness,
+    ancestor_headers: &[WitnessHeader],
+    shared_state_nodes: &[WitnessStateNode],
+    chain_spec: &Arc<TaikoChainSpec>,
+    evm_config: &TaikoEvmConfig,
+    executor: &mut E,
+) -> Result<FilteredBlockExecutionOutcome, StatelessValidationError>
+where
+    E: DerivedBlockExecutor,
+{
+    let output = reconstruct_block_from_transactions_core(
+        anchor_tx,
+        transactions,
+        block_env,
+        witness,
+        ancestor_headers,
+        shared_state_nodes,
+        chain_spec,
+        evm_config,
+        executor,
+    )?;
+    #[cfg(feature = "mpt-metrics")]
+    return Ok(output.0);
+    #[cfg(not(feature = "mpt-metrics"))]
+    return Ok(output);
+}
+
+/// Reconstructs a candidate block and returns host-only MPT workload counters.
+///
+/// # Errors
+///
+/// Returns the same validation errors as the ordinary reconstruction entrypoint.
+#[cfg(feature = "mpt-metrics")]
+#[allow(clippy::too_many_arguments)]
+pub fn reconstruct_block_from_transactions_with_mpt_metrics(
+    anchor_tx: Recovered<TransactionSigned>,
+    transactions: Vec<TransactionSigned>,
+    block_env: TaikoNextBlockEnvAttributes,
+    witness: &ExecutionWitness,
+    ancestor_headers: &[WitnessHeader],
+    shared_state_nodes: &[WitnessStateNode],
+    chain_spec: &Arc<TaikoChainSpec>,
+    evm_config: &TaikoEvmConfig,
+) -> Result<(FilteredBlockExecutionOutcome, MptWorkloadMetrics), StatelessValidationError> {
+    reconstruct_block_from_transactions_core(
+        anchor_tx,
+        transactions,
+        block_env,
+        witness,
+        ancestor_headers,
+        shared_state_nodes,
+        chain_spec,
+        evm_config,
+        &mut AlethiaDerivedBlockExecutor,
+    )
+}
+
+/// Reconstructs with an injected executor and returns host-only MPT workload counters.
+///
+/// # Errors
+///
+/// Returns the same validation errors as the ordinary reconstruction entrypoint.
+#[cfg(feature = "mpt-metrics")]
+#[allow(clippy::too_many_arguments)]
+pub fn reconstruct_block_from_transactions_with_executor_and_mpt_metrics<E>(
+    anchor_tx: Recovered<TransactionSigned>,
+    transactions: Vec<TransactionSigned>,
+    block_env: TaikoNextBlockEnvAttributes,
+    witness: &ExecutionWitness,
+    ancestor_headers: &[WitnessHeader],
+    shared_state_nodes: &[WitnessStateNode],
+    chain_spec: &Arc<TaikoChainSpec>,
+    evm_config: &TaikoEvmConfig,
+    executor: &mut E,
+) -> Result<(FilteredBlockExecutionOutcome, MptWorkloadMetrics), StatelessValidationError>
+where
+    E: DerivedBlockExecutor,
+{
+    reconstruct_block_from_transactions_core(
+        anchor_tx,
+        transactions,
+        block_env,
+        witness,
+        ancestor_headers,
+        shared_state_nodes,
+        chain_spec,
+        evm_config,
+        executor,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reconstruct_block_from_transactions_core<E>(
+    anchor_tx: Recovered<TransactionSigned>,
+    transactions: Vec<TransactionSigned>,
+    block_env: TaikoNextBlockEnvAttributes,
+    witness: &ExecutionWitness,
+    ancestor_headers: &[WitnessHeader],
+    shared_state_nodes: &[WitnessStateNode],
+    chain_spec: &Arc<TaikoChainSpec>,
+    evm_config: &TaikoEvmConfig,
+    executor: &mut E,
+) -> Result<ReconstructionCoreOutput, StatelessValidationError>
+where
+    E: DerivedBlockExecutor,
+{
     ensure_supported_parent_beacon_block_root(block_env.parent_beacon_block_root)?;
 
     let parent_header = sealed_parent_header(ancestor_headers)?;
@@ -295,10 +497,13 @@ pub fn reconstruct_block_from_transactions_with_witness_resources(
         SparseState::new_with_state_pool(witness, shared_state_nodes, pre_state_root)?;
 
     let db = WitnessDatabase::new(&trie, bytecode, ancestor_hashes);
-    let execution_outcome = execute_derived_block(evm_config, &parent_header, &derived_block, db)
+    let execution_outcome = executor
+        .execute(evm_config, &parent_header, &derived_block, db)
         .map_err(|err| map_block_execution_error(&err))?;
     ensure_anchor_receipt_success(&execution_outcome.execution_result.receipts)?;
     let state_root = trie.calculate_state_root(execution_outcome.hashed_state.clone())?;
+    #[cfg(feature = "mpt-metrics")]
+    let mpt_workload_metrics = trie.mpt_workload_metrics();
     let filtered_block = assemble_filtered_block(
         evm_config,
         &parent_header,
@@ -328,7 +533,10 @@ pub fn reconstruct_block_from_transactions_with_witness_resources(
     validate_anchor_transaction_in_block(&outcome.filtered_block, chain_spec.as_ref())
         .map_err(StatelessValidationError::ConsensusValidationFailed)?;
 
-    Ok(outcome)
+    #[cfg(feature = "mpt-metrics")]
+    return Ok((outcome, mpt_workload_metrics));
+    #[cfg(not(feature = "mpt-metrics"))]
+    return Ok(outcome);
 }
 
 fn execute_block<T>(
@@ -613,6 +821,62 @@ mod tests {
             headers: vec![WitnessHeader::from_header(header)],
             ..Default::default()
         }
+    }
+
+    #[cfg(feature = "mpt-metrics")]
+    #[test]
+    fn parent_storage_read_reports_the_same_value_and_actual_mpt_work() {
+        let address = Address::repeat_byte(0x42);
+        let slot = U256::from(256);
+        let expected = U256::from(17);
+        let mut storage = Trie::default();
+        storage.insert(
+            keccak256(alloy_primitives::B256::from(slot)),
+            alloy_rlp::encode(expected),
+        );
+        let storage_root = storage.hash_slow();
+
+        let mut state = Trie::default();
+        state.insert(
+            keccak256(address),
+            alloy_rlp::encode(TrieAccount {
+                nonce: 0,
+                balance: U256::ZERO,
+                storage_root,
+                code_hash: KECCAK_EMPTY,
+            }),
+        );
+        let state_root = state.hash_slow();
+        let mut nodes = state.rlp_nodes();
+        nodes.extend(storage.rlp_nodes());
+        let witness = witness_from_state_nodes(nodes, state_root);
+
+        let ordinary = super::read_parent_storage_with_witness_resources(
+            address,
+            slot,
+            &witness,
+            &witness.headers,
+            &[],
+        )
+        .expect("ordinary parent storage read");
+        let (observed, metrics) = super::read_parent_storage_with_mpt_metrics(
+            address,
+            slot,
+            &witness,
+            &witness.headers,
+            &[],
+        )
+        .expect("observed parent storage read");
+
+        assert_eq!(ordinary, expected);
+        assert_eq!(observed, ordinary);
+        assert_eq!(metrics.account_reads.operations, 1);
+        assert_eq!(metrics.storage_reads.operations, 1);
+        assert!(metrics.account_reads.node_visits >= 1);
+        assert!(metrics.storage_reads.node_visits >= 1);
+        assert!(metrics.witness_hydration.hashed_rlp_nodes >= 2);
+        assert_eq!(metrics.state_materializations.operations, 1);
+        assert_eq!(metrics.storage_materializations.operations, 1);
     }
 
     fn test_signed_tx(chain_id: u64, nonce: u64, signature: Signature) -> TransactionSigned {

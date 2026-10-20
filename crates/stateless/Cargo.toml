@@ -7,6 +7,10 @@ license.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = []
+mpt-metrics = ["dep:serde"]
+
 [dependencies]
 # Alloy
 alloy-rlp.workspace = true
@@ -27,6 +31,7 @@ reth-evm.workspace = true
 reth-trie-common.workspace = true
 reth-errors.workspace = true
 risc0-ethereum-trie = { git = "https://github.com/risc0/risc0-ethereum.git", tag = "v3.0.1" }
+serde = { workspace = true, features = ["derive"], optional = true }
 
 # Alethia reth
 alethia-reth-chainspec.workspace = true

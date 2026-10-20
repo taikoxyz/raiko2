@@ -149,6 +149,10 @@ input hash/length, proof-carry and proposal identities, contiguous block and for
 output, pricing unit/surface/model, and the embedded node/prove sums and fixed-point totals. An
 inconsistent complete row, or an empty quote or observation population, is a structural failure and
 publishes no run.
+Block validation also requires prove-side fixed/operation/feature attribution to match the node
+surface, exact resources to cover EVM-local resources, and sealed resource/MPT prices to match their
+selectors. Proposal-once pricing is recomputed from its selectors with the sealed model; block-only
+and proposal-only component domains cannot be exchanged while keeping a forged total closed.
 
 ### Compare: cross-program SP1 and incompatible-unit RISC0
 

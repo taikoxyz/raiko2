@@ -1,3 +1,7 @@
+use alethia_reth_evm::zk_gas::pricing::{
+    MptSelectors, PricingBreakdown, ProposalPricingInput, ZkGasModel,
+};
+use raiko2_zkgas_trace::PricingBreakdownSnapshot;
 use serde_json::json;
 use std::{
     fs,
@@ -34,10 +38,25 @@ fn executable() -> ExecutableIdentity {
         dirty: None,
     }
 }
+fn snapshot(pricing: PricingBreakdown) -> PricingBreakdownSnapshot {
+    PricingBreakdownSnapshot {
+        fixed_scaled: pricing.fixed_scaled,
+        operations_scaled: pricing.operations_scaled,
+        feature_error_scaled: pricing.feature_error_scaled,
+        resources_scaled: pricing.resources_scaled,
+        mpt_scaled: pricing.mpt_scaled,
+        startup_scaled: pricing.startup_scaled,
+        transaction_payload_scaled: pricing.transaction_payload_scaled,
+        blob_source_scaled: pricing.blob_source_scaled,
+        parent_mpt_scaled: pricing.parent_mpt_scaled,
+        total_scaled: pricing.total_scaled,
+        total_pgu: pricing.total_pgu.unwrap(),
+    }
+}
 fn quote() -> CompleteQuoteV1 {
     let p = embedded_profiles().unwrap().profiles.remove(0);
     let public_output = format!("0x{}", "00".repeat(32));
-    serde_json::from_value(json!({
+    let mut quote: CompleteQuoteV1 = serde_json::from_value(json!({
         "schema_version":1,"key":{"corpus_id":"corpus","sample_id":"sample","guest_input_sha256":"input"},
         "executable":executable(),"input_source":{"kind":"single","descriptor_sha256":"descriptor"},"guest_input_byte_length":12,
         "proposal":{"proposal_id":1,"chain":{"name":"sample-chain","chain_id":167000},"proof_carry_chain_id":167000,"proof_carry_proposal_id":1,"witness_chain_spec_sha256":["spec"],"first_block":2,"last_block":2,"block_count":1,"public_output":public_output,"fork_segments":[{"fork":"SHASTA","first_block":2,"last_block":2}]},
@@ -45,21 +64,51 @@ fn quote() -> CompleteQuoteV1 {
         "quote":{"schema_version":1,"model_id":p.model_id,"guest_input_sha256":"input","guest_input_bincode_length":12,"public_output":public_output,"blocks":[{
             "block_index":0,"block_number":2,
             "node":{"unzen_zkgas":2,"pricing":{"fixed_scaled":"0","operations_scaled":"0","feature_error_scaled":"0","evm_local_resources":{"unique_account_count":0,"unique_storage_slot_access_count":0,"unique_storage_slot_write_count":0,"unique_code_hash_count":0,"unique_code_bytes":0},"evm_local_resources_scaled":"0","known_subtotal_scaled":"0","known_subtotal_pgu":"0"}},
-            "prove":{"input_transaction_count":0,"started_transaction_count":0,"true_unattempted_transactions":0,"exact_resources":{"unique_account_count":0,"unique_storage_slot_access_count":0,"unique_storage_slot_write_count":0,"unique_code_hash_count":0,"unique_code_bytes":0},"mpt":{"path_node_visits":0,"materialization_work_units":0,"hydration_hash_blocks":0,"dirty_encoded_nodes":0,"dirty_hash_blocks":0,"structural_branch_extension_churn_nodes":0,"dropped_trie_nodes":0},"pricing":{"fixed_scaled":"0","operations_scaled":"0","feature_error_scaled":"0","resources_scaled":"0","mpt_scaled":"0","startup_scaled":"0","transaction_payload_scaled":"0","blob_source_scaled":"0","parent_mpt_scaled":"0","total_scaled":"0","total_pgu":"0"}}
+            "prove":{"input_transaction_count":1,"started_transaction_count":1,"true_unattempted_transactions":0,"exact_resources":{"unique_account_count":0,"unique_storage_slot_access_count":0,"unique_storage_slot_write_count":0,"unique_code_hash_count":0,"unique_code_bytes":0},"mpt":{"path_node_visits":0,"materialization_work_units":0,"hydration_hash_blocks":0,"dirty_encoded_nodes":0,"dirty_hash_blocks":0,"structural_branch_extension_churn_nodes":0,"dropped_trie_nodes":0},"pricing":{"fixed_scaled":"0","operations_scaled":"0","feature_error_scaled":"0","resources_scaled":"0","mpt_scaled":"0","startup_scaled":"0","transaction_payload_scaled":"0","blob_source_scaled":"0","parent_mpt_scaled":"0","total_scaled":"0","total_pgu":"0"}}
         }],
             "node":{"unzen_zkgas_sum":"2","block_local_known_scaled":"0","block_local_known_pgu":"0","sum_of_block_known_pgu":"0"},
-            "prove":{"selectors":{"payload":{"total_transaction_count":0,"canonical_transaction_bytes":0,"nonempty_payload_transactions":0},"true_unattempted_transactions":0,"blobs":{"source_blob_counts":[],"proposal_blob_hash_count":0,"provider_blob_count":0,"provider_commitment_count":0,"provider_proof_count":0},"parent_mpt":{"path_node_visits":0,"materialization_work_units":0,"hydration_hash_blocks":0,"dirty_encoded_nodes":0,"dirty_hash_blocks":0,"structural_branch_extension_churn_nodes":0,"dropped_trie_nodes":0}},
+            "prove":{"selectors":{"payload":{"total_transaction_count":1,"canonical_transaction_bytes":1,"nonempty_payload_transactions":0},"true_unattempted_transactions":0,"blobs":{"source_blob_counts":[1],"proposal_blob_hash_count":1,"provider_blob_count":1,"provider_commitment_count":1,"provider_proof_count":1},"parent_mpt":{"path_node_visits":0,"materialization_work_units":0,"hydration_hash_blocks":0,"dirty_encoded_nodes":0,"dirty_hash_blocks":0,"structural_branch_extension_churn_nodes":0,"dropped_trie_nodes":0}},
                 "block_local_scaled":"0","block_local_pgu":"0","sum_of_block_admission_pgu":"0","proposal_once":{"fixed_scaled":"10000000000000000000","operations_scaled":"0","feature_error_scaled":"0","resources_scaled":"0","mpt_scaled":"0","startup_scaled":"0","transaction_payload_scaled":"0","blob_source_scaled":"0","parent_mpt_scaled":"0","total_scaled":"10000000000000000000","total_pgu":"10"},"proposal_once_pgu":"10","total_scaled":"10000000000000000000","total_pgu":"10"}}
-    })).unwrap()
+    })).unwrap();
+    let selectors = &quote.quote.prove.selectors;
+    let parent = selectors.parent_mpt;
+    let expected = ZkGasModel
+        .price_proposal_once(&ProposalPricingInput {
+            canonical_transaction_bytes: selectors.payload.canonical_transaction_bytes,
+            nonempty_payload_transactions: selectors.payload.nonempty_payload_transactions,
+            true_unattempted_transactions: selectors.true_unattempted_transactions,
+            source_blob_counts: &selectors.blobs.source_blob_counts,
+            proposal_blob_hash_count: selectors.blobs.proposal_blob_hash_count,
+            provider_blob_count: selectors.blobs.provider_blob_count,
+            provider_commitment_count: selectors.blobs.provider_commitment_count,
+            provider_proof_count: selectors.blobs.provider_proof_count,
+            parent_mpt: MptSelectors {
+                path_node_visits: parent.path_node_visits,
+                materialization_work_units: parent.materialization_work_units,
+                hydration_hash_blocks: parent.hydration_hash_blocks,
+                dirty_encoded_nodes: parent.dirty_encoded_nodes,
+                dirty_hash_blocks: parent.dirty_hash_blocks,
+                structural_branch_extension_churn_nodes: parent
+                    .structural_branch_extension_churn_nodes,
+                dropped_trie_nodes: parent.dropped_trie_nodes,
+            },
+        })
+        .unwrap();
+    quote.quote.prove.proposal_once = snapshot(expected);
+    quote.quote.prove.proposal_once_pgu = expected.total_pgu.unwrap();
+    quote.quote.prove.total_scaled = expected.total_scaled;
+    quote.quote.prove.total_pgu = expected.total_pgu.unwrap();
+    quote
 }
 fn observation() -> CompleteObservationV1 {
+    let quote = quote();
     CompleteObservationV1 {
         observation_id: "measurement".into(),
         attempt_id: "attempt-1".into(),
-        quote_key: quote().key,
+        quote_key: quote.key,
         backend: "sp1".into(),
         workload: Workload {
-            value: 20,
+            value: quote.quote.prove.total_pgu * 2,
             unit: "sp1_pgu".into(),
         },
         measurement_stage: "execute".into(),
@@ -393,8 +442,9 @@ fn quote_with_feature_error(
     quote.quote.prove.block_local_scaled = operations_scaled;
     quote.quote.prove.block_local_pgu = operation_pgu;
     quote.quote.prove.sum_of_block_admission_pgu = operation_pgu;
-    quote.quote.prove.total_scaled = operations_scaled + 10 * SCALE;
-    quote.quote.prove.total_pgu = operation_pgu + 10;
+    quote.quote.prove.total_scaled =
+        operations_scaled + quote.quote.prove.proposal_once.total_scaled;
+    quote.quote.prove.total_pgu = operation_pgu + quote.quote.prove.proposal_once.total_pgu;
     quote
 }
 
@@ -423,6 +473,126 @@ fn feature_error_is_validated_as_operations_attribution_not_an_additive_price() 
     let error = run_compare(&args, &executable()).unwrap_err();
     assert!(format!("{error:#}").contains("feature_error attribution"));
     assert!(!args.output.exists());
+}
+
+fn add_block_price(quote: &mut CompleteQuoteV1, scaled: i128) {
+    let pricing = &mut quote.quote.blocks[0].prove.pricing;
+    pricing.total_scaled += scaled;
+    pricing.total_pgu += 1;
+    quote.quote.prove.block_local_scaled += scaled;
+    quote.quote.prove.block_local_pgu += 1;
+    quote.quote.prove.sum_of_block_admission_pgu += 1;
+    quote.quote.prove.total_scaled += scaled;
+    quote.quote.prove.total_pgu += 1;
+}
+
+#[test]
+fn complete_quote_rejects_cross_surface_and_selector_domain_forgery() {
+    const SCALE: i128 = 1_000_000_000_000_000_000;
+    for mutation in [
+        "shared-fixed",
+        "shared-operations",
+        "shared-feature-attribution",
+        "exact-below-local",
+        "zero-input-transactions",
+        "zero-started-transactions",
+        "block-proposal-component",
+        "proposal-block-component",
+        "empty-blob-sources",
+        "proposal-selector-price",
+        "negative-components",
+        "node-resource-price",
+        "prove-resource-price",
+        "prove-mpt-price",
+    ] {
+        let dir = TestDir::new();
+        let mut q = if mutation == "shared-feature-attribution" {
+            quote_with_feature_error(2 * SCALE, SCALE)
+        } else {
+            quote()
+        };
+        match mutation {
+            "shared-fixed" => {
+                q.quote.blocks[0].prove.pricing.fixed_scaled += SCALE;
+                add_block_price(&mut q, SCALE);
+            }
+            "shared-operations" => {
+                q.quote.blocks[0].prove.pricing.operations_scaled += SCALE;
+                add_block_price(&mut q, SCALE);
+            }
+            "shared-feature-attribution" => {
+                q.quote.blocks[0].prove.pricing.feature_error_scaled /= 2;
+            }
+            "exact-below-local" => {
+                q.quote.blocks[0]
+                    .node
+                    .pricing
+                    .evm_local_resources
+                    .unique_account_count = 1;
+            }
+            "zero-input-transactions" => {
+                q.quote.blocks[0].prove.input_transaction_count = 0;
+                q.quote.blocks[0].prove.started_transaction_count = 0;
+                q.quote.prove.selectors.payload.total_transaction_count = 0;
+            }
+            "zero-started-transactions" => {
+                q.quote.blocks[0].prove.started_transaction_count = 0;
+                q.quote.blocks[0].prove.true_unattempted_transactions = 1;
+                q.quote.prove.selectors.true_unattempted_transactions = 1;
+            }
+            "block-proposal-component" => {
+                q.quote.blocks[0].prove.pricing.startup_scaled = SCALE;
+                add_block_price(&mut q, SCALE);
+            }
+            "proposal-block-component" => {
+                q.quote.prove.proposal_once.startup_scaled -= SCALE;
+                q.quote.prove.proposal_once.fixed_scaled = SCALE;
+            }
+            "empty-blob-sources" => {
+                q.quote.prove.selectors.blobs.source_blob_counts.clear();
+            }
+            "proposal-selector-price" => {
+                q.quote.prove.selectors.payload.canonical_transaction_bytes += 1;
+            }
+            "negative-components" => {
+                let node = &mut q.quote.blocks[0].node.pricing;
+                node.fixed_scaled = -1;
+                node.operations_scaled = 1;
+                let prove = &mut q.quote.blocks[0].prove.pricing;
+                prove.fixed_scaled = -1;
+                prove.operations_scaled = 1;
+            }
+            "node-resource-price" => {
+                let node = &mut q.quote.blocks[0].node.pricing;
+                node.evm_local_resources_scaled = SCALE;
+                node.known_subtotal_scaled = SCALE;
+                node.known_subtotal_pgu = 1;
+                q.quote.node.block_local_known_scaled = SCALE;
+                q.quote.node.block_local_known_pgu = 1;
+                q.quote.node.sum_of_block_known_pgu = 1;
+            }
+            "prove-resource-price" => {
+                q.quote.blocks[0].prove.pricing.resources_scaled = SCALE;
+                add_block_price(&mut q, SCALE);
+            }
+            "prove-mpt-price" => {
+                q.quote.blocks[0].prove.pricing.mpt_scaled = SCALE;
+                add_block_price(&mut q, SCALE);
+            }
+            _ => unreachable!(),
+        }
+        let args = write_inputs(
+            &dir,
+            &[QuoteRowV1::Complete(Box::new(q))],
+            &[complete_observation()],
+        );
+        let error = run_compare(&args, &executable()).unwrap_err();
+        assert!(
+            error.to_string().contains("complete quote invariant"),
+            "wrong error for {mutation}: {error:#}"
+        );
+        assert!(!args.output.exists());
+    }
 }
 
 #[test]

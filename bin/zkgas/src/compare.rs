@@ -7,7 +7,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use alethia_reth_evm::zk_gas::pricing::FIXED_POINT_SCALE;
+use alethia_reth_evm::zk_gas::pricing::{
+    BlockPricingInput, FIXED_POINT_SCALE, MptSelectors, PricingBreakdown, ProposalPricingInput,
+    ResourceSelectors, ZkGasModel,
+};
 use anyhow::{Context, Result, ensure};
 use num_bigint::BigUint;
 use num_traits::Zero;
@@ -95,6 +98,23 @@ fn validate_pricing_breakdown(
     pricing: &raiko2_zkgas_trace::PricingBreakdownSnapshot,
 ) -> Result<()> {
     ensure!(
+        [
+            pricing.fixed_scaled,
+            pricing.operations_scaled,
+            pricing.feature_error_scaled,
+            pricing.resources_scaled,
+            pricing.mpt_scaled,
+            pricing.startup_scaled,
+            pricing.transaction_payload_scaled,
+            pricing.blob_source_scaled,
+            pricing.parent_mpt_scaled,
+            pricing.total_scaled,
+        ]
+        .into_iter()
+        .all(|value| value >= 0),
+        "negative pricing component"
+    );
+    ensure!(
         pricing.feature_error_scaled >= 0
             && pricing.feature_error_scaled <= pricing.operations_scaled,
         "feature_error attribution exceeds operations"
@@ -118,6 +138,55 @@ fn validate_pricing_breakdown(
         "pricing breakdown total_pgu mismatch"
     );
     Ok(())
+}
+
+fn resource_selectors(
+    selectors: raiko2_zkgas_trace::ResourceSelectorsSnapshot,
+) -> ResourceSelectors {
+    ResourceSelectors {
+        unique_account_count: selectors.unique_account_count,
+        unique_storage_slot_access_count: selectors.unique_storage_slot_access_count,
+        unique_storage_slot_write_count: selectors.unique_storage_slot_write_count,
+        unique_code_hash_count: selectors.unique_code_hash_count,
+        unique_code_bytes: selectors.unique_code_bytes,
+    }
+}
+
+fn mpt_selectors(selectors: raiko2_zkgas_trace::MptSelectorsSnapshot) -> MptSelectors {
+    MptSelectors {
+        path_node_visits: selectors.path_node_visits,
+        materialization_work_units: selectors.materialization_work_units,
+        hydration_hash_blocks: selectors.hydration_hash_blocks,
+        dirty_encoded_nodes: selectors.dirty_encoded_nodes,
+        dirty_hash_blocks: selectors.dirty_hash_blocks,
+        structural_branch_extension_churn_nodes: selectors.structural_branch_extension_churn_nodes,
+        dropped_trie_nodes: selectors.dropped_trie_nodes,
+    }
+}
+
+fn exact_resources_cover_local(exact: ResourceSelectors, local: ResourceSelectors) -> bool {
+    exact.unique_account_count >= local.unique_account_count
+        && exact.unique_storage_slot_access_count >= local.unique_storage_slot_access_count
+        && exact.unique_storage_slot_write_count >= local.unique_storage_slot_write_count
+        && exact.unique_code_hash_count >= local.unique_code_hash_count
+        && exact.unique_code_bytes >= local.unique_code_bytes
+}
+
+fn snapshot_matches_pricing(
+    snapshot: &raiko2_zkgas_trace::PricingBreakdownSnapshot,
+    pricing: &PricingBreakdown,
+) -> bool {
+    snapshot.fixed_scaled == pricing.fixed_scaled
+        && snapshot.operations_scaled == pricing.operations_scaled
+        && snapshot.feature_error_scaled == pricing.feature_error_scaled
+        && snapshot.resources_scaled == pricing.resources_scaled
+        && snapshot.mpt_scaled == pricing.mpt_scaled
+        && snapshot.startup_scaled == pricing.startup_scaled
+        && snapshot.transaction_payload_scaled == pricing.transaction_payload_scaled
+        && snapshot.blob_source_scaled == pricing.blob_source_scaled
+        && snapshot.parent_mpt_scaled == pricing.parent_mpt_scaled
+        && snapshot.total_scaled == pricing.total_scaled
+        && Some(snapshot.total_pgu) == pricing.total_pgu
 }
 
 fn validate_complete_quote(complete: &CompleteQuoteV1) -> Result<()> {
@@ -172,12 +241,26 @@ fn validate_complete_quote(complete: &CompleteQuoteV1) -> Result<()> {
             "embedded block number mismatch"
         );
         ensure!(
-            block.prove.started_transaction_count <= block.prove.input_transaction_count
+            block.prove.input_transaction_count > 0
+                && block.prove.started_transaction_count > 0
+                && block.prove.started_transaction_count <= block.prove.input_transaction_count
                 && block.prove.true_unattempted_transactions
                     == block.prove.input_transaction_count - block.prove.started_transaction_count,
             "embedded block transaction topology mismatch"
         );
         let node = &block.node.pricing;
+        ensure!(
+            [
+                node.fixed_scaled,
+                node.operations_scaled,
+                node.feature_error_scaled,
+                node.evm_local_resources_scaled,
+                node.known_subtotal_scaled,
+            ]
+            .into_iter()
+            .all(|value| value >= 0),
+            "negative node pricing component"
+        );
         ensure!(
             node.feature_error_scaled >= 0 && node.feature_error_scaled <= node.operations_scaled,
             "feature_error attribution exceeds operations"
@@ -195,7 +278,61 @@ fn validate_complete_quote(complete: &CompleteQuoteV1) -> Result<()> {
             node.known_subtotal_pgu == ceil_scaled(node.known_subtotal_scaled)?,
             "node pricing pgu mismatch"
         );
-        validate_pricing_breakdown(&block.prove.pricing)?;
+        let prove = &block.prove.pricing;
+        validate_pricing_breakdown(prove)?;
+        ensure!(
+            (
+                prove.fixed_scaled,
+                prove.operations_scaled,
+                prove.feature_error_scaled
+            ) == (
+                node.fixed_scaled,
+                node.operations_scaled,
+                node.feature_error_scaled,
+            ),
+            "node and prove shared pricing mismatch"
+        );
+        ensure!(
+            exact_resources_cover_local(
+                resource_selectors(block.prove.exact_resources),
+                resource_selectors(node.evm_local_resources),
+            ),
+            "exact resources do not cover EVM-local resources"
+        );
+        let local_pricing = ZkGasModel
+            .price_block(&BlockPricingInput {
+                started_non_anchor_transactions: 0,
+                native_value_transfers: 0,
+                operation_routes: &[],
+                resources: resource_selectors(node.evm_local_resources),
+                mpt: MptSelectors::default(),
+            })
+            .context("EVM-local selector domain is invalid")?;
+        ensure!(
+            node.evm_local_resources_scaled == local_pricing.resources_scaled,
+            "EVM-local resource price mismatch"
+        );
+        let exact_pricing = ZkGasModel
+            .price_block(&BlockPricingInput {
+                started_non_anchor_transactions: 0,
+                native_value_transfers: 0,
+                operation_routes: &[],
+                resources: resource_selectors(block.prove.exact_resources),
+                mpt: mpt_selectors(block.prove.mpt),
+            })
+            .context("exact block selector domain is invalid")?;
+        ensure!(
+            prove.resources_scaled == exact_pricing.resources_scaled
+                && prove.mpt_scaled == exact_pricing.mpt_scaled,
+            "exact block resource or MPT price mismatch"
+        );
+        ensure!(
+            prove.startup_scaled == 0
+                && prove.transaction_payload_scaled == 0
+                && prove.blob_source_scaled == 0
+                && prove.parent_mpt_scaled == 0,
+            "block pricing contains proposal-only components"
+        );
     }
     ensure!(!proposal.fork_segments.is_empty(), "fork envelope is empty");
     let mut next = proposal.first_block;
@@ -318,12 +455,34 @@ fn validate_complete_quote(complete: &CompleteQuoteV1) -> Result<()> {
         "payload transaction count mismatch"
     );
     ensure!(
+        quote.prove.selectors.payload.canonical_transaction_bytes >= input_transactions,
+        "canonical transaction bytes are below the transaction count"
+    );
+    ensure!(
         quote.prove.selectors.true_unattempted_transactions == unattempted,
         "unattempted transaction count mismatch"
     );
     ensure!(
         quote.prove.selectors.payload.nonempty_payload_transactions <= input_transactions,
         "nonempty payload transaction count mismatch"
+    );
+    let selectors = &quote.prove.selectors;
+    let expected_proposal_once = ZkGasModel
+        .price_proposal_once(&ProposalPricingInput {
+            canonical_transaction_bytes: selectors.payload.canonical_transaction_bytes,
+            nonempty_payload_transactions: selectors.payload.nonempty_payload_transactions,
+            true_unattempted_transactions: selectors.true_unattempted_transactions,
+            source_blob_counts: &selectors.blobs.source_blob_counts,
+            proposal_blob_hash_count: selectors.blobs.proposal_blob_hash_count,
+            provider_blob_count: selectors.blobs.provider_blob_count,
+            provider_commitment_count: selectors.blobs.provider_commitment_count,
+            provider_proof_count: selectors.blobs.provider_proof_count,
+            parent_mpt: mpt_selectors(selectors.parent_mpt),
+        })
+        .context("proposal selector domain is invalid")?;
+    ensure!(
+        snapshot_matches_pricing(&quote.prove.proposal_once, &expected_proposal_once),
+        "proposal-once pricing does not match sealed selectors"
     );
     Ok(())
 }

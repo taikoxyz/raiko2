@@ -9,7 +9,7 @@ use std::{
 
 use alethia_reth_evm::zk_gas::pricing::{
     BlockPricingInput, FIXED_POINT_SCALE, MptSelectors, PricingBreakdown, ProposalPricingInput,
-    ResourceSelectors, ZkGasModel,
+    RUNTIME_SPEC_SHA256, ResourceSelectors, ZkGasModel,
 };
 use anyhow::{Context, Result, ensure};
 use num_bigint::BigUint;
@@ -189,9 +189,45 @@ fn snapshot_matches_pricing(
         && Some(snapshot.total_pgu) == pricing.total_pgu
 }
 
+fn validate_blob_selector_domain(
+    selectors: &raiko2_zkgas_trace::ProposalBlobSelectors,
+) -> Result<()> {
+    ensure!(
+        (1..=11).contains(&selectors.source_blob_counts.len()),
+        "source blob count is outside the proposal domain"
+    );
+    let (normal, forced) = selectors
+        .source_blob_counts
+        .split_last()
+        .context("source blob counts are empty")?;
+    ensure!(
+        forced.iter().all(|count| *count == 1) && (1..=6).contains(normal),
+        "source blob topology is outside the proposal domain"
+    );
+    let total = selectors
+        .source_blob_counts
+        .iter()
+        .try_fold(0u64, |sum, count| sum.checked_add(*count))
+        .context("source blob total overflow")?;
+    ensure!(
+        (1..=16).contains(&total)
+            && [
+                selectors.proposal_blob_hash_count,
+                selectors.provider_blob_count,
+                selectors.provider_commitment_count,
+                selectors.provider_proof_count,
+            ]
+            .into_iter()
+            .all(|count| count == total),
+        "provider blob topology mismatch"
+    );
+    Ok(())
+}
+
 fn validate_complete_quote(complete: &CompleteQuoteV1) -> Result<()> {
     let quote = &complete.quote;
     let proposal = &complete.proposal;
+    let current_model = quote.model_id == RUNTIME_SPEC_SHA256;
     ensure!(
         quote.schema_version == 1,
         "embedded quote schema_version mismatch"
@@ -299,33 +335,35 @@ fn validate_complete_quote(complete: &CompleteQuoteV1) -> Result<()> {
             ),
             "exact resources do not cover EVM-local resources"
         );
-        let local_pricing = ZkGasModel
-            .price_block(&BlockPricingInput {
-                started_non_anchor_transactions: 0,
-                native_value_transfers: 0,
-                operation_routes: &[],
-                resources: resource_selectors(node.evm_local_resources),
-                mpt: MptSelectors::default(),
-            })
-            .context("EVM-local selector domain is invalid")?;
-        ensure!(
-            node.evm_local_resources_scaled == local_pricing.resources_scaled,
-            "EVM-local resource price mismatch"
-        );
-        let exact_pricing = ZkGasModel
-            .price_block(&BlockPricingInput {
-                started_non_anchor_transactions: 0,
-                native_value_transfers: 0,
-                operation_routes: &[],
-                resources: resource_selectors(block.prove.exact_resources),
-                mpt: mpt_selectors(block.prove.mpt),
-            })
-            .context("exact block selector domain is invalid")?;
-        ensure!(
-            prove.resources_scaled == exact_pricing.resources_scaled
-                && prove.mpt_scaled == exact_pricing.mpt_scaled,
-            "exact block resource or MPT price mismatch"
-        );
+        if current_model {
+            let local_pricing = ZkGasModel
+                .price_block(&BlockPricingInput {
+                    started_non_anchor_transactions: 0,
+                    native_value_transfers: 0,
+                    operation_routes: &[],
+                    resources: resource_selectors(node.evm_local_resources),
+                    mpt: MptSelectors::default(),
+                })
+                .context("EVM-local selector domain is invalid")?;
+            ensure!(
+                node.evm_local_resources_scaled == local_pricing.resources_scaled,
+                "EVM-local resource price mismatch"
+            );
+            let exact_pricing = ZkGasModel
+                .price_block(&BlockPricingInput {
+                    started_non_anchor_transactions: 0,
+                    native_value_transfers: 0,
+                    operation_routes: &[],
+                    resources: resource_selectors(block.prove.exact_resources),
+                    mpt: mpt_selectors(block.prove.mpt),
+                })
+                .context("exact block selector domain is invalid")?;
+            ensure!(
+                prove.resources_scaled == exact_pricing.resources_scaled
+                    && prove.mpt_scaled == exact_pricing.mpt_scaled,
+                "exact block resource or MPT price mismatch"
+            );
+        }
         ensure!(
             prove.startup_scaled == 0
                 && prove.transaction_payload_scaled == 0
@@ -467,23 +505,26 @@ fn validate_complete_quote(complete: &CompleteQuoteV1) -> Result<()> {
         "nonempty payload transaction count mismatch"
     );
     let selectors = &quote.prove.selectors;
-    let expected_proposal_once = ZkGasModel
-        .price_proposal_once(&ProposalPricingInput {
-            canonical_transaction_bytes: selectors.payload.canonical_transaction_bytes,
-            nonempty_payload_transactions: selectors.payload.nonempty_payload_transactions,
-            true_unattempted_transactions: selectors.true_unattempted_transactions,
-            source_blob_counts: &selectors.blobs.source_blob_counts,
-            proposal_blob_hash_count: selectors.blobs.proposal_blob_hash_count,
-            provider_blob_count: selectors.blobs.provider_blob_count,
-            provider_commitment_count: selectors.blobs.provider_commitment_count,
-            provider_proof_count: selectors.blobs.provider_proof_count,
-            parent_mpt: mpt_selectors(selectors.parent_mpt),
-        })
-        .context("proposal selector domain is invalid")?;
-    ensure!(
-        snapshot_matches_pricing(&quote.prove.proposal_once, &expected_proposal_once),
-        "proposal-once pricing does not match sealed selectors"
-    );
+    validate_blob_selector_domain(&selectors.blobs)?;
+    if current_model {
+        let expected_proposal_once = ZkGasModel
+            .price_proposal_once(&ProposalPricingInput {
+                canonical_transaction_bytes: selectors.payload.canonical_transaction_bytes,
+                nonempty_payload_transactions: selectors.payload.nonempty_payload_transactions,
+                true_unattempted_transactions: selectors.true_unattempted_transactions,
+                source_blob_counts: &selectors.blobs.source_blob_counts,
+                proposal_blob_hash_count: selectors.blobs.proposal_blob_hash_count,
+                provider_blob_count: selectors.blobs.provider_blob_count,
+                provider_commitment_count: selectors.blobs.provider_commitment_count,
+                provider_proof_count: selectors.blobs.provider_proof_count,
+                parent_mpt: mpt_selectors(selectors.parent_mpt),
+            })
+            .context("proposal selector domain is invalid")?;
+        ensure!(
+            snapshot_matches_pricing(&quote.prove.proposal_once, &expected_proposal_once),
+            "proposal-once pricing does not match sealed selectors"
+        );
+    }
     Ok(())
 }
 

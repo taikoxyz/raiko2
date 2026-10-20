@@ -153,6 +153,9 @@ Block validation also requires prove-side fixed/operation/feature attribution to
 surface, exact resources to cover EVM-local resources, and sealed resource/MPT prices to match their
 selectors. Proposal-once pricing is recomputed from its selectors with the sealed model; block-only
 and proposal-only component domains cannot be exchanged while keeping a forged total closed.
+Tariff recomputation applies when the quote model matches the compare binary's sealed runtime model.
+Schema-v1 quotes from another explicitly profiled model retain the model-independent structural,
+selector-domain, duplicated-identity, and arithmetic checks without being repriced by the wrong model.
 
 ### Compare: cross-program SP1 and incompatible-unit RISC0
 

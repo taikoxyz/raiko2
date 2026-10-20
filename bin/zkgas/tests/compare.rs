@@ -596,6 +596,63 @@ fn complete_quote_rejects_cross_surface_and_selector_domain_forgery() {
 }
 
 #[test]
+fn schema_v1_quote_from_an_explicit_different_model_remains_comparable() {
+    const SCALE: i128 = 1_000_000_000_000_000_000;
+    let dir = TestDir::new();
+    let mut q = quote();
+    q.quote.model_id = "model-m2".into();
+    q.calibration_profile = q.quote.model_id.clone();
+
+    let block = &mut q.quote.blocks[0];
+    block.node.pricing.evm_local_resources.unique_account_count = 1;
+    block.node.pricing.evm_local_resources_scaled = SCALE;
+    block.node.pricing.known_subtotal_scaled = SCALE;
+    block.node.pricing.known_subtotal_pgu = 1;
+    block.prove.exact_resources.unique_account_count = 1;
+    block.prove.pricing.resources_scaled = SCALE;
+    block.prove.pricing.total_scaled = SCALE;
+    block.prove.pricing.total_pgu = 1;
+    q.quote.node.block_local_known_scaled = SCALE;
+    q.quote.node.block_local_known_pgu = 1;
+    q.quote.node.sum_of_block_known_pgu = 1;
+    q.quote.prove.block_local_scaled = SCALE;
+    q.quote.prove.block_local_pgu = 1;
+    q.quote.prove.sum_of_block_admission_pgu = 1;
+
+    q.quote.prove.proposal_once.startup_scaled += SCALE;
+    q.quote.prove.proposal_once.total_scaled += SCALE;
+    q.quote.prove.proposal_once.total_pgu += 1;
+    q.quote.prove.proposal_once_pgu += 1;
+    q.quote.prove.total_scaled += 2 * SCALE;
+    q.quote.prove.total_pgu += 2;
+
+    let mut o = observation();
+    o.workload.value = q.quote.prove.total_pgu * 2;
+    let mut profiles = embedded_profiles().unwrap();
+    let profile = &mut profiles.profiles[0];
+    profile.profile_id = "model-m2-profile".into();
+    profile.model_id = q.quote.model_id.clone();
+    profile.runtime_spec_sha256 = Some(q.quote.model_id.clone());
+    profile.normalization = None;
+
+    let mut args = write_inputs(
+        &dir,
+        &[QuoteRowV1::Complete(Box::new(q))],
+        &[ObservationRowV1::Complete(Box::new(o))],
+    );
+    let profiles_path = dir.path().join("profiles.toml");
+    fs::write(&profiles_path, toml::to_string(&profiles).unwrap()).unwrap();
+    args.profiles = Some(profiles_path);
+
+    let run = run_compare(&args, &executable()).unwrap();
+    assert_eq!(run.exit_code(), 0);
+    assert!(matches!(
+        &rows(&run.run_path)[0].result,
+        ComparisonResultV1::Joined { profile_id, .. } if profile_id == "model-m2-profile"
+    ));
+}
+
+#[test]
 fn empty_quote_or_observation_populations_are_structural_collection_failures() {
     for (quotes, observations) in [
         (vec![], vec![complete_observation()]),

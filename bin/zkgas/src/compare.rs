@@ -95,11 +95,15 @@ fn validate_pricing_breakdown(
     pricing: &raiko2_zkgas_trace::PricingBreakdownSnapshot,
 ) -> Result<()> {
     ensure!(
+        pricing.feature_error_scaled >= 0
+            && pricing.feature_error_scaled <= pricing.operations_scaled,
+        "feature_error attribution exceeds operations"
+    );
+    ensure!(
         pricing.total_scaled
             == checked_sum([
                 pricing.fixed_scaled,
                 pricing.operations_scaled,
-                pricing.feature_error_scaled,
                 pricing.resources_scaled,
                 pricing.mpt_scaled,
                 pricing.startup_scaled,
@@ -175,11 +179,14 @@ fn validate_complete_quote(complete: &CompleteQuoteV1) -> Result<()> {
         );
         let node = &block.node.pricing;
         ensure!(
+            node.feature_error_scaled >= 0 && node.feature_error_scaled <= node.operations_scaled,
+            "feature_error attribution exceeds operations"
+        );
+        ensure!(
             node.known_subtotal_scaled
                 == checked_sum([
                     node.fixed_scaled,
                     node.operations_scaled,
-                    node.feature_error_scaled,
                     node.evm_local_resources_scaled,
                 ])?,
             "node pricing subtotal mismatch"

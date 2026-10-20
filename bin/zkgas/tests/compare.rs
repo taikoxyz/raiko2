@@ -370,6 +370,61 @@ fn complete_quotes_reject_every_inconsistent_embedded_identity_before_joining() 
     }
 }
 
+fn quote_with_feature_error(
+    operations_scaled: i128,
+    feature_error_scaled: i128,
+) -> CompleteQuoteV1 {
+    const SCALE: i128 = 1_000_000_000_000_000_000;
+    let mut quote = quote();
+    let operation_pgu = u128::try_from(operations_scaled / SCALE).unwrap();
+    let node = &mut quote.quote.blocks[0].node.pricing;
+    node.operations_scaled = operations_scaled;
+    node.feature_error_scaled = feature_error_scaled;
+    node.known_subtotal_scaled = operations_scaled;
+    node.known_subtotal_pgu = operation_pgu;
+    let prove = &mut quote.quote.blocks[0].prove.pricing;
+    prove.operations_scaled = operations_scaled;
+    prove.feature_error_scaled = feature_error_scaled;
+    prove.total_scaled = operations_scaled;
+    prove.total_pgu = operation_pgu;
+    quote.quote.node.block_local_known_scaled = operations_scaled;
+    quote.quote.node.block_local_known_pgu = operation_pgu;
+    quote.quote.node.sum_of_block_known_pgu = operation_pgu;
+    quote.quote.prove.block_local_scaled = operations_scaled;
+    quote.quote.prove.block_local_pgu = operation_pgu;
+    quote.quote.prove.sum_of_block_admission_pgu = operation_pgu;
+    quote.quote.prove.total_scaled = operations_scaled + 10 * SCALE;
+    quote.quote.prove.total_pgu = operation_pgu + 10;
+    quote
+}
+
+#[test]
+fn feature_error_is_validated_as_operations_attribution_not_an_additive_price() {
+    const SCALE: i128 = 1_000_000_000_000_000_000;
+    for feature_error_scaled in [SCALE, SCALE / 2] {
+        let dir = TestDir::new();
+        let q = quote_with_feature_error(2 * SCALE, feature_error_scaled);
+        let args = write_inputs(
+            &dir,
+            &[QuoteRowV1::Complete(Box::new(q))],
+            &[complete_observation()],
+        );
+        let run = run_compare(&args, &executable()).unwrap();
+        assert_eq!(run.manifest.counts.get(&ComparisonKind::Joined), Some(&1));
+    }
+
+    let dir = TestDir::new();
+    let q = quote_with_feature_error(2 * SCALE, 2 * SCALE + 1);
+    let args = write_inputs(
+        &dir,
+        &[QuoteRowV1::Complete(Box::new(q))],
+        &[complete_observation()],
+    );
+    let error = run_compare(&args, &executable()).unwrap_err();
+    assert!(format!("{error:#}").contains("feature_error attribution"));
+    assert!(!args.output.exists());
+}
+
 #[test]
 fn empty_quote_or_observation_populations_are_structural_collection_failures() {
     for (quotes, observations) in [

@@ -22,7 +22,7 @@ use crate::{
 pub const MAX_COMPARE_FILES: usize = 128;
 pub const MAX_COMPARE_FILE_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_COMPARE_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
-pub const MAX_COMPARE_ROWS: usize = 10_000;
+pub const MAX_COMPARE_ROWS: usize = MAX_OBSERVATION_ROWS;
 pub const MAX_PROFILE_BYTES: u64 = 1024 * 1024;
 pub const MAX_PROFILES: usize = 128;
 pub const MAX_COMPARE_OUTPUT_BYTES: usize = 256 * 1024 * 1024;

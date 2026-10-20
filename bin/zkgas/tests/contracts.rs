@@ -133,6 +133,39 @@ fn excessive_manifest_rows_are_rejected_before_any_input_is_opened() {
 }
 
 #[test]
+fn observation_sequence_hard_limit_is_enforced_during_deserialization() {
+    let row = json!({"status":"failed","observation_id":"observation","attempt_id":"attempt","failure":failure()});
+    let mut manifest = json!({"schema_version":1,"observation_set_id":"set","observations":vec![row.clone();10_000]});
+    let accepted: ObservationManifestV1 = serde_json::from_value(manifest.clone()).unwrap();
+    assert_eq!(accepted.observations.len(), 10_000);
+    manifest["observations"].as_array_mut().unwrap().push(row);
+    let parsed = serde_json::from_value::<ObservationManifestV1>(manifest);
+    assert!(parsed.is_err(), "an over-limit sequence must be rejected");
+    let error = parsed.unwrap_err();
+    assert!(
+        error.to_string().contains("observation manifest row limit"),
+        "{error}"
+    );
+}
+
+#[test]
+fn observation_sequence_stops_before_invalid_or_malformed_over_limit_tail() {
+    let row = serde_json::to_string(&json!({"status":"failed","observation_id":"observation","attempt_id":"attempt","failure":failure()})).unwrap();
+    for tail in [r#",{"status":"invalid-tail"}] }"#, ",malformed-tail] }"] {
+        let raw = format!(
+            r#"{{"schema_version":1,"observation_set_id":"set","observations":[{}{}"#,
+            vec![row.as_str(); 10_001].join(","),
+            tail
+        );
+        let error = serde_json::from_str::<ObservationManifestV1>(&raw).unwrap_err();
+        assert!(
+            error.to_string().contains("observation manifest row limit"),
+            "must reject count before inspecting tail: {error}"
+        );
+    }
+}
+
+#[test]
 fn workload_u128_wire_values_are_decimal_strings() {
     let workload = Workload {
         value: u128::MAX,

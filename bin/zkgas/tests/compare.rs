@@ -640,6 +640,45 @@ fn excessive_parsed_rows_and_failed_verified_duplicate_keys_are_structural() {
 }
 
 #[test]
+fn observation_row_limit_stops_before_malformed_tail_without_output() {
+    let dir = TestDir::new();
+    let args = write_inputs(&dir, &[complete_quote()], &[]);
+    let observation_rows: Vec<_> = (0..10_001).map(|i| serde_json::to_string(&json!({"status":"failed","observation_id":format!("observation-{i}"),"attempt_id":"attempt","failure":{"code":"unavailable","message":"missing"}})).unwrap()).collect();
+    for tail in ["]}", r#",{"status":"invalid-tail"}]}"#, ",malformed-tail]}"] {
+        let raw = format!(
+            r#"{{"schema_version":1,"observation_set_id":"set","observations":[{}{}"#,
+            observation_rows.join(","),
+            tail
+        );
+        fs::write(&args.observations[0], raw).unwrap();
+        let error = run_compare(&args, &executable()).unwrap_err();
+        assert!(
+            error.to_string().contains("observation manifest row limit"),
+            "{error}"
+        );
+        assert!(!args.output.exists());
+    }
+}
+
+#[test]
+fn observation_files_below_individual_limits_still_obey_the_aggregate_row_limit() {
+    let dir = TestDir::new();
+    let mut args = write_inputs(&dir, &[complete_quote()], &[]);
+    for index in 0..2 {
+        let path = dir.path().join(format!("observations-{index}.json"));
+        let observations: Vec<_> = (0..5_000).map(|i| json!({"status":"failed","observation_id":format!("observation-{i}"),"attempt_id":"attempt","failure":{"code":"unavailable","message":"missing"}})).collect();
+        fs::write(&path, serde_json::to_vec(&json!({"schema_version":1,"observation_set_id":format!("set-{index}"),"observations":observations})).unwrap()).unwrap();
+        args.observations.push(path);
+    }
+    let error = run_compare(&args, &executable()).unwrap_err();
+    assert!(
+        error.to_string().contains("total input row count limit"),
+        "{error}"
+    );
+    assert!(!args.output.exists());
+}
+
+#[test]
 fn binary_exit_codes_cover_complete_partial_incompatible_and_structural_errors() {
     use std::process::Command;
     for mode in ["complete", "partial", "incompatible", "structural"] {

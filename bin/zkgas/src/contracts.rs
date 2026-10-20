@@ -9,6 +9,7 @@ pub const MAX_OPAQUE_BYTES: usize = 65_536;
 pub const MAX_OPAQUE_DEPTH: usize = 16;
 pub const MAX_OPAQUE_ENTRIES: usize = 1_024;
 pub const MAX_INPUT_ROWS: usize = 10_000;
+pub const MAX_OBSERVATION_ROWS: usize = 10_000;
 
 fn version_one<'de, D: Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
     let version = u32::deserialize(d)?;
@@ -108,28 +109,64 @@ wire! { pub struct InputSampleV1 {
     #[serde(default, skip_serializing_if = "Option::is_none")] pub metadata: Option<OpaqueObject>,
 } }
 
-fn bounded_samples<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<InputSampleV1>, D::Error> {
-    struct Samples;
-    impl<'de> serde::de::Visitor<'de> for Samples {
-        type Value = Vec<InputSampleV1>;
+fn bounded_rows<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
+    d: D,
+    limit: usize,
+    limit_error: &'static str,
+) -> Result<Vec<T>, D::Error> {
+    struct Rows<T> {
+        limit: usize,
+        limit_error: &'static str,
+        row: std::marker::PhantomData<T>,
+    }
+    // SeqAccess determines whether another element exists; the seed rejects it before decoding
+    // or allocating that row. An invalid later tail cannot mask a reached count limit.
+    struct RejectExtraRow(&'static str);
+    impl<'de> serde::de::DeserializeSeed<'de> for RejectExtraRow {
+        type Value = ();
+        fn deserialize<D: Deserializer<'de>>(self, _d: D) -> Result<(), D::Error> {
+            Err(D::Error::custom(self.0))
+        }
+    }
+    impl<'de, T: Deserialize<'de>> serde::de::Visitor<'de> for Rows<T> {
+        type Value = Vec<T>;
         fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.write_str("a bounded sample list")
+            f.write_str("a bounded row list")
         }
         fn visit_seq<A: serde::de::SeqAccess<'de>>(
             self,
             mut seq: A,
         ) -> Result<Self::Value, A::Error> {
             let mut rows = Vec::new();
-            while let Some(row) = seq.next_element()? {
-                if rows.len() >= MAX_INPUT_ROWS {
-                    return Err(A::Error::custom("input manifest row limit exceeded"));
-                }
+            while rows.len() < self.limit {
+                let Some(row) = seq.next_element()? else {
+                    return Ok(rows);
+                };
                 rows.push(row);
             }
+            seq.next_element_seed(RejectExtraRow(self.limit_error))?;
             Ok(rows)
         }
     }
-    d.deserialize_seq(Samples)
+    d.deserialize_seq(Rows {
+        limit,
+        limit_error,
+        row: std::marker::PhantomData,
+    })
+}
+
+fn bounded_samples<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<InputSampleV1>, D::Error> {
+    bounded_rows(d, MAX_INPUT_ROWS, "input manifest row limit exceeded")
+}
+
+fn bounded_observations<'de, D: Deserializer<'de>>(
+    d: D,
+) -> Result<Vec<ObservationRowV1>, D::Error> {
+    bounded_rows(
+        d,
+        MAX_OBSERVATION_ROWS,
+        "observation manifest row limit exceeded",
+    )
 }
 wire! { pub struct InputManifestV1 {
     #[serde(deserialize_with = "version_one")] pub schema_version: u32,
@@ -182,7 +219,7 @@ pub enum ObservationRowV1 {
 wire! { pub struct ObservationManifestV1 {
     #[serde(deserialize_with = "version_one")] pub schema_version: u32,
     pub observation_set_id: String,
-    pub observations: Vec<ObservationRowV1>,
+    #[serde(deserialize_with = "bounded_observations")] pub observations: Vec<ObservationRowV1>,
 } }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

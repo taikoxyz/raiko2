@@ -9,6 +9,8 @@ mod runtime_quote;
 
 pub use proposal_inputs::{ProposalBlobSelectors, ProposalPayloadSelectors};
 pub use runtime_quote::{
-    BlockWorkloadQuote, PricingBreakdownSnapshot, ProposalWorkloadQuote, RuntimeQuoteError,
-    quote_shasta_proposal,
+    BlockWorkloadQuote, MptSelectorsSnapshot, NodeBlockWorkloadQuote, NodePricingBreakdownSnapshot,
+    NodeProposalWorkloadQuote, PricingBreakdownSnapshot, ProposalPricingSelectorsSnapshot,
+    ProposalWorkloadQuote, ProveBlockWorkloadQuote, ProveProposalWorkloadQuote,
+    ResourceSelectorsSnapshot, RuntimeQuoteError, quote_shasta_proposal,
 };

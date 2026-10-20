@@ -435,6 +435,76 @@ cargo run -r -p guest-launcher -- \
 This stage does not produce or verify a proof and accepts only native execute mode. It validates the
 supplied input without backfilling proof-carry data, fails if the exact resource observations do not
 cover the EVM-local report, and records both per-block admission PGU and the proposal-once total.
+The initial report schema separates fields by where the current implementation obtains them:
+
+- `node` contains the incomplete block-local information available to Alethia during mining. The
+  existing block `difficulty` remains the Unzen value and is recorded as `unzen_zkgas`; the new
+  pricing subtotal is Shadow output and is not written to `difficulty`.
+- `prove` contains information obtained only by the raiko2 host's full proposal replay: exact
+  block-end resources, stateless MPT work, proposal payload/blob/parent-MPT selectors, and the
+  completed model quote. This replay is native host computation; actual SP1 PGU still comes from
+  `ExecutionReport::gas()` and is joined by the external collection pipeline.
+
+All `*_scaled` values use a fixed-point scale of `10^18`. For each block `b`, the currently
+implemented node-side Shadow subtotal is:
+
+```text
+N_b = fixed_b + operations_b + evm_local_resources_b
+```
+
+These terms are reported under `blocks[b].node.pricing`. `feature_error_scaled` is attribution
+inside `operations_scaled`, not an additional term. The raw five-selector EVM-local resource set is
+reported as `evm_local_resources`. In PGU before the final ceiling, the sealed formula is:
+
+```text
+fixed = 1,280,652.929819390011787524
+      +   172,429.766934792317965893 * started_non_anchor_tx
+      +     5,017                         * native_transfer
+
+operations = sum_route(compose(accepted, incremental, structural) + feature_error)
+
+resources(A, Sa, Sw, Ch, Cb)
+  = 12,162*A + 9,152*Sa + 20,296*Sw + 2,971*Ch + 2*Cb
+```
+
+Here `A`, `Sa`, `Sw`, `Ch`, and `Cb` are unique accounts, storage accesses, storage writes, code
+hashes, and code bytes. Route composition is either the accepted value or the maximum of the three
+normal candidates, as sealed by the generated route table. The current node report exposes the
+priced `fixed` and `operations` aggregates, `feature_error` attribution, and raw resource selectors;
+it does not expose raw fixed selectors or per-route operation rows.
+
+The complete replay-side block quote replaces that incomplete resource term with the exact
+block-end term and adds MPT work:
+
+```text
+B_b = N_b - evm_local_resources_b + exact_resources_b + mpt_b
+
+mpt(P, M, Hh, De, Dh, Sc, Dn)
+  = 256*P + 5,000*M + 3,000*Hh + 8,000*De + 3,000*Dh
+    + 400,000*Sc + 400,000*Dn
+```
+
+The raw exact resource and seven MPT selectors are under `blocks[b].prove`; their priced terms are
+`prove.pricing.resources_scaled` and `prove.pricing.mpt_scaled`. Proposal-once work is:
+
+```text
+Q = 154,263,870.735480402119958866
+  + 256*canonical_tx_bytes
+  + 16,384*nonempty_payload_tx
+  + 131,072*true_unattempted_tx
+  + 19,922,944*extra_blobs
+  + 1,048,576*extra_sources
+  + mpt(parent selectors)
+
+P = ceil((sum_b B_b + Q) / 10^18)
+```
+
+The raw inputs to `Q` are under `prove.selectors`, its priced breakdown is
+`prove.proposal_once`, and `prove.total_pgu` is `P`. `node.block_local_known_pgu` and
+`prove.block_local_pgu` apply one ceiling after summing their respective block fixed-point values;
+the corresponding `sum_of_block_*_pgu` fields preserve the sum of per-block ceilings used for
+block-by-block admission comparisons.
+
 The reported `model_id` authenticates the pricing specification, not the SP1 ELF used by an external
 proving run. A complete model quote is therefore shadow-comparison output; it becomes admission or
 capacity evidence only after the compared PGU is verified against the proposal ELF/VK identity

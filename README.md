@@ -262,6 +262,7 @@ For the first external provider migration, see
 - `crates/pipeline`: preflight, manifest building, and validation wiring
 - `crates/prover`: prover backends and aggregation adapters
 - `xtask`: guest build, verifier registration, benchmarking, and release automation
+- [`bin/zkgas`](bin/zkgas/README.md): local quote, comparison, and reporting tools for zkGas evaluation
 
 ## License
 

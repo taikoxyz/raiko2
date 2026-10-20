@@ -14841,6 +14841,7 @@ dependencies = [
  "num-traits",
  "raiko2-primitives",
  "raiko2-primitives-shasta",
+ "raiko2-protocol-shasta",
  "raiko2-zkgas-trace",
  "rustix 1.1.4",
  "serde",

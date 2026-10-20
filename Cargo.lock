@@ -14831,6 +14831,7 @@ dependencies = [
 name = "zkgas"
 version = "0.1.0"
 dependencies = [
+ "alethia-reth-chainspec 1.4.1 (git+https://github.com/taikoxyz/alethia-reth?rev=37a3366edda050abc6460bfc0f4c27b242a72f5e)",
  "anyhow",
  "bincode",
  "clap",
@@ -14838,6 +14839,7 @@ dependencies = [
  "num-bigint 0.4.6",
  "num-rational",
  "num-traits",
+ "raiko2-primitives",
  "raiko2-primitives-shasta",
  "raiko2-zkgas-trace",
  "rustix 1.1.4",

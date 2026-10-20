@@ -29,7 +29,7 @@ fn all_eight_contracts_have_independent_strict_versions() {
         json!({"schema_version":1,"observation_set_id":"set","observations":[]}),
     );
     assert_strict::<QuoteRowV1>(
-        json!({"schema_version":1,"status":"failed","key":{"corpus_id":"corpus","sample_id":"sample","guest_input_sha256":"input"},"executable":executable(),"input_source":{"kind":"single","descriptor_sha256":"descriptor"},"guest_input_byte_length":0,"failure":failure()}),
+        json!({"schema_version":1,"status":"failed","corpus_id":"corpus","sample_id":"sample","executable":executable(),"input_source":{"kind":"single","descriptor_sha256":"descriptor"},"failure":failure()}),
     );
     assert_strict::<CompatibilityProfilesV1>(json!({"schema_version":1,"profiles":[]}));
     assert_strict::<ComparisonManifestV1>(
@@ -44,6 +44,36 @@ fn all_eight_contracts_have_independent_strict_versions() {
     assert_strict::<ReportV1>(
         json!({"schema_version":1,"report_id":"report","comparison_manifest_sha256":"manifest","row_sequence_sha256":"sequence","config_sha256":"config","executable":executable(),"arithmetic_policy":"exact-v1","status":"complete","whole_run_counts":{},"selected_counts":{},"strata":[],"excluded":[]}),
     );
+}
+
+#[test]
+fn failed_quote_distinguishes_unavailable_observed_and_verified_identity() {
+    let minimal = json!({"schema_version":1,"status":"failed","corpus_id":"corpus","sample_id":"sample","executable":executable(),"input_source":{"kind":"single","descriptor_sha256":"descriptor"},"failure":failure()});
+    let QuoteRowV1::Failed(row) = serde_json::from_value::<QuoteRowV1>(minimal.clone()).unwrap()
+    else {
+        unreachable!()
+    };
+    let encoded = serde_json::to_value(row).unwrap();
+    assert!(encoded.get("verified_key").is_none());
+    assert!(encoded.get("observed_guest_input_sha256").is_none());
+    assert!(encoded.get("observed_guest_input_byte_length").is_none());
+    assert!(encoded.get("key").is_none());
+    assert!(encoded.get("guest_input_byte_length").is_none());
+    let mut observed = minimal.clone();
+    observed["observed_guest_input_sha256"] = json!("observed");
+    observed["observed_guest_input_byte_length"] = json!(7);
+    serde_json::from_value::<QuoteRowV1>(observed.clone()).unwrap();
+    observed["verified_key"] =
+        json!({"corpus_id":"corpus","sample_id":"sample","guest_input_sha256":"canonical"});
+    serde_json::from_value::<QuoteRowV1>(observed).unwrap();
+    let mut legacy = minimal.clone();
+    legacy["key"] = json!({"corpus_id":"corpus","sample_id":"sample","guest_input_sha256":""});
+    assert!(serde_json::from_value::<QuoteRowV1>(legacy).is_err());
+    for id in ["corpus_id", "sample_id"] {
+        let mut missing = minimal.clone();
+        missing.as_object_mut().unwrap().remove(id);
+        assert!(serde_json::from_value::<QuoteRowV1>(missing).is_err());
+    }
 }
 
 #[test]

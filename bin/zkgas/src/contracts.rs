@@ -232,10 +232,13 @@ wire! { pub struct CompleteQuoteV1 {
 } }
 wire! { pub struct FailedQuoteV1 {
     #[serde(deserialize_with = "version_one")] pub schema_version: u32,
-    pub key: QuoteKey,
+    pub corpus_id: String,
+    pub sample_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub verified_key: Option<QuoteKey>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub observed_guest_input_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub observed_guest_input_byte_length: Option<u64>,
     pub executable: ExecutableIdentity,
     pub input_source: InputSourceV1,
-    pub guest_input_byte_length: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")] pub metadata: Option<OpaqueObject>,
     pub failure: FailureV1,
 } }

@@ -242,6 +242,10 @@ wire! { #[derive(PartialOrd, Ord)] pub struct ForkSegmentV1 {
     pub first_block: u64,
     pub last_block: u64,
 } }
+wire! { #[derive(PartialOrd, Ord)] pub struct ForkTopologySegmentV1 {
+    pub fork: String,
+    pub first_block_offset: u64,
+} }
 wire! { pub struct ProposalIdentityV1 {
     pub proposal_id: u64,
     pub chain: ChainIdentityV1,
@@ -452,7 +456,7 @@ wire! { pub struct ReportConfigV1 {
 } }
 wire! { #[derive(PartialOrd, Ord)] pub struct StratumIdentityV1 {
     pub chain_id: u64,
-    pub fork_segments: Vec<ForkSegmentV1>,
+    pub fork_topology: Vec<ForkTopologySegmentV1>,
     pub backend: String,
     pub workload_unit: String,
     pub measurement_stage: String,

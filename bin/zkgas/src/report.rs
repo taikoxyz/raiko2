@@ -31,7 +31,7 @@ pub const MAX_REPORT_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_REPORT_CONFIG_BYTES: u64 = 64 * 1024;
 pub const MAX_REPORT_CONFIG_ITEMS: usize = 128;
 pub const MAX_REPORT_OUTPUT_BYTES: u64 = 32 * 1024 * 1024;
-const GROUPING_POLICY: &str = "full-stratum-v1;chain;ordered-full-fork-segments;backend;unit;stage;full-program;backend-version;model;resolved-profile;compatibility;normalization-wrapper";
+const GROUPING_POLICY: &str = "full-stratum-v1;chain;ordered-fork-topology-relative-transition-offsets;backend;unit;stage;full-program;backend-version;model;resolved-profile;compatibility;normalization-wrapper";
 const METRIC_POLICY: &str = "report-v1;per-row-ratios-and-underquote-positive-actual-only;workload-ratio-full-sums;nearest-rank-max(1,ceil(q*n));raw-pearson;spearman-average-ties;kendall-tau-b;sqrt-rational-half-even-6;prediction-buckets;amplification=max(actual)/min(positive-actual);zero-or-less-than-two-positive-unavailable";
 
 #[derive(Clone, Debug, clap::Parser)]
@@ -582,7 +582,7 @@ fn matches_filters(result: &ComparisonResultV1, filters: &ReportFiltersV1) -> bo
             || profile.is_some_and(|p| filters.profile_ids.iter().any(|id| id == p)))
 }
 
-fn stratum(result: &ComparisonResultV1) -> Option<(StratumIdentityV1, (u128, u128))> {
+fn stratum(result: &ComparisonResultV1) -> Result<Option<(StratumIdentityV1, (u128, u128))>> {
     let (quote, observation, profile_id, compatible, normalization) = match result {
         ComparisonResultV1::Joined {
             quote,
@@ -603,12 +603,26 @@ fn stratum(result: &ComparisonResultV1) -> Option<(StratumIdentityV1, (u128, u12
             normalization,
             ..
         } => (quote, observation, None, false, normalization),
-        _ => return None,
+        _ => return Ok(None),
     };
-    Some((
+    let fork_topology = quote
+        .proposal
+        .fork_segments
+        .iter()
+        .map(|segment| {
+            Ok(ForkTopologySegmentV1 {
+                fork: segment.fork.clone(),
+                first_block_offset: segment
+                    .first_block
+                    .checked_sub(quote.proposal.first_block)
+                    .context("fork segment begins before proposal")?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(Some((
         StratumIdentityV1 {
             chain_id: quote.proposal.chain.chain_id,
-            fork_segments: quote.proposal.fork_segments.clone(),
+            fork_topology,
             backend: observation.backend.clone(),
             workload_unit: observation.workload.unit.clone(),
             measurement_stage: observation.measurement_stage.clone(),
@@ -622,7 +636,7 @@ fn stratum(result: &ComparisonResultV1) -> Option<(StratumIdentityV1, (u128, u12
                 .map(|n| n.normalization_sha256.clone()),
         },
         (quote.quote.prove.total_pgu, observation.workload.value),
-    ))
+    )))
 }
 
 fn rational_ratio(value: &BigRational) -> Result<RatioV1> {
@@ -924,7 +938,7 @@ fn build_report_with_hash(
             .selected_counts
             .entry(comparison_kind(&row.result))
             .or_default() += 1;
-        if let Some((identity, point)) = stratum(&row.result) {
+        if let Some((identity, point)) = stratum(&row.result)? {
             groups.entry(identity).or_default().push(point);
         } else {
             let reason = match &row.result {

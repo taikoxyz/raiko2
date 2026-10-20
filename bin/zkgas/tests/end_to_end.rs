@@ -357,8 +357,16 @@ fn binaries_compose_complete_and_partial_runs_with_verified_identity_and_reuse()
     for stratum in &report.strata {
         assert_eq!(stratum.identity.chain_id, quoted.proposal.chain.chain_id);
         assert_eq!(
-            stratum.identity.fork_segments,
-            quoted.proposal.fork_segments
+            stratum.identity.fork_topology,
+            quoted
+                .proposal
+                .fork_segments
+                .iter()
+                .map(|segment| ForkTopologySegmentV1 {
+                    fork: segment.fork.clone(),
+                    first_block_offset: segment.first_block - quoted.proposal.first_block,
+                })
+                .collect::<Vec<_>>()
         );
         assert_eq!(stratum.identity.model_id, quoted.quote.model_id);
         assert_eq!(stratum.identity.measurement_stage, "execute");

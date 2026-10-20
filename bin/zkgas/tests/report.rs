@@ -418,7 +418,7 @@ fn aggregation_never_combines_any_distinct_stratum_identity_component() {
         match index {
             1 => quote.proposal.chain.chain_id = 2,
             2 => quote.proposal.fork_segments[0].fork = "UNZEN".into(),
-            3 => quote.proposal.fork_segments[0].last_block = 3,
+            3 => quote.proposal.fork_segments[0].first_block = 3,
             4 => quote.proposal.fork_segments.push(ForkSegmentV1 {
                 fork: "UNZEN".into(),
                 first_block: 3,
@@ -475,6 +475,43 @@ fn aggregation_never_combines_any_distinct_stratum_identity_component() {
     observation_key.observation_id = "reversed".into();
     quote.proposal.fork_segments.reverse();
     assert_eq!(report_for(vec![cross, reversed], &config()).strata.len(), 2);
+}
+
+#[test]
+fn aggregation_normalizes_absolute_fork_boundaries_but_preserves_crossing_topology() {
+    let first = pair(0, 10, 20, true);
+    let mut shifted = pair(1, 10, 20, true);
+    let ComparisonResultV1::Joined {
+        quote,
+        observation_key,
+        ..
+    } = &mut shifted
+    else {
+        unreachable!()
+    };
+    quote.proposal.first_block = 200;
+    quote.proposal.last_block = 200;
+    quote.proposal.fork_segments[0].first_block = 200;
+    quote.proposal.fork_segments[0].last_block = 200;
+    observation_key.observation_id = "shifted".into();
+
+    let report = report_for(vec![first.clone(), shifted], &config());
+    assert_eq!(report.strata.len(), 1);
+    assert_eq!(report.strata[0].row_count, 2);
+
+    let mut crossing = first;
+    let ComparisonResultV1::Joined { quote, .. } = &mut crossing else {
+        unreachable!()
+    };
+    quote.proposal.last_block = 3;
+    quote.proposal.block_count = 2;
+    quote.proposal.fork_segments.push(ForkSegmentV1 {
+        fork: "UNZEN".into(),
+        first_block: 3,
+        last_block: 3,
+    });
+    let report = report_for(vec![crossing, pair(2, 10, 20, true)], &config());
+    assert_eq!(report.strata.len(), 2);
 }
 
 #[test]

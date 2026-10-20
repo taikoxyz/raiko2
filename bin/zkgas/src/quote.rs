@@ -18,8 +18,10 @@ use rustix::fs::{CWD, Mode, OFlags, ResolveFlags, openat2};
 use crate::{
     contracts::*,
     identity::{canonical_json, content_id, sha256_hex},
-    output::{CommitOutcome, commit_file},
+    output::{AtomicFileWriter, CommitOutcome},
 };
+
+pub const MAX_QUOTE_OUTPUT_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Replay is deliberately sequential, with a bounded input working set.
 /// Defaults are contract hard ceilings; callers may only tighten them.
@@ -36,6 +38,9 @@ pub struct QuoteLimits {
     /// Checked before and after each native replay; an in-progress replay is not interrupted.
     #[arg(long, default_value_t = 3_600)]
     pub max_elapsed_seconds: u64,
+    /// Maximum complete JSONL output; may only tighten the downstream-compatible hard ceiling.
+    #[arg(long, default_value_t = MAX_QUOTE_OUTPUT_BYTES)]
+    pub max_output_bytes: u64,
     /// Native replay is memory intensive; only sequential execution is supported.
     #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..=1))]
     pub concurrency: u8,
@@ -48,6 +53,7 @@ impl Default for QuoteLimits {
             max_total_bytes: 8 * 1024 * 1024 * 1024,
             max_rows: 10_000,
             max_elapsed_seconds: 3_600,
+            max_output_bytes: MAX_QUOTE_OUTPUT_BYTES,
             concurrency: 1,
         }
     }
@@ -75,6 +81,11 @@ impl QuoteLimits {
                 "max_elapsed_seconds",
                 self.max_elapsed_seconds,
                 ceilings.max_elapsed_seconds,
+            ),
+            (
+                "max_output_bytes",
+                self.max_output_bytes,
+                ceilings.max_output_bytes,
             ),
         ] {
             ensure!(
@@ -484,7 +495,11 @@ pub fn run_quote(args: &QuoteArgs, executable: &ExecutableIdentity) -> Result<Qu
     let partial = matches!(row, QuoteRowV1::Failed(_));
     let mut bytes = canonical_json(&row)?;
     bytes.push(b'\n');
-    publish(args, &bytes, partial, 1)
+    let mut output = AtomicFileWriter::new(&args.output, args.limits.max_output_bytes)?;
+    output
+        .append(&bytes)
+        .context("quote output byte limit exceeded")?;
+    publish(output, partial, 1)
 }
 
 fn run_manifest(
@@ -567,7 +582,7 @@ fn run_manifest(
         .collect();
     let manifest_hash = sha256_hex(&raw);
     drop(raw);
-    let mut bytes = Vec::new();
+    let mut output = AtomicFileWriter::new(&args.output, args.limits.max_output_bytes)?;
     let mut partial = false;
     let mut total_read = 0u64;
     let count = manifest.samples.len();
@@ -624,10 +639,13 @@ fn run_manifest(
         // this row. Serialize and release the quote before opening the next input.
         let row = make_row(identity, source, sample.metadata, executable, result);
         partial |= matches!(row, QuoteRowV1::Failed(_));
-        bytes.extend(canonical_json(&row)?);
+        let mut bytes = canonical_json(&row)?;
         bytes.push(b'\n');
+        output
+            .append(&bytes)
+            .context("quote output byte limit exceeded")?;
     }
-    publish(args, &bytes, partial, count)
+    publish(output, partial, count)
 }
 
 fn make_row(
@@ -669,13 +687,13 @@ fn make_row(
         })),
     }
 }
-fn publish(args: &QuoteArgs, bytes: &[u8], partial: bool, row_count: usize) -> Result<QuoteRun> {
+fn publish(output: AtomicFileWriter, partial: bool, row_count: usize) -> Result<QuoteRun> {
     let status = if partial {
         RunStatus::Partial
     } else {
         RunStatus::Complete
     };
-    let commit = commit_file(&args.output, bytes)?;
+    let commit = output.commit()?;
     Ok(QuoteRun {
         status,
         row_count,

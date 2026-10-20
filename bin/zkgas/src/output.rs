@@ -16,6 +16,81 @@ pub enum CommitOutcome {
     Reused,
 }
 
+/// A bounded sibling staging file that is atomically published without replacing an output.
+pub struct AtomicFileWriter {
+    destination: PathBuf,
+    staging: PathBuf,
+    temporary: File,
+    max_bytes: u64,
+    written: u64,
+}
+
+impl AtomicFileWriter {
+    pub fn new(destination: &Path, max_bytes: u64) -> Result<Self> {
+        let destination_parent = parent(destination)?;
+        let staging = destination_parent.join(format!(".zkgas-file-{}.tmp", uuid::Uuid::new_v4()));
+        let temporary = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&staging)?;
+        Ok(Self {
+            destination: destination.to_owned(),
+            staging,
+            temporary,
+            max_bytes,
+            written: 0,
+        })
+    }
+
+    pub fn append(&mut self, bytes: &[u8]) -> Result<()> {
+        let next = self
+            .written
+            .checked_add(bytes.len() as u64)
+            .context("output byte count overflow")?;
+        ensure!(next <= self.max_bytes, "output byte limit exceeded");
+        self.temporary.write_all(bytes)?;
+        self.written = next;
+        Ok(())
+    }
+
+    pub fn commit(self) -> Result<CommitOutcome> {
+        self.temporary.sync_all()?;
+        let destination_parent = parent(&self.destination)?;
+        match renameat_with(
+            CWD,
+            &self.staging,
+            CWD,
+            &self.destination,
+            RenameFlags::NOREPLACE,
+        ) {
+            Ok(()) => {
+                File::open(destination_parent)?.sync_all()?;
+                Ok(CommitOutcome::Created)
+            }
+            Err(rustix::io::Errno::EXIST) => {
+                ensure!(
+                    files_equal_bounded(
+                        &self.staging,
+                        &self.destination,
+                        self.written,
+                        self.max_bytes,
+                    )?,
+                    "immutable output conflict: {}",
+                    self.destination.display()
+                );
+                Ok(CommitOutcome::Reused)
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+}
+
+impl Drop for AtomicFileWriter {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.staging);
+    }
+}
+
 fn parent(path: &Path) -> Result<&Path> {
     ensure!(path.file_name().is_some(), "output must have a filename");
     Ok(path
@@ -51,6 +126,56 @@ fn read_regular_bounded(path: &Path, limit: u64) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+fn files_equal_bounded(
+    expected_path: &Path,
+    actual_path: &Path,
+    expected_length: u64,
+    limit: u64,
+) -> Result<bool> {
+    ensure!(
+        expected_length <= limit,
+        "staged output byte limit exceeded"
+    );
+    let mut expected = OpenOptions::new()
+        .read(true)
+        .custom_flags((OFlags::NOFOLLOW | OFlags::NONBLOCK).bits() as i32)
+        .open(expected_path)?;
+    let mut actual = OpenOptions::new()
+        .read(true)
+        .custom_flags((OFlags::NOFOLLOW | OFlags::NONBLOCK).bits() as i32)
+        .open(actual_path)?;
+    ensure!(
+        expected.metadata()?.is_file(),
+        "staged output is not a regular file"
+    );
+    ensure!(
+        actual.metadata()?.is_file(),
+        "existing output is not a regular file"
+    );
+    ensure!(
+        actual.metadata()?.len() <= limit,
+        "existing output byte limit exceeded"
+    );
+    if expected.metadata()?.len() != expected_length || actual.metadata()?.len() != expected_length
+    {
+        return Ok(false);
+    }
+    let mut expected_buffer = [0u8; 64 * 1024];
+    let mut actual_buffer = [0u8; 64 * 1024];
+    loop {
+        let expected_count = expected.read(&mut expected_buffer)?;
+        let actual_count = actual.read(&mut actual_buffer)?;
+        if expected_count != actual_count
+            || expected_buffer[..expected_count] != actual_buffer[..actual_count]
+        {
+            return Ok(false);
+        }
+        if expected_count == 0 {
+            return Ok(true);
+        }
+    }
+}
+
 /// Publish complete bytes atomically without ever overwriting an existing destination.
 pub fn commit_file(path: &Path, bytes: &[u8]) -> Result<CommitOutcome> {
     commit_file_bounded(path, bytes, u64::MAX)
@@ -62,45 +187,13 @@ pub fn commit_file_bounded(
     bytes: &[u8],
     max_existing_bytes: u64,
 ) -> Result<CommitOutcome> {
-    let parent = parent(path)?;
-    let staging = parent.join(format!(".zkgas-file-{}.tmp", uuid::Uuid::new_v4()));
-    let mut temporary = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&staging)?;
-    let result = (|| {
-        temporary.write_all(bytes)?;
-        temporary.sync_all()?;
-        match renameat_with(CWD, &staging, CWD, path, RenameFlags::NOREPLACE) {
-            Ok(()) => {
-                File::open(parent)?.sync_all()?;
-                Ok(CommitOutcome::Created)
-            }
-            Err(rustix::io::Errno::EXIST) => {
-                ensure!(
-                    read_regular_bounded(path, max_existing_bytes)? == bytes,
-                    "immutable output conflict: {}",
-                    path.display()
-                );
-                Ok(CommitOutcome::Reused)
-            }
-            Err(error) => Err(error.into()),
-        }
-    })();
-    drop(temporary);
-    // This randomly named file was created by this call; a conflicting destination is untouched.
-    let cleanup = match fs::remove_file(&staging) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error),
-    };
-    match result {
-        Ok(outcome) => {
-            cleanup?;
-            Ok(outcome)
-        }
-        Err(error) => Err(error),
-    }
+    ensure!(
+        bytes.len() as u64 <= max_existing_bytes,
+        "output byte limit exceeded"
+    );
+    let mut output = AtomicFileWriter::new(path, max_existing_bytes)?;
+    output.append(bytes)?;
+    output.commit()
 }
 
 #[derive(Debug, PartialEq, Eq)]

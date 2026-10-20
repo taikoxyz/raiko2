@@ -6,9 +6,10 @@ use std::{
 use raiko2_primitives_shasta::GuestInput;
 use raiko2_zkgas_trace::quote_shasta_proposal;
 use zkgas::{
+    compare::MAX_COMPARE_FILE_BYTES,
     contracts::*,
     identity::sha256_hex,
-    quote::{QuoteArgs, run_quote},
+    quote::{MAX_QUOTE_OUTPUT_BYTES, QuoteArgs, run_quote},
 };
 
 struct TestDir(PathBuf);
@@ -412,6 +413,7 @@ fn api_rejects_every_raised_ceiling_before_input_io() {
         ("max_total_bytes", 8 * 1024 * 1024 * 1024),
         ("max_rows", 10_000),
         ("max_elapsed_seconds", 3_600),
+        ("max_output_bytes", MAX_QUOTE_OUTPUT_BYTES),
     ] {
         let dir = TestDir::new();
         let mut args = QuoteArgs {
@@ -425,6 +427,7 @@ fn api_rejects_every_raised_ceiling_before_input_io() {
             "max_total_bytes" => args.limits.max_total_bytes = ceiling + 1,
             "max_rows" => args.limits.max_rows = (ceiling + 1) as usize,
             "max_elapsed_seconds" => args.limits.max_elapsed_seconds = ceiling + 1,
+            "max_output_bytes" => args.limits.max_output_bytes = ceiling + 1,
             _ => unreachable!(),
         }
         let error = run_quote(&args, &executable()).unwrap_err().to_string();
@@ -444,6 +447,7 @@ fn cli_rejects_every_raised_ceiling_with_structural_exit() {
         ("--max-total-bytes", "max_total_bytes", "8589934593"),
         ("--max-rows", "max_rows", "10001"),
         ("--max-elapsed-seconds", "max_elapsed_seconds", "3601"),
+        ("--max-output-bytes", "max_output_bytes", "67108865"),
     ] {
         let dir = TestDir::new();
         let output = dir.path().join("quotes.jsonl");
@@ -473,8 +477,53 @@ fn callers_can_tighten_every_resource_ceiling() {
     args.limits.max_total_bytes -= 1;
     args.limits.max_rows -= 1;
     args.limits.max_elapsed_seconds -= 1;
+    args.limits.max_output_bytes -= 1;
     assert_eq!(run_quote(&args, &executable()).unwrap().exit_code(), 0);
     assert!(matches!(rows(&args.output)[0], QuoteRowV1::Complete(_)));
+}
+
+#[test]
+fn quote_output_is_streamed_under_the_downstream_file_ceiling_and_never_partially_published() {
+    assert_eq!(MAX_QUOTE_OUTPUT_BYTES, MAX_COMPARE_FILE_BYTES);
+    let baseline_dir = TestDir::new();
+    let baseline = batch_args(
+        &baseline_dir,
+        vec![sample("one", "missing.bin", b"missing")],
+    );
+    run_quote(&baseline, &executable()).unwrap();
+    let one_row_bytes = fs::metadata(&baseline.output).unwrap().len();
+
+    let dir = TestDir::new();
+    let mut args = batch_args(
+        &dir,
+        vec![
+            sample("one", "missing.bin", b"missing"),
+            sample("two", "missing.bin", b"missing"),
+        ],
+    );
+    args.limits.max_output_bytes = one_row_bytes;
+    let error = run_quote(&args, &executable()).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("quote output byte limit exceeded")
+    );
+    assert!(!args.output.exists());
+
+    fs::write(&args.output, b"existing-output").unwrap();
+    assert!(run_quote(&args, &executable()).is_err());
+    assert_eq!(fs::read(&args.output).unwrap(), b"existing-output");
+    assert_eq!(
+        fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".zkgas-file-"))
+            .count(),
+        0
+    );
 }
 
 fn batch_args(dir: &TestDir, samples: Vec<InputSampleV1>) -> QuoteArgs {

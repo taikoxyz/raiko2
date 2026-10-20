@@ -325,118 +325,8 @@ pub fn verify_comparison_run(path: &Path) -> Result<VerifiedComparisonRun> {
     })
 }
 
-/// TOML's serde adapter first builds an internal document. Gate its strings, depth, array items
-/// and array-of-table declarations lexically before that allocation. This is deliberately only
-/// a resource gate; the TOML parser remains the sole authority for syntax and table semantics.
-fn toml_budget(bytes: &[u8]) -> Result<()> {
-    struct Frame {
-        array: bool,
-        count: usize,
-        expecting: bool,
-    }
-    let mut stack: Vec<Frame> = Vec::new();
-    let (mut i, mut tokens, mut array_tables) = (0, 0, 0);
-    let mut line_start = true;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if b.is_ascii_whitespace() {
-            if b == b'\n' {
-                line_start = true;
-            }
-            i += 1;
-            continue;
-        }
-        if b == b'#' {
-            while i < bytes.len() && bytes[i] != b'\n' {
-                i += 1;
-            }
-            continue;
-        }
-        tokens += 1;
-        ensure!(tokens <= 4096, "TOML token limit exceeded");
-        if b == b'[' && line_start && stack.is_empty() {
-            if bytes.get(i + 1) == Some(&b'[') {
-                array_tables += 1;
-                ensure!(
-                    array_tables <= MAX_REPORT_CONFIG_ITEMS,
-                    "TOML table item limit exceeded"
-                );
-            }
-            let start = i;
-            while i < bytes.len() && bytes[i] != b'\n' {
-                i += 1;
-                ensure!(i - start <= 1024, "TOML header length limit exceeded");
-            }
-            continue;
-        }
-        line_start = false;
-        if b == b']' || b == b'}' {
-            stack.pop();
-            i += 1;
-            continue;
-        }
-        if b == b',' {
-            if let Some(f) = stack.last_mut() {
-                f.expecting = true;
-            }
-            i += 1;
-            continue;
-        }
-        if b == b'=' {
-            i += 1;
-            continue;
-        }
-        if let Some(f) = stack.last_mut()
-            && f.array
-            && f.expecting
-        {
-            ensure!(
-                f.count < MAX_REPORT_CONFIG_ITEMS,
-                "TOML array item limit exceeded"
-            );
-            f.count += 1;
-            f.expecting = false;
-        }
-        if b == b'[' || b == b'{' {
-            ensure!(stack.len() < 16, "TOML depth limit exceeded");
-            stack.push(Frame {
-                array: b == b'[',
-                count: 0,
-                expecting: true,
-            });
-            i += 1;
-        } else if b == b'\'' || b == b'"' {
-            let triple = bytes.get(i..i + 3) == Some(&[b, b, b]);
-            let width = if triple { 3 } else { 1 };
-            i += width;
-            let start = i;
-            while i < bytes.len() {
-                ensure!(i - start <= 1024, "TOML string length limit exceeded");
-                if bytes[i] == b && (!triple || bytes.get(i..i + 3) == Some(&[b, b, b])) {
-                    i += width;
-                    break;
-                }
-                if b == b'"' && bytes[i] == b'\\' {
-                    i += 1;
-                }
-                i += 1;
-            }
-        } else {
-            let start = i;
-            while i < bytes.len()
-                && !bytes[i].is_ascii_whitespace()
-                && !b"=[]{}#,\"'".contains(&bytes[i])
-            {
-                i += 1;
-                ensure!(i - start <= 128, "TOML token length limit exceeded");
-            }
-            ensure!(i > start, "invalid TOML token");
-        }
-    }
-    Ok(())
-}
-
-/// Bounded strict config visitor, shared by JSON and TOML after their lexical resource gates.
+/// Bounded strict config visitor. JSON has an additional lexical allocation gate; TOML's
+/// authoritative parser first constructs its document, bounded by the 64 KiB raw input ceiling.
 struct ConfigBudget<'a> {
     total: &'a mut usize,
     depth: usize,
@@ -543,7 +433,8 @@ fn parse_config(raw: &[u8]) -> Result<ReportConfigV1> {
         decoder.end()?;
         value
     } else {
-        toml_budget(raw)?;
+        // The TOML adapter parses its whole document before invoking this visitor. The raw
+        // read ceiling bounds parser input; these checks bound the resulting semantic config.
         ConfigBudget {
             total: &mut 0,
             depth: 0,

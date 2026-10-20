@@ -941,13 +941,14 @@ fn aggregation_zero_actual_explains_every_unavailable_direct_metric() {
 }
 
 #[test]
-fn config_toml_limits_precede_document_parsing_and_allow_boundary_trailing_comma() {
+fn config_toml_semantic_item_limits_allow_boundary_trailing_comma() {
     let dir = TestDir::new();
     let path = fixture(&dir, vec![]);
     let args = args(&dir, path);
+    let names: Vec<_> = (0..129).map(|i| format!("\"backend-{i}\"")).collect();
     let raw = format!(
-        "schema_version=1\nquantiles=[{},malformed-tail]\nbuckets=[]\n[filters]\n",
-        vec!["\"0\""; 129].join(",")
+        "schema_version=1\nquantiles=[]\nbuckets=[]\n[filters]\nbackends=[{}]\n",
+        names.join(",")
     );
     fs::write(&args.config, raw).unwrap();
     let error = run_report(&args, &executable()).unwrap_err();
@@ -960,4 +961,74 @@ fn config_toml_limits_precede_document_parsing_and_allow_boundary_trailing_comma
     );
     fs::write(&args.config, boundary).unwrap();
     run_report(&args, &executable()).unwrap();
+}
+
+#[test]
+fn config_toml_accepts_authoritative_multiline_four_and_five_quote_endings() {
+    for quote in ['"', '\''] {
+        for closing_count in [4, 5] {
+            let dir = TestDir::new();
+            let path = fixture(&dir, vec![]);
+            let args = args(&dir, path);
+            let opening = quote.to_string().repeat(3);
+            let closing = quote.to_string().repeat(closing_count);
+            let second = "b".repeat(200);
+            let raw = format!(
+                "schema_version=1\nquantiles=[]\nbuckets=[]\n[filters]\nbackends=[{opening}a{closing}, \"{second}\"]\n"
+            );
+            let expected: ReportConfigV1 = toml::from_str(&raw).unwrap();
+            assert_eq!(
+                expected.filters.backends,
+                vec![
+                    format!("a{}", quote.to_string().repeat(closing_count - 3)),
+                    second
+                ]
+            );
+            fs::write(&args.config, &raw).unwrap();
+            let cli_report = run_report(&args, &executable()).unwrap().report;
+            let typed_report = build_report(
+                &verify_comparison_run(&args.comparisons).unwrap(),
+                &expected,
+                &executable(),
+            )
+            .unwrap();
+            assert_eq!(cli_report.selected_counts, typed_report.selected_counts);
+            assert_eq!(cli_report.config_sha256, sha256_hex(raw.as_bytes()));
+        }
+    }
+}
+
+#[test]
+fn config_toml_accepts_long_header_comments_and_quoted_comment_or_bracket_characters() {
+    let dir = TestDir::new();
+    let path = fixture(&dir, vec![]);
+    let args = args(&dir, path);
+    let raw = format!(
+        "# ordinary comment with [brackets] and quotes \"'\nschema_version=1\nquantiles=[\"0.5\"] # array comment\nbuckets=[]\n[filters] #{}\nbackends=[\"backend#[]\", 'literal#[]'] # trailing comment\n",
+        "c".repeat(1100)
+    );
+    let expected: ReportConfigV1 = toml::from_str(&raw).unwrap();
+    assert_eq!(expected.filters.backends, vec!["backend#[]", "literal#[]"]);
+    fs::write(&args.config, &raw).unwrap();
+    let report = run_report(&args, &executable()).unwrap().report;
+    assert_eq!(report.config_sha256, sha256_hex(raw.as_bytes()));
+}
+
+#[test]
+fn config_toml_exact_raw_byte_bound_precedes_document_parsing() {
+    let dir = TestDir::new();
+    let path = fixture(&dir, vec![]);
+    let args = args(&dir, path);
+    let mut raw = b"schema_version=1\nquantiles=[]\nbuckets=[]\n[filters]\n#".to_vec();
+    raw.resize(zkgas::report::MAX_REPORT_CONFIG_BYTES as usize, b'c');
+    fs::write(&args.config, &raw).unwrap();
+    run_report(&args, &executable()).unwrap();
+    raw[0] = b'?'; // At the excess-byte boundary, even an invalid TOML prefix is never parsed.
+    raw.push(b'c');
+    fs::write(&args.config, raw).unwrap();
+    let mut other = args.clone();
+    other.output = dir.path().join("over-limit-report.json");
+    let error = run_report(&other, &executable()).unwrap_err();
+    assert_eq!(error.to_string(), "file byte limit exceeded");
+    assert!(!other.output.exists());
 }

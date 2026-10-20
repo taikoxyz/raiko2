@@ -432,6 +432,10 @@ cargo run -r -p guest-launcher -- \
   --json-out ./proposal-workload-quote.json
 ```
 
+For an already serialized current-format input, replace `--input` with the mutually exclusive
+`--input-bincode ./path/to/current-guest-input.bin`. The bincode form must round-trip to the exact
+same canonical bytes; trailing or otherwise non-canonical bytes are rejected.
+
 This stage does not produce or verify a proof and accepts only native execute mode. It validates the
 supplied input without backfilling proof-carry data, fails if the exact resource observations do not
 cover the EVM-local report, and records both per-block admission PGU and the proposal-once total.

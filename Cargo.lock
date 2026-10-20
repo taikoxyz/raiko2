@@ -14828,6 +14828,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "zkgas"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bincode",
+ "clap",
+ "hex",
+ "num-bigint 0.4.6",
+ "num-rational",
+ "num-traits",
+ "raiko2-primitives-shasta",
+ "raiko2-zkgas-trace",
+ "rustix 1.1.4",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "toml 0.8.23",
+ "uuid",
+]
+
+[[package]]
 name = "zmij"
 version = "1.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -25,6 +25,7 @@ members = [
     "bin/witness-check",
     "bin/guest-launcher",
     "bin/preflight",
+    "bin/zkgas",
 ]
 exclude = [
     "guests/*",

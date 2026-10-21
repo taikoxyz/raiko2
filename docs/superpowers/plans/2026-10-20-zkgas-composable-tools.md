@@ -14,7 +14,8 @@
 
 - Keep pricing in `raiko2-zkgas-trace::quote_shasta_proposal`; do not copy pricing coefficients or formulas into `bin/zkgas`.
 - Do not fetch from Succinct, RISC0, RPC, explorers, or clusters, and do not run a guest from any `zkgas-*` binary.
-- Keep `guest-launcher proposal-workload-quote` compatible; removing it is outside this change.
+- Keep `guest-launcher proposal-workload-quote` compatible behind an explicit feature; removing it
+  is outside this change, and default launcher builds must not enable MPT instrumentation.
 - Every cross-tool contract has its own `schema_version`, uses `#[serde(deny_unknown_fields)]`, and permits arbitrary producer fields only inside size/depth-bounded `metadata` or `source` objects.
 - Hash raw input/config files where the spec requires byte identity; hash generated descriptors only after deterministic serialization of structs and `BTreeMap` values.
 - Quote identity always refers to canonical bincode, including when `--input-json` is used as a developer convenience.

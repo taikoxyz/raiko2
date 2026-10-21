@@ -10,7 +10,6 @@ use anyhow::{Context, Result, ensure};
 use num_bigint::{BigInt, BigUint};
 use num_rational::BigRational;
 use num_traits::{One, Signed, ToPrimitive, Zero};
-use rustix::fs::{CWD, Mode, OFlags, ResolveFlags, openat2};
 use serde::de::{DeserializeSeed, Error as _, MapAccess, SeqAccess, Visitor};
 use serde_json::Value;
 
@@ -23,6 +22,7 @@ use crate::{
     contracts::*,
     identity::{canonical_json, content_id, sha256_hex},
     output::{CommitOutcome, commit_file_bounded},
+    quote::open_regular_no_symlinks,
 };
 
 pub const MAX_REPORT_MANIFEST_BYTES: u64 = 4 * 1024 * 1024;
@@ -71,13 +71,7 @@ impl ReportRun {
 }
 
 fn open_regular(path: &Path) -> Result<File> {
-    let file = File::from(openat2(
-        CWD,
-        path,
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
-        Mode::empty(),
-        ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
-    )?);
+    let file = open_regular_no_symlinks(path)?;
     ensure!(file.metadata()?.is_file(), "input is not a regular file");
     Ok(file)
 }

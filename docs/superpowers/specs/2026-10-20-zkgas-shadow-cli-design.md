@@ -165,8 +165,9 @@ combined into one compatibility result. Re-reporting never reruns native proposa
 changes the row-level compatibility decision.
 
 The existing `guest-launcher proposal-workload-quote` developer interface remains compatible in
-this PR. It and `zkgas-quote` use the same quote implementation. Removing that interface is a
-separate compatibility decision.
+this PR behind the explicit `zkgas-quote` Cargo feature. It and `zkgas-quote` use the same quote
+implementation, while ordinary launcher builds do not enable MPT instrumentation through feature
+unification. Removing that interface is a separate compatibility decision.
 
 ## Versioned Composition Contracts
 

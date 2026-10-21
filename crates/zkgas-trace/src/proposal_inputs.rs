@@ -3,7 +3,7 @@
 use alloy_consensus::Transaction as _;
 use alloy_eips::eip2718::Encodable2718 as _;
 use anyhow::{Context, Result, bail};
-use raiko2_primitives_shasta::{GuestInput, verify_proposal_mode_blob_usage};
+use raiko2_primitives_shasta::GuestInput;
 use reth_ethereum_primitives::TransactionSigned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -77,9 +77,6 @@ impl PayloadAccumulator {
 }
 
 pub(crate) fn blob_selectors(input: &GuestInput) -> Result<ProposalBlobSelectors> {
-    verify_proposal_mode_blob_usage(input)
-        .map_err(anyhow::Error::msg)
-        .context("proposal blob usage verification")?;
     let proposal_sources = &input.taiko.proposal_event.proposal.sources;
     let provider_sources = &input.taiko.data_sources;
     if proposal_sources.is_empty() || proposal_sources.len() != provider_sources.len() {
@@ -140,6 +137,7 @@ mod tests {
     use super::*;
     use alloy_consensus::{SignableTransaction, TxEip1559};
     use alloy_primitives::{Address, Bytes, Signature, TxKind, U256};
+    use std::{fs, path::Path};
 
     fn transaction(payload: Bytes) -> TransactionSigned {
         TxEip1559 {
@@ -181,6 +179,30 @@ mod tests {
                 total_transaction_count: 3,
                 canonical_transaction_bytes: expected_bytes,
                 nonempty_payload_transactions: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn blob_selector_extraction_does_not_verify_cryptographic_proofs() {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join(
+            "../../tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_23077_l2_9051439_9051630.json",
+        );
+        let mut input: GuestInput = serde_json::from_str(
+            &fs::read_to_string(&fixture)
+                .unwrap_or_else(|error| panic!("read {}: {error}", fixture.display())),
+        )
+        .expect("parse checked-in current GuestInput");
+        input.taiko.data_sources[0].blob_proofs[0][0] ^= 0x01;
+
+        assert_eq!(
+            blob_selectors(&input).expect("selector extraction is structural"),
+            ProposalBlobSelectors {
+                source_blob_counts: vec![1],
+                proposal_blob_hash_count: 1,
+                provider_blob_count: 1,
+                provider_commitment_count: 1,
+                provider_proof_count: 1,
             }
         );
     }

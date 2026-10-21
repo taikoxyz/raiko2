@@ -5,7 +5,7 @@ use std::{
     thread,
 };
 
-use zkgas::output::{CommitOutcome, commit_directory, commit_file};
+use zkgas::output::{CommitOutcome, DirectoryCommitLimits, commit_directory_bounded, commit_file};
 
 struct TestDir(PathBuf);
 impl TestDir {
@@ -31,6 +31,18 @@ fn stage(base: &Path, name: &str, contents: &[u8]) -> PathBuf {
     fs::write(path.join("manifest.json"), b"manifest").unwrap();
     fs::write(path.join("rows/row.json"), contents).unwrap();
     path
+}
+
+fn commit_directory(staging: &Path, final_path: &Path) -> anyhow::Result<CommitOutcome> {
+    commit_directory_bounded(
+        staging,
+        final_path,
+        DirectoryCommitLimits {
+            max_entries: 16,
+            max_depth: 4,
+            max_bytes: 1024,
+        },
+    )
 }
 
 #[test]
@@ -67,6 +79,62 @@ fn directories_reuse_only_the_exact_complete_path_and_byte_set() {
 }
 
 #[test]
+fn bounded_directory_reuse_rejects_existing_bytes_entries_and_depth_before_comparison() {
+    let limits = DirectoryCommitLimits {
+        max_entries: 3,
+        max_depth: 2,
+        max_bytes: 11,
+    };
+    for mutation in ["bytes", "entries", "depth"] {
+        let limits = DirectoryCommitLimits {
+            max_entries: if mutation == "depth" {
+                10
+            } else {
+                limits.max_entries
+            },
+            ..limits
+        };
+        let dir = TestDir::new();
+        let final_path = dir.path().join("run");
+        assert_eq!(
+            commit_directory_bounded(&stage(dir.path(), "stage-1", b"row"), &final_path, limits,)
+                .unwrap(),
+            CommitOutcome::Created
+        );
+        match mutation {
+            "bytes" => {
+                fs::OpenOptions::new()
+                    .write(true)
+                    .open(final_path.join("rows/row.json"))
+                    .unwrap()
+                    .set_len(12)
+                    .unwrap();
+            }
+            "entries" => fs::write(final_path.join("extra.json"), b"").unwrap(),
+            "depth" => {
+                fs::create_dir(final_path.join("rows/nested")).unwrap();
+                fs::write(final_path.join("rows/nested/extra.json"), b"").unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let error =
+            commit_directory_bounded(&stage(dir.path(), "stage-2", b"row"), &final_path, limits)
+                .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(
+            message.contains(match mutation {
+                "bytes" => "byte limit",
+                "entries" => "entry limit",
+                "depth" => "depth limit",
+                _ => unreachable!(),
+            }),
+            "{mutation}: {error:#}"
+        );
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+}
+
+#[test]
 fn existing_empty_or_partial_directories_are_never_replaced() {
     for partial in [false, true] {
         let dir = TestDir::new();
@@ -100,6 +168,56 @@ fn existing_symlinks_are_rejected_even_when_the_target_bytes_match() {
             .unwrap()
             .file_type()
             .is_symlink()
+    );
+}
+
+#[test]
+fn existing_ancestor_symlink_is_never_followed_during_directory_reuse() {
+    use std::os::unix::fs::symlink;
+
+    let dir = TestDir::new();
+    let outside = TestDir::new();
+    fs::create_dir(outside.path().join("rows")).unwrap();
+    fs::write(outside.path().join("rows/row.json"), b"row").unwrap();
+
+    let final_path = dir.path().join("run");
+    fs::create_dir(&final_path).unwrap();
+    fs::write(final_path.join("manifest.json"), b"manifest").unwrap();
+    symlink(outside.path().join("rows"), final_path.join("rows")).unwrap();
+
+    assert!(commit_directory(&stage(dir.path(), "stage", b"row"), &final_path).is_err());
+    assert!(
+        fs::symlink_metadata(final_path.join("rows"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+}
+
+#[test]
+fn caller_supplied_symlinked_output_parent_remains_idempotent() {
+    use std::os::unix::fs::symlink;
+
+    let real = TestDir::new();
+    let links = TestDir::new();
+    let linked_parent = links.path().join("output");
+    symlink(real.path(), &linked_parent).unwrap();
+
+    let file = linked_parent.join("quote.jsonl");
+    assert_eq!(
+        commit_file(&file, b"quote").unwrap(),
+        CommitOutcome::Created
+    );
+    assert_eq!(commit_file(&file, b"quote").unwrap(), CommitOutcome::Reused);
+
+    let final_path = linked_parent.join("run");
+    assert_eq!(
+        commit_directory(&stage(&linked_parent, "stage-1", b"row"), &final_path).unwrap(),
+        CommitOutcome::Created
+    );
+    assert_eq!(
+        commit_directory(&stage(&linked_parent, "stage-2", b"row"), &final_path).unwrap(),
+        CommitOutcome::Reused
     );
 }
 

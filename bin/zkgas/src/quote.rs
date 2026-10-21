@@ -13,7 +13,11 @@ use bincode::Options;
 use clap::Args;
 use raiko2_primitives_shasta::GuestInput;
 use raiko2_zkgas_trace::{ProposalWorkloadQuote, quote_shasta_proposal};
-use rustix::fs::{CWD, Mode, OFlags, ResolveFlags, openat2};
+#[cfg(not(target_os = "linux"))]
+use rustix::fs::openat;
+#[cfg(target_os = "linux")]
+use rustix::fs::{CWD, ResolveFlags, openat2};
+use rustix::fs::{Mode, OFlags};
 
 use crate::{
     contracts::*,
@@ -198,16 +202,96 @@ fn read_bounded(file: File, limit: u64) -> InputResult<Vec<u8>> {
     Ok(bytes)
 }
 
-fn open_single(path: &Path) -> InputResult<File> {
-    openat2(
+#[cfg(target_os = "linux")]
+fn open_path_no_symlinks(path: &Path, flags: OFlags) -> Result<File> {
+    Ok(File::from(openat2(
         CWD,
         path,
-        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+        flags | OFlags::NOFOLLOW,
         Mode::empty(),
         ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
-    )
-    .map(File::from)
-    .map_err(|_| failed("input_open", "cannot open input without following symlinks"))
+    )?))
+}
+
+/// Component-wise fallback for platforms without `openat2`. Every ancestor is opened and pinned
+/// before the next component, and `NOFOLLOW` rejects a symlink at every hop.
+#[cfg(not(target_os = "linux"))]
+fn open_path_no_symlinks(path: &Path, flags: OFlags) -> Result<File> {
+    let mut directory = if path.is_absolute() {
+        File::open("/")?
+    } else {
+        File::open(".")?
+    };
+    let mut components = path
+        .components()
+        .filter_map(|component| match component {
+            Component::RootDir | Component::CurDir => None,
+            Component::ParentDir => Some(std::ffi::OsStr::new("..")),
+            Component::Normal(name) => Some(name),
+            Component::Prefix(_) => None,
+        })
+        .peekable();
+    while let Some(component) = components.next() {
+        let component_flags = if components.peek().is_none() {
+            flags
+        } else {
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::DIRECTORY
+        };
+        directory = File::from(openat(
+            &directory,
+            component,
+            component_flags | OFlags::NOFOLLOW,
+            Mode::empty(),
+        )?);
+    }
+    Ok(directory)
+}
+
+#[cfg(target_os = "linux")]
+fn open_beneath_no_symlinks(directory: &File, path: &Path, flags: OFlags) -> Result<File> {
+    Ok(File::from(openat2(
+        directory,
+        path,
+        flags | OFlags::NOFOLLOW,
+        Mode::empty(),
+        ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
+    )?))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn open_beneath_no_symlinks(directory: &File, path: &Path, flags: OFlags) -> Result<File> {
+    let mut directory = directory.try_clone()?;
+    let mut components = path
+        .components()
+        .filter_map(|component| match component {
+            Component::CurDir => None,
+            Component::Normal(name) => Some(name),
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => None,
+        })
+        .peekable();
+    while let Some(component) = components.next() {
+        let component_flags = if components.peek().is_none() {
+            flags
+        } else {
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::DIRECTORY
+        };
+        directory = File::from(openat(
+            &directory,
+            component,
+            component_flags | OFlags::NOFOLLOW,
+            Mode::empty(),
+        )?);
+    }
+    Ok(directory)
+}
+
+pub(crate) fn open_regular_no_symlinks(path: &Path) -> Result<File> {
+    open_path_no_symlinks(path, OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK)
+}
+
+fn open_single(path: &Path) -> InputResult<File> {
+    open_regular_no_symlinks(path)
+        .map_err(|_| failed("input_open", "cannot open input without following symlinks"))
 }
 
 /// Resolve every component in the kernel, anchored to an already opened manifest directory.
@@ -232,21 +316,17 @@ fn manifest_file(manifest_dir: &File, path: &Path) -> InputResult<File> {
             "manifest input path must stay beneath its directory",
         ));
     }
-    let file = File::from(
-        openat2(
-            manifest_dir,
-            path,
-            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
-            Mode::empty(),
-            ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
+    let file = open_beneath_no_symlinks(
+        manifest_dir,
+        path,
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+    )
+    .map_err(|_| {
+        failed(
+            "input_open",
+            "cannot open manifest input without following symlinks",
         )
-        .map_err(|_| {
-            failed(
-                "input_open",
-                "cannot open manifest input without following symlinks",
-            )
-        })?,
-    );
+    })?;
     if !file
         .metadata()
         .map_err(|e| failed("input_io", e))?
@@ -512,16 +592,11 @@ fn run_manifest(
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
-    let directory = File::from(
-        openat2(
-            CWD,
-            parent,
-            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::DIRECTORY | OFlags::NOFOLLOW,
-            Mode::empty(),
-            ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
-        )
-        .context("open manifest directory")?,
-    );
+    let directory = open_path_no_symlinks(
+        parent,
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::DIRECTORY | OFlags::NOFOLLOW,
+    )
+    .context("open manifest directory")?;
     let name = path.file_name().context("manifest must have a filename")?;
     let file = open_manifest_input(&directory, Path::new(name)).context("open manifest")?;
     let raw = read_bounded(file, args.limits.max_manifest_bytes)

@@ -7,7 +7,9 @@ use crate::{
 };
 use alethia_reth_block::{
     config::{TaikoEvmConfig, TaikoNextBlockEnvAttributes},
-    derived_block::{assemble_filtered_block, execute_derived_block},
+    derived_block::{
+        assemble_filtered_block, execute_derived_block, pre_existing_destroyed_account_hashes,
+    },
 };
 use alethia_reth_chainspec::{hardfork::TaikoHardforks, spec::TaikoChainSpec};
 use alethia_reth_consensus::validation::{
@@ -29,6 +31,14 @@ use reth_trie_common::{HashedPostState, KeccakKeyHasher};
 use std::sync::Arc;
 
 /// Injection point for derived-block execution during stateless reconstruction.
+///
+/// Implementations that construct [`HashedPostState`] directly from a reth `BundleState` must
+/// first preserve `pre_existing_destroyed_accounts` in the returned
+/// [`alethia_reth_block::derived_block::DerivedBlockExecutionOutcome`]. Reth 2.6 deliberately
+/// removed whole-storage wipe markers from `HashedPostState`: full-node providers materialize the
+/// deleted parent slots as explicit zero writes, but witness-backed stateless execution has no
+/// complete parent-state provider. The destroyed-account identities let the stateless trie clear
+/// the witnessed parent storage before applying the final per-slot delta.
 pub trait DerivedBlockExecutor {
     /// Executes the prepared candidate block against the witness-backed database.
     ///
@@ -501,7 +511,10 @@ where
         .execute(evm_config, &parent_header, &derived_block, db)
         .map_err(|err| map_block_execution_error(&err))?;
     ensure_anchor_receipt_success(&execution_outcome.execution_result.receipts)?;
-    let state_root = trie.calculate_state_root(execution_outcome.hashed_state.clone())?;
+    let state_root = trie.calculate_state_root(
+        execution_outcome.hashed_state.clone(),
+        &execution_outcome.pre_existing_destroyed_accounts,
+    )?;
     #[cfg(feature = "mpt-metrics")]
     let mpt_workload_metrics = trie.mpt_workload_metrics();
     let filtered_block = assemble_filtered_block(
@@ -572,8 +585,9 @@ where
         .map_err(StatelessValidationError::ConsensusValidationFailed)?;
 
     // Compute and check the post state root
+    let pre_existing_destroyed_accounts = pre_existing_destroyed_account_hashes(&output.state);
     let hashed_state = HashedPostState::from_bundle_state::<KeccakKeyHasher>(&output.state.state);
-    let state_root = trie.calculate_state_root(hashed_state)?;
+    let state_root = trie.calculate_state_root(hashed_state, &pre_existing_destroyed_accounts)?;
     if state_root != current_block.state_root {
         return Err(StatelessValidationError::PostStateRootMismatch {
             got: state_root,

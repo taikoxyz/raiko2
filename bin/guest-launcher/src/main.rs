@@ -32,9 +32,11 @@ use sp1_sdk::{
 #[command(about = "Run guest programs locally with fixture inputs", long_about = None)]
 struct Args {
     /// Path to the input JSON file.
-    #[arg(long, conflicts_with = "input_bincode")]
+    #[cfg_attr(feature = "zkgas-quote", arg(long, conflicts_with = "input_bincode"))]
+    #[cfg_attr(not(feature = "zkgas-quote"), arg(long))]
     input: Option<PathBuf>,
     /// Path to a current-format canonical bincode GuestInput (proposal workload quote only).
+    #[cfg(feature = "zkgas-quote")]
     #[arg(long, conflicts_with = "input")]
     input_bincode: Option<PathBuf>,
     /// JSON file containing a list of lab input paths.
@@ -107,6 +109,7 @@ enum ProofType {
 #[derive(Clone, Copy, Debug, ValueEnum, PartialEq, Eq)]
 enum Stage {
     Proposal,
+    #[cfg(feature = "zkgas-quote")]
     #[value(name = "proposal-workload-quote")]
     ProposalWorkloadQuote,
     #[value(name = "opcode-lab")]
@@ -276,6 +279,7 @@ impl Stage {
     const fn as_str(self) -> &'static str {
         match self {
             Stage::Proposal => "proposal",
+            #[cfg(feature = "zkgas-quote")]
             Stage::ProposalWorkloadQuote => "proposal-workload-quote",
             Stage::OpcodeLab => "opcode-lab",
             Stage::RevmOpcodeLab => "revm-opcode-lab",
@@ -372,6 +376,7 @@ impl Args {
         Ok(())
     }
 
+    #[cfg(feature = "zkgas-quote")]
     fn validate_input_source(&self) -> Result<()> {
         if self.input_bincode.is_some() && self.stage != Stage::ProposalWorkloadQuote {
             bail!("--input-bincode is only valid with --stage proposal-workload-quote");
@@ -379,6 +384,7 @@ impl Args {
         Ok(())
     }
 
+    #[cfg(feature = "zkgas-quote")]
     fn validate_proposal_workload_quote(&self) -> Result<()> {
         self.validate_input_source()?;
         if self.proof_type != ProofType::Native || self.mode != Mode::Execute {
@@ -499,9 +505,11 @@ fn opcode_lab_memory_labels(stage: Stage) -> OpcodeLabMemoryLabels {
             after_execute_run: "revm-opcode-lab:after_execute_run",
             after_apply_execution_metadata: "revm-opcode-lab:after_apply_execution_metadata",
         },
-        Stage::Proposal | Stage::ProposalWorkloadQuote | Stage::PrecompileLab => {
+        Stage::Proposal | Stage::PrecompileLab => {
             unreachable!("not an opcode lab stage")
         }
+        #[cfg(feature = "zkgas-quote")]
+        Stage::ProposalWorkloadQuote => unreachable!("not an opcode lab stage"),
     }
 }
 
@@ -571,9 +579,11 @@ async fn main() -> Result<()> {
     setup_logger();
 
     let args = Args::parse();
+    #[cfg(feature = "zkgas-quote")]
     args.validate_input_source()?;
     args.validate_standard_guest_artifacts()?;
 
+    #[cfg(feature = "zkgas-quote")]
     if args.stage == Stage::ProposalWorkloadQuote {
         return run_proposal_workload_quote(args);
     }
@@ -600,6 +610,7 @@ fn read_input(path: &PathBuf, proof_type: ProofType) -> Result<GuestInput> {
     Ok(input)
 }
 
+#[cfg(feature = "zkgas-quote")]
 fn run_proposal_workload_quote(args: Args) -> Result<()> {
     args.validate_proposal_workload_quote()?;
     let input = read_proposal_workload_quote_input(&args)?;
@@ -616,6 +627,7 @@ fn run_proposal_workload_quote(args: Args) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "zkgas-quote")]
 fn read_proposal_workload_quote_input(args: &Args) -> Result<GuestInput> {
     if let Some(path) = &args.input {
         let contents =
@@ -1362,10 +1374,12 @@ fn write_proof_json(path: &PathBuf, proof: &Proof) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Args, BenchReport, Mode, ProofType, Risc0ProposalExecution, Stage,
+        Args, BenchReport, ProofType, Risc0ProposalExecution, Stage,
         apply_risc0_execution_metadata, apply_sp1_metadata, read_input, read_opcode_lab_input_list,
-        read_proposal_workload_quote_input, risc0_padded_cycles, run_proposal_workload_quote,
+        risc0_padded_cycles,
     };
+    #[cfg(feature = "zkgas-quote")]
+    use super::{Mode, read_proposal_workload_quote_input, run_proposal_workload_quote};
     use alloy_primitives::{Address, B256};
     use clap::Parser as _;
     use raiko2_primitives::{ProofType as RaikoProofType, SupportedChainSpecs};
@@ -1373,6 +1387,7 @@ mod tests {
     use raiko2_prover::sp1::Sp1ExecutionMetadata;
     use std::fs;
 
+    #[cfg(feature = "zkgas-quote")]
     #[test]
     fn proposal_workload_quote_is_a_native_execute_only_stage() {
         let args = Args::try_parse_from([
@@ -1389,6 +1404,7 @@ mod tests {
         assert_eq!(args.mode, Mode::Execute);
     }
 
+    #[cfg(feature = "zkgas-quote")]
     #[test]
     fn proposal_workload_quote_parses_bincode_input() {
         Args::try_parse_from([
@@ -1401,6 +1417,7 @@ mod tests {
         .expect("parse current-format bincode input");
     }
 
+    #[cfg(feature = "zkgas-quote")]
     #[test]
     fn proposal_workload_quote_rejects_two_input_sources() {
         let error = match Args::try_parse_from([
@@ -1419,6 +1436,7 @@ mod tests {
         assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
+    #[cfg(feature = "zkgas-quote")]
     #[test]
     fn bincode_input_is_rejected_outside_proposal_workload_quote() {
         let args = Args::try_parse_from([
@@ -1442,6 +1460,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "zkgas-quote")]
     #[test]
     fn proposal_workload_quote_rejects_proof_output_before_reading_input() {
         let args = Args::try_parse_from([
@@ -1803,6 +1822,7 @@ mod tests {
         ))
     }
 
+    #[cfg(feature = "zkgas-quote")]
     #[test]
     fn proposal_workload_quote_reads_canonical_bincode_without_backfill() {
         let mut input = sample_guest_input();
@@ -1826,6 +1846,7 @@ mod tests {
         assert_eq!(bincode::serialize(&decoded).expect("reserialize"), encoded);
     }
 
+    #[cfg(feature = "zkgas-quote")]
     #[test]
     fn proposal_workload_quote_rejects_trailing_bincode_bytes() {
         let mut encoded = bincode::serialize(&sample_guest_input()).expect("serialize bincode");

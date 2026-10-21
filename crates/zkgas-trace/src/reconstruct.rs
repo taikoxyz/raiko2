@@ -2,7 +2,7 @@
 
 use alethia_reth_block::{
     config::{MissingBaseFee, TaikoEvmConfig, TaikoNextBlockEnvAttributes},
-    derived_block::DerivedBlockExecutionOutcome,
+    derived_block::{DerivedBlockExecutionOutcome, pre_existing_destroyed_account_hashes},
     executor::TaikoBlockExecutor,
 };
 use alethia_reth_evm::{
@@ -24,6 +24,7 @@ use reth_revm::{
         interpreter::EthInterpreter,
         interpreter_types::{InputsTr as _, Jumps as _, LegacyBytecode as _, LoopControl as _},
     },
+    state::EvmState,
 };
 use reth_trie_common::{HashedPostState, KeccakKeyHasher};
 use std::{
@@ -74,6 +75,13 @@ impl ResourceLedger {
             self.error = Some(ResourceError::Count("code_bytes"));
             return;
         };
+        self.code_length(hash, length);
+    }
+
+    fn code_length(&mut self, hash: B256, length: u64) {
+        if self.error.is_some() {
+            return;
+        }
         if let Some(first) = self.code_lengths.get(&hash) {
             if *first != length {
                 self.error = Some(ResourceError::CodeLength {
@@ -85,6 +93,22 @@ impl ResourceLedger {
         } else {
             self.code_lengths.insert(hash, length);
         }
+    }
+
+    fn merge(&mut self, other: Self) -> Result<(), ResourceError> {
+        if let Some(error) = other.error {
+            return Err(error);
+        }
+        self.accounts.extend(other.accounts);
+        self.storage_accesses.extend(other.storage_accesses);
+        self.storage_writes.extend(other.storage_writes);
+        for (hash, length) in other.code_lengths {
+            self.code_length(hash, length);
+        }
+        if let Some(error) = &self.error {
+            return Err(error.clone());
+        }
+        Ok(())
     }
 
     fn selectors(&self) -> Result<ResourceSelectors, ResourceError> {
@@ -111,9 +135,75 @@ impl ResourceLedger {
     }
 }
 
+#[derive(Debug, Default)]
+struct CandidateResourceLedger {
+    committed: ResourceLedger,
+    active: Option<ResourceLedger>,
+}
+
+impl CandidateResourceLedger {
+    fn begin_candidate(&mut self) {
+        debug_assert!(
+            self.active.is_none(),
+            "candidate resource scope already active"
+        );
+        self.active = Some(ResourceLedger::default());
+    }
+
+    const fn observed(&mut self) -> Option<&mut ResourceLedger> {
+        self.active.as_mut()
+    }
+
+    const fn active(&mut self) -> &mut ResourceLedger {
+        self.active
+            .as_mut()
+            .expect("candidate resource scope is not active")
+    }
+
+    fn reconcile_active_state(&mut self, state: &EvmState) {
+        let ledger = self.active();
+        for (address, account) in state {
+            ledger.account(*address);
+            for slot in account.storage.keys().copied() {
+                ledger.storage_access(*address, slot);
+            }
+            if let Some(code) = &account.info.code {
+                ledger.code(account.info.code_hash, code.original_byte_slice());
+            }
+        }
+    }
+
+    fn commit_active_state(&mut self, state: &EvmState) {
+        if self.active.is_none() {
+            return;
+        }
+        self.reconcile_active_state(state);
+        if let Err(error) = self.commit_candidate() {
+            self.committed.error.get_or_insert(error);
+        }
+    }
+
+    fn commit_candidate(&mut self) -> Result<(), ResourceError> {
+        let candidate = self
+            .active
+            .take()
+            .expect("candidate resource scope is not active");
+        self.committed.merge(candidate)
+    }
+
+    fn discard_candidate(&mut self) {
+        self.active = None;
+    }
+
+    const fn committed(&self) -> &ResourceLedger {
+        &self.committed
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct PendingStep {
     resource_account: Option<Address>,
+    materialized_code_account: Option<Address>,
     storage: Option<(Address, U256, bool)>,
 }
 
@@ -136,12 +226,12 @@ fn record_pending_step(
 
 #[derive(Clone, Debug, Default)]
 struct ResourceInspector {
-    ledger: Arc<Mutex<ResourceLedger>>,
+    ledger: Arc<Mutex<CandidateResourceLedger>>,
     pending: BTreeMap<usize, PendingStep>,
 }
 
 impl ResourceInspector {
-    const fn with_ledger(ledger: Arc<Mutex<ResourceLedger>>) -> Self {
+    const fn with_ledger(ledger: Arc<Mutex<CandidateResourceLedger>>) -> Self {
         Self {
             ledger,
             pending: BTreeMap::new(),
@@ -162,7 +252,10 @@ impl<DB: Database> Inspector<TaikoEvmContext<DB>, EthInterpreter> for ResourceIn
         interpreter: &mut Interpreter<EthInterpreter>,
         _context: &mut TaikoEvmContext<DB>,
     ) {
-        let mut ledger = self.ledger.lock().expect("resource ledger poisoned");
+        let mut resources = self.ledger.lock().expect("resource ledger poisoned");
+        let Some(ledger) = resources.observed() else {
+            return;
+        };
         ledger.account(interpreter.input.caller_address());
         ledger.account(interpreter.input.target_address());
         if let Some(address) = interpreter.input.bytecode_address() {
@@ -182,10 +275,14 @@ impl<DB: Database> Inspector<TaikoEvmContext<DB>, EthInterpreter> for ResourceIn
             .then(|| interpreter.stack.peek(0).ok())
             .flatten()
             .map(|slot| (interpreter.input.target_address(), slot, opcode == 0x55));
+        let resource_account = resource_account(interpreter, opcode);
         self.pending.insert(
             context.journal().depth(),
             PendingStep {
-                resource_account: resource_account(interpreter, opcode),
+                resource_account,
+                materialized_code_account: matches!(opcode, 0x3b | 0x3c)
+                    .then_some(resource_account)
+                    .flatten(),
                 storage,
             },
         );
@@ -203,8 +300,25 @@ impl<DB: Database> Inspector<TaikoEvmContext<DB>, EthInterpreter> for ResourceIn
             .bytecode
             .instruction_result()
             .is_none_or(InstructionResult::is_ok);
-        let mut ledger = self.ledger.lock().expect("resource ledger poisoned");
-        record_pending_step(&mut ledger, step, instruction_succeeded);
+        let materialized_code = instruction_succeeded
+            .then_some(step.materialized_code_account)
+            .flatten()
+            .and_then(|address| context.journal().evm_state().get(&address))
+            .and_then(|account| {
+                account
+                    .info
+                    .code
+                    .as_ref()
+                    .map(|code| (account.info.code_hash, code.original_byte_slice()))
+            });
+        let mut resources = self.ledger.lock().expect("resource ledger poisoned");
+        let Some(ledger) = resources.observed() else {
+            return;
+        };
+        record_pending_step(ledger, step, instruction_succeeded);
+        if let Some((hash, bytes)) = materialized_code {
+            ledger.code(hash, bytes);
+        }
     }
 
     fn call(
@@ -212,7 +326,8 @@ impl<DB: Database> Inspector<TaikoEvmContext<DB>, EthInterpreter> for ResourceIn
         _context: &mut TaikoEvmContext<DB>,
         inputs: &mut CallInputs,
     ) -> Option<CallOutcome> {
-        let mut ledger = self.ledger.lock().expect("resource ledger poisoned");
+        let mut resources = self.ledger.lock().expect("resource ledger poisoned");
+        let ledger = resources.observed()?;
         ledger.account(inputs.caller);
         ledger.account(inputs.target_address);
         ledger.account(inputs.bytecode_address);
@@ -224,35 +339,52 @@ impl<DB: Database> Inspector<TaikoEvmContext<DB>, EthInterpreter> for ResourceIn
         _context: &mut TaikoEvmContext<DB>,
         inputs: &mut CreateInputs,
     ) -> Option<CreateOutcome> {
-        self.ledger
+        if let Some(ledger) = self
+            .ledger
             .lock()
             .expect("resource ledger poisoned")
-            .account(inputs.caller());
+            .observed()
+        {
+            ledger.account(inputs.caller());
+        }
         None
     }
 }
 
-struct CountingTransactions<'a, I> {
+struct CandidateTransactions<'a, I> {
     inner: I,
-    started: &'a mut usize,
-    ledger: Arc<Mutex<ResourceLedger>>,
+    consumed: &'a mut usize,
+    resources: Arc<Mutex<CandidateResourceLedger>>,
 }
 
-impl<'tx, I> Iterator for CountingTransactions<'_, I>
+impl<I> Drop for CandidateTransactions<'_, I> {
+    fn drop(&mut self) {
+        self.resources
+            .lock()
+            .expect("resource ledger poisoned")
+            .discard_candidate();
+    }
+}
+
+impl<'tx, I> Iterator for CandidateTransactions<'_, I>
 where
     I: Iterator<Item = alloy_consensus::transaction::Recovered<&'tx TransactionSigned>>,
 {
     type Item = alloy_consensus::transaction::Recovered<&'tx TransactionSigned>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        let mut resources = self.resources.lock().expect("resource ledger poisoned");
+        resources.discard_candidate();
         let transaction = self.inner.next()?;
-        *self.started += 1;
+        *self.consumed += 1;
+        resources.begin_candidate();
         if let Some(access_list) = (*transaction.inner()).access_list() {
-            let mut ledger = self.ledger.lock().expect("resource ledger poisoned");
             for item in &access_list.0 {
-                ledger.account(item.address);
+                resources.active().account(item.address);
                 for key in &item.storage_keys {
-                    ledger.storage_access(item.address, U256::from_be_bytes(key.0));
+                    resources
+                        .active()
+                        .storage_access(item.address, U256::from_be_bytes(key.0));
                 }
             }
         }
@@ -262,9 +394,11 @@ where
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct BlockExecutionObservation {
-    pub report: ZkGasShadowReport,
+    pub committed_report: ZkGasShadowReport,
+    pub attempted_report: ZkGasShadowReport,
     pub exact_resources: ResourceSelectors,
-    pub started_transaction_count: usize,
+    pub consumed_candidate_count: usize,
+    pub attempted_transaction_count: u64,
     pub finalized_block_zkgas: u64,
 }
 
@@ -278,23 +412,16 @@ impl QuoteDerivedBlockExecutor {
         self.completed.take()
     }
 
-    fn reconcile_loaded_state<DB>(state: &State<DB>, ledger: &mut ResourceLedger) {
-        for (address, account) in &state.cache.accounts {
-            ledger.account(*address);
-            if let Some(account) = &account.account {
-                for slot in account.storage.keys().copied() {
-                    ledger.storage_access(*address, slot);
-                }
-                // EIP-7702 installs the delegation bytecode inline on the authority account and
-                // does not necessarily add it to `state.cache.contracts`.
-                if let Some(code) = &account.info.code {
-                    ledger.code(account.info.code_hash, code.original_byte_slice());
-                }
-            }
-        }
-        for (hash, code) in &state.cache.contracts {
-            ledger.code(*hash, code.original_byte_slice());
-        }
+    fn install_candidate_commit_hook<DB: Database>(
+        state: &mut State<DB>,
+        resources: Arc<Mutex<CandidateResourceLedger>>,
+    ) {
+        state.set_state_hook(Some(Box::new(move |committed: EvmState| {
+            resources
+                .lock()
+                .expect("resource ledger poisoned")
+                .commit_active_state(&committed);
+        })));
     }
 }
 
@@ -329,11 +456,12 @@ impl raiko2_stateless::DerivedBlockExecutor for QuoteDerivedBlockExecutor {
             .with_database(db)
             .with_bundle_update()
             .build();
+        let ledger = Arc::new(Mutex::new(CandidateResourceLedger::default()));
+        Self::install_candidate_commit_hook(&mut state, ledger.clone());
         let attributes = attributes_from_block(derived_block)?;
         let environment = evm_config
             .next_evm_env(parent_header, &attributes)
             .map_err(BlockExecutionError::other)?;
-        let ledger = Arc::new(Mutex::new(ResourceLedger::default()));
         let evm = evm_config.evm_factory().create_evm_with_inspector(
             &mut state,
             environment,
@@ -350,43 +478,60 @@ impl raiko2_stateless::DerivedBlockExecutor for QuoteDerivedBlockExecutor {
             evm_config.executor_factory.receipt_builder(),
             ZkGasMode::Shadow,
         );
-        let mut started = 0usize;
-        let transactions = CountingTransactions {
+        let mut consumed = 0usize;
+        let transactions = CandidateTransactions {
             inner: derived_block.transactions_recovered(),
-            started: &mut started,
-            ledger: ledger.clone(),
+            consumed: &mut consumed,
+            resources: ledger.clone(),
         };
         let execution = executor.execute_block_with_committed_transactions(transactions)?;
+        ledger
+            .lock()
+            .expect("resource ledger poisoned")
+            .discard_candidate();
         state.merge_transitions(BundleRetention::Reverts);
-        {
-            let mut locked = ledger.lock().expect("resource ledger poisoned");
-            Self::reconcile_loaded_state(&state, &mut locked);
-        }
         let exact_resources = ledger
             .lock()
             .expect("resource ledger poisoned")
+            .committed()
             .selectors()
             .map_err(BlockExecutionError::other)?;
-        let report = execution
+        let committed_report = execution
             .zk_gas_shadow_report
             .ok_or_else(|| BlockExecutionError::msg("missing zkGas shadow report"))?;
+        let attempted_report = execution
+            .attempted_zk_gas_shadow_report
+            .ok_or_else(|| BlockExecutionError::msg("missing attempted zkGas shadow report"))?;
         let finalized_block_zkgas = finalized_zk_gas.load(std::sync::atomic::Ordering::Relaxed);
         self.completed = Some(BlockExecutionObservation {
-            report,
+            committed_report,
+            attempted_report,
             exact_resources,
-            started_transaction_count: started,
+            consumed_candidate_count: consumed,
+            attempted_transaction_count: execution.attempted_transaction_count,
             finalized_block_zkgas,
         });
 
         let bundle_state: BundleState = state.take_bundle();
+        // This is not part of the candidate commit hook above. Capture the wipe identities from
+        // BundleState before `from_bundle_state` performs its lossy conversion: reth 2.6 expects a
+        // full-node state provider to expand every deleted parent slot into an explicit zero, while
+        // stateless replay has only the witness-backed sparse trie. SparseState uses this canonical
+        // list to clear each pre-existing destroyed account's parent storage, then applies the final
+        // slots retained in `hashed_state`. Accounts created and destroyed within this block are
+        // excluded because they cannot have parent storage.
+        let pre_existing_destroyed_accounts = pre_existing_destroyed_account_hashes(&bundle_state);
         Ok(DerivedBlockExecutionOutcome {
             committed_transactions: execution.committed_transactions,
             execution_result: execution.execution_result,
             hashed_state: HashedPostState::from_bundle_state::<KeccakKeyHasher>(
                 bundle_state.state(),
             ),
+            pre_existing_destroyed_accounts,
             finalized_block_zk_gas: finalized_block_zkgas,
-            zk_gas_shadow_report: Some(report),
+            zk_gas_shadow_report: Some(committed_report),
+            attempted_zk_gas_shadow_report: Some(attempted_report),
+            attempted_transaction_count: execution.attempted_transaction_count,
         })
     }
 }
@@ -442,6 +587,7 @@ mod tests {
             &mut ledger,
             PendingStep {
                 resource_account: Some(resource_account),
+                materialized_code_account: None,
                 storage: Some((storage_target, slot, true)),
             },
             false,
@@ -451,6 +597,63 @@ mod tests {
         assert!(!ledger.accounts.contains(&resource_account));
         assert!(ledger.storage_accesses.contains(&(storage_target, slot)));
         assert!(ledger.storage_writes.contains(&(storage_target, slot)));
+    }
+
+    #[test]
+    fn discarded_candidate_does_not_merge_its_resources() {
+        let rejected_account = Address::with_last_byte(0xb1);
+        let rejected_slot = U256::from(0xb2);
+        let committed_account = Address::with_last_byte(0xb3);
+        let mut resources = CandidateResourceLedger::default();
+
+        resources.begin_candidate();
+        resources.active().account(rejected_account);
+        resources
+            .active()
+            .storage_access(rejected_account, rejected_slot);
+        resources.discard_candidate();
+
+        resources.begin_candidate();
+        resources.active().account(committed_account);
+        resources.commit_candidate().unwrap();
+
+        assert_eq!(
+            resources.committed().selectors().unwrap(),
+            ResourceSelectors {
+                unique_account_count: 1,
+                ..Default::default()
+            }
+        );
+    }
+
+    #[test]
+    fn dropping_candidate_iterator_discards_the_last_uncommitted_scope() {
+        let rejected_account = Address::with_last_byte(0xb4);
+        let resources = Arc::new(Mutex::new(CandidateResourceLedger::default()));
+        resources
+            .lock()
+            .expect("resource ledger poisoned")
+            .begin_candidate();
+        resources
+            .lock()
+            .expect("resource ledger poisoned")
+            .active()
+            .account(rejected_account);
+        let mut consumed = 0;
+
+        drop(CandidateTransactions {
+            inner: std::iter::empty::<alloy_consensus::transaction::Recovered<&TransactionSigned>>(
+            ),
+            consumed: &mut consumed,
+            resources: resources.clone(),
+        });
+
+        let resources = resources.lock().expect("resource ledger poisoned");
+        assert!(resources.active.is_none());
+        assert_eq!(
+            resources.committed().selectors().unwrap(),
+            ResourceSelectors::default()
+        );
     }
 
     #[test]
@@ -470,7 +673,12 @@ mod tests {
         database.insert_account_info(target, AccountInfo::default());
         database.insert_account_info(authority, AccountInfo::default());
         let mut state = State::builder().with_database(database).build();
-        let ledger = Arc::new(Mutex::new(ResourceLedger::default()));
+        let ledger = Arc::new(Mutex::new(CandidateResourceLedger::default()));
+        QuoteDerivedBlockExecutor::install_candidate_commit_hook(&mut state, ledger.clone());
+        ledger
+            .lock()
+            .expect("resource ledger poisoned")
+            .begin_candidate();
         let mut environment: EvmEnv<TaikoSpecId> = EvmEnv::default();
         environment.cfg_env.spec = TaikoSpecId::UNZEN;
         environment.cfg_env.chain_id = 167;
@@ -529,13 +737,10 @@ mod tests {
             "delegation must exercise the account-inline reconciliation path"
         );
 
-        QuoteDerivedBlockExecutor::reconcile_loaded_state(
-            &state,
-            &mut ledger.lock().expect("resource ledger poisoned"),
-        );
         let exact = ledger
             .lock()
             .expect("resource ledger poisoned")
+            .committed()
             .selectors()
             .expect("exact resources");
         let alethia_reth_evm::zk_gas::pricing::ZkGasShadowStatus::Incomplete { known, .. } =
@@ -546,6 +751,178 @@ mod tests {
         assert!(exact.unique_code_hash_count >= known.evm_local_resources().unique_code_hash_count);
         assert!(exact.unique_code_bytes >= known.evm_local_resources().unique_code_bytes);
         assert!(exact.unique_code_bytes >= 23);
+    }
+
+    #[test]
+    fn committed_eip7702_delegations_are_retained_before_later_overwrite() {
+        let authority = Address::with_last_byte(0xe1);
+        let first_delegate = Address::with_last_byte(0xe2);
+        let second_delegate = Address::with_last_byte(0xe3);
+        let delegation = |delegate: Address| {
+            let mut bytes = vec![0xef, 0x01, 0x00];
+            bytes.extend_from_slice(delegate.as_slice());
+            let bytes = Bytes::from(bytes);
+            AccountInfo {
+                code_hash: keccak256(&bytes),
+                code: Some(Bytecode::new_raw(bytes)),
+                ..Default::default()
+            }
+        };
+        let resources = Arc::new(Mutex::new(CandidateResourceLedger::default()));
+        let mut state = State::builder()
+            .with_database(InMemoryDB::default())
+            .build();
+        QuoteDerivedBlockExecutor::install_candidate_commit_hook(&mut state, resources.clone());
+
+        for delegate in [first_delegate, second_delegate] {
+            let mut changes = reth_revm::state::EvmState::default();
+            changes.insert(
+                authority,
+                reth_revm::state::Account::from(delegation(delegate)),
+            );
+            resources
+                .lock()
+                .expect("resource ledger poisoned")
+                .begin_candidate();
+            reth_revm::DatabaseCommit::commit(&mut state, changes);
+        }
+
+        let exact = resources
+            .lock()
+            .expect("resource ledger poisoned")
+            .committed()
+            .selectors()
+            .unwrap();
+        assert_eq!(exact.unique_code_hash_count, 2);
+        assert_eq!(exact.unique_code_bytes, 46);
+    }
+
+    fn extcode_materialization_program(copy_address: Address, size_address: Address) -> Bytecode {
+        let mut code = vec![0x60, 1, 0x5f, 0x5f, 0x73];
+        code.extend_from_slice(copy_address.as_slice());
+        code.extend_from_slice(&[0x3c, 0x73]);
+        code.extend_from_slice(size_address.as_slice());
+        code.extend_from_slice(&[0x3b, 0x50, 0x00]);
+        Bytecode::new_raw(Bytes::from(code))
+    }
+
+    fn extcodehash_program(first: Address, second: Address) -> Bytecode {
+        let mut code = vec![0x73];
+        code.extend_from_slice(first.as_slice());
+        code.extend_from_slice(&[0x3f, 0x50, 0x73]);
+        code.extend_from_slice(second.as_slice());
+        code.extend_from_slice(&[0x3f, 0x50, 0x00]);
+        Bytecode::new_raw(Bytes::from(code))
+    }
+
+    fn execute_extcode_program(
+        program: Bytecode,
+        contracts: &[(Address, Bytecode)],
+    ) -> ResourceSelectors {
+        let caller = Address::with_last_byte(0xf1);
+        let target = Address::with_last_byte(0xf2);
+        let mut database = InMemoryDB::default();
+        database.insert_account_info(
+            caller,
+            AccountInfo {
+                balance: U256::MAX,
+                ..Default::default()
+            },
+        );
+        for (address, code) in std::iter::once((target, program)).chain(contracts.iter().cloned()) {
+            let code_hash = code.hash_slow();
+            database.insert_account_info(
+                address,
+                AccountInfo {
+                    nonce: 1,
+                    code_hash,
+                    code: Some(code),
+                    ..Default::default()
+                },
+            );
+            database
+                .cache
+                .accounts
+                .get_mut(&address)
+                .expect("inserted contract account")
+                .info
+                .code = None;
+        }
+
+        let mut state = State::builder().with_database(database).build();
+        let ledger = Arc::new(Mutex::new(CandidateResourceLedger::default()));
+        ledger
+            .lock()
+            .expect("resource ledger poisoned")
+            .begin_candidate();
+        let mut environment: EvmEnv<TaikoSpecId> = EvmEnv::default();
+        environment.cfg_env.spec = TaikoSpecId::UNZEN;
+        environment.cfg_env.chain_id = 167;
+        environment.block_env.gas_limit = 30_000_000;
+        let mut evm = TaikoEvmFactory.create_evm_with_inspector(
+            &mut state,
+            environment,
+            ResourceInspector::with_ledger(ledger.clone()),
+        );
+        let result = evm
+            .transact(
+                TxEnv::builder()
+                    .caller(caller)
+                    .kind(TxKind::Call(target))
+                    .chain_id(Some(167))
+                    .gas_limit(1_000_000)
+                    .build()
+                    .expect("valid EXTCODE transaction"),
+            )
+            .expect("EXTCODE transaction execution");
+        assert!(result.result.is_success());
+        drop(evm);
+        ledger
+            .lock()
+            .expect("resource ledger poisoned")
+            .commit_candidate()
+            .expect("commit candidate resources");
+        ledger
+            .lock()
+            .expect("resource ledger poisoned")
+            .committed()
+            .selectors()
+            .expect("EXTCODE resources")
+    }
+
+    #[test]
+    fn committed_candidate_retains_materialized_extcode_bodies() {
+        let first = Address::with_last_byte(0xf3);
+        let second = Address::with_last_byte(0xf4);
+        let first_code = Bytecode::new_raw(Bytes::from(vec![0x00; 24_000]));
+        let mut second_bytes = vec![0x00; 24_000];
+        second_bytes[23_999] = 0x5b;
+        let second_code = Bytecode::new_raw(Bytes::from(second_bytes));
+        let contracts = [(first, first_code), (second, second_code)];
+
+        let repeated =
+            execute_extcode_program(extcode_materialization_program(first, first), &contracts);
+        let distinct =
+            execute_extcode_program(extcode_materialization_program(first, second), &contracts);
+        let hash_only = execute_extcode_program(extcodehash_program(first, second), &contracts);
+
+        assert_eq!(
+            distinct.unique_code_hash_count,
+            repeated.unique_code_hash_count + 1
+        );
+        assert_eq!(
+            distinct.unique_code_bytes,
+            repeated.unique_code_bytes + 24_000
+        );
+        assert_eq!(
+            hash_only.unique_code_hash_count, 1,
+            "only the executed parent code"
+        );
+        assert_eq!(
+            hash_only.unique_code_bytes,
+            u64::try_from(extcodehash_program(first, second).len()).unwrap(),
+            "EXTCODEHASH must not materialize the referenced bodies",
+        );
     }
 
     #[test]
@@ -590,7 +967,12 @@ mod tests {
         database.insert_account_info(target, account_with_code(target_code.into()));
         database.insert_account_info(child, account_with_code(child_code));
         let mut state = State::builder().with_database(database).build();
-        let ledger = Arc::new(Mutex::new(ResourceLedger::default()));
+        let ledger = Arc::new(Mutex::new(CandidateResourceLedger::default()));
+        QuoteDerivedBlockExecutor::install_candidate_commit_hook(&mut state, ledger.clone());
+        ledger
+            .lock()
+            .expect("resource ledger poisoned")
+            .begin_candidate();
         let mut environment: EvmEnv<TaikoSpecId> = EvmEnv::default();
         environment.cfg_env.spec = TaikoSpecId::UNZEN;
         environment.cfg_env.chain_id = 167;
@@ -621,13 +1003,10 @@ mod tests {
             .shadow_report();
         drop(evm);
 
-        QuoteDerivedBlockExecutor::reconcile_loaded_state(
-            &state,
-            &mut ledger.lock().expect("resource ledger poisoned"),
-        );
         let exact = ledger
             .lock()
             .expect("resource ledger poisoned")
+            .committed()
             .selectors()
             .expect("exact resources");
         let alethia_reth_evm::zk_gas::pricing::ZkGasShadowStatus::Incomplete { known, .. } =

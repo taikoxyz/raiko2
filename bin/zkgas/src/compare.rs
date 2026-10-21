@@ -20,7 +20,7 @@ use crate::{
     arithmetic::{ARITHMETIC_POLICY, ceil_mul_ratio, direct_metrics, ratio},
     contracts::*,
     identity::{canonical_json, content_id, sha256_hex},
-    output::{CommitOutcome, commit_directory},
+    output::{CommitOutcome, DirectoryCommitLimits, commit_directory_bounded},
 };
 
 pub const MAX_COMPARE_FILES: usize = 128;
@@ -278,10 +278,11 @@ fn validate_complete_quote(complete: &CompleteQuoteV1) -> Result<()> {
         );
         ensure!(
             block.prove.input_transaction_count > 0
-                && block.prove.started_transaction_count > 0
-                && block.prove.started_transaction_count <= block.prove.input_transaction_count
+                && block.prove.consumed_candidate_count > 0
+                && block.prove.attempted_transaction_count <= block.prove.consumed_candidate_count
+                && block.prove.consumed_candidate_count <= block.prove.input_transaction_count
                 && block.prove.true_unattempted_transactions
-                    == block.prove.input_transaction_count - block.prove.started_transaction_count,
+                    == block.prove.input_transaction_count - block.prove.consumed_candidate_count,
             "embedded block transaction topology mismatch"
         );
         let node = &block.node.pricing;
@@ -317,16 +318,10 @@ fn validate_complete_quote(complete: &CompleteQuoteV1) -> Result<()> {
         let prove = &block.prove.pricing;
         validate_pricing_breakdown(prove)?;
         ensure!(
-            (
-                prove.fixed_scaled,
-                prove.operations_scaled,
-                prove.feature_error_scaled
-            ) == (
-                node.fixed_scaled,
-                node.operations_scaled,
-                node.feature_error_scaled,
-            ),
-            "node and prove shared pricing mismatch"
+            prove.fixed_scaled >= node.fixed_scaled
+                && prove.operations_scaled >= node.operations_scaled
+                && prove.feature_error_scaled >= node.feature_error_scaled,
+            "attempted prove pricing does not cover committed node pricing"
         );
         ensure!(
             exact_resources_cover_local(
@@ -456,8 +451,8 @@ fn validate_complete_quote(complete: &CompleteQuoteV1) -> Result<()> {
         })
         .context("prove block pgu sum overflow")?;
     ensure!(
-        quote.prove.sum_of_block_admission_pgu == block_pgu,
-        "prove block admission sum mismatch"
+        quote.prove.sum_of_block_local_pgu == block_pgu,
+        "prove block-local pgu sum mismatch"
     );
     ensure!(
         quote.prove.proposal_once_pgu == quote.prove.proposal_once.total_pgu,
@@ -782,7 +777,7 @@ pub fn comparison_row_id(result: &ComparisonResultV1) -> Result<String> {
             matching_profile_ids,
             ..
         } => content_id(
-            "zkgas-comparison/joined-v1",
+            "zkgas-comparison/ambiguous-profile-v1",
             &(&quote.key, observation_key, matching_profile_ids),
         ),
         ComparisonResultV1::UnmatchedQuote {
@@ -1181,7 +1176,15 @@ pub fn run_compare(args: &CompareArgs, executable: &ExecutableIdentity) -> Resul
         for (id, bytes) in builder.files {
             fs::write(staging.join("rows").join(format!("{id}.json")), bytes)?;
         }
-        commit_directory(&staging, &run_path)
+        commit_directory_bounded(
+            &staging,
+            &run_path,
+            DirectoryCommitLimits {
+                max_entries: MAX_COMPARE_ROWS + 2,
+                max_depth: 2,
+                max_bytes: MAX_COMPARE_OUTPUT_BYTES as u64,
+            },
+        )
     })();
     if published.is_err() {
         let _ = fs::remove_dir_all(&staging);

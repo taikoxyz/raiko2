@@ -461,6 +461,10 @@ fn cli_rejects_every_raised_ceiling_with_structural_exit() {
         assert_eq!(result.status.code(), Some(1), "{field}");
         let error = String::from_utf8(result.stderr).unwrap();
         assert!(
+            error.contains("ERROR") && error.contains("zkgas quote failed"),
+            "the product CLI must install a subscriber that writes runtime errors to stderr: {error}"
+        );
+        assert!(
             error.contains(&format!("{field} exceeds hard ceiling")),
             "{field}: {error}"
         );

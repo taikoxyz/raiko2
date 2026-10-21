@@ -431,7 +431,7 @@ Replay one current-format Shasta `GuestInput` through the canonical native valid
 complete the sealed Alethia zkGas model with exact resource, MPT, payload, and blob selectors:
 
 ```bash
-cargo run -r -p guest-launcher -- \
+cargo run -r -p guest-launcher --features zkgas-quote -- \
   --stage proposal-workload-quote \
   --input ./path/to/current-guest-input.json \
   --json-out ./proposal-workload-quote.json
@@ -441,9 +441,11 @@ For an already serialized current-format input, replace `--input` with the mutua
 `--input-bincode ./path/to/current-guest-input.bin`. The bincode form must round-trip to the exact
 same canonical bytes; trailing or otherwise non-canonical bytes are rejected.
 
-This stage does not produce or verify a proof and accepts only native execute mode. It validates the
-supplied input without backfilling proof-carry data, fails if the exact resource observations do not
-cover the EVM-local report, and records both per-block admission PGU and the proposal-once total.
+The stage is feature-gated so ordinary launcher builds do not enable stateless MPT instrumentation
+through Cargo feature unification. It does not produce or verify a proof and accepts only native
+execute mode. It validates the supplied input without backfilling proof-carry data, fails if the
+exact resource observations do not cover the EVM-local report, and records both the sum of
+per-block-local quotes and the proposal-once total.
 The initial report schema separates fields by where the current implementation obtains them:
 
 - `node` contains the incomplete block-local information available to Alethia during mining. The
@@ -482,11 +484,18 @@ normal candidates, as sealed by the generated route table. The current node repo
 priced `fixed` and `operations` aggregates, `feature_error` attribution, and raw resource selectors;
 it does not expose raw fixed selectors or per-route operation rows.
 
-The complete replay-side block quote replaces that incomplete resource term with the exact
-block-end term and adds MPT work:
+For each block, `input_transaction_count` is the number of serialized candidates,
+`consumed_candidate_count` is the number visited by the canonical executor iterator, and
+`attempted_transaction_count` is the number whose EVM pricing scope began. The quote requires
+`attempted <= consumed <= input`; `true_unattempted_transactions` is `input - consumed`.
+Pre-execution rejections can therefore be consumed without being attempted, while a candidate
+discarded after execution contributes to attempted fixed/operation work without becoming committed.
+
+The complete replay-side block quote uses attempted fixed/operation work, the exact committed
+block-end resource term, and actual stateless MPT work:
 
 ```text
-B_b = N_b - evm_local_resources_b + exact_resources_b + mpt_b
+B_b = attempted_fixed_b + attempted_operations_b + committed_exact_resources_b + mpt_b
 
 mpt(P, M, Hh, De, Dh, Sc, Dn)
   = 256*P + 5,000*M + 3,000*Hh + 8,000*De + 3,000*Dh
@@ -511,8 +520,8 @@ P = ceil((sum_b B_b + Q) / 10^18)
 The raw inputs to `Q` are under `prove.selectors`, its priced breakdown is
 `prove.proposal_once`, and `prove.total_pgu` is `P`. `node.block_local_known_pgu` and
 `prove.block_local_pgu` apply one ceiling after summing their respective block fixed-point values;
-the corresponding `sum_of_block_*_pgu` fields preserve the sum of per-block ceilings used for
-block-by-block admission comparisons.
+the corresponding `sum_of_block_*_pgu` fields preserve the sum of per-block ceilings for direct
+comparison with independently rounded block-local quotes.
 
 The reported `model_id` authenticates the pricing specification, not the SP1 ELF used by an external
 proving run. A complete model quote is therefore shadow-comparison output; it becomes admission or

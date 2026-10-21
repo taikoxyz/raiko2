@@ -79,6 +79,11 @@ Every complete row includes the full quote, executable identity, canonical input
 proposal/public-output identity, chain-spec hashes, and ordered active-fork segments. A failed
 row records verified identity only when available, separately from any observed raw-file hash.
 
+`zkgas-quote` installs a stderr tracing subscriber with `warn` as its default filter. If replay
+executes a candidate that is later discarded, it emits one structured block-level warning with
+the input, consumed, attempted, committed, and discarded transaction counts. Set `RUST_LOG` to
+override the filter; quote JSON and pricing are unchanged by this observation.
+
 ### Compare: compatible SP1 example
 
 `--quotes` and `--observations` are repeatable. `--profiles` replaces the embedded profiles; it
@@ -149,10 +154,13 @@ input hash/length, proof-carry and proposal identities, contiguous block and for
 output, pricing unit/surface/model, and the embedded node/prove sums and fixed-point totals. An
 inconsistent complete row, or an empty quote or observation population, is a structural failure and
 publishes no run.
-Block validation also requires prove-side fixed/operation/feature attribution to match the node
-surface, exact resources to cover EVM-local resources, and sealed resource/MPT prices to match their
-selectors. Proposal-once pricing is recomputed from its selectors with the sealed model; block-only
-and proposal-only component domains cannot be exchanged while keeping a forged total closed.
+Block validation also requires prove-side attempted fixed/operation/feature values to cover the
+committed node surface component by component. They are equal when every attempted transaction is
+committed and may be strictly greater when execution begins for a candidate that is later discarded.
+Exact committed resources must cover EVM-local committed resources, and sealed resource/MPT prices
+must match their selectors. Proposal-once pricing is recomputed from its selectors with the sealed
+model; block-only and proposal-only component domains cannot be exchanged while keeping a forged
+total closed.
 Tariff recomputation applies when the quote model matches the compare binary's sealed runtime model.
 Schema-v1 quotes from another explicitly profiled model retain the model-independent structural,
 selector-domain, duplicated-identity, and arithmetic checks without being repriced by the wrong model.

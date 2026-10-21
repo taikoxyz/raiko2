@@ -57,11 +57,17 @@ pub trait StatelessTrie: core::fmt::Debug {
 
     /// Compute the post-state root after applying the hashed post-state changes.
     ///
+    /// `pre_existing_destroyed_accounts` contains canonical hashed identities for accounts that
+    /// existed before execution and were destroyed during it. Their parent storage must be cleared
+    /// before applying any final storage delta because [`HashedPostState`] does not carry that wipe
+    /// metadata.
+    ///
     /// # Errors
     ///
     /// Returns an error if the trie cannot apply the state changes or recompute the root.
     fn calculate_state_root(
         &mut self,
         state: HashedPostState,
+        pre_existing_destroyed_accounts: &[B256],
     ) -> Result<B256, StatelessValidationError>;
 }

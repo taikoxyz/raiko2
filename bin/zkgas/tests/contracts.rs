@@ -298,7 +298,7 @@ fn complete_quote_preserves_full_width_embedded_pricing_and_rejects_malformed_va
                 },
                 block_local_scaled: i128::MAX,
                 block_local_pgu: u128::MAX,
-                sum_of_block_admission_pgu: u128::MAX,
+                sum_of_block_local_pgu: u128::MAX,
                 proposal_once: PricingBreakdownSnapshot {
                     total_scaled: i128::MIN,
                     total_pgu: u128::MAX,

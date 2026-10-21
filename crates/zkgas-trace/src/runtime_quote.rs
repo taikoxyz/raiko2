@@ -150,7 +150,8 @@ pub struct NodeBlockWorkloadQuote {
 #[serde(deny_unknown_fields)]
 pub struct ProveBlockWorkloadQuote {
     pub input_transaction_count: u64,
-    pub started_transaction_count: u64,
+    pub consumed_candidate_count: u64,
+    pub attempted_transaction_count: u64,
     pub true_unattempted_transactions: u64,
     pub exact_resources: ResourceSelectorsSnapshot,
     pub mpt: MptSelectorsSnapshot,
@@ -181,7 +182,7 @@ pub struct ProveProposalWorkloadQuote {
     pub selectors: ProposalPricingSelectorsSnapshot,
     pub block_local_scaled: i128,
     pub block_local_pgu: u128,
-    pub sum_of_block_admission_pgu: u128,
+    pub sum_of_block_local_pgu: u128,
     pub proposal_once: PricingBreakdownSnapshot,
     pub proposal_once_pgu: u128,
     pub total_scaled: i128,
@@ -241,33 +242,116 @@ fn ceil_scaled(value: i128) -> Result<u128, RuntimeQuoteError> {
         .map_err(|_| RuntimeQuoteError::ArithmeticOverflow)
 }
 
+fn true_unattempted_transactions(
+    input: u64,
+    consumed: u64,
+    attempted: u64,
+) -> Result<u64, RuntimeQuoteError> {
+    if attempted > consumed || consumed > input {
+        return Err(RuntimeQuoteError::Topology("transaction_counts"));
+    }
+    input
+        .checked_sub(consumed)
+        .ok_or(RuntimeQuoteError::ArithmeticOverflow)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn observe_discarded_attempts(
+    guest_input_sha256: &str,
+    block_index: usize,
+    block_number: u64,
+    input_transaction_count: u64,
+    consumed_candidate_count: u64,
+    attempted_transaction_count: u64,
+    committed_transaction_count: u64,
+) -> Result<u64, RuntimeQuoteError> {
+    let discarded_attempt_count = attempted_transaction_count
+        .checked_sub(committed_transaction_count)
+        .ok_or(RuntimeQuoteError::Topology("transaction_counts"))?;
+    if discarded_attempt_count > 0 {
+        tracing::warn!(
+            guest_input_sha256,
+            block_index,
+            block_number,
+            input_transaction_count,
+            consumed_candidate_count,
+            attempted_transaction_count,
+            committed_transaction_count,
+            discarded_attempt_count,
+            "discarded attempted transactions observed during proposal quote replay"
+        );
+    }
+    Ok(discarded_attempt_count)
+}
+
 fn complete_block_pricing(
     block_index: usize,
-    report: &ZkGasShadowReport,
+    committed_report: &ZkGasShadowReport,
+    attempted_report: &ZkGasShadowReport,
     exact_resources: ResourceSelectors,
     mpt: MptSelectors,
 ) -> Result<(NodePricingBreakdownSnapshot, PricingBreakdownSnapshot), RuntimeQuoteError> {
-    let known = match report.status() {
+    let committed_known = match committed_report.status() {
         ZkGasShadowStatus::Incomplete { known, .. } => Some(known),
         ZkGasShadowStatus::Diagnostic(_) => None,
     };
-    let priced = ZkGasModel
-        .complete_block_shadow_report(report, exact_resources, mpt)
+    let committed_priced = ZkGasModel
+        .complete_block_shadow_report(committed_report, exact_resources, mpt)
         .map_err(|source| RuntimeQuoteError::BlockCompletion {
             block_index,
             source,
         })?;
-    let known = known.ok_or(RuntimeQuoteError::Missing("node_shadow_breakdown"))?;
-    Ok((
-        NodePricingBreakdownSnapshot::from(known),
-        PricingBreakdownSnapshot::try_from(priced)?,
-    ))
+    let committed_known =
+        committed_known.ok_or(RuntimeQuoteError::Missing("node_shadow_breakdown"))?;
+
+    let attempted_known = match attempted_report.status() {
+        ZkGasShadowStatus::Incomplete { known, .. } => Some(known),
+        ZkGasShadowStatus::Diagnostic(_) => None,
+    };
+    // Completing with the attempted report's own EVM-local resource subset validates the sealed
+    // report without allowing rejected-candidate resources to leak into the exact committed term.
+    let attempted_priced = ZkGasModel
+        .complete_block_shadow_report(
+            attempted_report,
+            attempted_known
+                .map(ZkGasKnownBlockBreakdown::evm_local_resources)
+                .unwrap_or_default(),
+            MptSelectors::default(),
+        )
+        .map_err(|source| RuntimeQuoteError::BlockCompletion {
+            block_index,
+            source,
+        })?;
+    attempted_known.ok_or(RuntimeQuoteError::Missing("attempted_shadow_breakdown"))?;
+    let total_scaled = checked_add_i128(
+        checked_add_i128(
+            attempted_priced.fixed_scaled,
+            attempted_priced.operations_scaled,
+        )?,
+        checked_add_i128(
+            committed_priced.resources_scaled,
+            committed_priced.mpt_scaled,
+        )?,
+    )?;
+    let prove = PricingBreakdownSnapshot {
+        fixed_scaled: attempted_priced.fixed_scaled,
+        operations_scaled: attempted_priced.operations_scaled,
+        feature_error_scaled: attempted_priced.feature_error_scaled,
+        resources_scaled: committed_priced.resources_scaled,
+        mpt_scaled: committed_priced.mpt_scaled,
+        total_scaled,
+        total_pgu: ceil_scaled(total_scaled)?,
+        ..Default::default()
+    };
+    Ok((NodePricingBreakdownSnapshot::from(committed_known), prove))
 }
 
 struct ReplayedBlock {
     index: usize,
     number: u64,
     input_transaction_count: u64,
+    consumed_candidate_count: u64,
+    attempted_transaction_count: u64,
     true_unattempted_transactions: u64,
     mpt: alethia_reth_evm::zk_gas::pricing::MptSelectors,
     execution: BlockExecutionObservation,
@@ -327,16 +411,37 @@ pub fn quote_shasta_proposal(
                 let execution = executor
                     .take()
                     .ok_or_else(|| anyhow::anyhow!("missing completed block pricing observation"))?;
-                let started = u64::try_from(execution.started_transaction_count)
-                    .context("started transaction count exceeds u64")?;
-                if started == 0 || started > input_transaction_count {
-                    anyhow::bail!("started transaction count is outside the block input domain");
-                }
+                let consumed = u64::try_from(execution.consumed_candidate_count)
+                    .context("consumed candidate count exceeds u64")?;
+                let attempted = execution.attempted_transaction_count;
+                let true_unattempted = true_unattempted_transactions(
+                    input_transaction_count,
+                    consumed,
+                    attempted,
+                )
+                .map_err(anyhow::Error::from)?;
+                let block_number = outcome.filtered_block.header().number();
+                let committed = u64::try_from(
+                    outcome.filtered_block.body().transactions().count(),
+                )
+                .context("committed transaction count exceeds u64")?;
+                observe_discarded_attempts(
+                    &guest_input_sha256,
+                    request.index,
+                    block_number,
+                    input_transaction_count,
+                    consumed,
+                    attempted,
+                    committed,
+                )
+                .map_err(anyhow::Error::from)?;
                 blocks.push(ReplayedBlock {
                     index: request.index,
-                    number: outcome.filtered_block.header().number(),
+                    number: block_number,
                     input_transaction_count,
-                    true_unattempted_transactions: input_transaction_count - started,
+                    consumed_candidate_count: consumed,
+                    attempted_transaction_count: attempted,
+                    true_unattempted_transactions: true_unattempted,
                     mpt: mpt::selectors(&metrics)
                         .map_err(|error| anyhow::anyhow!(error.to_string()))?,
                     execution,
@@ -383,7 +488,7 @@ pub fn quote_shasta_proposal(
     let mut block_local_known_scaled = 0_i128;
     let mut sum_of_block_known_pgu = 0_u128;
     let mut block_local_scaled = 0_i128;
-    let mut sum_of_block_admission_pgu = 0_u128;
+    let mut sum_of_block_local_pgu = 0_u128;
     for (position, block) in blocks.into_iter().enumerate() {
         if block.index != position || block.number != input.witnesses[position].block.header.number
         {
@@ -391,7 +496,8 @@ pub fn quote_shasta_proposal(
         }
         let (node_pricing, prove_pricing) = complete_block_pricing(
             position,
-            &block.execution.report,
+            &block.execution.committed_report,
+            &block.execution.attempted_report,
             block.execution.exact_resources,
             block.mpt,
         )?;
@@ -408,7 +514,7 @@ pub fn quote_shasta_proposal(
             .checked_add(node_pricing.known_subtotal_pgu)
             .ok_or(RuntimeQuoteError::ArithmeticOverflow)?;
         block_local_scaled = checked_add_i128(block_local_scaled, prove_pricing.total_scaled)?;
-        sum_of_block_admission_pgu = sum_of_block_admission_pgu
+        sum_of_block_local_pgu = sum_of_block_local_pgu
             .checked_add(prove_pricing.total_pgu)
             .ok_or(RuntimeQuoteError::ArithmeticOverflow)?;
         block_quotes.push(BlockWorkloadQuote {
@@ -420,10 +526,8 @@ pub fn quote_shasta_proposal(
             },
             prove: ProveBlockWorkloadQuote {
                 input_transaction_count: block.input_transaction_count,
-                started_transaction_count: block
-                    .input_transaction_count
-                    .checked_sub(block.true_unattempted_transactions)
-                    .ok_or(RuntimeQuoteError::ArithmeticOverflow)?,
+                consumed_candidate_count: block.consumed_candidate_count,
+                attempted_transaction_count: block.attempted_transaction_count,
                 true_unattempted_transactions: block.true_unattempted_transactions,
                 exact_resources: block.execution.exact_resources.into(),
                 mpt: block.mpt.into(),
@@ -473,7 +577,7 @@ pub fn quote_shasta_proposal(
             selectors: proposal_selectors,
             block_local_scaled,
             block_local_pgu: ceil_scaled(block_local_scaled)?,
-            sum_of_block_admission_pgu,
+            sum_of_block_local_pgu,
             proposal_once_pgu: proposal_once.total_pgu,
             proposal_once,
             total_scaled,
@@ -487,9 +591,67 @@ use anyhow::Context as _;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alethia_reth_evm::zk_gas::pricing::{ZkGasShadowDiagnostic, ZkGasShadowReport};
+    use alethia_reth_evm::zk_gas::pricing::{
+        OperationRoute, OperationRoutePricingInput, ZkGasBlockSnapshot, ZkGasShadowDiagnostic,
+        ZkGasShadowReport,
+    };
     use raiko2_protocol_shasta::libhash::hash_shasta_subproof_input;
-    use std::{fs, path::Path};
+    use std::{
+        collections::BTreeMap,
+        fmt, fs,
+        path::Path,
+        sync::{Arc, Mutex},
+    };
+    use tracing::{Event, Level, Subscriber, field::Visit};
+    use tracing_subscriber::{Layer, layer::Context, prelude::*};
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct CapturedEvent {
+        level: Level,
+        fields: BTreeMap<String, String>,
+    }
+
+    #[derive(Clone, Default)]
+    struct EventCapture(Arc<Mutex<Vec<CapturedEvent>>>);
+
+    struct FieldCapture<'a>(&'a mut BTreeMap<String, String>);
+
+    impl Visit for FieldCapture<'_> {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn fmt::Debug) {
+            self.0.insert(field.name().to_owned(), format!("{value:?}"));
+        }
+
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.0.insert(field.name().to_owned(), value.to_owned());
+        }
+
+        fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+            self.0.insert(field.name().to_owned(), value.to_string());
+        }
+    }
+
+    impl<S> Layer<S> for EventCapture
+    where
+        S: Subscriber,
+    {
+        fn on_event(&self, event: &Event<'_>, _context: Context<'_, S>) {
+            let mut fields = BTreeMap::new();
+            event.record(&mut FieldCapture(&mut fields));
+            self.0
+                .lock()
+                .expect("event capture poisoned")
+                .push(CapturedEvent {
+                    level: *event.metadata().level(),
+                    fields,
+                });
+        }
+    }
+
+    impl EventCapture {
+        fn events(&self) -> Vec<CapturedEvent> {
+            self.0.lock().expect("event capture poisoned").clone()
+        }
+    }
 
     fn assert_initial_json_schema(quote: &ProposalWorkloadQuote) {
         let encoded =
@@ -501,6 +663,21 @@ mod tests {
         assert!(json.get("prove").is_some());
         assert!(json["blocks"][0].get("node").is_some());
         assert!(json["blocks"][0].get("prove").is_some());
+        assert!(
+            json["blocks"][0]["prove"]
+                .get("consumed_candidate_count")
+                .is_some()
+        );
+        assert!(
+            json["blocks"][0]["prove"]
+                .get("attempted_transaction_count")
+                .is_some()
+        );
+        assert!(
+            json["blocks"][0]["prove"]
+                .get("started_transaction_count")
+                .is_none()
+        );
         assert!(json.get("unzen_zkgas_sum").is_none());
         assert!(json["blocks"][0].get("breakdown").is_none());
     }
@@ -524,8 +701,8 @@ mod tests {
         );
         assert_eq!(
             block.prove.pricing.total_scaled,
-            block.node.pricing.fixed_scaled
-                + block.node.pricing.operations_scaled
+            block.prove.pricing.fixed_scaled
+                + block.prove.pricing.operations_scaled
                 + block.prove.pricing.resources_scaled
                 + block.prove.pricing.mpt_scaled,
         );
@@ -567,6 +744,7 @@ mod tests {
         let error = complete_block_pricing(
             7,
             &ZkGasShadowReport::collector_unavailable(),
+            &ZkGasShadowReport::collector_unavailable(),
             ResourceSelectors::default(),
             MptSelectors::default(),
         )
@@ -584,6 +762,158 @@ mod tests {
     }
 
     #[test]
+    fn block_completion_preserves_attempted_shadow_diagnostic() {
+        let error = complete_block_pricing(
+            9,
+            &ZkGasBlockSnapshot::default().shadow_report(),
+            &ZkGasShadowReport::collector_unavailable(),
+            ResourceSelectors::default(),
+            MptSelectors::default(),
+        )
+        .expect_err("attempted collector diagnostic must fail completion");
+
+        assert!(matches!(
+            error,
+            RuntimeQuoteError::BlockCompletion {
+                block_index: 9,
+                source: ZkGasCompletionError::ZkGasShadowDiagnostic(
+                    ZkGasShadowDiagnostic::CollectorUnavailable
+                ),
+            }
+        ));
+    }
+
+    #[test]
+    fn block_completion_uses_attempted_execution_but_committed_exact_resources() {
+        let route = OperationRoute::Opcode(0x00);
+        let operation =
+            |accepted_absolute_scaled, feature_error_scaled| OperationRoutePricingInput {
+                route,
+                accepted_absolute_scaled,
+                incremental_scaled: 0,
+                structural_scaled: 0,
+                feature_error_scaled,
+            };
+        let committed_resources = ResourceSelectors {
+            unique_account_count: 1,
+            ..Default::default()
+        };
+        let attempted_resources = ResourceSelectors {
+            unique_account_count: 7,
+            ..Default::default()
+        };
+        let committed = ZkGasBlockSnapshot {
+            operation_routes: vec![operation(10, 0)],
+            resources: committed_resources,
+            ..Default::default()
+        }
+        .shadow_report();
+        let attempted = ZkGasBlockSnapshot {
+            started_non_anchor_transactions: 1,
+            operation_routes: vec![operation(50, 7)],
+            resources: attempted_resources,
+            ..Default::default()
+        }
+        .shadow_report();
+
+        let (node, prove) = complete_block_pricing(
+            0,
+            &committed,
+            &attempted,
+            committed_resources,
+            MptSelectors::default(),
+        )
+        .expect("complete mixed-scope block pricing");
+
+        assert_eq!(node.operations_scaled, 10);
+        assert_eq!(prove.operations_scaled, 57);
+        assert_eq!(prove.feature_error_scaled, 7);
+        assert_ne!(prove.fixed_scaled, node.fixed_scaled);
+        assert_eq!(prove.resources_scaled, node.evm_local_resources_scaled);
+        assert_eq!(
+            prove.total_scaled,
+            prove.fixed_scaled + prove.operations_scaled + prove.resources_scaled
+        );
+    }
+
+    #[test]
+    fn transaction_count_domains_distinguish_consumed_attempted_and_unattempted() {
+        assert_eq!(true_unattempted_transactions(5, 4, 3).unwrap(), 1);
+        assert_eq!(true_unattempted_transactions(5, 5, 3).unwrap(), 0);
+        assert!(matches!(
+            true_unattempted_transactions(5, 3, 4),
+            Err(RuntimeQuoteError::Topology("transaction_counts"))
+        ));
+        assert!(matches!(
+            true_unattempted_transactions(5, 6, 5),
+            Err(RuntimeQuoteError::Topology("transaction_counts"))
+        ));
+    }
+
+    #[test]
+    fn discarded_attempts_emit_one_structured_warning() {
+        let capture = EventCapture::default();
+        let subscriber = tracing_subscriber::registry().with(capture.clone());
+
+        let discarded = tracing::subscriber::with_default(subscriber, || {
+            observe_discarded_attempts("guest-input-sha256", 7, 12_345, 6, 5, 4, 3)
+        })
+        .expect("attempted count covers committed count");
+
+        assert_eq!(discarded, 1);
+        let events = capture.events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].level, Level::WARN);
+        assert_eq!(
+            events[0].fields,
+            BTreeMap::from([
+                ("attempted_transaction_count".to_owned(), "4".to_owned()),
+                ("block_index".to_owned(), "7".to_owned()),
+                ("block_number".to_owned(), "12345".to_owned()),
+                ("committed_transaction_count".to_owned(), "3".to_owned()),
+                ("consumed_candidate_count".to_owned(), "5".to_owned()),
+                ("discarded_attempt_count".to_owned(), "1".to_owned()),
+                (
+                    "guest_input_sha256".to_owned(),
+                    "guest-input-sha256".to_owned(),
+                ),
+                ("input_transaction_count".to_owned(), "6".to_owned()),
+                (
+                    "message".to_owned(),
+                    "discarded attempted transactions observed during proposal quote replay"
+                        .to_owned(),
+                ),
+            ])
+        );
+    }
+
+    #[test]
+    fn zero_discarded_attempts_emit_no_warning() {
+        let capture = EventCapture::default();
+        let subscriber = tracing_subscriber::registry().with(capture.clone());
+
+        let discarded = tracing::subscriber::with_default(subscriber, || {
+            observe_discarded_attempts("guest-input-sha256", 7, 12_345, 6, 5, 4, 4)
+        })
+        .expect("attempted count equals committed count");
+
+        assert_eq!(discarded, 0);
+        assert!(capture.events().is_empty());
+    }
+
+    #[test]
+    fn committed_count_exceeding_attempted_count_is_a_topology_error() {
+        let error = observe_discarded_attempts("guest-input-sha256", 7, 12_345, 6, 5, 3, 4)
+            .expect_err("committed count cannot exceed attempted count");
+
+        assert!(matches!(
+            error,
+            RuntimeQuoteError::Topology("transaction_counts")
+        ));
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One assertion table pins the complete fixture quote contract.
     fn checked_in_current_guest_input_completes_quote_with_public_output_parity() {
         let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join(
             "../../tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_23077_l2_9051439_9051630.json",
@@ -599,14 +929,162 @@ mod tests {
 
         assert_eq!(quote.public_output, expected_output);
         assert_initial_json_schema(&quote);
-        assert_eq!(quote.blocks.len(), input.witnesses.len());
+        assert_eq!(
+            quote.model_id,
+            "93d04eddda3779393807808859eb36561d35aad0cdd8a8a3960ec3e279a93046"
+        );
+        assert_eq!(
+            quote.guest_input_sha256,
+            "aeab09f9e6f9d62aafa7c2c98b386b812dfd58b9c832219f26e7877d3c5f545e"
+        );
+        assert_eq!(quote.guest_input_bincode_length, 5_475_191);
+        assert_eq!(quote.blocks.len(), 192);
+        assert_eq!(
+            quote
+                .blocks
+                .iter()
+                .map(|block| block.prove.consumed_candidate_count)
+                .sum::<u64>(),
+            218
+        );
+        assert_eq!(
+            quote
+                .blocks
+                .iter()
+                .map(|block| block.prove.attempted_transaction_count)
+                .sum::<u64>(),
+            218
+        );
+        assert!(quote.blocks.iter().all(|block| {
+            block.prove.input_transaction_count == block.prove.consumed_candidate_count
+                && block.prove.consumed_candidate_count == block.prove.attempted_transaction_count
+        }));
         assert_eq!(
             quote.node.unzen_zkgas_sum, 0,
             "the checked-in proposal predates mainnet Unzen activation"
         );
-        assert!(quote.prove.total_pgu > 0);
-        assert!(quote.prove.proposal_once_pgu > 0);
+        assert_eq!(
+            quote.blocks.iter().fold(
+                (0_i128, 0_i128, 0_i128, 0_i128),
+                |(fixed, operations, feature, resources), block| (
+                    fixed + block.node.pricing.fixed_scaled,
+                    operations + block.node.pricing.operations_scaled,
+                    feature + block.node.pricing.feature_error_scaled,
+                    resources + block.node.pricing.evm_local_resources_scaled,
+                ),
+            ),
+            (
+                250_368_536_465_627_482_530_317_826,
+                3_094_754_539_851_423_638_535_373_936,
+                0,
+                39_401_034_000_000_000_000_000_000,
+            )
+        );
+        assert_eq!(
+            quote.blocks.iter().fold(
+                (0_i128, 0_i128, 0_i128, 0_i128, 0_i128),
+                |(fixed, operations, feature, resources, mpt), block| (
+                    fixed + block.prove.pricing.fixed_scaled,
+                    operations + block.prove.pricing.operations_scaled,
+                    feature + block.prove.pricing.feature_error_scaled,
+                    resources + block.prove.pricing.resources_scaled,
+                    mpt + block.prove.pricing.mpt_scaled,
+                ),
+            ),
+            (
+                250_368_536_465_627_482_530_317_826,
+                3_094_754_539_851_423_638_535_373_936,
+                0,
+                39_401_034_000_000_000_000_000_000,
+                1_001_405_936_000_000_000_000_000_000,
+            )
+        );
+        assert_eq!(
+            quote.node,
+            NodeProposalWorkloadQuote {
+                unzen_zkgas_sum: 0,
+                block_local_known_scaled: 3_384_524_110_317_051_121_065_691_762,
+                block_local_known_pgu: 3_384_524_111,
+                sum_of_block_known_pgu: 3_384_524_237,
+            }
+        );
+        assert_eq!(
+            quote.prove.selectors,
+            ProposalPricingSelectorsSnapshot {
+                payload: ProposalPayloadSelectors {
+                    total_transaction_count: 218,
+                    canonical_transaction_bytes: 52_300,
+                    nonempty_payload_transactions: 218,
+                },
+                true_unattempted_transactions: 0,
+                blobs: ProposalBlobSelectors {
+                    source_blob_counts: vec![1],
+                    proposal_blob_hash_count: 1,
+                    provider_blob_count: 1,
+                    provider_commitment_count: 1,
+                    provider_proof_count: 1,
+                },
+                parent_mpt: MptSelectorsSnapshot {
+                    path_node_visits: 15,
+                    materialization_work_units: 861,
+                    hydration_hash_blocks: 271,
+                    dirty_encoded_nodes: 0,
+                    dirty_hash_blocks: 0,
+                    structural_branch_extension_churn_nodes: 0,
+                    dropped_trie_nodes: 0,
+                },
+            }
+        );
+        assert_eq!(
+            quote.prove.proposal_once,
+            PricingBreakdownSnapshot {
+                fixed_scaled: 0,
+                operations_scaled: 0,
+                feature_error_scaled: 0,
+                resources_scaled: 0,
+                mpt_scaled: 0,
+                startup_scaled: 154_263_870_735_480_402_119_958_866,
+                transaction_payload_scaled: 16_960_512_000_000_000_000_000_000,
+                blob_source_scaled: 0,
+                parent_mpt_scaled: 5_121_840_000_000_000_000_000_000,
+                total_scaled: 176_346_222_735_480_402_119_958_866,
+                total_pgu: 176_346_223,
+            }
+        );
+        assert_eq!(
+            quote.prove.block_local_scaled,
+            4_385_930_046_317_051_121_065_691_762
+        );
+        assert_eq!(quote.prove.block_local_pgu, 4_385_930_047);
+        assert_eq!(quote.prove.sum_of_block_local_pgu, 4_385_930_173);
+        assert_eq!(quote.prove.proposal_once_pgu, 176_346_223);
+        assert_eq!(
+            quote.prove.total_scaled,
+            4_562_276_269_052_531_523_185_650_628
+        );
+        assert_eq!(quote.prove.total_pgu, 4_562_276_270);
         quote.blocks.iter().for_each(assert_block_formula_closes);
         assert_proposal_formula_closes(&quote);
+    }
+
+    #[test]
+    fn full_quote_still_rejects_an_invalid_blob_proof() {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join(
+            "../../tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_23077_l2_9051439_9051630.json",
+        );
+        let mut input: GuestInput = serde_json::from_str(
+            &fs::read_to_string(&fixture)
+                .unwrap_or_else(|error| panic!("read {}: {error}", fixture.display())),
+        )
+        .expect("parse checked-in current GuestInput");
+        input.taiko.data_sources[0].blob_proofs[0][0] ^= 0x01;
+
+        let error = quote_shasta_proposal(&input).expect_err("canonical validation must reject");
+        assert!(
+            error
+                .to_string()
+                .contains("Blob proof-of-equivalence verification failed"),
+            "unexpected error: {error:#}"
+        );
     }
 }

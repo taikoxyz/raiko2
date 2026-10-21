@@ -4,8 +4,8 @@ use super::{
     BlobCoder, DerivationSource,
     constants::{
         BLOCK_GAS_LIMIT_MAX_CHANGE, GAS_LIMIT_DENOMINATOR, MAX_BLOCK_GAS_LIMIT,
-        MIN_BLOCK_GAS_LIMIT, derivation_source_max_blocks_for_chain_timestamp,
-        max_anchor_offset_for_chain, timestamp_max_offset_for_chain,
+        MIN_BLOCK_GAS_LIMIT, UNZEN_DERIVATION_SOURCE_MAX_BLOCKS, max_anchor_offset_for_chain,
+        timestamp_max_offset_for_chain,
     },
     manifest::DerivationSourceManifest,
 };
@@ -193,7 +193,8 @@ pub fn apply_inherited_metadata(
     }
 }
 
-/// Decode and sanitize a source manifest using the same default-manifest rules as taiko-mono-rs.
+/// Decode and sanitize a source manifest using Unzen's per-source block limit and the same
+/// default-manifest rules as taiko-mono-rs.
 ///
 /// Blob payloads that fail the shared Shasta blob codec degrade to the default manifest,
 /// mirroring the driver's undecodable-blob handling.
@@ -211,15 +212,13 @@ pub fn prepare_source_manifest(
     meta: ProposalMetadata,
     fork_timestamp: u64,
 ) -> Result<DerivationSourceManifest, SourceDerivationError> {
-    let max_blocks =
-        derivation_source_max_blocks_for_chain_timestamp(meta.chain_id, meta.proposal_timestamp);
     prepare_source_manifest_with_max_blocks(
         source,
         data_source,
         parent,
         meta,
         fork_timestamp,
-        max_blocks,
+        UNZEN_DERIVATION_SOURCE_MAX_BLOCKS,
     )
 }
 
@@ -1173,8 +1172,7 @@ mod tests {
     #[test]
     fn derivation_over_max_blocks_collapses_to_default() {
         let source = blob_backed_source();
-        // Use TAIKO_HOODI_CHAIN_ID with proposal_timestamp=0 to stay pre-Unzen (192-block cap).
-        let max_blocks = crate::shasta::constants::DERIVATION_SOURCE_MAX_BLOCKS;
+        let max_blocks = UNZEN_DERIVATION_SOURCE_MAX_BLOCKS;
         let over = DerivationSourceManifest {
             blocks: (0..=max_blocks) // MAX + 1 blocks
                 .map(|i| {
@@ -1185,11 +1183,7 @@ mod tests {
                 .collect(),
         };
         let data_source = blob_data_source(&over.encode_and_compress().expect("payload"));
-        let meta = ProposalMetadata {
-            proposal_timestamp: 0,
-            chain_id: crate::shasta::constants::TAIKO_HOODI_CHAIN_ID,
-            ..proposal_metadata()
-        };
+        let meta = proposal_metadata();
         let prepared =
             prepare_source_manifest(&source, Some(&data_source), parent_context(), meta, 0)
                 .expect("prepared manifest");

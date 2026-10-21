@@ -7,7 +7,7 @@ fn guest_input_json_to_bincode_roundtrip_shared_fixture() -> Result<(), Box<dyn 
     // Keep this test pinned to the repo's shared Shasta fixture so we catch any newly introduced
     // non-bincode-compatible custom serde early (before SP1 runtime).
     let json = include_str!(
-        "../../../tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_23077_l2_9051439_9051630.json"
+        "../../../tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_41455_l2_12556056_12556247.json"
     );
     let input: GuestInput = serde_json::from_str(json)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;

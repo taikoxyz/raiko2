@@ -916,7 +916,7 @@ mod tests {
     #[allow(clippy::too_many_lines)] // One assertion table pins the complete fixture quote contract.
     fn checked_in_current_guest_input_completes_quote_with_public_output_parity() {
         let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join(
-            "../../tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_23077_l2_9051439_9051630.json",
+            "../../tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_41455_l2_12556056_12556247.json",
         );
         let input: GuestInput = serde_json::from_str(
             &fs::read_to_string(&fixture)
@@ -935,9 +935,9 @@ mod tests {
         );
         assert_eq!(
             quote.guest_input_sha256,
-            "aeab09f9e6f9d62aafa7c2c98b386b812dfd58b9c832219f26e7877d3c5f545e"
+            "10e26ee7c6c05eecf23e3c19c58e9c0c4269a877de83df1f1b70a33f06008506"
         );
-        assert_eq!(quote.guest_input_bincode_length, 5_475_191);
+        assert_eq!(quote.guest_input_bincode_length, 4_916_804);
         assert_eq!(quote.blocks.len(), 192);
         assert_eq!(
             quote
@@ -945,7 +945,7 @@ mod tests {
                 .iter()
                 .map(|block| block.prove.consumed_candidate_count)
                 .sum::<u64>(),
-            218
+            199
         );
         assert_eq!(
             quote
@@ -953,15 +953,15 @@ mod tests {
                 .iter()
                 .map(|block| block.prove.attempted_transaction_count)
                 .sum::<u64>(),
-            218
+            199
         );
         assert!(quote.blocks.iter().all(|block| {
             block.prove.input_transaction_count == block.prove.consumed_candidate_count
                 && block.prove.consumed_candidate_count == block.prove.attempted_transaction_count
         }));
         assert_eq!(
-            quote.node.unzen_zkgas_sum, 0,
-            "the checked-in proposal predates mainnet Unzen activation"
+            quote.node.unzen_zkgas_sum, 259_514_910,
+            "the checked-in proposal uses mainnet Unzen pricing"
         );
         assert_eq!(
             quote.blocks.iter().fold(
@@ -974,10 +974,10 @@ mod tests {
                 ),
             ),
             (
-                250_368_536_465_627_482_530_317_826,
-                3_094_754_539_851_423_638_535_373_936,
+                247_097_387_893_866_428_488_965_859,
+                3_160_041_535_744_141_665_900_594_819,
                 0,
-                39_401_034_000_000_000_000_000_000,
+                35_600_428_000_000_000_000_000_000,
             )
         );
         assert_eq!(
@@ -992,29 +992,29 @@ mod tests {
                 ),
             ),
             (
-                250_368_536_465_627_482_530_317_826,
-                3_094_754_539_851_423_638_535_373_936,
+                247_097_387_893_866_428_488_965_859,
+                3_160_041_535_744_141_665_900_594_819,
                 0,
-                39_401_034_000_000_000_000_000_000,
-                1_001_405_936_000_000_000_000_000_000,
+                35_600_428_000_000_000_000_000_000,
+                1_185_183_312_000_000_000_000_000_000,
             )
         );
         assert_eq!(
             quote.node,
             NodeProposalWorkloadQuote {
-                unzen_zkgas_sum: 0,
-                block_local_known_scaled: 3_384_524_110_317_051_121_065_691_762,
-                block_local_known_pgu: 3_384_524_111,
-                sum_of_block_known_pgu: 3_384_524_237,
+                unzen_zkgas_sum: 259_514_910,
+                block_local_known_scaled: 3_442_739_351_638_008_094_389_560_678,
+                block_local_known_pgu: 3_442_739_352,
+                sum_of_block_known_pgu: 3_442_739_480,
             }
         );
         assert_eq!(
             quote.prove.selectors,
             ProposalPricingSelectorsSnapshot {
                 payload: ProposalPayloadSelectors {
-                    total_transaction_count: 218,
-                    canonical_transaction_bytes: 52_300,
-                    nonempty_payload_transactions: 218,
+                    total_transaction_count: 199,
+                    canonical_transaction_bytes: 48_022,
+                    nonempty_payload_transactions: 199,
                 },
                 true_unattempted_transactions: 0,
                 blobs: ProposalBlobSelectors {
@@ -1026,8 +1026,8 @@ mod tests {
                 },
                 parent_mpt: MptSelectorsSnapshot {
                     path_node_visits: 15,
-                    materialization_work_units: 861,
-                    hydration_hash_blocks: 271,
+                    materialization_work_units: 1074,
+                    hydration_hash_blocks: 328,
                     dirty_encoded_nodes: 0,
                     dirty_hash_blocks: 0,
                     structural_branch_extension_churn_nodes: 0,
@@ -1044,25 +1044,25 @@ mod tests {
                 resources_scaled: 0,
                 mpt_scaled: 0,
                 startup_scaled: 154_263_870_735_480_402_119_958_866,
-                transaction_payload_scaled: 16_960_512_000_000_000_000_000_000,
+                transaction_payload_scaled: 15_554_048_000_000_000_000_000_000,
                 blob_source_scaled: 0,
-                parent_mpt_scaled: 5_121_840_000_000_000_000_000_000,
-                total_scaled: 176_346_222_735_480_402_119_958_866,
-                total_pgu: 176_346_223,
+                parent_mpt_scaled: 6_357_840_000_000_000_000_000_000,
+                total_scaled: 176_175_758_735_480_402_119_958_866,
+                total_pgu: 176_175_759,
             }
         );
         assert_eq!(
             quote.prove.block_local_scaled,
-            4_385_930_046_317_051_121_065_691_762
+            4_627_922_663_638_008_094_389_560_678
         );
-        assert_eq!(quote.prove.block_local_pgu, 4_385_930_047);
-        assert_eq!(quote.prove.sum_of_block_local_pgu, 4_385_930_173);
-        assert_eq!(quote.prove.proposal_once_pgu, 176_346_223);
+        assert_eq!(quote.prove.block_local_pgu, 4_627_922_664);
+        assert_eq!(quote.prove.sum_of_block_local_pgu, 4_627_922_792);
+        assert_eq!(quote.prove.proposal_once_pgu, 176_175_759);
         assert_eq!(
             quote.prove.total_scaled,
-            4_562_276_269_052_531_523_185_650_628
+            4_804_098_422_373_488_496_509_519_544
         );
-        assert_eq!(quote.prove.total_pgu, 4_562_276_270);
+        assert_eq!(quote.prove.total_pgu, 4_804_098_423);
         quote.blocks.iter().for_each(assert_block_formula_closes);
         assert_proposal_formula_closes(&quote);
     }
@@ -1070,7 +1070,7 @@ mod tests {
     #[test]
     fn full_quote_still_rejects_an_invalid_blob_proof() {
         let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join(
-            "../../tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_23077_l2_9051439_9051630.json",
+            "../../tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_41455_l2_12556056_12556247.json",
         );
         let mut input: GuestInput = serde_json::from_str(
             &fs::read_to_string(&fixture)

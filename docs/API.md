@@ -5,6 +5,10 @@
 Raiko2 exposes a `/v4` API for explicit proof-type proposal proving,
 aggregation, task lookup, status, and clear operations.
 
+Proposal validation and proving support Unzen and later only. The proposal timestamp and every
+witness block timestamp must be at or after the built-in Unzen activation for the input chain.
+Pre-Unzen inputs are rejected before parent-state reads or block replay.
+
 Proof submission is asynchronous. Legacy `/v3/*` and `/proof/*` compatibility routes are kept in
 the codebase for short-term reference, but are not mounted by the default server router. The legacy
 `POST /proof/*` responses intentionally match old `raiko` v3 response shapes and do not expose
@@ -1288,12 +1292,13 @@ set both SGX lane timeouts. Use the independent `prover.sgx.timeout_ms` and
   count remains an M2
   formula input, and combinations outside the collected sample rectangles are deliberately admitted
   without a per-request error proof. The collected rectangles are `block_count` 155-192 and
-  `total_zkgas` 216314230-562107601; 192 is the pre-Unzen derivation-source block limit while the
-  Unzen limit is 768, so an admitted proposal can carry up to four times the calibrated block count.
+  `total_zkgas` 216314230-562107601. The supported Unzen derivation-source block limit is 768,
+  so an admitted proposal can carry up to four times the calibrated block count.
   Totals above the effective `proposal_zkgas_warning_threshold` (default `1000000000`) deliberately
   remain on the estimated path and emit a warning containing the total, threshold, estimate, and
-  model ID for offline sampling. Pre-Unzen, later-fork, lower-`execution_po2`, zero-zkGas, and
+  model ID for offline sampling. Later-fork, lower-`execution_po2`, zero-zkGas, and
   arithmetic-overflow inputs use the warning-plus-local fallback.
+  Proposal or witness timestamps before Unzen fail shared input validation.
 - Estimated aggregation derives the journal on the host and quotes `180 * child_count` mcycles for
   every structurally valid, non-empty input. Child count and historical observations do not gate
   runtime availability. The current v4 API admits 1-1024 proposals, so this deliberately

@@ -6,7 +6,7 @@ proposal workload pricing. They exchange files and may be used independently. Pr
 and report consume saved results.
 
 Input acquisition and workload measurement belong to external producers. Supply a valid current
-Shasta `GuestInput` from a retained fixture, local execution, public task, or another source, and
+Unzen-or-later `GuestInput` from a retained fixture, local execution, public task, or another source, and
 separately supply observations. These tools never fetch RPC, explorer, Succinct, RISC0, or cluster
 data, reconstruct historical inputs, translate old input schemas, run guests, or build ELF assets.
 They add no server configuration or deployment behavior. Comparison checks the asserted join and
@@ -36,11 +36,11 @@ Single-input mode requires `--corpus-id` and `--sample-id`. Exactly one input mo
 
 ```sh
 target/debug/zkgas-quote \
-  --input-json tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_23077_l2_9051439_9051630.json \
-  --corpus-id example-corpus --sample-id proposal-23077 --output quote-json.jsonl
+  --input-json tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_41455_l2_12556056_12556247.json \
+  --corpus-id example-corpus --sample-id proposal-41455 --output quote-json.jsonl
 
 target/debug/zkgas-quote --input-bincode corpus/input.bin \
-  --corpus-id example-corpus --sample-id proposal-23077 --output quote.jsonl
+  --corpus-id example-corpus --sample-id proposal-41455 --output quote.jsonl
 
 target/debug/zkgas-quote --manifest corpus/manifest.json --output quotes.jsonl
 ```
@@ -59,7 +59,7 @@ and length with those of the canonical bincode file (`sha256sum corpus/input.bin
   "schema_version": 1,
   "corpus_id": "example-corpus",
   "samples": [{
-    "sample_id": "proposal-23077",
+    "sample_id": "proposal-41455",
     "guest_input": {
       "path": "input.bin",
       "sha256": "REPLACE_WITH_CANONICAL_BINCODE_SHA256",

@@ -78,10 +78,7 @@ pub(crate) fn selectors(metrics: &MptWorkloadMetrics) -> Result<MptSelectors, Ru
             metrics.storage_hashes.hash_input_blocks,
         )?,
         structural_branch_extension_churn_nodes,
-        dropped_trie_nodes: checked_add(
-            node_count(metrics.storage_wipe_dropped_nodes)?,
-            node_count(metrics.materialized_storage_drop_nodes)?,
-        )?,
+        dropped_trie_nodes: node_count(metrics.materialized_storage_drop_nodes)?,
     })
 }
 

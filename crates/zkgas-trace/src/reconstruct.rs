@@ -2,7 +2,7 @@
 
 use alethia_reth_block::{
     config::{MissingBaseFee, TaikoEvmConfig, TaikoNextBlockEnvAttributes},
-    derived_block::{DerivedBlockExecutionOutcome, pre_existing_destroyed_account_hashes},
+    derived_block::DerivedBlockExecutionOutcome,
     executor::TaikoBlockExecutor,
 };
 use alethia_reth_evm::{
@@ -513,21 +513,15 @@ impl raiko2_stateless::DerivedBlockExecutor for QuoteDerivedBlockExecutor {
         });
 
         let bundle_state: BundleState = state.take_bundle();
-        // This is not part of the candidate commit hook above. Capture the wipe identities from
-        // BundleState before `from_bundle_state` performs its lossy conversion: reth 2.6 expects a
-        // full-node state provider to expand every deleted parent slot into an explicit zero, while
-        // stateless replay has only the witness-backed sparse trie. SparseState uses this canonical
-        // list to clear each pre-existing destroyed account's parent storage, then applies the final
-        // slots retained in `hashed_state`. Accounts created and destroyed within this block are
-        // excluded because they cannot have parent storage.
-        let pre_existing_destroyed_accounts = pre_existing_destroyed_account_hashes(&bundle_state);
         Ok(DerivedBlockExecutionOutcome {
             committed_transactions: execution.committed_transactions,
             execution_result: execution.execution_result,
             hashed_state: HashedPostState::from_bundle_state::<KeccakKeyHasher>(
                 bundle_state.state(),
             ),
-            pre_existing_destroyed_accounts,
+            // Temporary compile bridge for the pinned Alethia outcome; remove after its
+            // upstream field removal lands on main. Unzen-only callers never use this field.
+            pre_existing_destroyed_accounts: Vec::new(),
             finalized_block_zk_gas: finalized_block_zkgas,
             zk_gas_shadow_report: Some(committed_report),
             attempted_zk_gas_shadow_report: Some(attempted_report),

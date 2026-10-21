@@ -7,9 +7,7 @@ use crate::{
 };
 use alethia_reth_block::{
     config::{TaikoEvmConfig, TaikoNextBlockEnvAttributes},
-    derived_block::{
-        assemble_filtered_block, execute_derived_block, pre_existing_destroyed_account_hashes,
-    },
+    derived_block::{assemble_filtered_block, execute_derived_block},
 };
 use alethia_reth_chainspec::{hardfork::TaikoHardforks, spec::TaikoChainSpec};
 use alethia_reth_consensus::validation::{
@@ -32,13 +30,8 @@ use std::sync::Arc;
 
 /// Injection point for derived-block execution during stateless reconstruction.
 ///
-/// Implementations that construct [`HashedPostState`] directly from a reth `BundleState` must
-/// first preserve `pre_existing_destroyed_accounts` in the returned
-/// [`alethia_reth_block::derived_block::DerivedBlockExecutionOutcome`]. Reth 2.6 deliberately
-/// removed whole-storage wipe markers from `HashedPostState`: full-node providers materialize the
-/// deleted parent slots as explicit zero writes, but witness-backed stateless execution has no
-/// complete parent-state provider. The destroyed-account identities let the stateless trie clear
-/// the witnessed parent storage before applying the final per-slot delta.
+/// Stateless entrypoints enforce the Unzen-only boundary before execution; storage changes are
+/// ordinary per-slot deltas applied to the witnessed parent state.
 pub trait DerivedBlockExecutor {
     /// Executes the prepared candidate block against the witness-backed database.
     ///
@@ -122,6 +115,7 @@ pub fn validate_block_with_witness_resources(
     chain_spec: &Arc<TaikoChainSpec>,
     config: &TaikoEvmConfig,
 ) -> Result<B256, StatelessValidationError> {
+    ensure_unzen_active(chain_spec, block.header.timestamp)?;
     stateless_validation_with_trie::<SparseState>(
         block,
         witness,
@@ -217,6 +211,18 @@ fn ensure_full_ancestor_headers(
     Ok(())
 }
 
+fn ensure_unzen_active(
+    chain_spec: &TaikoChainSpec,
+    timestamp: u64,
+) -> Result<(), StatelessValidationError> {
+    if !chain_spec.is_unzen_active(timestamp) {
+        return Err(StatelessValidationError::Custom(
+            "only Unzen and later blocks are supported",
+        ));
+    }
+    Ok(())
+}
+
 fn ensure_supported_parent_beacon_block_root(
     parent_beacon_block_root: Option<B256>,
 ) -> Result<(), StatelessValidationError> {
@@ -230,14 +236,11 @@ fn ensure_supported_parent_beacon_block_root(
 }
 
 fn ensure_canonical_parent_beacon_block_root(
-    chain_spec: &TaikoChainSpec,
-    timestamp: u64,
     parent_beacon_block_root: Option<B256>,
 ) -> Result<(), StatelessValidationError> {
     ensure_supported_parent_beacon_block_root(parent_beacon_block_root)?;
 
-    let expected = chain_spec.is_unzen_active(timestamp).then_some(B256::ZERO);
-    if parent_beacon_block_root != expected {
+    if parent_beacon_block_root != Some(B256::ZERO) {
         return Err(StatelessValidationError::Custom(
             "parent_beacon_block_root does not match the active Taiko fork",
         ));
@@ -496,6 +499,7 @@ fn reconstruct_block_from_transactions_core<E>(
 where
     E: DerivedBlockExecutor,
 {
+    ensure_unzen_active(chain_spec, block_env.timestamp)?;
     ensure_supported_parent_beacon_block_root(block_env.parent_beacon_block_root)?;
 
     let parent_header = sealed_parent_header(ancestor_headers)?;
@@ -511,10 +515,7 @@ where
         .execute(evm_config, &parent_header, &derived_block, db)
         .map_err(|err| map_block_execution_error(&err))?;
     ensure_anchor_receipt_success(&execution_outcome.execution_result.receipts)?;
-    let state_root = trie.calculate_state_root(
-        execution_outcome.hashed_state.clone(),
-        &execution_outcome.pre_existing_destroyed_accounts,
-    )?;
+    let state_root = trie.calculate_state_root(execution_outcome.hashed_state.clone())?;
     #[cfg(feature = "mpt-metrics")]
     let mpt_workload_metrics = trie.mpt_workload_metrics();
     let filtered_block = assemble_filtered_block(
@@ -585,9 +586,8 @@ where
         .map_err(StatelessValidationError::ConsensusValidationFailed)?;
 
     // Compute and check the post state root
-    let pre_existing_destroyed_accounts = pre_existing_destroyed_account_hashes(&output.state);
     let hashed_state = HashedPostState::from_bundle_state::<KeccakKeyHasher>(&output.state.state);
-    let state_root = trie.calculate_state_root(hashed_state, &pre_existing_destroyed_accounts)?;
+    let state_root = trie.calculate_state_root(hashed_state)?;
     if state_root != current_block.state_root {
         return Err(StatelessValidationError::PostStateRootMismatch {
             got: state_root,
@@ -673,11 +673,7 @@ pub(crate) fn validate_block_consensus(
     block: &RecoveredBlock<Block>,
     ancestor_headers: &[WitnessHeader],
 ) -> Result<(), StatelessValidationError> {
-    ensure_canonical_parent_beacon_block_root(
-        chain_spec.as_ref(),
-        block.header().timestamp,
-        block.header().parent_beacon_block_root,
-    )?;
+    ensure_canonical_parent_beacon_block_root(block.header().parent_beacon_block_root)?;
     ensure_full_ancestor_headers(ancestor_headers)?;
 
     let parent_header = ancestor_headers
@@ -989,6 +985,117 @@ mod tests {
     }
 
     #[test]
+    fn unzen_only_block_validation_rejects_before_witness_processing() {
+        let chain_spec = TAIKO_MAINNET.clone();
+        let config = TaikoEvmConfig::new(chain_spec.clone());
+        let mut header = shanghai_header(1, 1_786_021_199, alloy_primitives::B256::ZERO);
+        header.parent_beacon_block_root = None;
+        let error = validate_block(
+            Block {
+                header,
+                body: empty_shanghai_body(),
+            },
+            &ExecutionWitness::default(),
+            &chain_spec,
+            &config,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                StatelessValidationError::Custom("only Unzen and later blocks are supported")
+            ),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn unzen_only_reconstruction_rejects_before_witness_processing() {
+        let chain_spec = TAIKO_MAINNET.clone();
+        let config = TaikoEvmConfig::new(chain_spec.clone());
+        let tx = test_signed_tx(
+            chain_spec.inner.chain().id(),
+            0,
+            Signature::test_signature(),
+        );
+        let error = reconstruct_block_from_transactions_with_witness_resources(
+            tx.try_into_recovered().unwrap(),
+            Vec::new(),
+            TaikoNextBlockEnvAttributes {
+                timestamp: 1_786_021_199,
+                suggested_fee_recipient: Address::ZERO,
+                prev_randao: alloy_primitives::B256::ZERO,
+                gas_limit: 30_000_000,
+                extra_data: shasta_extra_data(),
+                base_fee_per_gas: 25_000_000,
+                parent_beacon_block_root: None,
+            },
+            &ExecutionWitness::default(),
+            &[],
+            &[],
+            &chain_spec,
+            &config,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                StatelessValidationError::Custom("only Unzen and later blocks are supported")
+            ),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn unzen_only_stateless_entrypoints_accept_activation_before_requiring_witnesses() {
+        let chain_spec = TAIKO_MAINNET.clone();
+        let config = TaikoEvmConfig::new(chain_spec.clone());
+        let error = validate_block(
+            Block {
+                header: shanghai_header(1, 1_786_021_200, alloy_primitives::B256::ZERO),
+                body: empty_shanghai_body(),
+            },
+            &ExecutionWitness::default(),
+            &chain_spec,
+            &config,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, StatelessValidationError::MissingAncestorHeader),
+            "{error:?}"
+        );
+
+        let tx = test_signed_tx(
+            chain_spec.inner.chain().id(),
+            0,
+            Signature::test_signature(),
+        );
+        let error = reconstruct_block_from_transactions_with_witness_resources(
+            tx.try_into_recovered().unwrap(),
+            Vec::new(),
+            TaikoNextBlockEnvAttributes {
+                timestamp: 1_786_021_200,
+                suggested_fee_recipient: Address::ZERO,
+                prev_randao: alloy_primitives::B256::ZERO,
+                gas_limit: 30_000_000,
+                extra_data: shasta_extra_data(),
+                base_fee_per_gas: 25_000_000,
+                parent_beacon_block_root: Some(alloy_primitives::B256::ZERO),
+            },
+            &ExecutionWitness::default(),
+            &[],
+            &[],
+            &chain_spec,
+            &config,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, StatelessValidationError::MissingAncestorHeader),
+            "{error:?}"
+        );
+    }
+
+    #[test]
     fn reconstruct_block_rejects_nonzero_parent_beacon_block_root() {
         let chain_spec = TAIKO_DEVNET.clone();
         let evm_config = TaikoEvmConfig::new(chain_spec.clone());
@@ -1053,7 +1160,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_block_requires_fork_exact_parent_beacon_block_root_before_witness_processing() {
+    fn validate_block_requires_unzen_zero_parent_beacon_block_root_before_witness_processing() {
         let devnet_config = TaikoEvmConfig::new(TAIKO_DEVNET.clone());
         let mut unzen_header = shanghai_header(1, 101, alloy_primitives::B256::ZERO);
         unzen_header.parent_beacon_block_root = None;
@@ -1068,23 +1175,6 @@ mod tests {
         );
         assert!(matches!(
             missing_unzen_root,
-            Err(StatelessValidationError::Custom(
-                "parent_beacon_block_root does not match the active Taiko fork"
-            ))
-        ));
-
-        let mainnet_config = TaikoEvmConfig::new(TAIKO_MAINNET.clone());
-        let unexpected_pre_unzen_root = validate_block(
-            Block {
-                header: shanghai_header(1, 1, alloy_primitives::B256::ZERO),
-                body: empty_shanghai_body(),
-            },
-            &ExecutionWitness::default(),
-            &TAIKO_MAINNET,
-            &mainnet_config,
-        );
-        assert!(matches!(
-            unexpected_pre_unzen_root,
             Err(StatelessValidationError::Custom(
                 "parent_beacon_block_root does not match the active Taiko fork"
             ))

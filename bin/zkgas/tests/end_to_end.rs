@@ -176,7 +176,7 @@ fn binaries_compose_complete_and_partial_runs_with_verified_identity_and_reuse()
     let dir = TestDir::new();
     let root = &dir.0;
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join(
-        "../../tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_23077_l2_9051439_9051630.json",
+        "../../tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_41455_l2_12556056_12556247.json",
     );
     let input: GuestInput = serde_json::from_slice(&fs::read(fixture).unwrap()).unwrap();
     let expected_output = hash_shasta_subproof_input(&input.proof_carry_data);
@@ -191,7 +191,7 @@ fn binaries_compose_complete_and_partial_runs_with_verified_identity_and_reuse()
                 "--corpus-id",
                 "synthetic-e2e",
                 "--sample-id",
-                "mainnet-proposal-23077",
+                "mainnet-proposal-41455",
             ],
             &[("--input-bincode", &input_path), ("--output", &quotes_path)],
             0,
@@ -218,7 +218,7 @@ fn binaries_compose_complete_and_partial_runs_with_verified_identity_and_reuse()
         quoted.executable.sha256,
         sha256_hex(&fs::read(env!("CARGO_BIN_EXE_zkgas-quote")).unwrap())
     );
-    assert_eq!(quoted.proposal.proposal_id, 23077);
+    assert_eq!(quoted.proposal.proposal_id, 41455);
     assert_eq!(quoted.proposal.block_count, 192);
     assert_eq!(quoted.proposal.chain.chain_id, 167000);
     assert!(

@@ -319,37 +319,6 @@ impl SparseState {
         Ok(())
     }
 
-    /// Clears an account's parent storage before applying a recreated account's storage delta.
-    #[allow(clippy::unnecessary_wraps)]
-    fn clear_storage(
-        &mut self,
-        hashed_address: B256,
-    ) -> Result<&mut RlpTrie<U256>, StatelessValidationError> {
-        #[cfg(feature = "mpt-metrics")]
-        let dropped = self
-            .storages
-            .get_mut()
-            .get(&hashed_address)
-            .map(|trie| trie.snapshot().node_counts_and_bytes());
-
-        let storage = self
-            .storages
-            .get_mut()
-            .entry(hashed_address)
-            .insert_entry(RlpTrie::default())
-            .into_mut();
-        #[cfg(feature = "mpt-metrics")]
-        {
-            let metrics = self.metrics.get_mut();
-            metrics.storage_wipe_operations += 1;
-            if let Some((nodes, bytes)) = dropped {
-                metrics.storage_wipe_dropped_nodes.add_assign(nodes);
-                metrics.storage_wipe_dropped_encoded_bytes += bytes;
-            }
-        }
-        Ok(storage)
-    }
-
     /// Returns a mutable version of the storage trie of the given account.
     fn storage_trie_mut(
         &mut self,
@@ -582,7 +551,6 @@ impl StatelessTrie for SparseState {
     fn calculate_state_root(
         &mut self,
         state: HashedPostState,
-        pre_existing_destroyed_accounts: &[B256],
     ) -> Result<B256, StatelessValidationError> {
         // The mutation sequence is part of the measured workload: HashMap iteration order is not
         // portable between the native host and zkVM. Canonical sorting keeps split/merge paths and
@@ -602,19 +570,9 @@ impl StatelessTrie for SparseState {
                 let mut inserts_and_updates = Vec::new();
                 let mut deletes = Vec::new();
                 let (root, hash_observation) = {
-                    // reth v2.6 post-state storage contains only explicitly changed slots. Its
-                    // separate destroyed-account metadata tells us when the delta starts from an
-                    // empty trie; otherwise unmentioned parent slots must be retained.
-                    let storage_trie = if pre_existing_destroyed_accounts
-                        .binary_search(&hashed_address)
-                        .is_ok()
-                    {
-                        self.clear_storage(hashed_address)?
-                    } else {
-                        self.storage_trie_mut(hashed_address).map_err(|error| {
-                            StatelessValidationError::StatelessExecutionFailed(error.to_string())
-                        })?
-                    };
+                    let storage_trie = self.storage_trie_mut(hashed_address).map_err(|error| {
+                        StatelessValidationError::StatelessExecutionFailed(error.to_string())
+                    })?;
 
                     if let Some(storage) = state.storages.get(&hashed_address) {
                         for (hashed_key, value) in &storage.storage_slots {
@@ -656,16 +614,9 @@ impl StatelessTrie for SparseState {
 
             #[cfg(not(feature = "mpt-metrics"))]
             let storage_root = {
-                let storage_trie = if pre_existing_destroyed_accounts
-                    .binary_search(&hashed_address)
-                    .is_ok()
-                {
-                    self.clear_storage(hashed_address)?
-                } else {
-                    self.storage_trie_mut(hashed_address).map_err(|error| {
-                        StatelessValidationError::StatelessExecutionFailed(error.to_string())
-                    })?
-                };
+                let storage_trie = self.storage_trie_mut(hashed_address).map_err(|error| {
+                    StatelessValidationError::StatelessExecutionFailed(error.to_string())
+                })?;
                 if let Some(storage) = state.storages.get(&hashed_address) {
                     for (hashed_key, value) in &storage.storage_slots {
                         if !value.is_zero() {
@@ -1099,7 +1050,7 @@ mod mpt_metrics_tests {
                     (B256::repeat_byte(0x33), U256::from(33)),
                 ]),
             )]);
-        trie.calculate_state_root(seed, &[]).unwrap();
+        trie.calculate_state_root(seed).unwrap();
         trie
     }
 
@@ -1138,12 +1089,8 @@ mod mpt_metrics_tests {
         let mut reverse = seeded_state();
         let before = forward.mpt_workload_metrics();
 
-        let forward_root = forward
-            .calculate_state_root(update_state(false), &[])
-            .unwrap();
-        let reverse_root = reverse
-            .calculate_state_root(update_state(true), &[])
-            .unwrap();
+        let forward_root = forward.calculate_state_root(update_state(false)).unwrap();
+        let reverse_root = reverse.calculate_state_root(update_state(true)).unwrap();
         assert_eq!(forward_root, reverse_root);
 
         let (mut expected, _) =
@@ -1164,7 +1111,6 @@ mod mpt_metrics_tests {
                             (B256::repeat_byte(0x44), U256::from(44)),
                         ]),
                     )]),
-                &[],
             )
             .unwrap();
         assert_eq!(forward_root, expected_root);
@@ -1267,7 +1213,7 @@ mod canonical_mutation_order_tests {
         let (mut trie, _) =
             <SparseState as StatelessTrie>::new(&ExecutionWitness::default(), EMPTY_ROOT_HASH)
                 .unwrap();
-        trie.calculate_state_root(HashedPostState::default().with_accounts(entries), &[])
+        trie.calculate_state_root(HashedPostState::default().with_accounts(entries))
             .unwrap()
     }
 
@@ -1305,69 +1251,6 @@ mod storage_delta_reth26_tests {
     use raiko2_primitives::{ExecutionWitness, WitnessStateNode};
     use reth_primitives_traits::Account;
     use reth_trie_common::{HashedPostState, HashedStorage};
-
-    fn parent_with_storage(address: Address) -> (SparseState, B256, U256, U256, B256, B256) {
-        let hashed_address = keccak256(address);
-        let rewritten_slot = U256::from(1);
-        let stale_parent_slot = U256::from(2);
-        let hashed_rewritten_slot = keccak256(B256::from(rewritten_slot));
-        let hashed_stale_parent_slot = keccak256(B256::from(stale_parent_slot));
-
-        let mut parent_storage = RlpTrie::<U256>::default();
-        parent_storage.insert(hashed_rewritten_slot, U256::from(10));
-        parent_storage.insert(hashed_stale_parent_slot, U256::from(20));
-        let mut parent_state = RlpTrie::<TrieAccount>::default();
-        parent_state.insert(
-            hashed_address,
-            TrieAccount {
-                nonce: 1,
-                balance: U256::from(100),
-                storage_root: parent_storage.inner.hash(),
-                code_hash: KECCAK256_EMPTY,
-            },
-        );
-        let pre_state_root = parent_state.inner.hash();
-        let witness = ExecutionWitness {
-            state: parent_state
-                .rlp_nodes()
-                .into_iter()
-                .chain(parent_storage.rlp_nodes())
-                .map(WitnessStateNode::from_bytes)
-                .collect(),
-            ..Default::default()
-        };
-        let (sparse, _) = SparseState::new(&witness, pre_state_root).unwrap();
-        (
-            sparse,
-            hashed_address,
-            rewritten_slot,
-            stale_parent_slot,
-            hashed_rewritten_slot,
-            hashed_stale_parent_slot,
-        )
-    }
-
-    fn expected_recreated_root(
-        hashed_address: B256,
-        account: &Account,
-        storage_slots: impl IntoIterator<Item = (B256, U256)>,
-    ) -> B256 {
-        let mut storage = RlpTrie::<U256>::default();
-        for (slot, value) in storage_slots {
-            storage.insert(slot, value);
-        }
-        let mut state = RlpTrie::<TrieAccount>::default();
-        state.insert(
-            hashed_address,
-            TrieAccount {
-                nonce: account.nonce,
-                balance: account.balance,
-                storage_root: storage.inner.hash(),
-                code_hash: account.bytecode_hash.unwrap_or(KECCAK256_EMPTY),
-            },
-        );
-        state.inner.hash()
-    }
 
     #[test]
     fn post_state_storage_delta_preserves_unmentioned_parent_slot() {
@@ -1419,7 +1302,7 @@ mod storage_delta_reth26_tests {
                 HashedStorage::from_iter([(hashed_changed_slot, U256::from(30))]),
             )]);
 
-        sparse.calculate_state_root(post_state, &[]).unwrap();
+        sparse.calculate_state_root(post_state).unwrap();
 
         assert_eq!(
             sparse.storage(address, changed_slot).unwrap(),
@@ -1429,86 +1312,5 @@ mod storage_delta_reth26_tests {
             sparse.storage(address, unchanged_slot).unwrap(),
             U256::from(20)
         );
-    }
-
-    #[test]
-    fn pre_unzen_destroy_then_fund_clears_parent_storage() {
-        let address = Address::repeat_byte(0x22);
-        let (
-            mut sparse,
-            hashed_address,
-            rewritten_slot,
-            stale_parent_slot,
-            _hashed_rewritten_slot,
-            _hashed_stale_parent_slot,
-        ) = parent_with_storage(address);
-        let funded = Account {
-            nonce: 0,
-            balance: U256::from(7),
-            bytecode_hash: None,
-        };
-        let recreated = HashedPostState::default().with_accounts([(hashed_address, Some(funded))]);
-
-        let actual_root = sparse
-            .calculate_state_root(recreated, &[hashed_address])
-            .unwrap();
-        assert_eq!(
-            actual_root,
-            expected_recreated_root(hashed_address, &funded, [])
-        );
-        assert_eq!(sparse.storage(address, rewritten_slot).unwrap(), U256::ZERO);
-        assert_eq!(
-            sparse.storage(address, stale_parent_slot).unwrap(),
-            U256::ZERO
-        );
-        #[cfg(feature = "mpt-metrics")]
-        assert_eq!(sparse.mpt_workload_metrics().storage_wipe_operations, 1);
-    }
-
-    #[test]
-    fn pre_unzen_destroy_then_create2_redeploy_applies_delta_to_empty_storage() {
-        let address = Address::repeat_byte(0x23);
-        let (
-            mut sparse,
-            hashed_address,
-            rewritten_slot,
-            stale_parent_slot,
-            hashed_rewritten_slot,
-            _hashed_stale_parent_slot,
-        ) = parent_with_storage(address);
-        let code_hash = B256::repeat_byte(0x44);
-        let redeployed = Account {
-            nonce: 1,
-            balance: U256::ZERO,
-            bytecode_hash: Some(code_hash),
-        };
-        let recreated = HashedPostState::default()
-            .with_accounts([(hashed_address, Some(redeployed))])
-            .with_storages([(
-                hashed_address,
-                HashedStorage::from_iter([(hashed_rewritten_slot, U256::from(30))]),
-            )]);
-
-        let actual_root = sparse
-            .calculate_state_root(recreated, &[hashed_address])
-            .unwrap();
-        assert_eq!(
-            actual_root,
-            expected_recreated_root(
-                hashed_address,
-                &redeployed,
-                [(hashed_rewritten_slot, U256::from(30))],
-            )
-        );
-        assert_eq!(
-            sparse.storage(address, rewritten_slot).unwrap(),
-            U256::from(30)
-        );
-        assert_eq!(
-            sparse.storage(address, stale_parent_slot).unwrap(),
-            U256::ZERO
-        );
-        #[cfg(feature = "mpt-metrics")]
-        assert_eq!(sparse.mpt_workload_metrics().storage_wipe_operations, 1);
     }
 }

@@ -29,11 +29,9 @@ use raiko2_primitives_shasta::{
 };
 use raiko2_protocol_shasta::libhash::{hash_proposal, hash_shasta_subproof_input};
 use raiko2_protocol_shasta::shasta::{
-    calculate_shasta_difficulty,
-    constants::{DERIVATION_SOURCE_MAX_BLOCKS, UNZEN_DERIVATION_SOURCE_MAX_BLOCKS},
-    encode_extra_data,
-    manifest::BlockManifest,
-    prepare_source_manifest_with_max_blocks, ParentBlockContext, ProposalMetadata,
+    calculate_shasta_difficulty, constants::UNZEN_DERIVATION_SOURCE_MAX_BLOCKS, encode_extra_data,
+    manifest::BlockManifest, prepare_source_manifest_with_max_blocks, ParentBlockContext,
+    ProposalMetadata,
 };
 use raiko2_stateless::{
     read_parent_storage_with_witness_resources,
@@ -451,17 +449,6 @@ fn shasta_fork_timestamp(chain_spec: &TaikoChainSpec) -> Result<u64> {
     }
 }
 
-fn derivation_source_max_blocks(chain_spec: &TaikoChainSpec, proposal_timestamp: u64) -> usize {
-    if chain_spec
-        .taiko_fork_activation(TaikoHardfork::Unzen)
-        .active_at_timestamp(proposal_timestamp)
-    {
-        UNZEN_DERIVATION_SOURCE_MAX_BLOCKS
-    } else {
-        DERIVATION_SOURCE_MAX_BLOCKS
-    }
-}
-
 struct DerivedShastaBlocks {
     blocks: Vec<BlockManifest>,
     source_spans: Vec<AnchorSourceSpan>,
@@ -511,8 +498,6 @@ fn derive_expected_shasta_blocks(
 
     let mut blocks = Vec::new();
     let mut source_spans = Vec::with_capacity(proposal.sources.len());
-    let max_blocks =
-        derivation_source_max_blocks(runtime.chain_spec.as_ref(), meta.proposal_timestamp);
     for (source_index, source) in proposal.sources.iter().enumerate() {
         let manifest = prepare_source_manifest_with_max_blocks(
             source,
@@ -520,7 +505,7 @@ fn derive_expected_shasta_blocks(
             parent,
             meta,
             fork_timestamp,
-            max_blocks,
+            UNZEN_DERIVATION_SOURCE_MAX_BLOCKS,
         )
         .with_context(|| format!("failed to prepare derivation source {source_index}"))?;
 
@@ -839,6 +824,31 @@ where
         !guest_input.witnesses.is_empty(),
         "GuestInput must contain at least one witness"
     );
+    // Proposal proving and quoting support Unzen onwards. Select the activation from the
+    // built-in chain spec, never the host-supplied fork map, before any witness reads or replay.
+    let first_chain_id = guest_input.witnesses[0].chain_spec.chain_id;
+    let runtime = TaikoRuntime::from_chain_id(first_chain_id)
+        .context("Failed to build Taiko runtime from GuestInput chain_id")?;
+    let unzen = runtime
+        .chain_spec
+        .taiko_fork_activation(TaikoHardfork::Unzen);
+    ensure!(
+        unzen.active_at_timestamp(
+            guest_input
+                .taiko
+                .proposal_event
+                .proposal
+                .timestamp
+                .to::<u64>()
+        ),
+        "proposal timestamp must be at or after Unzen activation"
+    );
+    for (index, witness) in guest_input.witnesses.iter().enumerate() {
+        ensure!(
+            unzen.active_at_timestamp(witness.block.header.timestamp),
+            "witness {index} block timestamp must be at or after Unzen activation"
+        );
+    }
     validate_proposal_ancestor_header_count(guest_input)?;
 
     bench_report_start("proposal_blob_usage");
@@ -849,12 +859,6 @@ where
     let proof_carry_data = &guest_input.proof_carry_data;
 
     bench_report_start("proposal_invariants");
-    let first_chain_id = guest_input
-        .witnesses
-        .first()
-        .expect("checked")
-        .chain_spec
-        .chain_id;
     validate_supported_chain_id(first_chain_id)?;
     ensure!(
         guest_input.taiko.chain_spec.chain_id == first_chain_id,
@@ -945,8 +949,6 @@ where
     bench_report_end("proposal_invariants");
 
     bench_report_start("proposal_runtime");
-    let runtime = TaikoRuntime::from_chain_id(first_chain_id)
-        .context("Failed to build Taiko runtime from GuestInput chain_id")?;
     let anchor_signer =
         FixedKSigner::golden_touch().context("failed to initialize Golden Touch fixed-k signer")?;
     bench_report_end("proposal_runtime");
@@ -1614,8 +1616,9 @@ mod tests {
             .try_into()
             .expect("fits in uint48");
         guest_input.taiko.proposal_event.proposal.proposer = Address::from([0x33; 20]);
-        guest_input.taiko.proposal_event.proposal.timestamp =
-            123u64.try_into().expect("timestamp fits in uint48");
+        guest_input.taiko.proposal_event.proposal.timestamp = 1_786_021_200u64
+            .try_into()
+            .expect("timestamp fits in uint48");
         guest_input.taiko.proposal_event.proposal.parentProposalHash = B256::from([0x44; 32]);
         guest_input.taiko.proposal_event.proposal.originBlockNumber =
             l1_header.number.try_into().expect("fits in uint48");
@@ -1771,6 +1774,61 @@ mod tests {
         assert_eq!(
             anchor_block_number_from_storage_word(word),
             anchor_block_number as u64
+        );
+    }
+
+    #[test]
+    fn unzen_only_rejects_before_parent_reads_or_block_replay() {
+        const UNZEN_TIMESTAMP: u64 = 1_786_021_200;
+        // Cover the proposal, first witness, and a later witness independently. The shared
+        // entry must reject every case before witness storage reads or execution callbacks.
+        for rejected_timestamp in 0..3 {
+            let mut input = guest_input_with_single_block();
+            input.taiko.proposal_event.proposal.timestamp = UNZEN_TIMESTAMP.try_into().unwrap();
+            input.witnesses[0].block.header.timestamp = UNZEN_TIMESTAMP;
+            input.witnesses.push(input.witnesses[0].clone());
+            match rejected_timestamp {
+                0 => {
+                    input.taiko.proposal_event.proposal.timestamp =
+                        (UNZEN_TIMESTAMP - 1).try_into().unwrap()
+                }
+                1 => input.witnesses[0].block.header.timestamp = UNZEN_TIMESTAMP - 1,
+                _ => input.witnesses[1].block.header.timestamp = UNZEN_TIMESTAMP - 1,
+            }
+            input.proof_carry_data =
+                build_proof_carry_data_from_witness_spec(&input, ProofType::Native).unwrap();
+            let reads = std::cell::Cell::new(0);
+            let replays = std::cell::Cell::new(0);
+            let error = prove_shasta_proposal_with_block_verifier_and_parent_reader(
+                &input,
+                |_, _, _, _, _, _| {
+                    replays.set(replays.get() + 1);
+                    anyhow::bail!("unexpected block replay")
+                },
+                |_| {
+                    reads.set(reads.get() + 1);
+                    anyhow::bail!("unexpected parent read")
+                },
+            )
+            .expect_err("pre-Unzen input must be rejected");
+            assert!(
+                error_chain_contains(&error, "Unzen"),
+                "case {rejected_timestamp}: {error:#}"
+            );
+            assert_eq!(reads.get(), 0);
+            assert_eq!(replays.get(), 0);
+        }
+    }
+
+    #[test]
+    fn unzen_only_accepts_proposal_and_witness_at_activation() {
+        let mut input = guest_input_with_single_block();
+        input.witnesses[0].block.header.timestamp = 1_786_021_200;
+        input.proof_carry_data =
+            build_proof_carry_data_from_witness_spec(&input, ProofType::Native).unwrap();
+        assert_eq!(
+            prove_identity(&input).expect("Unzen activation is inclusive"),
+            hash_shasta_subproof_input(&input.proof_carry_data)
         );
     }
 
@@ -2904,9 +2962,9 @@ mod tests {
                 .proposal
                 .timestamp
                 .to::<u64>(),
-            123
+            1_786_021_200
         );
-        set_origin_header_timestamp(&mut guest_input, 123);
+        set_origin_header_timestamp(&mut guest_input, 1_786_021_200);
         assert_guest_rejects(
             guest_input,
             "must be strictly after anchored L1 origin timestamp",
@@ -2923,9 +2981,9 @@ mod tests {
                 .proposal
                 .timestamp
                 .to::<u64>(),
-            123
+            1_786_021_200
         );
-        set_origin_header_timestamp(&mut guest_input, 122);
+        set_origin_header_timestamp(&mut guest_input, 1_786_021_199);
         guest_input.proof_carry_data =
             build_proof_carry_data_from_witness_spec(&guest_input, ProofType::Native)
                 .expect("build carry data");
@@ -2942,9 +3000,9 @@ mod tests {
                 .proposal
                 .timestamp
                 .to::<u64>(),
-            123
+            1_786_021_200
         );
-        set_origin_header_timestamp(&mut guest_input, 124);
+        set_origin_header_timestamp(&mut guest_input, 1_786_021_201);
         assert_guest_rejects(
             guest_input,
             "must be strictly after anchored L1 origin timestamp",

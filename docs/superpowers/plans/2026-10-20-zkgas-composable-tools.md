@@ -108,7 +108,7 @@
 
 - [ ] **Step 1: Add failing single-input equivalence tests**
 
-  In `bin/zkgas/tests/quote.rs`, serialize the checked-in `tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_23077_l2_9051439_9051630.json` to canonical bincode. Assert `run_quote` emits one complete row whose embedded `ProposalWorkloadQuote` equals a direct `quote_shasta_proposal` call, whose quote key uses the canonical bincode SHA-256/length, and whose single-input descriptor excludes the filesystem path. Add `--input-json` equivalence and assert it produces the same GuestInput identity.
+  In `bin/zkgas/tests/quote.rs`, serialize the checked-in `tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_41455_l2_12556056_12556247.json` to canonical bincode. Assert `run_quote` emits one complete row whose embedded `ProposalWorkloadQuote` equals a direct `quote_shasta_proposal` call, whose quote key uses the canonical bincode SHA-256/length, and whose single-input descriptor excludes the filesystem path. Add `--input-json` equivalence and assert it produces the same GuestInput identity.
 
 - [ ] **Step 2: Run the quote test and verify it fails**
 
@@ -319,7 +319,7 @@
 
 - [ ] **Step 2: Quote the exact checked-in proposal input**
 
-  Create a fresh `/tmp/raiko2-zkgas-sp1-smoke-*` directory with `mktemp -d`, then run `target/release/zkgas-quote --input-json tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_23077_l2_9051439_9051630.json --corpus-id raiko2-checked-in --sample-id mainnet-proposal-23077 --output <tmp>/quotes.jsonl`.
+  Create a fresh `/tmp/raiko2-zkgas-sp1-smoke-*` directory with `mktemp -d`, then run `target/release/zkgas-quote --input-json tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_41455_l2_12556056_12556247.json --corpus-id raiko2-checked-in --sample-id mainnet-proposal-41455 --output <tmp>/quotes.jsonl`.
 
   Expected: exit `0`, one complete row, nonzero `quote.prove.total_pgu`, and quote public output matching native quote tests.
 
@@ -333,7 +333,7 @@
     --proof-type sp1 \
     --mode execute \
     --sp1-prover local \
-    --input tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_23077_l2_9051439_9051630.json \
+    --input tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_41455_l2_12556056_12556247.json \
     --json-out <tmp>/sp1-execute.json
   ```
 

@@ -34,15 +34,11 @@ use raiko2_primitives_shasta::{
 use raiko2_protocol::ManifestChainSpec;
 use raiko2_protocol_shasta::shasta::{
     ParentBlockContext, ProofCarryData, ProposalMetadata, ShastaEventData, ShastaTransitionInput,
-    TransitionInputData,
-    constants::{DERIVATION_SOURCE_MAX_BLOCKS, UNZEN_DERIVATION_SOURCE_MAX_BLOCKS},
-    decode_proposal_id_from_extra_data,
-    manifest::BlockManifest,
+    TransitionInputData, constants::UNZEN_DERIVATION_SOURCE_MAX_BLOCKS,
+    decode_proposal_id_from_extra_data, manifest::BlockManifest,
     prepare_source_manifest_with_max_blocks,
 };
-use raiko2_provider::{
-    AccountProofWitnessNodes, AccountStateMaps, Provider, RpcClientConfig, StorageProofTargets,
-};
+use raiko2_provider::{Provider, RpcClientConfig, StorageProofTargets};
 use raiko2_stateless::read_parent_storage_with_witness_resources;
 use std::{
     future::Future,
@@ -243,7 +239,7 @@ fn canonical_preflight_locator_key(
     l1_chain_spec: &ChainSpec,
     l2_chain_spec: &ChainSpec,
 ) -> RaikoResult<CanonicalPreflightLocatorKeyV1> {
-    extract_block_range(ctx, l2_chain_spec)?;
+    extract_block_range(ctx)?;
     let blob_proof_type = ShastaManifestBuilder::resolve_blob_proof_type(ctx)?;
     let l2_block_range = ctx.request.l2_block_range.ok_or_else(|| {
         RaikoError::InvalidRequestConfig(
@@ -342,11 +338,12 @@ async fn resolve_preflight_block_range_and_proposal_event<P: Provider>(
     provider: &P,
     chain_spec: &ChainSpec,
 ) -> RaikoResult<(Vec<u64>, u64, ShastaEventData)> {
-    let (block_numbers, expected_proposal_id) = extract_block_range(ctx, chain_spec)?;
+    let (block_numbers, expected_proposal_id) = extract_block_range(ctx)?;
     let first_block_no = block_numbers.first().copied().ok_or_else(|| {
         RaikoError::InvalidRequestConfig("request l2_block_range is empty".to_string())
     })?;
     let proposal_block = fetch_preflight_proposal_block(provider, first_block_no).await?;
+    ensure_unzen_preflight_timestamp(chain_spec, first_block_no, proposal_block.header.timestamp)?;
     let proposal_event = resolve_shasta_proposal_event(
         ctx,
         provider,
@@ -370,6 +367,7 @@ async fn fetch_preflight_witnesses<P: Provider>(
     blocks: &[reth_ethereum_primitives::Block],
     tx_lists: Option<&[Bytes]>,
 ) -> RaikoResult<Vec<StatelessInput>> {
+    ensure_unzen_preflight_blocks(chain_spec, blocks)?;
     let block_numbers = blocks
         .iter()
         .map(|block| block.header.number)
@@ -514,7 +512,16 @@ async fn build_canonical_preflight_from_parts<P: Provider>(
     expected_proposal_id: u64,
     proposal_event: ShastaEventData,
 ) -> RaikoResult<CanonicalShastaPreflightV1> {
+    let first_block_no = block_numbers.first().copied().ok_or_else(|| {
+        RaikoError::Preflight("cannot build Shasta preflight without blocks".to_string())
+    })?;
+    ensure_unzen_preflight_timestamp(
+        chain_spec,
+        first_block_no,
+        proposal_event.proposal.timestamp.to::<u64>(),
+    )?;
     let blocks = fetch_preflight_blocks(provider, block_numbers).await?;
+    ensure_unzen_preflight_blocks(chain_spec, &blocks)?;
     let mut manifest =
         build_preflight_manifest(ctx, provider, chain_spec, &blocks, proposal_event).await?;
     let parent_block =
@@ -760,70 +767,20 @@ const fn retryable_shasta_preflight_error(err: &RaikoError) -> bool {
     )
 }
 
-fn preflight_requires_tx_list_witnesses(
-    chain_spec: &ChainSpec,
-    blocks: &[reth_ethereum_primitives::Block],
-) -> bool {
-    chain_spec
-        .hard_forks
-        .get(&ForkId::Taiko(TaikoFork::Unzen))
-        .is_some_and(|fork| {
-            blocks
-                .iter()
-                .any(|block| fork.active(block.header.number, block.header.timestamp))
-        })
-}
-
-fn tx_list_witness_unavailable(err: &RaikoError) -> bool {
-    if matches!(err, RaikoError::FeatureNotSupportedError(_)) {
-        return true;
-    }
-
-    let (RaikoError::RPC(message)
-    | RaikoError::Provider(message)
-    | RaikoError::RpcWithContext { message, .. }) = err
-    else {
-        return false;
-    };
-    let lower = message.to_ascii_lowercase();
-    lower.contains("debug_executionwitnessfortxlist")
-        && (lower.contains("method not found")
-            || lower.contains("method_not_found")
-            || lower.contains("-32601")
-            || lower.contains("unsupported")
-            || lower.contains("not available"))
-}
-
 async fn fetch_preflight_chunk_witnesses<P: Provider>(
     provider: &P,
     block_numbers: &[u64],
     tx_lists: Option<&[Bytes]>,
-    requires_tx_list_witness: bool,
-) -> RaikoResult<(Vec<ExecutionWitness>, bool, u128)> {
+) -> RaikoResult<(Vec<ExecutionWitness>, u128)> {
     let started_at = Instant::now();
-    let (witnesses, use_canonical_witness) = if let Some(tx_lists) = tx_lists {
-        match provider
+    let witnesses = if let Some(tx_lists) = tx_lists {
+        provider
             .batch_witnesses_with_tx_lists(block_numbers, tx_lists)
-            .await
-        {
-            Ok(witnesses) => (witnesses, false),
-            Err(err) if !requires_tx_list_witness && tx_list_witness_unavailable(&err) => {
-                warn!(
-                    error = %err,
-                    "falling back to canonical Shasta witnesses before Unzen because tx-list witness API is unavailable"
-                );
-                (provider.batch_witnesses(block_numbers).await?, true)
-            }
-            Err(err) => return Err(err),
-        }
+            .await?
     } else {
-        (provider.batch_witnesses(block_numbers).await?, false)
+        provider.batch_witnesses(block_numbers).await?
     };
-    Ok((
-        witnesses,
-        use_canonical_witness,
-        started_at.elapsed().as_millis(),
-    ))
+    Ok((witnesses, started_at.elapsed().as_millis()))
 }
 
 fn derived_tx_list_signers(tx_list: &Bytes) -> RaikoResult<Vec<Address>> {
@@ -849,44 +806,6 @@ fn collect_preflight_account_targets(tx_list: Option<&Bytes>) -> RaikoResult<Vec
     targets.sort_unstable();
     targets.dedup();
     Ok(targets)
-}
-
-async fn fetch_preflight_accounts<P: Provider>(
-    provider: &P,
-    block_numbers: &[u64],
-    account_targets: &[Vec<Address>],
-    use_canonical_witness: bool,
-) -> RaikoResult<(AccountStateMaps, AccountProofWitnessNodes, u128)> {
-    let started_at = Instant::now();
-    let (accounts, account_witness_nodes) = if use_canonical_witness {
-        provider
-            .batch_accounts_with_proof_witnesses(block_numbers, account_targets)
-            .await?
-    } else {
-        let accounts = provider
-            .batch_accounts(block_numbers, account_targets)
-            .await?;
-        (accounts, vec![Vec::new(); block_numbers.len()])
-    };
-    Ok((
-        accounts,
-        account_witness_nodes,
-        started_at.elapsed().as_millis(),
-    ))
-}
-
-fn merge_account_witness_nodes(
-    witnesses: &mut [ExecutionWitness],
-    account_witness_nodes: Vec<Vec<WitnessStateNode>>,
-) {
-    for (witness, nodes) in witnesses.iter_mut().zip(account_witness_nodes) {
-        if nodes.is_empty() {
-            continue;
-        }
-        witness.state.extend(nodes);
-        witness.state =
-            ExecutionWitness::canonicalize_state_nodes(std::mem::take(&mut witness.state));
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1087,16 +1006,8 @@ async fn fetch_preflight_chunk<P: Provider>(
             blocks.len()
         )));
     }
-    let requires_tx_list_witness =
-        tx_lists.is_some() && preflight_requires_tx_list_witnesses(&chain_spec, blocks);
-    let (mut witnesses, use_canonical_witness, witnesses_elapsed_ms) =
-        fetch_preflight_chunk_witnesses(
-            provider,
-            &block_numbers,
-            tx_lists,
-            requires_tx_list_witness,
-        )
-        .await?;
+    let (witnesses, witnesses_elapsed_ms) =
+        fetch_preflight_chunk_witnesses(provider, &block_numbers, tx_lists).await?;
     let account_targets = blocks
         .iter()
         .enumerate()
@@ -1104,25 +1015,16 @@ async fn fetch_preflight_chunk<P: Provider>(
             collect_preflight_account_targets(tx_lists.map(|tx_lists| &tx_lists[index]))
         })
         .collect::<RaikoResult<Vec<_>>>()?;
-    let (accounts, account_witness_nodes, accounts_elapsed_ms) = fetch_preflight_accounts(
-        provider,
-        &block_numbers,
-        &account_targets,
-        use_canonical_witness,
-    )
-    .await?;
+    let accounts_started_at = Instant::now();
+    let accounts = provider
+        .batch_accounts(&block_numbers, &account_targets)
+        .await?;
+    let accounts_elapsed_ms = accounts_started_at.elapsed().as_millis();
 
-    if blocks.len() != witnesses.len()
-        || blocks.len() != accounts.len()
-        || blocks.len() != account_witness_nodes.len()
-    {
+    if blocks.len() != witnesses.len() || blocks.len() != accounts.len() {
         return Err(RaikoError::InvalidRequestConfig(
             "Provider returned mismatched input lengths".to_string(),
         ));
-    }
-
-    if use_canonical_witness {
-        merge_account_witness_nodes(&mut witnesses, account_witness_nodes);
     }
 
     let witnesses = blocks
@@ -1172,15 +1074,7 @@ fn derive_preflight_source_data(
         )));
     }
 
-    let first_block = blocks.first().ok_or_else(|| {
-        RaikoError::Preflight("cannot derive Shasta tx lists without blocks".to_string())
-    })?;
     let proposal_timestamp = manifest.proposal_event.proposal.timestamp.to::<u64>();
-    let max_blocks = derivation_source_max_blocks_for_chain_spec_at(
-        chain_spec,
-        first_block.header.number,
-        proposal_timestamp,
-    );
     let fork_timestamp = shasta_fork_timestamp_for_chain_spec(chain_spec)?;
     let mut parent = preflight_parent_context(
         parent_block.ok_or_else(|| {
@@ -1208,7 +1102,7 @@ fn derive_preflight_source_data(
             parent,
             meta,
             fork_timestamp,
-            max_blocks,
+            UNZEN_DERIVATION_SOURCE_MAX_BLOCKS,
         )
         .map_err(|err| {
             RaikoError::Preflight(format!(
@@ -1838,20 +1732,31 @@ fn validate_l1_headers(
     Ok(())
 }
 
-fn derivation_source_max_blocks_for_chain_spec_at(
+fn ensure_unzen_preflight_timestamp(
     chain_spec: &ChainSpec,
     block_no: u64,
-    proposal_timestamp: u64,
-) -> usize {
-    if chain_spec
+    timestamp: u64,
+) -> RaikoResult<()> {
+    if !chain_spec
         .hard_forks
         .get(&ForkId::Taiko(TaikoFork::Unzen))
-        .is_some_and(|fork| fork.active(block_no, proposal_timestamp))
+        .is_some_and(|fork| fork.active(block_no, timestamp))
     {
-        UNZEN_DERIVATION_SOURCE_MAX_BLOCKS
-    } else {
-        DERIVATION_SOURCE_MAX_BLOCKS
+        return Err(RaikoError::Preflight(
+            "only Unzen and later proposals and blocks are supported".to_string(),
+        ));
     }
+    Ok(())
+}
+
+fn ensure_unzen_preflight_blocks(
+    chain_spec: &ChainSpec,
+    blocks: &[reth_ethereum_primitives::Block],
+) -> RaikoResult<()> {
+    for block in blocks {
+        ensure_unzen_preflight_timestamp(chain_spec, block.header.number, block.header.timestamp)?;
+    }
+    Ok(())
 }
 
 fn validate_derivation_source_block_limit(
@@ -1860,31 +1765,16 @@ fn validate_derivation_source_block_limit(
     proposal_timestamp: u64,
     chain_spec: &ChainSpec,
 ) -> RaikoResult<()> {
-    let max_blocks = derivation_source_max_blocks_for_chain_spec_at(
-        chain_spec,
-        first_block_no,
-        proposal_timestamp,
-    );
-    if block_count > max_blocks {
+    ensure_unzen_preflight_timestamp(chain_spec, first_block_no, proposal_timestamp)?;
+    if block_count > UNZEN_DERIVATION_SOURCE_MAX_BLOCKS {
         return Err(RaikoError::InvalidRequestConfig(format!(
-            "request l2_block_range contains {block_count} blocks, max {max_blocks}"
+            "request l2_block_range contains {block_count} blocks, max {UNZEN_DERIVATION_SOURCE_MAX_BLOCKS}"
         )));
     }
     Ok(())
 }
 
-fn possible_derivation_source_max_blocks_for_chain_spec(chain_spec: &ChainSpec) -> usize {
-    if matches!(
-        chain_spec.hard_forks.get(&ForkId::Taiko(TaikoFork::Unzen)),
-        Some(ForkCondition::Block(_) | ForkCondition::Timestamp(_))
-    ) {
-        UNZEN_DERIVATION_SOURCE_MAX_BLOCKS
-    } else {
-        DERIVATION_SOURCE_MAX_BLOCKS
-    }
-}
-
-fn extract_block_range(ctx: &ProofContext, chain_spec: &ChainSpec) -> RaikoResult<(Vec<u64>, u64)> {
+fn extract_block_range(ctx: &ProofContext) -> RaikoResult<(Vec<u64>, u64)> {
     if let Some(range) = ctx.request.l2_block_range {
         if !range.is_valid() {
             return Err(RaikoError::InvalidRequestConfig(
@@ -1900,10 +1790,8 @@ fn extract_block_range(ctx: &ProofContext, chain_spec: &ChainSpec) -> RaikoResul
                     "request l2_block_range contains too many blocks".into(),
                 )
             })?;
-        let max_blocks = u64::try_from(possible_derivation_source_max_blocks_for_chain_spec(
-            chain_spec,
-        ))
-        .expect("derivation source max blocks fits u64");
+        let max_blocks = u64::try_from(UNZEN_DERIVATION_SOURCE_MAX_BLOCKS)
+            .expect("derivation source max blocks fits u64");
         if block_count > max_blocks {
             return Err(RaikoError::InvalidRequestConfig(format!(
                 "request l2_block_range contains {block_count} blocks, max {max_blocks}"
@@ -2415,7 +2303,6 @@ mod tests {
         tx_list_witness_calls: Arc<AtomicUsize>,
         tx_list_witness_inputs: Arc<Mutex<Vec<Bytes>>>,
         account_inputs: Arc<Mutex<Vec<Vec<Address>>>>,
-        account_witness_nodes: Arc<Mutex<Vec<Vec<WitnessStateNode>>>>,
         storage_proof_inputs: Arc<Mutex<StorageProofTargets>>,
         storage_witness_nodes: Arc<Mutex<Vec<Vec<WitnessStateNode>>>>,
     }
@@ -2462,23 +2349,6 @@ mod tests {
         ) -> RaikoResult<Vec<AddressMap<TrieAccount>>> {
             *self.account_inputs.lock().expect("account inputs lock") = accounts.to_vec();
             Ok(vec![AddressMap::default(); accounts.len()])
-        }
-
-        async fn batch_accounts_with_proof_witnesses(
-            &self,
-            _blocks: &[u64],
-            accounts: &[Vec<Address>],
-        ) -> RaikoResult<(Vec<AddressMap<TrieAccount>>, Vec<Vec<WitnessStateNode>>)> {
-            *self.account_inputs.lock().expect("account inputs lock") = accounts.to_vec();
-            let mut nodes = self
-                .account_witness_nodes
-                .lock()
-                .expect("account witness nodes lock")
-                .clone();
-            if nodes.is_empty() {
-                nodes = vec![Vec::new(); accounts.len()];
-            }
-            Ok((vec![AddressMap::default(); accounts.len()], nodes))
         }
 
         async fn batch_storage_proof_witnesses(
@@ -2804,8 +2674,9 @@ mod tests {
         input.taiko.proposal_event.proposal.id = 7u64.try_into().expect("fits in uint48");
         input.taiko.prover_data.actual_prover = Address::from([0x11; 20]);
         input.taiko.proposal_event.proposal.proposer = Address::from([0x22; 20]);
-        input.taiko.proposal_event.proposal.timestamp =
-            123u64.try_into().expect("timestamp fits in uint48");
+        input.taiko.proposal_event.proposal.timestamp = 1_800_000_000u64
+            .try_into()
+            .expect("timestamp fits in uint48");
         input.taiko.proposal_event.proposal.parentProposalHash = B256::from([0x33; 32]);
 
         let mut witness = StatelessInput {
@@ -2834,10 +2705,10 @@ mod tests {
         }
     }
 
-    fn alethia_hoodi_shasta_timestamp() -> u64 {
-        match TAIKO_HOODI.taiko_fork_activation(AlethiaTaikoHardfork::Shasta) {
+    fn alethia_hoodi_unzen_timestamp() -> u64 {
+        match TAIKO_HOODI.taiko_fork_activation(AlethiaTaikoHardfork::Unzen) {
             AlethiaForkCondition::Timestamp(timestamp) => timestamp,
-            condition => panic!("expected Hoodi Shasta timestamp fork, got {condition:?}"),
+            condition => panic!("expected Hoodi Unzen timestamp fork, got {condition:?}"),
         }
     }
 
@@ -2945,7 +2816,7 @@ mod tests {
         proposal_event.proposal.parentProposalHash = B256::from([0x22; 32]);
         proposal_event.proposal.originBlockNumber = 10u64.try_into().expect("fits in uint48");
         proposal_event.proposal.originBlockHash = origin_header.hash_slow();
-        proposal_event.proposal.timestamp = 777u64.try_into().expect("fits in uint48");
+        proposal_event.proposal.timestamp = 1_800_000_000u64.try_into().expect("fits in uint48");
 
         TestProvider {
             block,
@@ -2961,9 +2832,6 @@ mod tests {
             tx_list_witness_calls: Arc::new(AtomicUsize::new(0)),
             tx_list_witness_inputs: Arc::new(Mutex::new(Vec::new())),
             account_inputs: Arc::new(Mutex::new(Vec::new())),
-            account_witness_nodes: Arc::new(Mutex::new(vec![vec![WitnessStateNode::from_bytes(
-                Bytes::from_static(&[0xc1, 0x80]),
-            )]])),
             storage_proof_inputs: Arc::new(Mutex::new(Vec::new())),
             storage_witness_nodes: Arc::new(Mutex::new(vec![vec![WitnessStateNode::from_bytes(
                 Bytes::from_static(&[0xc1, 0x80]),
@@ -3513,64 +3381,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pre_unzen_tx_list_preflight_prefers_tx_list_witness_when_available() {
-        let provider = sample_provider();
-        let tx_lists = empty_replay_tx_lists(&provider);
-        let chain_spec = ChainSpec {
-            name: "taiko_mainnet".to_string(),
-            chain_id: super::TAIKO_MAINNET_CHAIN_ID,
-            ..Default::default()
-        };
-
-        let (_chunk_index, witnesses) = super::fetch_preflight_chunk(
-            &provider,
-            42,
-            0,
-            1,
-            std::slice::from_ref(&provider.block),
-            Some(&tx_lists),
-            chain_spec,
-        )
-        .await
-        .expect("fetch preflight chunk");
-
-        assert_eq!(witnesses.len(), 1);
-        assert_eq!(provider.witness_calls.load(Ordering::SeqCst), 0);
-        assert_eq!(provider.tx_list_witness_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(witnesses[0].witness.state.len(), 0);
-    }
-
-    #[tokio::test]
-    async fn pre_unzen_tx_list_preflight_falls_back_to_canonical_when_tx_list_witness_unsupported()
-    {
-        let mut provider = sample_provider();
-        provider.tx_list_witness_supported = false;
-        let tx_lists = empty_replay_tx_lists(&provider);
-        let chain_spec = ChainSpec {
-            name: "taiko_mainnet".to_string(),
-            chain_id: super::TAIKO_MAINNET_CHAIN_ID,
-            ..Default::default()
-        };
-
-        let (_chunk_index, witnesses) = super::fetch_preflight_chunk(
-            &provider,
-            42,
-            0,
-            1,
-            std::slice::from_ref(&provider.block),
-            Some(&tx_lists),
-            chain_spec,
-        )
-        .await
-        .expect("fetch preflight chunk");
-
-        assert_eq!(witnesses.len(), 1);
-        assert_eq!(provider.witness_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(provider.tx_list_witness_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(witnesses[0].witness.state.len(), 1);
-    }
-
-    #[tokio::test]
     async fn unzen_tx_list_preflight_uses_tx_list_witness_even_on_mainnet_chain_id() {
         let provider = sample_provider();
         let tx_lists = empty_replay_tx_lists(&provider);
@@ -3700,8 +3510,7 @@ mod tests {
         let mut ctx = sample_context(42, 11, 9);
         ctx.request.l2_block_range = None;
 
-        let chain_spec = super::chain_spec_from_context(&ctx).expect("chain spec");
-        let err = super::extract_block_range(&ctx, &chain_spec).expect_err("missing range");
+        let err = super::extract_block_range(&ctx).expect_err("missing range");
 
         assert!(
             err.to_string()
@@ -3710,23 +3519,7 @@ mod tests {
     }
 
     #[test]
-    fn extract_block_range_accepts_protocol_max_blocks() {
-        let mut ctx = sample_context(42, 11, 9);
-        ctx.request.l2_block_range = Some(L2BlockRange {
-            start: 1,
-            end: u64::try_from(super::DERIVATION_SOURCE_MAX_BLOCKS).expect("fits u64"),
-        });
-
-        let chain_spec = super::chain_spec_from_context(&ctx).expect("chain spec");
-        let (blocks, proposal_id) =
-            super::extract_block_range(&ctx, &chain_spec).expect("valid range");
-
-        assert_eq!(proposal_id, 42);
-        assert_eq!(blocks.len(), super::DERIVATION_SOURCE_MAX_BLOCKS);
-    }
-
-    #[test]
-    fn extract_block_range_accepts_unzen_max_blocks_for_configured_environment() {
+    fn extract_block_range_accepts_unzen_max_blocks() {
         let mut ctx = sample_context(42, 11, 9);
         ctx.request.l2_chain_id = 167_001;
         ctx.request.l2_block_range = Some(L2BlockRange {
@@ -3734,35 +3527,10 @@ mod tests {
             end: u64::try_from(super::UNZEN_DERIVATION_SOURCE_MAX_BLOCKS).expect("fits u64"),
         });
 
-        let chain_spec = super::chain_spec_from_context(&ctx).expect("chain spec");
-        let (blocks, proposal_id) =
-            super::extract_block_range(&ctx, &chain_spec).expect("valid range");
+        let (blocks, proposal_id) = super::extract_block_range(&ctx).expect("valid range");
 
         assert_eq!(proposal_id, 42);
         assert_eq!(blocks.len(), super::UNZEN_DERIVATION_SOURCE_MAX_BLOCKS);
-    }
-
-    #[test]
-    fn extract_block_range_rejects_unzen_range_when_environment_has_no_activation() {
-        let mut ctx = sample_context(42, 11, 9);
-        let mut mainnet = SupportedChainSpecs::default()
-            .get_chain_spec("taiko_mainnet")
-            .expect("mainnet chain spec");
-        mainnet
-            .hard_forks
-            .insert(ForkId::Taiko(TaikoFork::Unzen), ForkCondition::Tbd);
-        ctx.request.l2_chain_id = mainnet.chain_id;
-        ctx.preflight.resolved_l2_chain_spec = Some(mainnet);
-        let max_blocks = u64::try_from(super::DERIVATION_SOURCE_MAX_BLOCKS).expect("fits u64");
-        ctx.request.l2_block_range = Some(L2BlockRange {
-            start: 1,
-            end: max_blocks + 1,
-        });
-        let chain_spec = super::chain_spec_from_context(&ctx).expect("chain spec");
-
-        let err = super::extract_block_range(&ctx, &chain_spec).expect_err("oversized range");
-
-        assert!(err.to_string().contains("contains 193 blocks, max 192"));
     }
 
     #[test]
@@ -3775,113 +3543,74 @@ mod tests {
             start: 1,
             end: max_blocks + 1,
         });
-        let chain_spec = super::chain_spec_from_context(&ctx).expect("chain spec");
-
-        let err = super::extract_block_range(&ctx, &chain_spec).expect_err("oversized range");
+        let err = super::extract_block_range(&ctx).expect_err("oversized range");
 
         assert!(err.to_string().contains("contains 769 blocks, max 768"));
     }
 
-    #[test]
-    fn derivation_source_limit_uses_environment_hardfork_activation() {
-        let mut ctx = sample_context(42, 11, 9);
-        ctx.request.l2_chain_id = 167_000;
-        let mainnet = super::chain_spec_from_context(&ctx).expect("chain spec");
-        let mainnet_unzen_timestamp = alethia_mainnet_unzen_timestamp();
-        assert_eq!(
-            super::derivation_source_max_blocks_for_chain_spec_at(
-                &mainnet,
-                1,
-                mainnet_unzen_timestamp - 1,
-            ),
-            super::DERIVATION_SOURCE_MAX_BLOCKS
-        );
-        assert_eq!(
-            super::derivation_source_max_blocks_for_chain_spec_at(
-                &mainnet,
-                1,
-                mainnet_unzen_timestamp,
-            ),
-            super::UNZEN_DERIVATION_SOURCE_MAX_BLOCKS
-        );
-
-        ctx.request.l2_chain_id = 167_013;
-        let hoodi = super::chain_spec_from_context(&ctx).expect("chain spec");
-        let Some(ForkCondition::Timestamp(hoodi_unzen_timestamp)) =
-            hoodi.hard_forks.get(&ForkId::Taiko(TaikoFork::Unzen))
-        else {
-            panic!("taiko_hoodi should configure a timestamp-based Unzen fork");
-        };
-        assert_eq!(
-            super::derivation_source_max_blocks_for_chain_spec_at(
-                &hoodi,
-                1,
-                hoodi_unzen_timestamp.saturating_sub(1),
-            ),
-            super::DERIVATION_SOURCE_MAX_BLOCKS
-        );
-        assert_eq!(
-            super::derivation_source_max_blocks_for_chain_spec_at(
-                &hoodi,
-                1,
-                *hoodi_unzen_timestamp
-            ),
-            super::UNZEN_DERIVATION_SOURCE_MAX_BLOCKS
-        );
-
-        ctx.request.l2_chain_id = 167_001;
-        let devnet = super::chain_spec_from_context(&ctx).expect("chain spec");
-        assert_eq!(
-            devnet.hard_forks.get(&ForkId::Taiko(TaikoFork::Unzen)),
-            Some(&ForkCondition::Timestamp(0))
-        );
-        assert_eq!(
-            super::derivation_source_max_blocks_for_chain_spec_at(&devnet, 1, 0),
-            super::UNZEN_DERIVATION_SOURCE_MAX_BLOCKS
-        );
-    }
-
-    #[test]
-    fn validate_derivation_source_block_limit_rejects_before_unzen_activation() {
-        let mut ctx = sample_context(42, 11, 9);
-        ctx.request.l2_chain_id = 167_000;
-        let chain_spec = super::chain_spec_from_context(&ctx).expect("chain spec");
-
-        let err = super::validate_derivation_source_block_limit(
-            super::DERIVATION_SOURCE_MAX_BLOCKS + 1,
-            1,
-            alethia_mainnet_unzen_timestamp() - 1,
-            &chain_spec,
-        )
-        .expect_err("pre-Unzen environment should reject");
-
-        assert!(err.to_string().contains("contains 193 blocks, max 192"));
+    #[tokio::test]
+    async fn unzen_boundary_rejects_before_witness_fetch() {
+        let activation = alethia_mainnet_unzen_timestamp();
+        for rejected_timestamp in 0..3 {
+            let mut provider = sample_provider();
+            provider.proposal_event.proposal.timestamp = activation.try_into().unwrap();
+            provider.block.header.timestamp = activation;
+            let mut second = provider.block.clone();
+            second.header.number += 1;
+            second.header.timestamp += 1;
+            provider.blocks = vec![provider.block.clone(), second];
+            match rejected_timestamp {
+                0 => {
+                    provider.proposal_event.proposal.timestamp =
+                        (activation - 1).try_into().unwrap()
+                }
+                1 => {
+                    provider.block.header.timestamp = activation - 1;
+                    provider.blocks[0] = provider.block.clone();
+                }
+                _ => provider.blocks[1].header.timestamp = activation - 1,
+            }
+            let mut ctx = sample_context(42, 11, 9);
+            ctx.request.l2_chain_id = super::TAIKO_MAINNET_CHAIN_ID;
+            ctx.request.l2_block_range = Some(L2BlockRange { start: 1, end: 2 });
+            let spec = ShastaSpec::new(
+                PipelineKey::ShastaNative,
+                (),
+                NativeBackend,
+                provider.clone(),
+            );
+            let error = spec
+                .preflight(&ctx, &provider)
+                .await
+                .expect_err("unsupported timestamp");
+            assert!(
+                error.to_string().contains("Unzen"),
+                "case {rejected_timestamp}: {error}"
+            );
+            assert_eq!(provider.witness_calls.load(Ordering::SeqCst), 0);
+            assert_eq!(provider.tx_list_witness_calls.load(Ordering::SeqCst), 0);
+        }
     }
 
     #[tokio::test]
-    async fn preflight_rejects_pre_unzen_range_before_witness_fetch() {
-        let provider = sample_provider();
+    async fn unzen_boundary_accepts_activation() {
+        let activation = alethia_mainnet_unzen_timestamp();
+        let mut provider = sample_provider();
+        provider.proposal_event.proposal.timestamp = activation.try_into().unwrap();
+        provider.block.header.timestamp = activation;
         let mut ctx = sample_context(42, 11, 9);
-        ctx.request.l2_chain_id = 167_013;
-        let max_blocks = u64::try_from(super::DERIVATION_SOURCE_MAX_BLOCKS).expect("fits u64");
-        ctx.request.l2_block_range = Some(L2BlockRange {
-            start: 1,
-            end: max_blocks + 1,
-        });
+        ctx.request.l2_chain_id = super::TAIKO_MAINNET_CHAIN_ID;
         let spec = ShastaSpec::new(
             PipelineKey::ShastaNative,
             (),
             NativeBackend,
             provider.clone(),
         );
-
-        let err = spec
+        let input = spec
             .preflight(&ctx, &provider)
             .await
-            .expect_err("pre-Unzen oversized range should fail before witness fetch");
-
-        assert!(err.to_string().contains("contains 193 blocks, max 192"));
-        assert_eq!(provider.witness_calls.load(Ordering::SeqCst), 0);
+            .expect("activation is supported");
+        assert_eq!(input.witnesses.len(), 1);
     }
 
     #[tokio::test]
@@ -4002,9 +3731,9 @@ mod tests {
             parent_checkpoint.block_hash,
             parent_checkpoint.state_root,
         );
-        let shasta_timestamp = alethia_hoodi_shasta_timestamp();
+        let unzen_timestamp = alethia_hoodi_unzen_timestamp();
         forced_block.header.number = 1;
-        forced_block.header.timestamp = shasta_timestamp;
+        forced_block.header.timestamp = unzen_timestamp;
         forced_block.header.gas_limit = 30_000_000;
         let mut normal_block = sample_block(
             42,
@@ -4013,12 +3742,12 @@ mod tests {
             normal_anchor_header.state_root,
         );
         normal_block.header.number = 2;
-        normal_block.header.timestamp = shasta_timestamp + 1;
+        normal_block.header.timestamp = unzen_timestamp + 1;
         normal_block.header.gas_limit = 30_000_000;
         provider.block = forced_block.clone();
         provider.blocks = vec![forced_block, normal_block.clone()];
         provider.parent_block.header.number = 0;
-        provider.parent_block.header.timestamp = shasta_timestamp.saturating_sub(1);
+        provider.parent_block.header.timestamp = unzen_timestamp.saturating_sub(1);
         provider.parent_block.header.gas_limit = 30_000_000;
         provider.proposal_event.proposal.originBlockNumber =
             origin_header.number.try_into().expect("fits in uint48");

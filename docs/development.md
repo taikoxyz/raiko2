@@ -339,14 +339,14 @@ artifacts before attempting registration.
 
 `bench-guest` measures execution metadata, SP1 prover gas, cycles, and wall time for guest runs.
 The checked-in sample input lives at
-`tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_23077_l2_9051439_9051630.json` and was
+`tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_41455_l2_12556056_12556247.json` and was
 generated from a real preflight run.
 
 Run one cached `GuestInput` and write an aggregate JSON report:
 
 ```bash
 cargo run -r -p xtask -- bench-guest sp1 \
-  --input ./tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_23077_l2_9051439_9051630.json \
+  --input ./tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_41455_l2_12556056_12556247.json \
   --repeat 3 \
   --json-out /tmp/sp1-prover-gas.json
 ```
@@ -356,7 +356,7 @@ Reuse prebuilt ELFs after a prior `build-guest sp1 --bench`:
 ```bash
 cargo run -r -p xtask -- bench-guest sp1 \
   --skip-build-guest \
-  --input ./tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_23077_l2_9051439_9051630.json \
+  --input ./tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_41455_l2_12556056_12556247.json \
   --repeat 3 \
   --json-out /tmp/sp1-prover-gas.json
 ```
@@ -388,8 +388,8 @@ Run a suite of cached `GuestInput` files:
 {
   "cases": [
     {
-      "name": "mainnet-proposal-23077",
-      "input": "./tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_23077_l2_9051439_9051630.json",
+      "name": "mainnet-proposal-41455",
+      "input": "./tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_41455_l2_12556056_12556247.json",
       "proof_type": "sp1"
     }
   ]

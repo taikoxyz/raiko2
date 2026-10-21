@@ -29,7 +29,7 @@ impl Drop for TestDir {
     }
 }
 fn fixture() -> GuestInput {
-    serde_json::from_slice(&fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_23077_l2_9051439_9051630.json")).unwrap()).unwrap()
+    serde_json::from_slice(&fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_41455_l2_12556056_12556247.json")).unwrap()).unwrap()
 }
 fn executable() -> ExecutableIdentity {
     ExecutableIdentity {
@@ -85,15 +85,15 @@ fn single_input_matches_quote_core_and_canonical_identity() {
     assert_eq!(row.quote, expected);
     assert_eq!(row.key.guest_input_sha256, sha256_hex(&canonical));
     assert_eq!(row.guest_input_byte_length, canonical.len() as u64);
-    assert_eq!(row.proposal.first_block, 9_051_439);
-    assert_eq!(row.proposal.last_block, 9_051_630);
+    assert_eq!(row.proposal.first_block, 12_556_056);
+    assert_eq!(row.proposal.last_block, 12_556_247);
     assert_eq!(row.proposal.block_count, 192);
     assert_eq!(
         row.proposal.fork_segments,
         vec![ForkSegmentV1 {
-            fork: "SHASTA".into(),
-            first_block: 9_051_439,
-            last_block: 9_051_630
+            fork: "UNZEN".into(),
+            first_block: 12_556_056,
+            last_block: 12_556_247
         }]
     );
     assert_eq!(row.prediction_unit, "sp1_pgu");

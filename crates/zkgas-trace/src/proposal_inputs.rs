@@ -186,7 +186,7 @@ mod tests {
     #[test]
     fn blob_selector_extraction_does_not_verify_cryptographic_proofs() {
         let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join(
-            "../../tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_23077_l2_9051439_9051630.json",
+            "../../tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_41455_l2_12556056_12556247.json",
         );
         let mut input: GuestInput = serde_json::from_str(
             &fs::read_to_string(&fixture)

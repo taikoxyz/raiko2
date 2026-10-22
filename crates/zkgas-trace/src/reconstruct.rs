@@ -519,9 +519,6 @@ impl raiko2_stateless::DerivedBlockExecutor for QuoteDerivedBlockExecutor {
             hashed_state: HashedPostState::from_bundle_state::<KeccakKeyHasher>(
                 bundle_state.state(),
             ),
-            // Temporary compile bridge for the pinned Alethia outcome; remove after its
-            // upstream field removal lands on main. Unzen-only callers never use this field.
-            pre_existing_destroyed_accounts: Vec::new(),
             finalized_block_zk_gas: finalized_block_zkgas,
             zk_gas_shadow_report: Some(committed_report),
             attempted_zk_gas_shadow_report: Some(attempted_report),

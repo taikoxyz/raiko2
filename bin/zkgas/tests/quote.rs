@@ -70,6 +70,18 @@ fn rows(path: &Path) -> Vec<QuoteRowV1> {
         .collect()
 }
 
+fn create_fifo(path: &Path) {
+    let output = std::process::Command::new("mkfifo")
+        .arg(path)
+        .output()
+        .expect("run mkfifo");
+    assert!(
+        output.status.success(),
+        "mkfifo failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[test]
 fn single_input_matches_quote_core_and_canonical_identity() {
     let dir = TestDir::new();
@@ -687,12 +699,7 @@ fn manifest_semantic_failures_commit_typed_rows() {
             }
             "directory" => row.guest_input.path = ".".into(),
             "fifo" => {
-                rustix::fs::mkfifoat(
-                    rustix::fs::CWD,
-                    dir.path().join("pipe"),
-                    rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
-                )
-                .unwrap();
+                create_fifo(&dir.path().join("pipe"));
                 row.guest_input.path = "pipe".into();
             }
             "trailing" => {

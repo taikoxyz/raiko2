@@ -1,3 +1,5 @@
+mod common;
+
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -5,12 +7,13 @@ use std::{
     thread,
 };
 
+use common::trusted_temp_root;
 use zkgas::output::{CommitOutcome, DirectoryCommitLimits, commit_directory_bounded, commit_file};
 
 struct TestDir(PathBuf);
 impl TestDir {
     fn new() -> Self {
-        let path = std::env::temp_dir().join(format!("zkgas-output-test-{}", uuid::Uuid::new_v4()));
+        let path = trusted_temp_root().join(format!("zkgas-output-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir(&path).unwrap();
         Self(path)
     }
@@ -320,7 +323,7 @@ fn staging_alias_is_rejected_without_removing_existing_output() {
 }
 #[test]
 fn bounded_commit_rejects_oversized_existing_files_and_preserves_no_replace_races() {
-    let root = std::env::temp_dir().join(format!("zkgas-bounded-output-{}", uuid::Uuid::new_v4()));
+    let root = trusted_temp_root().join(format!("zkgas-bounded-output-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir(&root).unwrap();
     let destination = root.join("report.json");
     std::fs::write(&destination, b"existing").unwrap();

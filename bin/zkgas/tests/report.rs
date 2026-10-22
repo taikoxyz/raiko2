@@ -1,3 +1,6 @@
+mod common;
+
+use common::trusted_temp_root;
 use serde_json::json;
 use std::{
     collections::BTreeMap,
@@ -16,7 +19,7 @@ use zkgas::{
 struct TestDir(PathBuf);
 impl TestDir {
     fn new() -> Self {
-        let path = std::env::temp_dir().join(format!("zkgas-report-test-{}", uuid::Uuid::new_v4()));
+        let path = trusted_temp_root().join(format!("zkgas-report-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir(&path).unwrap();
         Self(path)
     }

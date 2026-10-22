@@ -1,5 +1,8 @@
+mod common;
+
 use std::collections::BTreeMap;
 
+use common::trusted_temp_root;
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use zkgas::{contracts::*, identity::*};
@@ -218,7 +221,7 @@ fn executable_identity_binds_executable_bytes() {
 
 #[test]
 fn executable_identity_hashes_a_pinned_image_not_a_replaceable_path() {
-    let dir = std::env::temp_dir().join(format!("zkgas-executable-test-{}", uuid::Uuid::new_v4()));
+    let dir = trusted_temp_root().join(format!("zkgas-executable-test-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir(&dir).unwrap();
     let path = dir.join("tool");
     std::fs::write(&path, b"running-image").unwrap();

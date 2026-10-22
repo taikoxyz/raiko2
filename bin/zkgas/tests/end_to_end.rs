@@ -1,4 +1,6 @@
 //! Real binary composition; observations are synthetic examples, never measured SP1 truth.
+mod common;
+
 use std::{
     collections::BTreeMap,
     fs,
@@ -6,6 +8,7 @@ use std::{
     process::{Command, Output},
 };
 
+use common::trusted_temp_root;
 use raiko2_primitives_shasta::GuestInput;
 use raiko2_protocol_shasta::libhash::hash_shasta_subproof_input;
 use serde_json::json;
@@ -19,7 +22,7 @@ use zkgas::{
 struct TestDir(PathBuf);
 impl TestDir {
     fn new() -> Self {
-        let path = std::env::temp_dir().join(format!("zkgas-e2e-{}", uuid::Uuid::new_v4()));
+        let path = trusted_temp_root().join(format!("zkgas-e2e-{}", uuid::Uuid::new_v4()));
         fs::create_dir(&path).unwrap();
         Self(path)
     }

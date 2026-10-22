@@ -1,6 +1,9 @@
+mod common;
+
 use alethia_reth_evm::zk_gas::pricing::{
     MptSelectors, PricingBreakdown, ProposalPricingInput, ZkGasModel,
 };
+use common::trusted_temp_root;
 use raiko2_zkgas_trace::PricingBreakdownSnapshot;
 use serde_json::json;
 use std::{
@@ -19,8 +22,7 @@ use zkgas::{
 struct TestDir(PathBuf);
 impl TestDir {
     fn new() -> Self {
-        let path =
-            std::env::temp_dir().join(format!("zkgas-compare-test-{}", uuid::Uuid::new_v4()));
+        let path = trusted_temp_root().join(format!("zkgas-compare-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir(&path).unwrap();
         Self(path)
     }

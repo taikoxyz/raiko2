@@ -12,7 +12,8 @@ flow, and exposes a proving-work metric richer than execution steps.
 
 - Raiko2 baseline: [`5fb9f9792e9901cd40c0fb6753ba2519598a9595`](https://github.com/taikoxyz/raiko2/commit/5fb9f9792e9901cd40c0fb6753ba2519598a9595), freshly fetched `origin/main`.
 - ZisK release and `main`: [`v1.3.2-alpha`, `1e22630bb7e143c30705a1603ed87cfd3da8c6ec`](https://github.com/0xPolygonHermez/zisk/tree/1e22630bb7e143c30705a1603ed87cfd3da8c6ec).
-- ZisK guest compiler: [`zisk-4.0.0`, `ae4928fa0d3c7e4be46e8e8db185ac07436c0aa9`](https://github.com/0xPolygonHermez/rust/tree/ae4928fa0d3c7e4be46e8e8db185ac07436c0aa9).
+- Default ZisK guest compiler: [`zisk-4.0.0`, `ae4928fa0d3c7e4be46e8e8db185ac07436c0aa9`](https://github.com/0xPolygonHermez/rust/tree/ae4928fa0d3c7e4be46e8e8db185ac07436c0aa9).
+- Newer official compiler candidate: [`zisk`, `c83bf43be864c5c444d446c38f47d250d97761ca`](https://github.com/0xPolygonHermez/rust/tree/c83bf43be864c5c444d446c38f47d250d97761ca), based on Rust 1.99.0; source and release metadata verified, binary not executed.
 
 These pins describe this experiment. They are not a proposal for runtime SDK/ELF
 version checks or new zkGas policy gates. Developer-controlled builds and releases
@@ -25,7 +26,7 @@ decide when dependencies and guest programs change.
 | Reuse the proposal input and execution logic? | Yes: reuse `GuestInput` and call `prove_shasta_proposal`; transport needs an adapter. | Cross-compilation and execution on real proposal fixtures. |
 | Keep proposal proofs followed by an aggregation guest? | Yes: ZisK exposes an in-guest proof verifier; the existing carry-data and aggregation-hash helper can be reused. | Actual child-proof verification, output parity and aggregation cost. |
 | Measure more than steps/cycles without proving? | Yes: profiler weighted cost, or setup-backed execution cost in trace cells; standalone execution also reports a per-AIR instance plan. | Wall time and suitability of each path for Taiko workloads. |
-| Compile latest Raiko2 with the current official ZisK compiler? | Not directly: Raiko2 and its reth dependencies require Rust 1.95; ZisK's selected compiler is based on Rust 1.94. | A suitable newer ZisK compiler or a validated custom toolchain. |
+| Compile latest Raiko2 with a ZisK compiler? | The default selection is Rust 1.94 and fails the declared Rust 1.95 minimum. An official Rust 1.99 source/tag and compiler archive are available as a candidate. | Actual compiler version from the archive, SDK compatibility and cross-compilation of our guest dependency graph. |
 
 ## Proposal input and guest execution
 
@@ -154,21 +155,40 @@ Evidence: [SDK execute-only client](https://github.com/0xPolygonHermez/zisk/blob
 [profiler cost report](https://github.com/0xPolygonHermez/zisk/blob/1e22630bb7e143c30705a1603ed87cfd3da8c6ec/emulator/src/stats/stats.rs),
 [operation weights](https://github.com/0xPolygonHermez/zisk/blob/1e22630bb7e143c30705a1603ed87cfd3da8c6ec/emulator/src/emu_costs.rs).
 
-## Compiler obstacle and next verification
+## Compiler selection and next verification
 
 The CLI selects the newest `zisk-4.x.y` toolchain tag, not the repository's older
 GitHub `releases/latest` pointer. At investigation time that selects
 `zisk-4.0.0`; its [`src/version`](https://github.com/0xPolygonHermez/rust/blob/ae4928fa0d3c7e4be46e8e8db185ac07436c0aa9/src/version)
-is `1.94.0`. Current Raiko2, alethia-reth and reth declare Rust 1.95. Installing the
-current official ZisK toolchain alone would not resolve that requirement.
+is `1.94.0`. Current Raiko2, alethia-reth and reth declare Rust 1.95, so the default
+installation does not satisfy their minimum version.
 
-The preferred next step is to obtain a ZisK-compatible Rust 1.95+ compiler, or
-validate a custom build of its toolchain. Do not downgrade the shared reth pins or
-ignore MSRV checks and call that current-main compatibility.
+A follow-up inspection found that ZisK has already upgraded another compiler
+line: commit [`c83bf43`](https://github.com/0xPolygonHermez/rust/commit/c83bf43be864c5c444d446c38f47d250d97761ca)
+is titled "Update Rust to version 1.99.0", its `src/version` is `1.99.0`, and it
+includes the `riscv64ima-zisk-zkvm-elf` target. The official
+[`zisk` release](https://github.com/0xPolygonHermez/rust/releases/tag/zisk), published
+2026-10-15, contains Linux x86_64 and macOS ARM64 toolchain archives. At inspection
+time the `zisk` tag resolves to that commit. The Linux archive's published SHA-256
+is `21a895087d34491fbf9047d83c7ae9703d7e8b2599601303ce5d9f6411ed80ca`.
 
-After resolving the compiler requirement, the smallest useful verification is:
+The current installer supports an explicit `--toolchain-version` override, but
+its default major-4 selector excludes the `zisk` tag. This is a compiler-selection
+and compatibility-test problem, not evidence that ZisK cannot upgrade. A release
+archive and newer source do not yet prove that our guest builds or that this
+compiler/SDK combination works.
 
-1. Build only the proposal wrapper and execute saved, complete Mainnet and Hoodi
+The preferred next step is to validate this official 1.99 candidate in an
+isolated build environment, pinning the resolved commit/archive digest instead
+of relying on a moving tag. Do not downgrade shared reth pins or ignore MSRV
+checks to make the old default compiler appear compatible. The installer cleans
+and changes its configured installation directory and toolchain registration;
+inspect that behavior before running it and use an isolated environment.
+
+The smallest useful verification is:
+
+1. Check the candidate compiler binary's version and target support, then build
+   only the proposal wrapper and execute saved, complete Mainnet and Hoodi
    proposal fixtures through the shared validation path. Compare the exact
    32-byte public output with the native result; record input size, elapsed time
    and memory.
@@ -183,6 +203,28 @@ After resolving the compiler requirement, the smallest useful verification is:
 4. Only after these measurements add the normal `ProverBackend` ELF selector,
    `Prover` implementation and public route/config wiring. Keep experimental cost
    collection independent of any decision to update a production zkGas table.
+
+## Recommended approach for multiple vendors
+
+Keep one shared proposal/aggregation implementation and canonical input/output
+semantics. Give each vendor its own guest workspace, Cargo lockfile, crypto
+patches, compiler and build image. The existing SP1/RISC0 guest workspaces already
+provide part of this separation; a ZisK workspace should follow the same pattern.
+The host compiler need not match any guest compiler. Record the complete build
+combination with its ELF/VK artifacts; do not add runtime SDK-version gates.
+
+Isolation resolves conflicting SDK/build environments, but cannot make Rust 1.94
+compile a shared dependency that requires 1.95. Shared dependency upgrades must
+be checked against each active vendor's actual guest build. When a vendor lags,
+prefer its newer compatible toolchain; otherwise its backend upgrade remains
+pending. Do not silently give that vendor older execution semantics. Reusing an
+older guest artifact is acceptable only when it still implements the required
+fork and relevant fixes and has verified input/output compatibility.
+
+Compare complete fixtures and the shared public hashes across vendor builds;
+compiler version equality is not the compatibility criterion. Keep workload
+metrics separately named and versioned because vendor cost units differ even
+when the same proposal is proven.
 
 This investigation checked source and release metadata only. There is no local
 ZisK toolchain/CLI available, and no proposal, child proof, aggregation or timing

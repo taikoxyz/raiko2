@@ -35,7 +35,7 @@ This directory contains the contributor- and operator-facing documentation for `
 
 The [ZisK integration feasibility note](zisk-integration-feasibility.md) records the
 2026-10-23 source investigation of proposal input reuse, sub-proof aggregation and
-proving-work metrics, including the outstanding compiler requirement.
+proving-work metrics, including compiler selection and compatibility checks.
 
 The files under [`plans/`](plans) and [`issues/`](issues) are design, implementation, and review
 notes. Not all of them are historical — `plans/README.md` tracks plans in `Draft for discussion`,

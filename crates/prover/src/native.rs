@@ -246,7 +246,7 @@ mod tests {
 
     fn fixture_guest_input() -> GuestInput {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../test/guest_inputs/shasta/taiko_hoodi/proposals/proposal_17460.json");
+            .join("../../tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_41455_l2_12556056_12556247.json");
         let raw = fs::read_to_string(&path)
             .unwrap_or_else(|err| panic!("read fixture {}: {err}", path.display()));
         let mut guest_input: GuestInput =

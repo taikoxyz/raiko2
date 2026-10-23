@@ -339,6 +339,9 @@ mod tests {
     use raiko2_primitives::{ProofType, ProverConfig, SupportedChainSpecs, WitnessHeader};
     use raiko2_primitives_shasta::{GuestInput, build_proof_carry_data_from_witness_spec};
     use raiko2_protocol_shasta::TaikoManifest;
+
+    const MAINNET_UNZEN_TIMESTAMP: u64 = 1_786_021_200;
+
     sol! {
         #[derive(Debug)]
         struct AnchorV4Checkpoint {
@@ -422,8 +425,9 @@ mod tests {
         input.taiko.proposal_event.proposal.id =
             input.taiko.proposal_id.try_into().expect("fits in uint48");
         input.taiko.proposal_event.proposal.proposer = Address::from([0x33; 20]);
-        input.taiko.proposal_event.proposal.timestamp =
-            123u64.try_into().expect("timestamp fits in uint48");
+        input.taiko.proposal_event.proposal.timestamp = MAINNET_UNZEN_TIMESTAMP
+            .try_into()
+            .expect("timestamp fits in uint48");
         input.taiko.proposal_event.proposal.parentProposalHash = B256::from([0x44; 32]);
         input.taiko.proposal_event.proposal.originBlockNumber =
             l1_header.number.try_into().expect("fits in uint48");

@@ -3,12 +3,11 @@
 The `shasta` in this fixture's filename is a frozen identifier, not a fork selector. See the
 `Frozen identifier` entry in [../../CONTEXT.md](../../CONTEXT.md).
 
-The fixture's contents do predate Unzen. Its blocks are mainnet `9051439`-`9051630`, timestamped
-2026-07-22, and mainnet activated Unzen on 2026-08-06, so it exercises the pre-Unzen
-`SpecId::SHANGHAI` rules. It is still the checked-in fixture the tests below use; there is no
-post-activation replacement yet.
+The fixture contains real post-Unzen mainnet blocks `12556056`-`12556247`. Proposal timestamp
+`1791755639` is after mainnet's Unzen activation at `1786021200`. Raiko2 proposal validation,
+proving, and zkGas quoting require both the proposal and every witness block to be Unzen or later.
 
-`shasta_guest_input_taiko_mainnet_proposal_23077_l2_9051439_9051630.json` is a checked-in
+`shasta_guest_input_taiko_mainnet_proposal_41455_l2_12556056_12556247.json` is a checked-in
 `GuestInput` fixture used by:
 
 - `bin/raiko2/src/server/fixture.rs`
@@ -37,17 +36,19 @@ the repo-local calibration skill; do not hand-edit fixture observations or audit
 
 ## Provenance
 
-This fixture was generated on 2026-07-22 from a real Taiko mainnet preflight using:
+This fixture was generated from a real post-Unzen Taiko mainnet preflight using:
 
-- `proposal_id = 23077`
-- `l2_start = 9051439`
-- `l2_end = 9051630`
-- `l1_inclusion_block_number = 25585003`
-- `last_anchor_block_number = 25584933`
+- `proposal_id = 41455`
+- `l2_start = 12556056`
+- `l2_end = 12556247`
+- `l1_inclusion_block_number = 26172029`
+- `last_anchor_block_number = 26171960`
+- `proposal_timestamp = 1791755639`
 - `l2_chain_id = 167000`
 
-The generated input passed current native guest-input validation and includes the blob commitments
-and proofs required to verify blob-backed proposal data.
+The input includes the blob commitments and proofs required to verify blob-backed proposal data.
+The checked-in JSON is copied byte-for-byte from the retained preflight input, with SHA-256
+`20c76ab78f7bde77612f28d82f734912247ee905fd682de0568d9013053cc575`.
 
 ## Regenerate
 
@@ -57,13 +58,12 @@ target/debug/preflight \
   --l1-rpc-url https://ethereum-rpc.publicnode.com \
   --l2-chain-id 167000 \
   --l1-chain-id 1 \
-  --proposal-id 23077 \
-  --l1-inclusion-block-number 25585003 \
-  --last-anchor-block-number 25584933 \
-  --l2-start 9051439 \
-  --l2-end 9051630 \
+  --proposal-id 41455 \
+  --l1-inclusion-block-number 26172029 \
+  --last-anchor-block-number 26171960 \
+  --l2-start 12556056 \
+  --l2-end 12556247 \
   --proof-type native \
   --validate \
-  --pretty \
-  --output tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_23077_l2_9051439_9051630.json
+  --output tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_41455_l2_12556056_12556247.json
 ```

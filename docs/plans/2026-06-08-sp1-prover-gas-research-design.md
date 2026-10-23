@@ -43,7 +43,7 @@ Keep the existing single-input command working:
 ```bash
 cargo run -r -p xtask -- bench-guest sp1 \
   --skip-build-guest \
-  --input ./tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_23077_l2_9051439_9051630.json \
+  --input ./tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_41455_l2_12556056_12556247.json \
   --repeat 3 \
   --json-out /tmp/sp1-prover-gas.json
 ```
@@ -54,8 +54,8 @@ Add a suite manifest for multi-case runs:
 {
   "cases": [
     {
-      "name": "mainnet-proposal-23077",
-      "input": "./tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_23077_l2_9051439_9051630.json",
+      "name": "mainnet-proposal-41455",
+      "input": "./tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_41455_l2_12556056_12556247.json",
       "proof_type": "sp1"
     }
   ]

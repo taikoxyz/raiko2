@@ -1428,14 +1428,15 @@ Operator notes:
   does not gate on network name, block count, or total zkGas; block count remains an M2 formula
   input. Combinations outside the collected sample rectangles are deliberately admitted without a
   per-request error proof. Size that acceptance concretely: the collected rectangles are
-  `block_count` 155-192 and `total_zkgas` 216314230-562107601, and 192 is the pre-Unzen
-  derivation-source block limit. Unzen raises that protocol limit to 768, and estimation only runs
+  `block_count` 155-192 and `total_zkgas` 216314230-562107601. The supported Unzen
+  derivation-source block limit is 768, and estimation only runs
   on exact-Unzen input, so an admitted proposal can carry up to four times the calibrated block
   count. Totals above the effective `proposal_zkgas_warning_threshold` (default `1000000000`) remain
   estimated and emit a warning with the total, threshold, estimate, and model ID so operators can
-  select offline calibration samples. Pre-Unzen, later-fork, lower-`execution_po2`, zero-zkGas, and
+  select offline calibration samples. Later-fork, lower-`execution_po2`, zero-zkGas, and
   arithmetic-overflow inputs emit a different warning and perform exactly one local evaluation. A
-  malformed or structurally invalid input fails directly rather than falling back.
+  malformed or structurally invalid input fails directly rather than falling back. Proposal or
+  witness timestamps before Unzen fail shared input validation.
 - Estimated aggregation derives the journal on the host and quotes `180 * child_count` mcycles for
   every structurally valid, non-empty input. Historical child-count observations are audit data,
   never a runtime allowlist. The v4 API accepts 1-1024 proposals, so the quote ranges from 180 to

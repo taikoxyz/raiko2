@@ -903,11 +903,11 @@ async fn e2e_v4_native_proposal_and_aggregate_complete_from_fixture() {
         "proof_type": "native",
         "aggregate": true,
         "proposals": [{
-            "proposal_id": 23077,
-            "l1_inclusion_block_number": 25585003,
-            "l2_block_number_start": 9051439,
-            "l2_block_number_end": 9051630,
-            "last_anchor_block_number": 25584933
+            "proposal_id": 41455,
+            "l1_inclusion_block_number": 26172029,
+            "l2_block_number_start": 12556056,
+            "l2_block_number_end": 12556247,
+            "last_anchor_block_number": 26171960
         }]
     });
 

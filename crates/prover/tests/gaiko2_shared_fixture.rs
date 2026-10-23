@@ -19,12 +19,12 @@ fn shared_shasta_fixture_adapts_into_stable_remote_prover_v1_packet() {
     assert_eq!(payload.witnesses.len(), 192);
     assert_eq!(
         payload.proof_carry_data.transition_input.proposal_id,
-        23_077
+        41_455
     );
-    assert_eq!(payload.witnesses[0].block.header.number, 9_051_439);
-    assert_eq!(payload.witnesses[191].block.header.number, 9_051_630);
+    assert_eq!(payload.witnesses[0].block.header.number, 12_556_056);
+    assert_eq!(payload.witnesses[191].block.header.number, 12_556_247);
     assert_eq!(payload.witnesses[0].witness.headers.len(), 256);
-    assert_eq!(payload.witnesses[0].witness.state.len(), 90);
+    assert_eq!(payload.witnesses[0].witness.state.len(), 107);
     assert!(payload.witnesses[0].witness.state_indices.is_empty());
     assert!(
         payload.witnesses[0]
@@ -38,5 +38,5 @@ fn shared_shasta_fixture_adapts_into_stable_remote_prover_v1_packet() {
 
 fn shared_fixture_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_23077_l2_9051439_9051630.json")
+        .join("../../tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_41455_l2_12556056_12556247.json")
 }

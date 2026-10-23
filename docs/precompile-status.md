@@ -11,8 +11,8 @@ It answers three separate questions:
 
 Use this file together with:
 
-- the upstream `alethia-reth` `crates/evm/src/spec.rs` tests at rev `0fb47d9`, which `Cargo.toml`
-  pins
+- the upstream `alethia-reth` `crates/evm/src/spec.rs` tests at rev `f09235e`, the `origin/main`
+  merge commit directly pinned by the Raiko2 Alethia v2.6 manifests
 - `guests/risc0/src/crypto.rs`
 - `guests/sp1/src/crypto.rs`
 
@@ -28,14 +28,18 @@ and every other Taiko fork falls through to `SpecId::SHANGHAI`. The two agree, b
 no callers outside that file: it feeds chain-spec validation and preflight cache identity, not guest
 execution. Editing it does not change what the guest runs.
 
-This document describes `revm-precompile` version `41.0.0`, which is what both guests pin
-(`guests/sp1/Cargo.toml`, `guests/risc0/Cargo.toml`) and what the Alethia execution path uses through
-Reth rev `f2eecc65`. Each guest lockfile resolves a single `revm-precompile` copy. The guest-specific
-`install_crypto` calls therefore register hooks into the same `41.0.0` global used by execution.
-The guests are excluded from the root workspace, so they still carry independent lockfiles and the
-root lockfile does not govern them.
+This document describes `revm-precompile` version `43.0.3`, used by the Alethia v2.6 execution
+path. `guests/risc0/Cargo.toml` directly pins `revm-precompile` `43.0.3`, while
+`guests/sp1/Cargo.toml` directly pins both `revm` and `revm-precompile` `43.0.3`. The guest-specific
+`install_crypto` calls therefore register hooks into the same `43.0.3` global used by execution.
 
-In `41.0.0`, `SHANGHAI` collapses to `PrecompileSpecId::BERLIN` while `OSAKA` maps to
+Each guest lockfile also retains `revm-precompile` `41.0.0` through `taiko-mono`'s `protocol`
+dependency and its older Alethia `0fb47d9` / Reth `f2eecc65` graph. There are consequently two
+`revm-precompile` copies in each guest lockfile; the `41.0.0` copy belongs to that retained graph,
+not the Alethia v2.6 execution and guest-hook path described here. The guests are excluded from the
+root workspace, so they carry independent lockfiles and the root lockfile does not govern them.
+
+In `43.0.3`, `SHANGHAI` collapses to `PrecompileSpecId::BERLIN` while `OSAKA` maps to
 `PrecompileSpecId::OSAKA`, composed as:
 
 ```

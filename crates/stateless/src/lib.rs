@@ -9,18 +9,33 @@
 //! using state proofs and witness data.
 
 mod analysis;
+#[cfg(feature = "mpt-metrics")]
+mod mpt_metrics;
 mod sparse;
 mod trie;
 mod validation;
 mod witness_db;
 
 pub use crate::analysis::{WitnessMaterializationStats, analyze_block_with_witness_resources};
+#[cfg(feature = "mpt-metrics")]
+pub use crate::mpt_metrics::{
+    MptHashMetrics, MptHydrationMetrics, MptMaterializationMetrics, MptMutationMetrics,
+    MptNodeKindCounts, MptReadMetrics, MptWorkloadMetrics,
+};
 pub use crate::trie::StatelessTrie;
 pub use raiko2_primitives::{ExecutionWitness, StatelessValidationError};
 pub use validation::{
-    FilteredBlockExecutionOutcome, read_parent_storage_with_witness_resources,
+    DerivedBlockExecutor, FilteredBlockExecutionOutcome,
+    read_parent_storage_with_witness_resources,
+    reconstruct_block_from_transactions_with_executor_and_witness_resources,
     reconstruct_block_from_transactions_with_witness_resources, validate_block,
     validate_block_with_ancestor_headers, validate_block_with_witness_resources,
+};
+#[cfg(feature = "mpt-metrics")]
+pub use validation::{
+    read_parent_storage_with_mpt_metrics,
+    reconstruct_block_from_transactions_with_executor_and_mpt_metrics,
+    reconstruct_block_from_transactions_with_mpt_metrics,
 };
 
 #[cfg(test)]

@@ -23,6 +23,7 @@ use risc0_ethereum_trie::Trie;
 use taiko_client_protocol::FixedKSigner;
 
 const ANCHOR_BLOCK_STATE_SLOT: u64 = 256;
+const MAINNET_UNZEN_TIMESTAMP: u64 = 1_786_021_200;
 const TEST_PARENT_ANCHOR_BLOCK_NUMBER: u64 = 7;
 const TEST_SHASTA_BLOCK_NUMBER: u64 = 1_166_000;
 
@@ -189,8 +190,9 @@ fn guest_input_with_single_block() -> GuestInput {
         .try_into()
         .expect("fits in uint48");
     guest_input.taiko.proposal_event.proposal.proposer = Address::from([0x33; 20]);
-    guest_input.taiko.proposal_event.proposal.timestamp =
-        123u64.try_into().expect("timestamp fits in uint48");
+    guest_input.taiko.proposal_event.proposal.timestamp = MAINNET_UNZEN_TIMESTAMP
+        .try_into()
+        .expect("timestamp fits in uint48");
     guest_input.taiko.proposal_event.proposal.parentProposalHash = B256::from([0x44; 32]);
     guest_input.taiko.proposal_event.proposal.originBlockNumber =
         l1_header.number.try_into().expect("fits in uint48");
@@ -204,7 +206,7 @@ fn guest_input_with_single_block() -> GuestInput {
 fn canonical_inline_source_guest_input() -> GuestInput {
     let mut guest_input = guest_input_with_single_block();
     let chain_spec = guest_input.witnesses[0].chain_spec.clone();
-    let parent_timestamp = 1_775_135_700u64;
+    let parent_timestamp = MAINNET_UNZEN_TIMESTAMP;
     let block_timestamp = parent_timestamp + 1;
     let proposal_timestamp = parent_timestamp + 100;
     let (parent_state_root, parent_state_nodes) =
@@ -506,7 +508,7 @@ fn rejects_canonical_inline_source_derivation() {
 #[test]
 fn rejects_force_inclusion_as_last_source() {
     let mut guest_input = canonical_inline_source_guest_input();
-    guest_input.witnesses[0].block.header.timestamp = 1_775_393_400;
+    guest_input.witnesses[0].block.header.timestamp = MAINNET_UNZEN_TIMESTAMP;
     guest_input.proof_carry_data.verifier = guest_input.witnesses[0]
         .chain_spec
         .get_fork_verifier_address(

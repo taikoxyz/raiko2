@@ -5,11 +5,10 @@
 
 use alloy_primitives::{Bytes, U256, b256};
 use raiko2_protocol_shasta::shasta::constants::{
-    DERIVATION_SOURCE_MAX_BLOCKS, TAIKO_DEVNET_CHAIN_ID, TAIKO_HOODI_CHAIN_ID,
-    TAIKO_MAINNET_CHAIN_ID, UNZEN_DERIVATION_SOURCE_MAX_BLOCKS,
-    derivation_source_max_blocks_for_chain_timestamp, max_anchor_offset_for_chain,
-    min_base_fee_for_chain, shasta_fork_condition_for_chain, shasta_fork_timestamp_for_chain,
-    timestamp_max_offset_for_chain,
+    TAIKO_DEVNET_CHAIN_ID, TAIKO_HOODI_CHAIN_ID, TAIKO_MAINNET_CHAIN_ID,
+    UNZEN_DERIVATION_SOURCE_MAX_BLOCKS, derivation_source_max_blocks_for_chain_timestamp,
+    max_anchor_offset_for_chain, min_base_fee_for_chain, shasta_fork_condition_for_chain,
+    shasta_fork_timestamp_for_chain, timestamp_max_offset_for_chain,
 };
 use raiko2_protocol_shasta::shasta::{
     AnchorV4Input, ShastaForkConfigError, calculate_shasta_difficulty, encode_extra_data,
@@ -78,18 +77,12 @@ fn shasta_chain_constants_are_chain_aware() {
 }
 
 #[test]
-fn mainnet_unzen_derivation_max_blocks_flip_at_activation() {
-    // Companion semantics check for Unzen: max blocks (192 → 768), not just verifier addresses.
+fn mainnet_unzen_derivation_max_blocks_at_activation() {
     const MAINNET_UNZEN: u64 = 1_786_021_200;
-    assert_eq!(
-        derivation_source_max_blocks_for_chain_timestamp(TAIKO_MAINNET_CHAIN_ID, MAINNET_UNZEN - 1),
-        DERIVATION_SOURCE_MAX_BLOCKS
-    );
     assert_eq!(
         derivation_source_max_blocks_for_chain_timestamp(TAIKO_MAINNET_CHAIN_ID, MAINNET_UNZEN),
         UNZEN_DERIVATION_SOURCE_MAX_BLOCKS
     );
-    assert_eq!(DERIVATION_SOURCE_MAX_BLOCKS, 192);
     assert_eq!(UNZEN_DERIVATION_SOURCE_MAX_BLOCKS, 768);
 }
 

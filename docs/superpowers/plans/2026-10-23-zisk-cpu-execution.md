@@ -33,11 +33,11 @@
 
 **Responsibility:** Root agent; downloaded artifacts and disposable execution environment only.
 
-- [ ] Fetch the two official archives and verify their published digests before extraction; inspect archive paths and executables before use.
-- [ ] Check compiler version and ZisK target support inside a network-disabled container. Capture the exact compiler/SDK executable identity and environment.
-- [ ] Check that the CPU emulator launches and supports cost statistics and binary public output without proving keys.
-- [ ] Inspect build/dependency entry points; fetch dependencies separately from execution in a disposable Cargo cache.
-- [ ] Record any compiler/SDK compatibility failure as a source or environment issue with its exact command/output, rather than downgrading shared pins.
+- [x] Fetch the two official archives and verify their published digests before extraction; inspect archive paths and executables before use.
+- [x] Check compiler version and ZisK target support inside a network-disabled container. Capture the exact compiler/SDK executable identity and environment.
+- [x] Check that the CPU emulator launches and supports cost statistics and binary public output without proving keys.
+- [x] Inspect build/dependency entry points; fetch dependencies separately from execution in a disposable Cargo cache.
+- [x] Record any compiler/SDK compatibility failure as a source or environment issue with its exact command/output, rather than downgrading shared pins.
 
 ## Task 2: Implement the guest and CPU benchmark adapter
 
@@ -45,20 +45,25 @@
 
 **Interfaces:** Consume the existing `GuestInput`, `prove_shasta_proposal`, `aggregate_shasta_zk_with_verifier`, and bincode 1.3.3. The benchmark accepts explicit input/guest ELF/emulator/output paths. It prepares framed input, computes the native expected hash, runs the CPU emulator, checks output and writes a JSON report plus raw logs/statistics.
 
-- [ ] Add failing focused tests for raw stdin framing/codec round-trip and public digest extraction, including truncation and malformed lengths/slots.
-- [ ] Implement the standalone proposal guest wrapper, using current shared dependencies and ZisK runtime. Keep dependency resolution and crypto patches isolated to this guest workspace.
-- [ ] Prepare the aggregation wrapper/proof adapter with authoritative VK handling and checked proof/public-output binding. If key material is unavailable, keep the build/enablement boundary explicit; do not insert a fake verifier or claim a genuine aggregation pass.
-- [ ] Add failure tests for process failure, missing/malformed cost data and output mismatch; implement the benchmark CLI around the official CPU emulator, with an explicit configurable execution limit and no proving operation.
-- [ ] Emit backend-specific metric names, raw breakdown, input/ELF identity, native/guest output comparison, elapsed time and measured peak RSS (or explicit absence). Preserve native errors and emulator errors.
-- [ ] Run focused unit tests and formatting. Build both proposal and aggregation code where genuine setup/program identities are available; record any unverified aggregation boundary precisely.
+- [x] Add failing focused tests for raw stdin framing/codec round-trip and public digest extraction, including truncation and malformed lengths/slots.
+- [x] Implement the standalone proposal guest wrapper, using current shared dependencies and ZisK runtime. Keep dependency resolution and crypto patches isolated to this guest workspace.
+- [x] Prepare the aggregation wrapper/proof adapter with authoritative VK handling and checked proof/public-output binding. If key material is unavailable, keep the build/enablement boundary explicit; do not insert a fake verifier or claim a genuine aggregation pass.
+- [x] Add failure tests for process failure, missing/malformed cost data and output mismatch; implement the benchmark CLI around the official CPU emulator, with an explicit configurable execution limit and no proving operation.
+- [x] Emit backend-specific metric names, raw breakdown, input/ELF identity, native/guest output comparison, elapsed time and measured peak RSS (or explicit absence). Preserve native errors and emulator errors.
+- [x] Run focused unit tests and formatting. Both targets compile; aggregation uses explicitly synthetic compile-only identities, not genuine proof artifacts. Missing keys fail clearly, and genuine aggregation remains unverified.
 
 ## Task 3: Run complete-input execution and finish review
 
 **Responsibility:** Root runs the real CPU benchmark; independent reviewer and tester inspect the complete diff and behavior.
 
-- [ ] Build the guest with the verified compiler and run the checked-in complete Mainnet proposal fixture; compare its exact hash against the shared native validator.
-- [ ] Locate any existing complete post-Unzen fixture without accessing secret files; if available, run it too. Otherwise state that current-fork execution remains unverified.
-- [ ] Save raw output/logs/statistics and a reproducible benchmark report. Repeat a small deterministic probe where useful; do not repeatedly rerun the entire expensive fixture without a reason.
-- [ ] Independently review the actual diff and verify framing, bad-exit, malformed-stats and hash-mismatch behavior. Fix confirmed findings and obtain the originator's re-check.
-- [ ] Run focused tests/builds and proportionate workspace checks. Record failures caused by environment, resources or pre-existing source separately.
-- [ ] Update the feasibility note and CPU workflow with measured results and exact commands. Commit locally on `feat/zisk-integration`; do not publish a production capability that has only compile/execution evidence.
+- [x] Build the guest with the verified compiler and run the checked-in complete Mainnet proposal fixture; compare its exact hash against the shared native validator.
+- [x] Locate and run the existing complete post-Unzen Mainnet fixture: proposal 41455; exact output equality passes.
+- [x] Save raw output/logs/statistics and a reproducible benchmark report. A real 100-step failure probe produces no success report.
+- [x] Independently review the actual diff and verify framing, bad-exit, malformed-stats and hash-mismatch behavior. The reviewer and tester rechecked the guest lockfile and C allocator fix; both full-run artifacts were independently audited.
+- [x] Run focused tests/builds and proportionate workspace checks. Focused checks pass; full-workspace Clippy is blocked by an existing RISC0 artifact download returning HTTP 400.
+- [x] Update the feasibility note and CPU workflow with measured results and exact commands; the implementation is ready for a local commit on `feat/zisk-integration`. Do not publish a production capability that has only compile/execution evidence.
+
+Measured results and reproducible commands are in
+[the CPU benchmark report](../../zisk-cpu-benchmark.md#measured-cpu-results-2026-10-23).
+No Hoodi fixture, actual proving, genuine child-proof aggregation, setup-backed
+cost measurement, production route, publication or deployment is claimed.

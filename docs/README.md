@@ -33,7 +33,8 @@ This directory contains the contributor- and operator-facing documentation for `
 
 ## Design and Review Notes
 
-The [ZisK integration feasibility note](zisk-integration-feasibility.md) records the
+The [ZisK integration feasibility note](zisk-integration-feasibility.md) and
+[CPU execution benchmark](zisk-cpu-benchmark.md) record the
 2026-10-23 source investigation of proposal input reuse, sub-proof aggregation and
 proving-work metrics, including compiler selection and compatibility checks.
 

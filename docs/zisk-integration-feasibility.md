@@ -1,8 +1,12 @@
 # ZisK integration feasibility
 
-Status: source investigation, 2026-10-23. No ZisK guest has been built or executed in
-this investigation. This note records feasibility and the next measurements; it
-does not enable a new production route.
+Status: isolated CPU integration experiment, 2026-10-23. Both guest binaries
+compile with the official Rust 1.99 compiler. Two complete 192-block Mainnet
+proposals pass CPU execution with exact native/guest public-output equality,
+including one post-Unzen proposal. Genuine proving and child-proof aggregation
+are not tested.
+This experiment does not enable a new production route. See the
+[CPU benchmark workflow](zisk-cpu-benchmark.md) for the implemented entry point.
 
 ## Scope and pinned sources
 
@@ -13,7 +17,7 @@ flow, and exposes a proving-work metric richer than execution steps.
 - Raiko2 baseline: [`5fb9f9792e9901cd40c0fb6753ba2519598a9595`](https://github.com/taikoxyz/raiko2/commit/5fb9f9792e9901cd40c0fb6753ba2519598a9595), freshly fetched `origin/main`.
 - ZisK release and `main`: [`v1.3.2-alpha`, `1e22630bb7e143c30705a1603ed87cfd3da8c6ec`](https://github.com/0xPolygonHermez/zisk/tree/1e22630bb7e143c30705a1603ed87cfd3da8c6ec).
 - Default ZisK guest compiler: [`zisk-4.0.0`, `ae4928fa0d3c7e4be46e8e8db185ac07436c0aa9`](https://github.com/0xPolygonHermez/rust/tree/ae4928fa0d3c7e4be46e8e8db185ac07436c0aa9).
-- Newer official compiler candidate: [`zisk`, `c83bf43be864c5c444d446c38f47d250d97761ca`](https://github.com/0xPolygonHermez/rust/tree/c83bf43be864c5c444d446c38f47d250d97761ca), based on Rust 1.99.0; source and release metadata verified, binary not executed.
+- Selected official compiler: [`zisk`, `c83bf43be864c5c444d446c38f47d250d97761ca`](https://github.com/0xPolygonHermez/rust/tree/c83bf43be864c5c444d446c38f47d250d97761ca); the archive reports `rustc 1.99.0-dev` and successfully compiles the guest dependency graph.
 
 These pins describe this experiment. They are not a proposal for runtime SDK/ELF
 version checks or new zkGas policy gates. Developer-controlled builds and releases
@@ -23,10 +27,10 @@ decide when dependencies and guest programs change.
 
 | Question | Source-level result | Not yet established |
 | --- | --- | --- |
-| Reuse the proposal input and execution logic? | Yes: reuse `GuestInput` and call `prove_shasta_proposal`; transport needs an adapter. | Cross-compilation and execution on real proposal fixtures. |
+| Reuse the proposal input and execution logic? | Implemented: unchanged `GuestInput`, shared `prove_shasta_proposal`, bincode 1.3 raw-frame adapter. Both complete Mainnet fixtures pass execution and public-output equality. | Hoodi fixture execution and broader input coverage. |
 | Keep proposal proofs followed by an aggregation guest? | Yes: ZisK exposes an in-guest proof verifier; the existing carry-data and aggregation-hash helper can be reused. | Actual child-proof verification, output parity and aggregation cost. |
-| Measure more than steps/cycles without proving? | Yes: profiler weighted cost, or setup-backed execution cost in trace cells; standalone execution also reports a per-AIR instance plan. | Wall time and suitability of each path for Taiko workloads. |
-| Compile latest Raiko2 with a ZisK compiler? | The default selection is Rust 1.94 and fails the declared Rust 1.95 minimum. An official Rust 1.99 source/tag and compiler archive are available as a candidate. | Actual compiler version from the archive, SDK compatibility and cross-compilation of our guest dependency graph. |
+| Measure more than steps/cycles without proving? | Measured: profiler weighted cost and breakdown; complete proposal profiling takes about 205–209 seconds on one CPU core. Source also exposes AIR plans and setup-backed cells as separate paths. | Accuracy against real proving work; AIR-plan and setup-backed execution measurements. |
+| Compile latest Raiko2 with a ZisK compiler? | The default Rust 1.94 selection is too old. The official Rust 1.99 compiler builds both wrappers with current main/reth pins. Aggregation compilation uses explicitly synthetic keys only. | Genuine proposal proofs and authenticated child aggregation. |
 
 ## Proposal input and guest execution
 
@@ -44,22 +48,22 @@ The data type is reusable, but the SDK default wire encoding differs:
 - ZisK `io::read<T>` / `ZiskStdin::write<T>` use bincode 2 standard encoding.
 - ZisK raw stdin frames carry a little-endian 8-byte length and 8-byte alignment.
 
-The smallest proposed adapter preserves the existing payload: host-side
-`bincode::serialize(&guest_input)` followed by `ZiskStdin::write_slice`, and
+The implemented adapter preserves the existing payload: host-side
+`bincode::serialize(&guest_input)` followed by framing equivalent to
+`ZiskStdin::write_slice`, and
 guest-side `ziskos::io::read_slice()` followed by bincode 1.3.3 deserialization.
 An existing RISC0-framed input file must not be passed through unchanged as ZisK
 stdin. `commit_slice(hash.as_slice())` preserves the 32 digest bytes; ZisK exposes
 64 public u32 slots, so the adapter reads the first eight slots as little-endian
 u32 bytes and checks the unused slots against the agreed padding convention.
 
-Other build work remains even though the protocol input does not need redesign:
+Backend-specific build work does not require redesigning the protocol input:
 
-- Add a ZisK guest wrapper and build lane for `riscv64ima-zisk-zkvm-elf`.
+- The standalone wrapper builds for `riscv64ima-zisk-zkvm-elf`.
 - Supply ZisK crypto hooks/patches where appropriate. Existing SP1/RISC0 patches
   are backend-specific and must not be copied as ZisK acceleration support.
-- Verify the pure Rust KZG path: the current non-`succinct` target selection uses
-  `kzg-rs`'s `standard` feature. This is source-level routing, not a claim that KZG
-  already compiles or runs efficiently on ZisK.
+- The non-`succinct` target selects `kzg-rs`'s `standard` feature. This path now
+  compiles and passes the complete fixtures; it has not been tuned for ZisK.
 - Measure allocator/input-memory requirements on full proposals, not only tiny
   samples. ZisK supports alternative allocators; choose from measurements.
 
@@ -175,23 +179,21 @@ is `21a895087d34491fbf9047d83c7ae9703d7e8b2599601303ce5d9f6411ed80ca`.
 The current installer supports an explicit `--toolchain-version` override, but
 its default major-4 selector excludes the `zisk` tag. This is a compiler-selection
 and compatibility-test problem, not evidence that ZisK cannot upgrade. A release
-archive and newer source do not yet prove that our guest builds or that this
-compiler/SDK combination works.
+archive and newer source alone did not establish compatibility; the subsequent
+CPU experiment builds both wrappers and runs the complete proposal fixtures.
 
-The preferred next step is to validate this official 1.99 candidate in an
-isolated build environment, pinning the resolved commit/archive digest instead
-of relying on a moving tag. Do not downgrade shared reth pins or ignore MSRV
-checks to make the old default compiler appear compatible. The installer cleans
-and changes its configured installation directory and toolchain registration;
-inspect that behavior before running it and use an isolated environment.
+The CPU experiment validates this official 1.99 compiler in an isolated build
+environment, pinning the resolved commit/archive digest instead of relying on a
+moving tag. It does not downgrade shared reth pins or ignore MSRV checks. The
+installer cleans and changes its configured installation directory and toolchain
+registration; the experiment instead extracts verified archives and registers
+the compiler only in a disposable container-mounted rustup home.
 
-The smallest useful verification is:
+Verification status and subsequent work:
 
-1. Check the candidate compiler binary's version and target support, then build
-   only the proposal wrapper and execute saved, complete Mainnet and Hoodi
-   proposal fixtures through the shared validation path. Compare the exact
-   32-byte public output with the native result; record input size, elapsed time
-   and memory.
+1. Done for two complete Mainnet fixtures: compiler/target checks, wrapper builds,
+   complete execution, exact 32-byte native/guest equality, size, elapsed time and
+   memory measurement. No complete Hoodi fixture was available for this run.
 2. For the same ELF/inputs, capture profiler weighted cost, standalone AIR plans
    and setup-backed cells as separate metrics. Check reproducibility and inspect
    which operations dominate. No proving is needed for these cost samples.
@@ -226,7 +228,7 @@ compiler version equality is not the compatibility criterion. Keep workload
 metrics separately named and versioned because vendor cost units differ even
 when the same proposal is proven.
 
-This investigation checked source and release metadata only. There is no local
-ZisK toolchain/CLI available, and no proposal, child proof, aggregation or timing
-test has run. The machine also had approximately 5 GiB free at inspection time;
-large proving artifacts should not be downloaded as an incidental research step.
+The CPU lane is deliberately narrower than a production backend: no server
+configuration, prover routing, deployed ELF assets or zkGas policy is changed.
+Genuine proof generation and child-proof verification remain a subsequent,
+prover-backed experiment; no proving keys are downloaded by this lane.

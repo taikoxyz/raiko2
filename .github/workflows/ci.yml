@@ -339,6 +339,9 @@ jobs:
       - name: test prover
         run: cargo test -p raiko2-prover --lib
 
+      - name: test guest launcher
+        run: cargo test -p guest-launcher --bin guest-launcher
+
       - name: test optional Boundless S3 support
         run: cargo test -p raiko2-prover --lib --features boundless-s3
 

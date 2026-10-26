@@ -4,8 +4,8 @@ The `shasta` in this fixture's filename is a frozen identifier, not a fork selec
 `Frozen identifier` entry in [../../CONTEXT.md](../../CONTEXT.md).
 
 The fixture contains real post-Unzen mainnet blocks `12556056`-`12556247`. Proposal timestamp
-`1791755639` is after mainnet's Unzen activation at `1786021200`. Raiko2 proposal validation,
-proving, and zkGas quoting require both the proposal and every witness block to be Unzen or later.
+`1791755639` is after mainnet's Unzen activation at `1786021200`. Raiko2 proposal validation and
+proving require both the proposal and every witness block to be Unzen or later.
 
 `shasta_guest_input_taiko_mainnet_proposal_41455_l2_12556056_12556247.json` is a checked-in
 `GuestInput` fixture used by:

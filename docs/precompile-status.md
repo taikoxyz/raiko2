@@ -11,8 +11,8 @@ It answers three separate questions:
 
 Use this file together with:
 
-- the upstream `alethia-reth` `crates/evm/src/spec.rs` tests at rev `f09235e`, the `origin/main`
-  merge commit directly pinned by the Raiko2 Alethia v2.6 manifests
+- the upstream `alethia-reth` `crates/evm/src/spec.rs` tests at the explicit `rev` pinned in
+  [`Cargo.toml`](../Cargo.toml), the source of truth for the active Alethia v2.6 revision
 - `guests/risc0/src/crypto.rs`
 - `guests/sp1/src/crypto.rs`
 

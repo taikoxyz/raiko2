@@ -9,8 +9,8 @@ Home / [Docs](docs/README.md) / [Architecture](docs/architecture.md) / [API](doc
 Raiko2 is a proposal proof service for Taiko. It builds canonical guest inputs from RPC data,
 validates them, runs local or remote proving routes, and exposes a typed v4 API for
 asynchronous proposal-side proof requests. Every Taiko network runs the Unzen fork, and Raiko2
-supports proposal validation, proving, and zkGas quoting only for Unzen and later. Both proposal
-timestamps and every witness block timestamp must meet the input chain's built-in Unzen activation.
+supports proposal validation and proving only for Unzen and later. Both proposal timestamps and every
+witness block timestamp must meet the input chain's built-in Unzen activation.
 
 ## At a Glance
 
@@ -263,7 +263,11 @@ For the first external provider migration, see
 - `crates/pipeline`: preflight, manifest building, and validation wiring
 - `crates/prover`: prover backends and aggregation adapters
 - `xtask`: guest build, verifier registration, benchmarking, and release automation
-- [`bin/zkgas`](bin/zkgas/README.md): local quote, comparison, and reporting tools for zkGas evaluation
+
+Experimental zkGas quote, comparison, and reporting tools are maintained in the companion
+[`feat/zkgas-shadow-internal`](https://github.com/taikoxyz/raiko2/tree/feat/zkgas-shadow-internal)
+branch. That branch consumes the maintained alethia-reth shadow-pricing APIs; production pins
+reviewed commits from alethia-reth `main`.
 
 ## License
 

@@ -1,9 +1,9 @@
 # Proposal Regression Tool
 
 The `shasta` in the script, config, and directory names below is a frozen identifier, not a fork
-selector. These are the current tools. The selected proposal determines which fork is exercised:
-current proposals run under Unzen, while historical proposals replay under their original fork
-rules. See the `Frozen identifier` entry in [../../CONTEXT.md](../../CONTEXT.md).
+selector. These are the current online tools. Positive proposal validation requires the proposal
+and every witness block to be Unzen or later; historical pre-Unzen inputs are unsupported. See the
+`Frozen identifier` entry in [../../CONTEXT.md](../../CONTEXT.md).
 
 ## Setup
 
@@ -47,10 +47,23 @@ Use `stress_shasta_proposal.py` for live regression against a running `raiko2` h
 full proposal metadata from L1/L2, submits HTTP proof requests to `--raiko-rpc`, and is the
 right path for SGX, SGXGETH, remote-prover, queue, and API status checks.
 
-Use `shasta_regression.py` for file-based local replay. It runs `preflight` to materialize
-`GuestInput` and then runs `guest-launcher` without a `raiko2` server. For current preflight,
-feed it metadata from `stress_shasta_proposal.py --discover-only --proposal-out`; `--range` and
-`--count` are only lightweight L2 span discovery helpers.
+Use `shasta_regression.py` for online file-based regression. A non-discovery run always runs
+`preflight` against RPC to materialize `GuestInput`, then runs `guest-launcher` without a `raiko2`
+server. For current preflight, feed it metadata from
+`stress_shasta_proposal.py --discover-only --proposal-out`; `--range` and
+`--count` are only lightweight L2 span discovery helpers. It is not a runner for already cached
+external inputs. Online runs may follow latest software and current completed proposals.
+
+For future offline proposal regression, use fixed Unzen-or-later fixtures from
+[`taikoxyz/zkgas-bench`](https://github.com/taikoxyz/zkgas-bench), starting with
+[`mainnet-unzen-proposal-41455-v1`](https://github.com/taikoxyz/zkgas-bench/tree/main/fixtures/regressions/mainnet-unzen-proposal-41455-v1).
+Follow [the acquisition and replay workflow](../../docs/development.md#guestinput-replay): pin the
+fixture revision, acquire and verify the Release asset once, then execute the cached JSON without
+RPC using `guest-launcher --input`, preserving the supplied proof-carry context. The existing
+`xtask replay-guest-input` helper reconstructs native context and rejects this case; do not rewrite
+the fixture or expected result to make it fit that helper. The candidate software may be newer
+than the fixture producer. Consumers own runners, assertions, backend
+selection, and execution frequency; ordinary unit/protocol tests keep their local fixtures.
 
 For SP1 prover-gas research, use `stress_shasta_proposal.py` only to discover the proposal tuple,
 then run `preflight` once and reuse the generated `GuestInput` with `xtask bench-guest sp1
@@ -138,21 +151,22 @@ Use `--l1-rpc`, `--l2-rpc`, `--event-contract`, `--abi-file`, and `--anchor-abi-
 overrides for non-standard environments. Fork-specific ABI files live under
 `scripts/regression/shasta/`.
 
-Then run `preflight` directly against one discovered proposal. The proposal tuple stays explicit,
-while RPC URLs and chain IDs come from the chain specs selected by `--l1-network` and `--network`:
+Then run `preflight` directly against a post-Unzen proposal (mainnet `41455` below). The tuple
+stays explicit, while RPC URLs and chain IDs come from the chain specs selected by `--l1-network`
+and `--network`:
 
 ```bash
 cargo run -r -p preflight -- \
-  --l1-network hoodi \
-  --network taiko_hoodi \
-  --proposal-id 17771 \
-  --l1-inclusion-block-number 2674375 \
-  --last-anchor-block-number 2674326 \
-  --l2-start 7225402 \
-  --l2-end 7225593 \
+  --l1-network ethereum \
+  --network taiko_mainnet \
+  --proposal-id 41455 \
+  --l1-inclusion-block-number 26172029 \
+  --last-anchor-block-number 26171960 \
+  --l2-start 12556056 \
+  --l2-end 12556247 \
   --proof-type native \
   --validate \
-  --output /tmp/proposal-17771.json
+  --output /tmp/proposal-41455.json
 ```
 
 Use `--rpc-url` and `--l1-rpc-url` only when you need to override the chain spec defaults. Use
@@ -166,23 +180,28 @@ For a host-side native replay after preflight, run the guest launcher against th
 
 ```bash
 cargo run -r -p guest-launcher -- \
+  --stage proposal \
   --proof-type native \
   --mode prove \
-  --input /tmp/proposal-17771.json \
-  --output /tmp/proposal-17771.native-proof.json
+  --input /tmp/proposal-41455.json \
+  --output /tmp/proposal-41455.native-mock.json
 ```
 
-For a direct `raiko2-sgx-prover` check without a `raiko2` server, convert the guest input into a
-request envelope that includes the full `GuestInput` and post it to the SGX prover:
+Native `--mode prove` performs replay and produces mock output; it does not generate a ZK or TEE
+proof. Native `--mode execute` is unsupported.
+
+For a direct `raiko2-sgx-prover` check without a `raiko2` server, convert the guest input using the
+existing adapter and post the resulting request to the SGX prover. The adapter materializes shared
+witness references; wrapping raw GuestInput JSON in an envelope is insufficient:
 
 ```bash
 cargo run -r -p raiko2-prover --example dump_gaiko2_shasta_fixture -- \
-  target/regression/proposal-17771.json \
-  target/regression/proposal-17771.raiko2-sgx-request.json
+  /tmp/proposal-41455.json \
+  /tmp/proposal-41455.raiko2-sgx-request.json
 
 curl -sS \
   -H 'content-type: application/json' \
-  --data-binary @/tmp/proposal-17771.raiko2-sgx-request.json \
+  --data-binary @/tmp/proposal-41455.raiko2-sgx-request.json \
   "${RAIKO2_REMOTE_SGX_BASE_URL:-http://127.0.0.1:9090}/prove/shasta"
 ```
 

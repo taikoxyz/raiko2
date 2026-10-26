@@ -1,4 +1,4 @@
-# Proposal GuestInput Fixture
+# Local Test Fixtures
 
 The `shasta` in this fixture's filename is a frozen identifier, not a fork selector. See the
 `Frozen identifier` entry in [../../CONTEXT.md](../../CONTEXT.md).
@@ -7,12 +7,26 @@ The fixture contains real post-Unzen mainnet blocks `12556056`-`12556247`. Propo
 `1791755639` is after mainnet's Unzen activation at `1786021200`. Raiko2 proposal validation and
 proving require both the proposal and every witness block to be Unzen or later.
 
+Future offline Raiko/Gaiko proposal regression uses pinned external fixtures from
+[`taikoxyz/zkgas-bench`](https://github.com/taikoxyz/zkgas-bench), beginning at Unzen. The shared
+[`mainnet-unzen-proposal-41455-v1`](https://github.com/taikoxyz/zkgas-bench/tree/main/fixtures/regressions/mainnet-unzen-proposal-41455-v1)
+case records input provenance, Release asset checksums, and its expected public commitment.
+See [external fixture acquisition and offline replay](../../docs/development.md#guestinput-replay)
+for consumer commands. Replay this case with `guest-launcher` to preserve its supplied proof-carry
+context; the existing `xtask replay-guest-input` helper reconstructs native context and rejects this
+case. Pin the fixture revision independently of the candidate software revision; online regression
+may follow current software and chain data. Execution tools, adapters, backend
+choices, and test policy remain in the consuming repositories.
+
+The local fixtures below remain for unit, API, and protocol tests. Ordinary tests must not fetch the
+private shared repository or acquire its Release assets.
+
 `shasta_guest_input_taiko_mainnet_proposal_41455_l2_12556056_12556247.json` is a checked-in
 `GuestInput` fixture used by:
 
 - `bin/raiko2/src/server/fixture.rs`
 - `crates/primitives-shasta/tests/guest_input_bincode_roundtrip.rs`
-- `docs/development.md`
+- local guest benchmarking examples in `docs/development.md`
 
 It replaces the old untracked repo-root `test.json` workflow.
 
@@ -24,10 +38,11 @@ The aggregate fixture defines the strict `raiko2`-owned request contract for:
 
 - `raiko2-shasta-aggregate-request-v1`
 
-Current gaiko2 proposal requests are generated from the shared `GuestInput` fixture as
+Current gaiko2 proposal requests are generated from a `GuestInput` fixture as
 `raiko2-shasta-request-v1` packets with `payload.guest_input`. Provider-specific repositories may
-keep their own copies, but `raiko2` owns the adapter behavior and validates it in
-`crates/prover/tests/remote_prover_fixture.rs`.
+consume the pinned external fixture through `dump_gaiko2_shasta_fixture`. The adapter expands
+shared witness references; simply wrapping raw JSON is insufficient. `raiko2` owns the adapter
+behavior and validates it in `crates/prover/tests/remote_prover_fixture.rs`.
 
 `risc0-zkgas/<version>/` contains compact, generated calibration inputs for the production RISC0
 zkGas estimator. Its config, fit rows, and validation rows are consumed by
@@ -50,7 +65,11 @@ The input includes the blob commitments and proofs required to verify blob-backe
 The checked-in JSON is copied byte-for-byte from the retained preflight input, with SHA-256
 `20c76ab78f7bde77612f28d82f734912247ee905fd682de0568d9013053cc575`.
 
-## Regenerate
+## Regenerate the local fixture
+
+This is an online provenance/re-capture workflow, not the offline regression runner. Do not
+silently replace a published shared input: a changed input or export format needs a new external
+fixture revision and checksums.
 
 ```bash
 target/debug/preflight \

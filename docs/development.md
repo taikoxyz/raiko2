@@ -489,60 +489,121 @@ The `shasta` in fixture paths, script names, and `xtask` profile names below is 
 not a fork selector. See the `Frozen identifier` entry in
 [../CONTEXT.md](../CONTEXT.md).
 
-Checked-in GuestInput fixtures live under `test/guest_inputs/shasta/<network>/`.
-Use `preflight` to capture a native fixture after live RPC preflight succeeds. The checked-in
-`taiko_hoodi/smoke` suite currently contains proposals `17460` and `17462`; proposal `17461`
-was skipped because public RPC witness fetching was unstable during capture.
+Future offline proposal regression uses fixed external fixtures from
+[`taikoxyz/zkgas-bench`](https://github.com/taikoxyz/zkgas-bench), starting at Unzen. The shared
+repository owns input bytes, provenance, checksums, semantic expectations, and retained measurement
+baselines. Raiko and Gaiko own their runners, adapters, case selection, assertions, backend choices,
+and execution frequency. Online regression may follow current software and chain data.
+
+Pin the fixture repository to an immutable commit chosen for the regression. Record that commit,
+the fixture ID, and the candidate Raiko/Gaiko revision separately: the software under test may be
+newer than the fixture producer. Input-format changes require a new fixture revision. Ordinary
+unit/protocol tests retain their local fixtures and require no private repository access.
+
+### Acquire and verify the fixture cache
+
+The shared
+[`fixtures/regressions/mainnet-unzen-proposal-41455-v1`](https://github.com/taikoxyz/zkgas-bench/tree/main/fixtures/regressions/mainnet-unzen-proposal-41455-v1)
+case references the existing `fixture-mainnet-proposal-41455-v1` Release asset
+`guest-input.json.gz`. It contains mainnet proposal `41455`, L2 blocks `12556056..12556247`,
+with proposal and all witnesses after Unzen activation. Follow the case README at the selected
+fixture commit for its provenance and expectations.
+
+Acquisition requires authenticated access to the private fixture repository. From the Raiko root,
+with that repository checked out alongside Raiko at the chosen commit:
 
 ```bash
-cargo run -r -p preflight -- \
-  --rpc-url http://<l2-rpc-host>:8545 \
-  --l1-rpc-url https://ethereum-hoodi-rpc.publicnode.com \
-  --l2-chain-id 167013 \
-  --l1-chain-id 560048 \
-  --proposal-id 17460 \
-  --l1-inclusion-block-number 2668326 \
-  --last-anchor-block-number 0 \
-  --l2-start 7165709 \
-  --l2-end 7165900 \
+set -eu
+: "${FIXTURE_REV:?Set the full immutable fixture repository commit}"
+fixture_repo=$(cd ../zkgas-bench && pwd)
+test "$(git -C "$fixture_repo" rev-parse HEAD)" = "$FIXTURE_REV"
+fixture="$fixture_repo/fixtures/regressions/mainnet-unzen-proposal-41455-v1"
+cache="$PWD/target/offline-fixtures/mainnet-unzen-proposal-41455-v1"
+mkdir -p "$cache"
+(cd "$fixture" && sha256sum -c SHA256SUMS)
+if [ ! -f "$cache/guest-input.json.gz" ]; then
+  timeout 120s gh release download fixture-mainnet-proposal-41455-v1 \
+    --repo taikoxyz/zkgas-bench --pattern guest-input.json.gz --dir "$cache"
+fi
+(cd "$cache" && sha256sum -c "$fixture/archive.sha256")
+gzip -dc "$cache/guest-input.json.gz" > "$cache/guest-input.json"
+(cd "$cache" && sha256sum -c "$fixture/input.sha256")
+```
+
+This verifies cached archives on reruns as well as first downloads. Prepare candidate binaries,
+dependencies, and any selected guest ELFs before entering an offline environment; build-time
+fetching is separate from replay. The following execution steps need no chain RPC, explorer,
+private repository connection, or preflight.
+
+### Replay the cached input offline
+
+Use the existing candidate `guest-launcher` binary directly on the verified JSON. Set
+`GUEST_LAUNCHER` to a prebuilt candidate binary path when using a different build profile or output
+directory; the default below uses `target/release/`:
+
+```bash
+"${GUEST_LAUNCHER:-target/release/guest-launcher}" \
+  --stage proposal \
+  --input "$cache/guest-input.json" \
   --proof-type native \
-  --save-guest-input \
-  --network taiko_hoodi \
-  --rpc-retry-max-attempts 8 \
-  --rpc-timeout-ms 120000 \
-  --pretty
+  --mode prove \
+  --output "$cache/native-mock.json" \
+  --json-out "$cache/native-report.json"
+test "$(jq -er '.public_values' "$cache/native-report.json")" = \
+  "$(cat "$fixture/expected/public-output.txt")"
 ```
 
-Replay one proposal, a suite, or every fixture for a network without RPC:
+Native uses `--mode prove` to run validation and produce mock output; `--mode execute` is
+unsupported for this backend. This checks replay and the expected public commitment for the
+stored proof-carry context. It is not evidence of ZK or TEE proof generation. Preserve that context
+when comparing the expected commitment; proof bytes, signatures, ELF identities, and timings are
+not fixed expectations of this case. Consumers may separately select SP1 or RISC0 execute lanes
+and their appropriate candidate guest artifacts.
+
+The existing `xtask replay-guest-input` helper is for native-captured inputs whose supplied
+proof-carry data matches reconstructed native context, or inputs with default carry data that can
+be reconstructed. It rejects this shared case because the stored context differs. Use
+`guest-launcher` above to preserve that context; do not rewrite the fixture or its expected result
+for the helper. The helper's `input_hash` describes its reconstructed protocol commitment, not the
+raw-file SHA-256. Its command requires the default `guest-tools` feature and is absent from a
+minimal `--no-default-features` build.
+
+For Gaiko, materialize the consumer request with Raiko's existing adapter before running Gaiko's
+native regression:
 
 ```bash
-cargo run -r -p xtask -- replay-guest-input --network taiko_hoodi --suite smoke
-cargo run -r -p xtask -- replay-guest-input --network taiko_hoodi --proposal 17460
-cargo run -r -p xtask -- replay-guest-input --network taiko_hoodi --all
+cargo run --locked --offline -p raiko2-prover --no-default-features \
+  --example dump_gaiko2_shasta_fixture -- \
+  "$cache/guest-input.json" \
+  "$cache/gaiko-request.json"
 ```
 
-Suites are tracked as `test/guest_inputs/shasta/<network>/suites/<name>.json`:
+The adapter expands shared witness references into the request representation. Wrapping the raw
+JSON in a request envelope does not perform this conversion. This local preparation command
+requires prepared Cargo dependencies; a prebuilt candidate adapter may be used instead. Gaiko
+owns its replay command and assertions; conversion alone does not submit a remote proof request.
 
-```json
-{
-  "network": "taiko_hoodi",
-  "name": "smoke",
-  "proposals": [17460, 17462]
-}
-```
+### Archived local replay inputs
+
+Historical inputs remain under `test/guest_inputs/shasta/<network>/` for provenance. Hoodi
+proposals `17460` and `17462` have first-witness timestamps `1776853946` and `1776854714`, before
+Hoodi Unzen activation `1781787600`. Mainnet proposal `7857` starts at `1778151287`, before mainnet
+activation `1786021200`. They are archived pre-Unzen inputs, not positive replay examples for the
+current Unzen-only path. Use the shared post-Unzen case above for positive offline regression.
 
 ## Regression Harness
 
-The file-based regression flow lives in
+The online file-based regression flow runs discovery/preflight against RPC and lives in
 [scripts/regression/README.md](../scripts/regression/README.md).
 
-Setup and run:
+Setup and run with full post-Unzen proposal metadata captured by the stress discovery helper
+(see the regression README):
 
 ```bash
 scripts/regression/prepare_regression.sh
 python scripts/regression/shasta_regression.py \
   --config scripts/regression/config/shasta_regression_devnet.json \
-  --count 3
+  --proposal-metadata /tmp/proposals.discovery.json
 
 python scripts/regression/shasta_regression.py \
   --config scripts/regression/config/shasta_regression_devnet.json \

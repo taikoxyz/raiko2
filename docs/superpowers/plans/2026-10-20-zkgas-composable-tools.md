@@ -1,5 +1,10 @@
 # zkGas Composable Tools Implementation Plan
 
+Current status: this historical plan's implementation is maintained in companion
+[PR #284](https://github.com/taikoxyz/raiko2/pull/284) on `feat/zkgas-shadow-internal`.
+Production `main` excludes these tools and their alethia-reth shadow-pricing APIs. The original
+plan below is preserved as historical context.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add source-agnostic `zkgas-quote`, `zkgas-compare`, and `zkgas-report` binaries under `bin/zkgas/`, then validate their composition with a real local SP1 execute run without coupling SP1 acquisition to the tools.

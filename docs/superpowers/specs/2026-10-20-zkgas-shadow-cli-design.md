@@ -2,6 +2,11 @@
 
 ## Status and Boundary
 
+Current status: this historical design's implementation is maintained in companion
+[PR #284](https://github.com/taikoxyz/raiko2/pull/284) on `feat/zkgas-shadow-internal`.
+Production `main` excludes these tools and their alethia-reth shadow-pricing APIs. The original
+design below is preserved as historical context.
+
 Approved direction: add a `bin/zkgas/` workspace package containing small composable command-line
 tools for computing and evaluating zkGas. It is not a node admission component, prover-runtime
 integration, service, or deployment. Promotion of the pricing model into a real product is a

@@ -429,6 +429,10 @@ and does not include those APIs or tools. Use the companion branch's documentati
 The [draft zkGas evaluation standard](zkgas-evaluation-standard.md) remains the reference for evidence
 lanes, unit-safe comparisons, scorecard metrics, and promotion criteria.
 
+The optional `raiko2-stateless/mpt-metrics` feature remains available for companion
+[PR #284](https://github.com/taikoxyz/raiko2/pull/284)'s calibration tooling. The normal production
+path does not enable this instrumentation.
+
 ## Opcode Workload-Metric Experiments
 
 The experiment scaffold under `experiments/opcode-gas/` is for opcode and precompile workload

@@ -1,21 +1,11 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use raiko2_pipeline::RunnerKind;
 use raiko2_primitives::ProofType;
-use raiko2_prover::{
-    boundless_config::{
-        DEFAULT_PROPOSAL_ZKGAS_WARNING_THRESHOLD, DEFAULT_REBID_MAX_ATTEMPTS,
-        DEFAULT_REBID_PRICE_STEP_BPS, DEFAULT_REBID_TIMEOUT_MS, DeploymentConfig,
-        MIN_MEANINGFUL_REBID_PRICE_STEP_BPS, MIN_REBID_TIMEOUT_MS, OfferParamsConfig, QuoteSizing,
-        REBID_MAX_ATTEMPTS_LIMIT, validate_offer_spec,
-    },
-    sp1_config::{
-        ExecutionMode as Sp1ExecutionMode, ProverMode as Sp1ProverMode, Sp1Config, Sp1ConfigError,
-    },
+use raiko2_prover::sp1_config::{
+    ExecutionMode as Sp1ExecutionMode, ProverMode as Sp1ProverMode, Sp1Config, Sp1ConfigError,
 };
 use serde::{Deserialize, Serialize};
 use std::ops::{Deref, DerefMut};
-
-use super::BoundlessPairConfig;
 
 /// Prover configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -87,8 +77,9 @@ impl ProverConfig {
                     self.risc0.enabled = true;
                     self.risc0.runner = match runner {
                         RunnerKind::Local => Risc0Runner::Local,
-                        RunnerKind::Network => Risc0Runner::Network,
-                        RunnerKind::Remote => unreachable!("route override is validated"),
+                        RunnerKind::Network | RunnerKind::Remote => {
+                            unreachable!("route override is validated")
+                        }
                     };
                 }
                 ProofType::Sp1 => {
@@ -118,19 +109,11 @@ impl ProverConfig {
         }
 
         match self.runner(ProofType::Risc0) {
-            Some(RunnerKind::Network) => {
-                if self.risc0.boundless.rpc_url.trim().is_empty() {
-                    bail!("prover.risc0.boundless.rpc_url must not be empty");
-                }
-                if self.risc0.boundless.signer_key.trim().is_empty() {
-                    bail!("prover.risc0.boundless.signer_key must not be empty");
-                }
-                self.risc0.boundless.validate()?;
-                self.validate_risc0()?;
-            }
             Some(RunnerKind::Local) => self.validate_risc0()?,
             None => {}
-            Some(RunnerKind::Remote) => unreachable!("RISC0 runner is restricted by its type"),
+            Some(RunnerKind::Network | RunnerKind::Remote) => {
+                unreachable!("RISC0 runner is restricted by its type")
+            }
         }
 
         if self.sp1.enabled {
@@ -278,10 +261,8 @@ impl std::str::FromStr for ProverRoutesOverride {
 fn validate_route(proof_type: ProofType, runner: RunnerKind) -> std::result::Result<(), String> {
     if matches!(
         (proof_type, runner),
-        (
-            ProofType::Risc0 | ProofType::Sp1,
-            RunnerKind::Local | RunnerKind::Network
-        ) | (ProofType::Native, RunnerKind::Local)
+        (ProofType::Sp1, RunnerKind::Local | RunnerKind::Network)
+            | (ProofType::Risc0 | ProofType::Native, RunnerKind::Local)
             | (ProofType::Sgx | ProofType::SgxGeth, RunnerKind::Remote)
     ) {
         Ok(())
@@ -472,7 +453,6 @@ pub struct Risc0Config {
     pub mock: bool,
     #[serde(default = "default_risc0_execution_po2")]
     pub execution_po2: u32,
-    pub boundless: BoundlessConfig,
 }
 
 impl Default for Risc0Config {
@@ -483,7 +463,6 @@ impl Default for Risc0Config {
             snark: true,
             mock: false,
             execution_po2: default_risc0_execution_po2(),
-            boundless: BoundlessConfig::default(),
         }
     }
 }
@@ -494,14 +473,12 @@ impl Default for Risc0Config {
 pub enum Risc0Runner {
     #[default]
     Local,
-    Network,
 }
 
 impl Risc0Runner {
     const fn runner_kind(self) -> RunnerKind {
         match self {
             Self::Local => RunnerKind::Local,
-            Self::Network => RunnerKind::Network,
         }
     }
 }
@@ -510,184 +487,30 @@ const fn default_risc0_execution_po2() -> u32 {
     20
 }
 
-/// Boundless configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct BoundlessConfig {
-    #[serde(default = "default_proposal_zkgas_warning_threshold")]
-    pub proposal_zkgas_warning_threshold: u64,
-    #[serde(default = "default_boundless_offchain")]
-    pub offchain: bool,
-    pub rpc_url: String,
-    pub signer_key: String,
-    #[serde(default)]
-    pub transaction: Option<raiko2_prover::boundless_config::BoundlessTransactionConfig>,
-    #[serde(default)]
-    pub deployment: Option<DeploymentConfig>,
-    pub batch_quote: QuoteSizing,
-    pub aggregation_quote: QuoteSizing,
-    pub offer_params: OfferParamsConfig,
-    #[serde(default = "default_boundless_poll_interval_ms")]
-    pub poll_interval_ms: u64,
-    #[serde(default = "default_boundless_timeout_ms")]
-    pub timeout_ms: u64,
-    #[serde(default = "default_boundless_rebid_timeout_ms")]
-    pub rebid_timeout_ms: u64,
-    #[serde(default = "default_boundless_rebid_price_step_bps")]
-    pub rebid_price_step_bps: u32,
-    #[serde(default = "default_boundless_rebid_max_attempts")]
-    pub rebid_max_attempts: u32,
-}
-
-impl Default for BoundlessConfig {
-    fn default() -> Self {
-        Self {
-            proposal_zkgas_warning_threshold: default_proposal_zkgas_warning_threshold(),
-            offchain: raiko2_prover::boundless_config::BoundlessConfig::default().offchain,
-            rpc_url: raiko2_prover::boundless_config::BoundlessConfig::default().rpc_url,
-            signer_key: String::new(),
-            transaction: None,
-            deployment: raiko2_prover::boundless_config::BoundlessConfig::default().deployment,
-            batch_quote: raiko2_prover::boundless_config::BoundlessConfig::default().batch_quote,
-            aggregation_quote: raiko2_prover::boundless_config::BoundlessConfig::default()
-                .aggregation_quote,
-            offer_params: raiko2_prover::boundless_config::BoundlessConfig::default().offer_params,
-            poll_interval_ms: default_boundless_poll_interval_ms(),
-            timeout_ms: default_boundless_timeout_ms(),
-            rebid_timeout_ms: default_boundless_rebid_timeout_ms(),
-            rebid_price_step_bps: default_boundless_rebid_price_step_bps(),
-            rebid_max_attempts: default_boundless_rebid_max_attempts(),
-        }
-    }
-}
-
-impl BoundlessConfig {
-    /// Validate the effective Boundless config.
-    pub fn validate(&self) -> Result<()> {
-        if self.proposal_zkgas_warning_threshold == 0 {
-            bail!("prover.risc0.boundless.proposal_zkgas_warning_threshold must be > 0");
-        }
-        self.batch_quote
-            .validate("prover.risc0.boundless.batch_quote")
-            .map_err(anyhow::Error::msg)?;
-        self.aggregation_quote
-            .validate("prover.risc0.boundless.aggregation_quote")
-            .map_err(anyhow::Error::msg)?;
-        match &self.transaction {
-            Some(transaction) => {
-                transaction
-                    .validate()
-                    .map_err(anyhow::Error::msg)
-                    .context("prover.risc0.boundless.transaction")?;
-            }
-            None if !self.offchain => {
-                bail!(
-                    "prover.risc0.boundless.transaction is required when prover.risc0.boundless.offchain=false"
-                );
-            }
-            None => {}
-        }
-        if self.rebid_timeout_ms < MIN_REBID_TIMEOUT_MS {
-            bail!("prover.risc0.boundless.rebid_timeout_ms must be >= {MIN_REBID_TIMEOUT_MS}");
-        }
-        if self.rebid_max_attempts > REBID_MAX_ATTEMPTS_LIMIT {
-            bail!(
-                "prover.risc0.boundless.rebid_max_attempts must be <= {REBID_MAX_ATTEMPTS_LIMIT}"
-            );
-        }
-        if (1..MIN_MEANINGFUL_REBID_PRICE_STEP_BPS).contains(&self.rebid_price_step_bps) {
-            bail!(
-                "prover.risc0.boundless.rebid_price_step_bps = {} is below the {MIN_MEANINGFUL_REBID_PRICE_STEP_BPS} bps (1%) floor; \
-                 values in 1..{MIN_MEANINGFUL_REBID_PRICE_STEP_BPS} are almost always a basis-points/multiplier confusion \
-                 (e.g. `2` meaning ×2). Use 0 for an explicit flat ladder or >= {MIN_MEANINGFUL_REBID_PRICE_STEP_BPS} to escalate.",
-                self.rebid_price_step_bps
-            );
-        }
-        validate_offer_spec(&self.offer_params.batch)
-            .map_err(anyhow::Error::msg)
-            .context("prover.risc0.boundless.offer_params.batch")?;
-        validate_offer_spec(&self.offer_params.aggregation)
-            .map_err(anyhow::Error::msg)
-            .context("prover.risc0.boundless.offer_params.aggregation")?;
-        Ok(())
-    }
-
-    /// Merge a pair-specific Boundless override into the global default config.
-    pub fn apply_pair_override(&self, pair: &BoundlessPairConfig) -> Result<Self> {
-        let mut merged = self.clone();
-        if let Some(proposal_zkgas_warning_threshold) = pair.proposal_zkgas_warning_threshold {
-            merged.proposal_zkgas_warning_threshold = proposal_zkgas_warning_threshold;
-        }
-        if let Some(batch_quote) = pair.batch_quote.clone() {
-            merged.batch_quote = batch_quote;
-        }
-        if let Some(aggregation_quote) = pair.aggregation_quote.clone() {
-            merged.aggregation_quote = aggregation_quote;
-        }
-        if let Some(poll_interval_ms) = pair.poll_interval_ms {
-            merged.poll_interval_ms = poll_interval_ms;
-        }
-        if let Some(timeout_ms) = pair.timeout_ms {
-            merged.timeout_ms = timeout_ms;
-        }
-        if let Some(rebid_timeout_ms) = pair.rebid_timeout_ms {
-            merged.rebid_timeout_ms = rebid_timeout_ms;
-        }
-        if let Some(rebid_price_step_bps) = pair.rebid_price_step_bps {
-            merged.rebid_price_step_bps = rebid_price_step_bps;
-        }
-        if let Some(rebid_max_attempts) = pair.rebid_max_attempts {
-            merged.rebid_max_attempts = rebid_max_attempts;
-        }
-        if let Some(batch) = &pair.offer_params.batch {
-            merged.offer_params.batch = batch.clone();
-        }
-        if let Some(aggregation) = &pair.offer_params.aggregation {
-            merged.offer_params.aggregation = aggregation.clone();
-        }
-        merged.validate()?;
-        Ok(merged)
-    }
-}
-
-const fn default_boundless_offchain() -> bool {
-    false
-}
-
-const fn default_proposal_zkgas_warning_threshold() -> u64 {
-    DEFAULT_PROPOSAL_ZKGAS_WARNING_THRESHOLD
-}
-
-const fn default_boundless_poll_interval_ms() -> u64 {
-    10_000
-}
-
-const fn default_boundless_timeout_ms() -> u64 {
-    3_600_000
-}
-
-const fn default_boundless_rebid_timeout_ms() -> u64 {
-    DEFAULT_REBID_TIMEOUT_MS
-}
-
-const fn default_boundless_rebid_price_step_bps() -> u32 {
-    DEFAULT_REBID_PRICE_STEP_BPS
-}
-
-const fn default_boundless_rebid_max_attempts() -> u32 {
-    DEFAULT_REBID_MAX_ATTEMPTS
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        BoundlessPairConfig, MIN_MEANINGFUL_REBID_PRICE_STEP_BPS, ProverConfig,
-        ProverRoutesOverride, REBID_MAX_ATTEMPTS_LIMIT, Sp1ExecutionMode, ZkAnyConfig,
-        ZkAnyTargetConfig,
+        ProverConfig, ProverRoutesOverride, Sp1ExecutionMode, ZkAnyConfig, ZkAnyTargetConfig,
     };
     use raiko2_pipeline::RunnerKind;
     use raiko2_primitives::ProofType;
     use raiko2_prover::sp1_config::ProverMode as Sp1ProverMode;
+
+    #[test]
+    fn removed_market_route_and_settings_are_rejected() {
+        assert!("risc0/network".parse::<ProverRoutesOverride>().is_err());
+        assert!(toml::from_str::<ProverConfig>("[risc0]\nrunner = \"network\"\n").is_err());
+        assert!(toml::from_str::<ProverConfig>("[risc0.boundless]\noffchain = true\n").is_err());
+    }
+
+    #[test]
+    fn removed_market_pair_override_is_rejected() {
+        let error = toml::from_str::<crate::config::NetworkPairConfig>(
+            "network = \"taiko_hoodi\"\nl1_network = \"hoodi\"\n[boundless]\noffchain = true\n",
+        )
+        .expect_err("removed pair override must fail ordinary schema validation");
+        assert!(error.to_string().contains("unknown field"));
+    }
 
     fn routes(value: &str) -> ProverRoutesOverride {
         value.parse().expect("valid prover routes")
@@ -697,209 +520,6 @@ mod tests {
         let mut config = ProverConfig::default();
         config.apply_routes_override(&routes(value));
         config
-    }
-
-    fn boundless_network_config() -> ProverConfig {
-        let mut config = config_with_routes("risc0/network");
-        config.risc0.boundless.signer_key = "configured-by-secret-store".to_string();
-        config.risc0.boundless.transaction = Some(
-            raiko2_prover::boundless_config::BoundlessTransactionConfig {
-                receipt_timeout_ms: 90_000,
-                fee_bump_bps: 5_000,
-                max_replacements: 4,
-                max_fee_per_gas_wei: "1000000000".to_string(),
-            },
-        );
-        config
-    }
-
-    #[test]
-    fn explicitly_supplied_boundless_table_requires_both_quote_stages() {
-        for missing_quote in ["batch_quote", "aggregation_quote"] {
-            let mut value = toml::Value::try_from(ProverConfig::default())
-                .expect("serialize default prover config");
-            value
-                .get_mut("risc0")
-                .and_then(toml::Value::as_table_mut)
-                .expect("RISC0 config table")
-                .get_mut("boundless")
-                .and_then(toml::Value::as_table_mut)
-                .expect("Boundless config table")
-                .remove(missing_quote);
-
-            let serialized = toml::to_string(&value).expect("serialize mutated prover config");
-            let error = toml::from_str::<ProverConfig>(&serialized)
-                .expect_err("explicit Boundless table must require both quote stages");
-            assert!(error.to_string().contains(missing_quote), "{error}");
-        }
-    }
-
-    #[test]
-    fn global_estimated_quote_rejects_misspelled_offset_key() {
-        let mut value = toml::Value::try_from(ProverConfig::default())
-            .expect("serialize default prover config");
-        let boundless = value
-            .get_mut("risc0")
-            .and_then(toml::Value::as_table_mut)
-            .expect("RISC0 config table")
-            .get_mut("boundless")
-            .and_then(toml::Value::as_table_mut)
-            .expect("Boundless config table");
-        let misspelled_quote = toml::from_str(
-            r#"
-strategy = "estimated"
-mcycle_offset = 1300
-"#,
-        )
-        .expect("misspelled quote fixture should be valid TOML");
-        boundless.insert("batch_quote".to_string(), misspelled_quote);
-
-        let serialized = toml::to_string(&value).expect("serialize mutated prover config");
-        let error = toml::from_str::<ProverConfig>(&serialized)
-            .expect_err("misspelled global estimated offset must fail closed");
-
-        assert!(error.to_string().contains("unknown field"), "{error}");
-        assert!(error.to_string().contains("mcycle_offset"), "{error}");
-    }
-
-    #[test]
-    fn omitted_inactive_boundless_table_defaults_to_evaluated_quotes() {
-        let config: ProverConfig = toml::from_str(
-            r#"
-[risc0]
-enabled = false
-"#,
-        )
-        .expect("omitted inactive Boundless table should deserialize");
-
-        assert_eq!(
-            config.risc0.boundless.batch_quote,
-            raiko2_prover::boundless_config::QuoteSizing::Evaluated
-        );
-        assert_eq!(
-            config.risc0.boundless.aggregation_quote,
-            raiko2_prover::boundless_config::QuoteSizing::Evaluated
-        );
-    }
-
-    #[test]
-    fn pair_omission_inherits_base_quote_strategies() {
-        let mut config = boundless_network_config();
-        config.risc0.boundless.batch_quote =
-            raiko2_prover::boundless_config::QuoteSizing::Evaluated;
-        config.risc0.boundless.aggregation_quote =
-            raiko2_prover::boundless_config::QuoteSizing::Fixed { mcycles: 200 };
-
-        let effective = config
-            .risc0
-            .boundless
-            .apply_pair_override(&BoundlessPairConfig::default())
-            .expect("pair without quote overrides should retain base strategies");
-
-        assert_eq!(
-            effective.batch_quote,
-            raiko2_prover::boundless_config::QuoteSizing::Evaluated
-        );
-        assert_eq!(
-            effective.aggregation_quote,
-            raiko2_prover::boundless_config::QuoteSizing::Fixed { mcycles: 200 }
-        );
-    }
-
-    #[test]
-    fn pair_omission_inherits_base_proposal_zkgas_warning_threshold() {
-        let mut config = boundless_network_config();
-        config.risc0.boundless.proposal_zkgas_warning_threshold = 900_000_000;
-
-        let effective = config
-            .risc0
-            .boundless
-            .apply_pair_override(&BoundlessPairConfig::default())
-            .expect("pair without warning override should retain base threshold");
-
-        assert_eq!(effective.proposal_zkgas_warning_threshold, 900_000_000);
-    }
-
-    #[test]
-    fn pair_overrides_proposal_zkgas_warning_threshold() {
-        let config = boundless_network_config();
-        let pair: BoundlessPairConfig =
-            toml::from_str("proposal_zkgas_warning_threshold = 750000000")
-                .expect("pair-specific proposal zkGas warning threshold should deserialize");
-
-        let effective = config
-            .risc0
-            .boundless
-            .apply_pair_override(&pair)
-            .expect("pair proposal zkGas warning threshold should apply");
-
-        assert_eq!(effective.proposal_zkgas_warning_threshold, 750_000_000);
-    }
-
-    #[test]
-    fn global_proposal_zkgas_warning_threshold_rejects_zero() {
-        let mut config = boundless_network_config();
-        config.risc0.boundless.proposal_zkgas_warning_threshold = 0;
-
-        let error = config
-            .validate()
-            .expect_err("zero proposal zkGas warning threshold must fail");
-
-        assert!(
-            error
-                .to_string()
-                .contains("proposal_zkgas_warning_threshold"),
-            "{error}"
-        );
-    }
-
-    #[test]
-    fn pair_estimated_quote_override_keeps_stage_offsets_independent() {
-        let config = boundless_network_config();
-        let pair: BoundlessPairConfig = toml::from_str(
-            r#"
-[batch_quote]
-strategy = "estimated"
-mcycles_offset = 1300
-
-[aggregation_quote]
-strategy = "estimated"
-mcycles_offset = 0
-"#,
-        )
-        .expect("stage-specific estimated quote offsets should deserialize");
-
-        let effective = config
-            .risc0
-            .boundless
-            .apply_pair_override(&pair)
-            .expect("pair estimated quote offset should apply");
-
-        assert_eq!(
-            effective.batch_quote,
-            raiko2_prover::boundless_config::QuoteSizing::Estimated {
-                mcycles_offset: 1_300
-            }
-        );
-        assert_eq!(
-            effective.aggregation_quote,
-            raiko2_prover::boundless_config::QuoteSizing::Estimated { mcycles_offset: 0 }
-        );
-    }
-
-    #[test]
-    fn pair_estimated_quote_rejects_stale_fixed_mcycles_key() {
-        let error = toml::from_str::<BoundlessPairConfig>(
-            r#"
-[aggregation_quote]
-strategy = "estimated"
-mcycles = 1300
-"#,
-        )
-        .expect_err("stale pair-specific estimated quote key must fail closed");
-
-        assert!(error.to_string().contains("unknown field"), "{error}");
-        assert!(error.to_string().contains("mcycles"), "{error}");
     }
 
     #[test]
@@ -978,141 +598,6 @@ bonsai = true
     }
 
     #[test]
-    fn risc0_boundless_nested_config_preserves_every_setting_group() {
-        let config: ProverConfig = toml::from_str(
-            r#"
-[risc0]
-enabled = true
-runner = "network"
-snark = false
-mock = true
-execution_po2 = 24
-
-[risc0.boundless]
-offchain = true
-rpc_url = "https://boundless.example.com"
-signer_key = "configured-by-secret-store"
-poll_interval_ms = 11000
-timeout_ms = 3700000
-rebid_timeout_ms = 310000
-rebid_price_step_bps = 4200
-rebid_max_attempts = 6
-
-[risc0.boundless.transaction]
-receipt_timeout_ms = 90000
-fee_bump_bps = 5000
-max_replacements = 4
-max_fee_per_gas_wei = "1000000000"
-
-[risc0.boundless.deployment]
-deployment_type = "taiko"
-
-[risc0.boundless.deployment.overrides]
-order_stream_url = "https://orders.example.com"
-market_address = "0x0000000000000000000000000000000000000001"
-
-[risc0.boundless.batch_quote]
-strategy = "fixed"
-mcycles = 4321
-
-[risc0.boundless.aggregation_quote]
-strategy = "evaluated"
-
-[risc0.boundless.offer_params.batch]
-pricing_mode = "market"
-absolute_max_price_per_mcycle = "0.000000600"
-ramp_up_start_sec = 21
-ramp_up_period_sec = 121
-lock_collateral = "20"
-
-[risc0.boundless.offer_params.batch.timeouts]
-mode = "fixed"
-lock_timeout_secs = 601
-timeout_secs = 3601
-
-[risc0.boundless.offer_params.aggregation]
-pricing_mode = "manual"
-max_price_per_mcycle = "0.000000800"
-min_price_per_mcycle = "0.000000006"
-absolute_max_price_per_mcycle = "0.000003200"
-ramp_up_start_sec = 22
-ramp_up_period_sec = 122
-lock_collateral = "21"
-
-[risc0.boundless.offer_params.aggregation.timeouts]
-mode = "per_mcycle"
-lock_timeout_ms_per_mcycle = 3000
-timeout_ms_per_mcycle = 6000
-"#,
-        )
-        .expect("complete nested Boundless config should parse");
-
-        config
-            .validate()
-            .expect("nested Boundless config should validate");
-        let risc0 = &config.risc0;
-        let boundless = &risc0.boundless;
-        assert_eq!(risc0.execution_po2, 24);
-        assert!(boundless.offchain);
-        assert_eq!(boundless.poll_interval_ms, 11_000);
-        assert_eq!(boundless.timeout_ms, 3_700_000);
-        assert_eq!(boundless.rebid_timeout_ms, 310_000);
-        assert_eq!(boundless.rebid_price_step_bps, 4_200);
-        assert_eq!(boundless.rebid_max_attempts, 6);
-        let transaction = boundless.transaction.as_ref().expect("transaction policy");
-        assert_eq!(transaction.receipt_timeout_ms, 90_000);
-        assert_eq!(transaction.fee_bump_bps, 5_000);
-        assert_eq!(transaction.max_replacements, 4);
-        assert_eq!(transaction.max_fee_per_gas_wei, "1000000000");
-        let deployment = boundless.deployment.as_ref().expect("deployment");
-        assert_eq!(
-            deployment.deployment_type,
-            Some(raiko2_prover::boundless_config::DeploymentType::Taiko)
-        );
-        assert_eq!(
-            deployment
-                .overrides
-                .as_ref()
-                .and_then(|value| value.get("order_stream_url"))
-                .and_then(serde_json::Value::as_str),
-            Some("https://orders.example.com")
-        );
-        assert_eq!(
-            boundless.batch_quote,
-            raiko2_prover::boundless_config::QuoteSizing::Fixed { mcycles: 4_321 }
-        );
-        assert_eq!(
-            boundless.aggregation_quote,
-            raiko2_prover::boundless_config::QuoteSizing::Evaluated
-        );
-        assert_eq!(boundless.offer_params.batch.ramp_up_start_sec, 21);
-        assert_eq!(
-            boundless.offer_params.batch.timeouts,
-            raiko2_prover::boundless_config::TimeoutPolicy::Fixed {
-                lock_timeout_secs: 601,
-                timeout_secs: 3_601,
-            }
-        );
-        assert_eq!(
-            boundless
-                .offer_params
-                .aggregation
-                .max_price_per_mcycle
-                .as_deref(),
-            Some("0.000000800")
-        );
-        assert_eq!(boundless.offer_params.aggregation.lock_collateral, "21");
-        assert_eq!(
-            boundless.offer_params.aggregation.timeouts,
-            raiko2_prover::boundless_config::TimeoutPolicy::PerMcycle {
-                lock_timeout_ms_per_mcycle: 3_000,
-                timeout_ms_per_mcycle: 6_000,
-                dynamic_pricing_timeout_modifier: None,
-            }
-        );
-    }
-
-    #[test]
     fn sp1_table_rejects_unknown_backend_fields() {
         let err = toml::from_str::<ProverConfig>(
             r#"
@@ -1136,7 +621,7 @@ enabled = true
 runner = "remote"
 "#,
         )
-        .expect_err("RISC0 supports only local and network runners");
+        .expect_err("RISC0 supports only the local runner");
 
         assert!(err.to_string().contains("unknown variant"), "{err}");
     }
@@ -1176,7 +661,6 @@ runner = "remote"
     fn prover_routes_accept_only_supported_runner_combinations() {
         for routes in [
             "risc0/local",
-            "risc0/network",
             "sp1/local",
             "sp1/network",
             "native/local",
@@ -1191,6 +675,7 @@ runner = "remote"
         }
 
         for routes in [
+            "risc0/network",
             "risc0/remote",
             "sp1/remote",
             "native/network",
@@ -1209,7 +694,7 @@ runner = "remote"
 
     #[test]
     fn prover_routes_override_parser_rejects_invalid_input() {
-        let duplicate = "risc0/local,risc0/network"
+        let duplicate = "risc0/local,risc0/local"
             .parse::<ProverRoutesOverride>()
             .expect_err("duplicate proof type must fail");
         assert!(duplicate.contains("duplicate prover route"));
@@ -1344,69 +829,6 @@ runner = "remote"
     }
 
     #[test]
-    fn risc0_network_requires_boundless_network_credentials() {
-        let mut config = boundless_network_config();
-        config.risc0.boundless.rpc_url.clear();
-
-        let err = config
-            .validate()
-            .expect_err("risc0/network must require a Boundless RPC URL");
-        assert!(err.to_string().contains("prover.risc0.boundless.rpc_url"));
-
-        config.risc0.boundless.rpc_url = "https://boundless.example.com".to_string();
-        config.risc0.boundless.signer_key.clear();
-        let err = config
-            .validate()
-            .expect_err("risc0/network must require a Boundless signer");
-        assert!(
-            err.to_string()
-                .contains("prover.risc0.boundless.signer_key")
-        );
-    }
-
-    #[test]
-    fn risc0_network_requires_boundless_transaction_policy() {
-        let mut config = boundless_network_config();
-        config.risc0.boundless.transaction = None;
-
-        let err = config
-            .validate()
-            .expect_err("on-chain Boundless must require a transaction policy");
-        assert!(
-            err.to_string()
-                .contains("prover.risc0.boundless.transaction"),
-            "{err}"
-        );
-
-        config.risc0.boundless.offchain = true;
-        config
-            .validate()
-            .expect("off-chain Boundless does not submit transactions");
-    }
-
-    #[test]
-    fn risc0_local_skips_boundless_network_credentials() {
-        let mut config = config_with_routes("risc0/local");
-        config.risc0.boundless.rpc_url.clear();
-        config.risc0.boundless.signer_key.clear();
-
-        config
-            .validate()
-            .expect("risc0/local must not require Boundless credentials");
-    }
-
-    #[test]
-    fn disabled_risc0_skips_boundless_backend_validation() {
-        let mut config = config_with_routes("native/local");
-        config.risc0.execution_po2 = 0;
-        config.risc0.boundless.rebid_timeout_ms = 0;
-
-        config
-            .validate()
-            .expect("disabled RISC0 must not validate Boundless or RISC0 settings");
-    }
-
-    #[test]
     fn sgx_route_requires_lane_specific_base_url() {
         let mut config = config_with_routes("sgx/remote");
         config.sgx.base_url.clear();
@@ -1510,99 +932,6 @@ runner = "remote"
 
         assert!(!message.contains(sensitive_url));
         assert!(!message.contains("sample_secret"));
-    }
-
-    #[test]
-    fn prover_config_rejects_zero_aggregation_quote() {
-        let mut config = boundless_network_config();
-        config.risc0.boundless.aggregation_quote =
-            raiko2_prover::boundless_config::QuoteSizing::Fixed { mcycles: 0 };
-
-        assert!(
-            config
-                .validate()
-                .expect_err("zero aggregation quote should fail")
-                .to_string()
-                .contains("prover.risc0.boundless.aggregation_quote")
-        );
-    }
-
-    #[test]
-    fn prover_config_accepts_zero_boundless_rebid_price_step_bps() {
-        let mut config = boundless_network_config();
-        config.risc0.boundless.rebid_price_step_bps = 0;
-
-        // 0 bps is a valid flat (no-escalation) ladder.
-        config
-            .validate()
-            .expect("zero rebid price step bps should be accepted");
-    }
-
-    #[test]
-    fn prover_config_rejects_sub_floor_boundless_rebid_price_step_bps() {
-        // A value in 1..100 bps is almost always a bps/multiplier confusion (e.g. `2` meaning ×2).
-        let mut config = boundless_network_config();
-        config.risc0.boundless.rebid_price_step_bps = 2;
-
-        assert!(
-            config
-                .validate()
-                .expect_err("sub-floor rebid price step bps should fail")
-                .to_string()
-                .contains("rebid_price_step_bps")
-        );
-    }
-
-    #[test]
-    fn prover_config_accepts_floor_boundless_rebid_price_step_bps() {
-        let mut config = boundless_network_config();
-        config.risc0.boundless.rebid_price_step_bps = MIN_MEANINGFUL_REBID_PRICE_STEP_BPS;
-
-        config
-            .validate()
-            .expect("floor rebid price step bps should be accepted");
-    }
-
-    #[test]
-    fn prover_config_rejects_excessive_boundless_rebid_max_attempts() {
-        let mut config = boundless_network_config();
-        config.risc0.boundless.rebid_max_attempts = REBID_MAX_ATTEMPTS_LIMIT + 1;
-
-        assert!(
-            config
-                .validate()
-                .expect_err("excessive rebid attempts should fail")
-                .to_string()
-                .contains("rebid_max_attempts")
-        );
-    }
-
-    #[test]
-    fn prover_config_rejects_zero_boundless_rebid_timeout() {
-        let mut config = boundless_network_config();
-        config.risc0.boundless.rebid_timeout_ms = 0;
-
-        assert!(
-            config
-                .validate()
-                .expect_err("zero rebid timeout should fail")
-                .to_string()
-                .contains("prover.risc0.boundless.rebid_timeout_ms")
-        );
-    }
-
-    #[test]
-    fn prover_config_rejects_subsecond_boundless_rebid_timeout() {
-        let mut config = boundless_network_config();
-        config.risc0.boundless.rebid_timeout_ms = 999;
-
-        assert!(
-            config
-                .validate()
-                .expect_err("subsecond rebid timeout should fail")
-                .to_string()
-                .contains("prover.risc0.boundless.rebid_timeout_ms")
-        );
     }
 
     #[test]

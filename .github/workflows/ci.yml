@@ -25,7 +25,7 @@ jobs:
       rust: ${{ steps.filter.outputs.rust }}
       guest_artifacts: ${{ steps.filter.outputs.guest_artifacts }}
       opcode_gas: ${{ steps.filter.outputs.opcode_gas }}
-      zkgas_model: ${{ steps.filter.outputs.zkgas_model }}
+      zkgas_experiments: ${{ steps.filter.outputs.zkgas_experiments }}
       workflow: ${{ steps.filter.outputs.workflow }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -52,27 +52,21 @@ jobs:
               - 'docker/**'
               - 'test.json'
               - 'justfile'
-              # `boundless::estimation` include_str!s the zkGas validation fixture and pins its
-              # SHA-256, so a fixture-only edit must still run the prover tests.
-              - 'tests/fixtures/risc0-zkgas/**'
             guest_artifacts:
               - 'crates/guests/elf/**'
             opcode_gas:
               - 'experiments/opcode-gas/**'
-            zkgas_model:
-              - 'scripts/modeling/**'
+            zkgas_experiments:
               - 'experiments/opcode-gas/**'
               - 'experiments/risc0-zkgas/**'
-              - 'tests/fixtures/risc0-zkgas/**'
-              - 'crates/prover/models/**'
               - 'xtask/src/export_unzen_zk_gas_schedule.rs'
               - 'justfile'
             workflow:
               - '.github/workflows/ci.yml'
 
-  zkgas-model:
+  zkgas-experiments:
     needs: changes
-    if: needs.changes.outputs.zkgas_model == 'true' || needs.changes.outputs.workflow == 'true' || github.event_name == 'workflow_dispatch'
+    if: needs.changes.outputs.zkgas_experiments == 'true' || needs.changes.outputs.workflow == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -85,20 +79,11 @@ jobs:
         with:
           python-version: '3.11'
 
-      # The generator is stdlib-only by design; no dependency install step is needed.
-      - name: test zkGas model tooling
+      # The offline experiments use only the Python standard library.
+      - name: test zkGas experiments
         run: |
-          python -m unittest discover -s scripts/modeling/tests
           python -m unittest discover -s experiments/opcode-gas/tests
           python -m unittest discover -s experiments/risc0-zkgas/tests
-        env:
-          PYTHONDONTWRITEBYTECODE: "1"
-
-      # Proves the committed runtime artifact is still exactly what the fixture regenerates.
-      # Both paths are left at the generator's defaults so this lane never becomes another
-      # hardcoded fixture-path copy to update at the next model promotion.
-      - name: check committed zkGas model artifact
-        run: python scripts/modeling/risc0_zkgas_model.py check
         env:
           PYTHONDONTWRITEBYTECODE: "1"
 
@@ -290,17 +275,12 @@ jobs:
           -p raiko2-runtime
 
       # The engine state-machine tests only need the backend-neutral core.
-      # Disabling default features avoids compiling the RISC0, SP1, and
-      # Boundless prover stacks in the PR gate.
+      # Disabling default features avoids compiling the RISC0 and SP1 prover stacks
+      # in the PR gate.
       - name: test engine core
         run: cargo test -p raiko2-engine --no-default-features
 
-  # PR-gate lane for the prover crate: the boundless bidding/money-path and recovery unit
-  # tests previously ran only in the manually dispatched rust-heavy workflow, so a pricing
-  # or rebid regression could merge green. `--lib` keeps this lane to unit tests;
-  # integration tests and the server stack stay on rust-heavy. Debug info is disabled to
-  # keep the zk-stack build inside runner disk limits, and the cache key is separate from
-  # the light lanes so the heavy prover artifacts don't evict their shared cache.
+  # Keep prover and guest-launcher unit tests in the PR gate.
   rust-test-prover:
     needs: changes
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflow == 'true' || github.event_name == 'workflow_dispatch'
@@ -336,21 +316,17 @@ jobs:
         with:
           shared-key: ci-rust-prover
 
+      # SP1 embeds a helper built under Cargo's registry. rust-cache drops that
+      # helper but retains the build-script output pointing to it. Invalidate
+      # the wrapper so the next Cargo command rebuilds the helper before embedding.
+      - name: refresh SP1 native runner build state
+        run: cargo clean -p sp1-core-executor-runner
+
       - name: test prover
         run: cargo test -p raiko2-prover --lib
 
       - name: test guest launcher
         run: cargo test -p guest-launcher --bin guest-launcher
-
-      - name: test optional Boundless S3 support
-        run: cargo test -p raiko2-prover --lib --features boundless-s3
-
-      - name: verify default host excludes Boundless S3 SDK
-        run: |
-          if cargo tree -p raiko2 -i aws-sdk-s3; then
-            echo "::error::default raiko2 dependency graph unexpectedly includes aws-sdk-s3"
-            exit 1
-          fi
 
   rust-test-xtask:
     needs: changes
@@ -388,6 +364,11 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: ci-rust
+
+      # This lane also compiles SP1 and must recreate its registry-local helper
+      # after restoring build-script outputs from the shared Rust cache.
+      - name: refresh SP1 native runner build state
+        run: cargo clean -p sp1-core-executor-runner
 
       - name: test xtask build guest
         run: cargo test -p xtask-build-guest --features digests

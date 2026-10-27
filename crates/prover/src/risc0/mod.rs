@@ -5,6 +5,7 @@
 
 mod types;
 
+pub use crate::risc0_aggregation::build_risc0_aggregation_input;
 pub use types::{Risc0Config, Risc0ExecutionMetadata, Risc0Response};
 
 use alloy_primitives::{B256, Bytes};

@@ -27,9 +27,6 @@
 //! let gaiko2_prover = Gaiko2Prover::new(Default::default());
 //! ```
 
-#[cfg(feature = "boundless")]
-pub mod boundless;
-pub mod boundless_config;
 pub mod gaiko2;
 pub mod native;
 mod pending_recovery;
@@ -37,7 +34,7 @@ pub mod redact;
 pub mod remote_prover;
 #[cfg(feature = "risc0")]
 pub mod risc0;
-#[cfg(any(feature = "risc0", feature = "boundless"))]
+#[cfg(feature = "risc0")]
 mod risc0_aggregation;
 #[cfg(feature = "sp1")]
 pub mod sp1;
@@ -49,16 +46,12 @@ pub use sp1_config::{
     Sp1FulfillmentStrategy, Sp1NetworkMetadata, Sp1NetworkMode, Sp1NetworkSubmissionProgress,
 };
 
-#[cfg(any(feature = "risc0", feature = "boundless"))]
+#[cfg(feature = "risc0")]
 use alloy::sol_types::SolValue;
 use alloy_primitives::Bytes;
 use alloy_primitives::{Address, B256};
-#[cfg(feature = "boundless")]
-use raiko2_guest_common::aggregate_shasta_zk_with_verifier;
 use raiko2_pipeline::ProverBackend;
 use raiko2_primitives::{AggregationGuestInput, Proof, ProverConfig, RaikoError, RaikoResult};
-#[cfg(feature = "boundless")]
-use raiko2_primitives_shasta::instance::words_to_bytes_le;
 use raiko2_primitives_shasta::{
     ShastaZkAggregationGuestInput, encode_proof_carry_data,
     instance::{build_shasta_commitment_from_proof_carry_data_vec, shasta_aggregation_output},
@@ -67,16 +60,15 @@ use raiko2_primitives_shasta::{
 use raiko2_protocol_shasta::libhash::hash_shasta_subproof_input;
 use raiko2_protocol_shasta::shasta::ProofCarryData;
 #[cfg(feature = "risc0")]
-use risc0_ethereum_contracts_boundless::encode_seal;
+use risc0_ethereum_contracts::encode_seal;
 #[cfg(feature = "risc0")]
 use risc0_zkvm::Receipt as Risc0Receipt;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-#[cfg(any(feature = "risc0", feature = "sp1", feature = "boundless", test))]
-use std::{
-    sync::atomic::{AtomicU64, Ordering},
-    time::Duration,
-};
+#[cfg(feature = "sp1")]
+use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(any(feature = "sp1", test))]
+use std::time::Duration;
 
 /// Encoding helper for guest inputs.
 pub trait GuestInputCodec<I>: Send + Sync {
@@ -86,105 +78,9 @@ pub trait GuestInputCodec<I>: Send + Sync {
     fn encode(&self, input: &I, config: &ProverConfig) -> RaikoResult<Bytes>;
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum BoundlessQuoteStrategy {
-    Estimated,
-    Evaluated,
-    Fixed,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct BoundlessSubmissionProgress {
-    pub provider_request_id: String,
-    pub remote_tx_hash: Option<String>,
-    /// Whether this request id already had a confirmed on-chain submission before the current
-    /// rebid transaction. A missing event may fall back to market polling only in this case.
-    #[serde(default)]
-    pub request_id_has_confirmed_submission: bool,
-    /// Exact EIP-712 signing digest of an on-chain Boundless request. This distinguishes market
-    /// rebid rungs that deliberately reuse one request id.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub request_digest: Option<String>,
-    /// Earliest inclusive lower block for recovering any on-chain rung sharing this request id.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub broadcast_from_block: Option<u64>,
-    pub expires_at: u64,
-    /// Offer lock deadline (`rampUpStart + lockTimeout`), in seconds since the UNIX epoch. The
-    /// client fee is zero for fulfillments past this time, so it bounds the payable window.
-    pub lock_expires_at: u64,
-    pub submitted_at: u64,
-    pub image_ref: String,
-    pub deployment: String,
-    pub offchain: bool,
-    pub quoted_mcycles_count: Option<u32>,
-    pub evaluated_mcycles_count: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub quote_strategy: Option<BoundlessQuoteStrategy>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub quote_model_id: Option<String>,
-    pub max_price_multiplier: u32,
-    /// Exact escalated max price this submission bid, in wei, as a decimal string. The floored
-    /// `max_price_multiplier` collapses the common attempt-2 (×1.5) rung to `1`, so this carries the
-    /// precise bid for telemetry.
-    pub max_price_wei: Option<String>,
-    /// Rebid attempt number that produced this submission, starting at one. Persisted so a resume
-    /// after restart restores the attempt count even when rebids reuse the same price (a flat
-    /// `rebid_price_step_bps == 0` ladder), which cannot be recovered from `max_price_multiplier`
-    /// alone.
-    pub rebid_attempt: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct BoundlessSubmissionResume {
-    pub provider_request_id: String,
-    pub remote_tx_hash: Option<String>,
-    /// Whether this request id already had a confirmed on-chain submission before the current
-    /// rebid transaction. Older checkpoints default to `false` and therefore fail closed.
-    #[serde(default)]
-    pub request_id_has_confirmed_submission: bool,
-    /// Exact EIP-712 signing digest of an on-chain Boundless request.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub request_digest: Option<String>,
-    /// Earliest inclusive lower block for recovering any on-chain rung sharing this request id.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub broadcast_from_block: Option<u64>,
-    /// Exact guest image used by the submitted request.
-    pub image_ref: String,
-    /// Boundless market deployment that owns the request identifier.
-    pub deployment: String,
-    /// Transport used to submit the request to the Boundless market.
-    pub offchain: bool,
-    pub expires_at: u64,
-    /// Offer lock deadline in seconds since the UNIX epoch.
-    pub lock_expires_at: u64,
-    pub submitted_at: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub quoted_mcycles_count: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub evaluated_mcycles_count: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub quote_strategy: Option<BoundlessQuoteStrategy>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub quote_model_id: Option<String>,
-    pub max_price_multiplier: u32,
-    /// Exact escalated max price this submission bid, in wei, as a decimal string.
-    pub max_price_wei: Option<String>,
-    pub rebid_attempt: u32,
-}
-
-/// Exact persisted provider submission that may be cleared after a terminal outcome.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PendingProofCheckpointIdentity {
-    pub backend: NetworkProverBackend,
-    pub provider_request_id: String,
-    pub attempt: std::num::NonZeroU32,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ProverProgress {
-    BoundlessSubmission(BoundlessSubmissionProgress),
     Sp1NetworkSubmission(Sp1NetworkSubmissionProgress),
 }
 
@@ -204,31 +100,32 @@ impl std::fmt::Display for ProgressPersistenceError {
 
 impl std::error::Error for ProgressPersistenceError {}
 
-#[cfg(any(feature = "risc0", feature = "sp1", feature = "boundless", test))]
+#[cfg(any(feature = "sp1", test))]
 const CHECKPOINT_RETRY_BASE_DELAY: Duration = if cfg!(test) {
     Duration::from_millis(1)
 } else {
     Duration::from_secs(1)
 };
-#[cfg(any(feature = "risc0", feature = "sp1", feature = "boundless", test))]
+#[cfg(any(feature = "sp1", test))]
 const CHECKPOINT_RETRY_MAX_DELAY: Duration = if cfg!(test) {
     Duration::from_millis(16)
 } else {
     Duration::from_secs(30)
 };
-#[cfg(any(feature = "risc0", feature = "sp1", feature = "boundless", test))]
+#[cfg(any(feature = "sp1", test))]
 const CHECKPOINT_RETRY_JITTER_SLOTS: u64 = 8;
-#[cfg(any(feature = "risc0", feature = "sp1", feature = "boundless", test))]
+#[cfg(feature = "sp1")]
 static CHECKPOINT_RETRY_INVOCATION: AtomicU64 = AtomicU64::new(0);
 
-#[cfg(any(feature = "risc0", feature = "sp1", feature = "boundless", test))]
+#[cfg(any(feature = "sp1", test))]
 #[derive(Clone, Copy)]
 struct CheckpointRetrySchedule {
     jitter_slot: u32,
 }
 
-#[cfg(any(feature = "risc0", feature = "sp1", feature = "boundless", test))]
+#[cfg(any(feature = "sp1", test))]
 impl CheckpointRetrySchedule {
+    #[cfg(feature = "sp1")]
     fn new() -> Self {
         Self::from_seed(CHECKPOINT_RETRY_INVOCATION.fetch_add(1, Ordering::Relaxed))
     }
@@ -252,103 +149,11 @@ impl CheckpointRetrySchedule {
     }
 }
 
-#[cfg(any(feature = "risc0", feature = "sp1", feature = "boundless", test))]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ProgressPersistenceOutcome {
-    Persisted,
-    PersistedAfterDeadline,
-    DeadlineExceeded,
-}
-
-#[cfg(any(feature = "risc0", feature = "sp1", feature = "boundless", test))]
-async fn persist_prover_progress_with_deadline(
-    observer: Option<&Arc<dyn ProverProgressObserver>>,
-    progress: &ProverProgress,
-    checkpoint: &'static str,
-    permit: &SubmissionCheckpointPermit,
-    deadline: Option<tokio::time::Instant>,
-) -> RaikoResult<ProgressPersistenceOutcome> {
-    let Some(observer) = observer else {
-        return Ok(ProgressPersistenceOutcome::Persisted);
-    };
-    let schedule = CheckpointRetrySchedule::new();
-    let mut retry = 0_u32;
-    loop {
-        if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
-            return Ok(ProgressPersistenceOutcome::DeadlineExceeded);
-        }
-        match observer.on_progress(progress, permit).await {
-            Ok(()) => {
-                return Ok(
-                    if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
-                        ProgressPersistenceOutcome::PersistedAfterDeadline
-                    } else {
-                        ProgressPersistenceOutcome::Persisted
-                    },
-                );
-            }
-            Err(ProgressPersistenceError::Retryable(error)) => {
-                let now = tokio::time::Instant::now();
-                if deadline.is_some_and(|deadline| now >= deadline) {
-                    return Ok(ProgressPersistenceOutcome::DeadlineExceeded);
-                }
-                let delay = schedule.delay(retry);
-                if let Some(deadline) = deadline {
-                    let retry_at = now.checked_add(delay).unwrap_or(deadline);
-                    if retry_at >= deadline {
-                        tokio::time::sleep_until(deadline).await;
-                        return Ok(ProgressPersistenceOutcome::DeadlineExceeded);
-                    }
-                }
-                tracing::warn!(
-                    %error,
-                    checkpoint,
-                    retry,
-                    retry_delay_ms = delay.as_millis(),
-                    "failed to persist remote submission checkpoint; retrying without resubmission"
-                );
-                tokio::time::sleep(delay).await;
-                retry = retry.saturating_add(1);
-            }
-            Err(ProgressPersistenceError::Permanent(error)) => {
-                return Err(RaikoError::Guest(error));
-            }
-        }
-    }
-}
-
-#[cfg(any(feature = "risc0", feature = "sp1", feature = "boundless", test))]
+#[cfg(feature = "sp1")]
 pub(crate) async fn persist_prover_progress(
     observer: Option<&Arc<dyn ProverProgressObserver>>,
     progress: &ProverProgress,
     checkpoint: &'static str,
-    permit: &SubmissionCheckpointPermit,
-) -> RaikoResult<()> {
-    let outcome =
-        persist_prover_progress_with_deadline(observer, progress, checkpoint, permit, None).await?;
-    debug_assert_eq!(outcome, ProgressPersistenceOutcome::Persisted);
-    Ok(())
-}
-
-#[cfg(any(feature = "risc0", feature = "sp1", feature = "boundless", test))]
-pub(crate) async fn persist_prover_progress_until(
-    observer: Option<&Arc<dyn ProverProgressObserver>>,
-    progress: &ProverProgress,
-    checkpoint: &'static str,
-    permit: &SubmissionCheckpointPermit,
-    timeout: Duration,
-) -> RaikoResult<ProgressPersistenceOutcome> {
-    let deadline = tokio::time::Instant::now()
-        .checked_add(timeout)
-        .ok_or_else(|| RaikoError::Guest("checkpoint deadline overflow".to_string()))?;
-    persist_prover_progress_with_deadline(observer, progress, checkpoint, permit, Some(deadline))
-        .await
-}
-
-#[cfg(any(feature = "risc0", feature = "sp1", feature = "boundless", test))]
-pub(crate) async fn clear_pending_proof_checkpoint(
-    observer: Option<&Arc<dyn ProverProgressObserver>>,
-    identity: &PendingProofCheckpointIdentity,
     permit: &SubmissionCheckpointPermit,
 ) -> RaikoResult<()> {
     let Some(observer) = observer else {
@@ -357,21 +162,17 @@ pub(crate) async fn clear_pending_proof_checkpoint(
     let schedule = CheckpointRetrySchedule::new();
     let mut retry = 0_u32;
     loop {
-        match observer
-            .clear_pending_proof_checkpoint(identity, permit)
-            .await
-        {
+        // Await each write to completion without cancelling an in-flight checkpoint CAS.
+        match observer.on_progress(progress, permit).await {
             Ok(()) => return Ok(()),
             Err(ProgressPersistenceError::Retryable(error)) => {
                 let delay = schedule.delay(retry);
                 tracing::warn!(
                     %error,
-                    backend = ?identity.backend,
-                    provider_request_id = %identity.provider_request_id,
-                    attempt = identity.attempt.get(),
+                    checkpoint,
                     retry,
                     retry_delay_ms = delay.as_millis(),
-                    "failed to clear terminal provider checkpoint; retrying"
+                    "failed to persist remote submission checkpoint; retrying without resubmission"
                 );
                 tokio::time::sleep(delay).await;
                 retry = retry.saturating_add(1);
@@ -406,7 +207,7 @@ impl SubmissionCheckpointPermit {
     }
 }
 
-#[cfg(any(feature = "risc0", feature = "sp1", feature = "boundless", test))]
+#[cfg(feature = "sp1")]
 pub(crate) async fn acquire_submission_checkpoint_permit(
     observer: Option<&Arc<dyn ProverProgressObserver>>,
 ) -> RaikoResult<SubmissionCheckpointPermit> {
@@ -439,24 +240,14 @@ pub trait ProverProgressObserver: Send + Sync {
     ) -> Result<Option<PendingProofCheckpoint>, ProgressPersistenceError> {
         Ok(None)
     }
-
-    async fn clear_pending_proof_checkpoint(
-        &self,
-        _identity: &PendingProofCheckpointIdentity,
-        _permit: &SubmissionCheckpointPermit,
-    ) -> Result<(), ProgressPersistenceError> {
-        Err(ProgressPersistenceError::Permanent(
-            "provider checkpoint clearing is unsupported".to_string(),
-        ))
-    }
 }
 
-#[cfg(any(feature = "risc0", feature = "sp1", feature = "boundless", test))]
+#[cfg(any(feature = "risc0", feature = "sp1", test))]
 const B256_BYTES: usize = 32;
-#[cfg(any(feature = "risc0", feature = "boundless"))]
+#[cfg(feature = "risc0")]
 pub(crate) const RISC0_SEAL_PAYLOAD_KIND: &str = "risc0_seal";
 
-#[cfg(any(feature = "risc0", feature = "sp1", feature = "boundless", test))]
+#[cfg(any(feature = "risc0", feature = "sp1", test))]
 pub(crate) fn parse_shasta_proposal_input_hash(public_values: &[u8]) -> RaikoResult<B256> {
     if public_values.len() == B256_BYTES {
         Ok(B256::from_slice(public_values))
@@ -487,33 +278,6 @@ pub(crate) fn validated_shasta_proposal_input(carry: &ProofCarryData) -> RaikoRe
         || RaikoError::InvalidRequestConfig("invalid shasta proof carry data".to_string()),
     )?;
     Ok(hash_shasta_subproof_input(carry))
-}
-
-#[cfg(feature = "boundless")]
-pub(crate) fn validated_shasta_zk_aggregation_output(
-    image_id: [u32; 8],
-    proof_carry_data_vec: Vec<ProofCarryData>,
-    prover_address: Address,
-) -> RaikoResult<B256> {
-    let block_inputs = proof_carry_data_vec
-        .iter()
-        .map(validated_shasta_proposal_input)
-        .collect::<RaikoResult<Vec<_>>>()?;
-    let input = ShastaZkAggregationGuestInput {
-        image_id,
-        block_inputs,
-        proof_carry_data_vec,
-        prover_address,
-    };
-    let image_id_b256 = B256::from(words_to_bytes_le(&image_id));
-
-    aggregate_shasta_zk_with_verifier(&input, image_id_b256, |_index, _input| Ok(())).map_err(
-        |error| {
-            RaikoError::InvalidRequestConfig(format!(
-                "invalid shasta ZK aggregation input: {error:#}"
-            ))
-        },
-    )
 }
 
 pub(crate) fn expected_shasta_aggregate_input(
@@ -553,7 +317,7 @@ pub(crate) fn ensure_shasta_aggregate_input_matches_carries(
     Ok(())
 }
 
-#[cfg(any(feature = "risc0", feature = "sp1", feature = "boundless", test))]
+#[cfg(any(feature = "risc0", feature = "sp1", test))]
 pub(crate) fn parse_shasta_aggregation_input_hash(public_values: &[u8]) -> RaikoResult<B256> {
     if public_values.len() >= B256_BYTES {
         Ok(B256::from_slice(&public_values[..B256_BYTES]))
@@ -565,7 +329,7 @@ pub(crate) fn parse_shasta_aggregation_input_hash(public_values: &[u8]) -> Raiko
     }
 }
 
-#[cfg(any(feature = "risc0", feature = "boundless"))]
+#[cfg(feature = "risc0")]
 pub(crate) fn encode_risc0_proposal_seal_payload(seal: &[u8], image_id: B256) -> String {
     let proof: Vec<u8> = (seal.to_vec(), image_id)
         .abi_encode()
@@ -575,7 +339,7 @@ pub(crate) fn encode_risc0_proposal_seal_payload(seal: &[u8], image_id: B256) ->
     alloy_primitives::hex::encode_prefixed(proof)
 }
 
-#[cfg(any(feature = "risc0", feature = "boundless"))]
+#[cfg(feature = "risc0")]
 pub(crate) fn encode_risc0_aggregation_seal_payload(
     seal: &[u8],
     block_image_id: B256,
@@ -612,7 +376,7 @@ pub(crate) fn encode_risc0_aggregation_proof_payload(
     )
 }
 
-#[cfg(any(feature = "risc0", feature = "boundless"))]
+#[cfg(feature = "risc0")]
 pub(crate) fn decode_hex_payload(value: Option<&str>) -> Vec<u8> {
     value
         .and_then(|raw| alloy_primitives::hex::decode(raw.strip_prefix("0x").unwrap_or(raw)).ok())
@@ -798,14 +562,6 @@ pub fn validate_external_aggregate_proof_metadata(
                     )));
                 }
             }
-            raiko2_pipeline::PipelineKey::ShastaRisc0Network => {
-                if proof.quote.is_none() || proof.extra_data.is_none() {
-                    return Err(RaikoError::InvalidRequestConfig(format!(
-                        "proof {index} is missing Boundless aggregation metadata"
-                    )));
-                }
-                require_external_aggregate_proof_carry(index, proof)?;
-            }
         }
     }
 
@@ -892,135 +648,26 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        CHECKPOINT_RETRY_MAX_DELAY, CheckpointRetrySchedule, NetworkProverBackend,
-        PendingProofCheckpointIdentity, ProgressPersistenceError, ProverProgress,
-        ProverProgressObserver, SubmissionCheckpointPermit, build_shasta_aggregation_input,
-        clear_pending_proof_checkpoint, encode_proof_carry_data,
+        CHECKPOINT_RETRY_MAX_DELAY, CheckpointRetrySchedule, SubmissionCheckpointPermit,
+        build_shasta_aggregation_input, encode_proof_carry_data,
         ensure_shasta_proposal_input_matches_carry, parse_shasta_aggregation_input_hash,
         parse_shasta_proposal_input_hash, validate_external_aggregate_proofs,
     };
-    #[cfg(any(feature = "risc0", feature = "boundless"))]
+    #[cfg(feature = "risc0")]
     use super::{
         decode_hex_payload, encode_risc0_aggregation_seal_payload,
         encode_risc0_proposal_seal_payload,
     };
     use alloy_primitives::B256;
-    #[cfg(any(feature = "risc0", feature = "boundless"))]
+    #[cfg(feature = "risc0")]
     use alloy_sol_types::SolValue;
     use raiko2_pipeline::PipelineKey;
     use raiko2_primitives::Proof;
     use raiko2_protocol_shasta::shasta::ProofCarryData;
     use std::sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicBool, Ordering},
     };
-
-    #[derive(Default)]
-    struct ClearingObserver {
-        cleared: Mutex<Vec<PendingProofCheckpointIdentity>>,
-    }
-
-    #[async_trait::async_trait]
-    impl ProverProgressObserver for ClearingObserver {
-        async fn on_progress(
-            &self,
-            _progress: &ProverProgress,
-            _permit: &SubmissionCheckpointPermit,
-        ) -> Result<(), ProgressPersistenceError> {
-            Ok(())
-        }
-
-        async fn clear_pending_proof_checkpoint(
-            &self,
-            identity: &PendingProofCheckpointIdentity,
-            _permit: &SubmissionCheckpointPermit,
-        ) -> Result<(), ProgressPersistenceError> {
-            self.cleared
-                .lock()
-                .expect("cleared checkpoint lock")
-                .push(identity.clone());
-            Ok(())
-        }
-    }
-
-    struct PermanentClearFailureObserver;
-
-    #[async_trait::async_trait]
-    impl ProverProgressObserver for PermanentClearFailureObserver {
-        async fn on_progress(
-            &self,
-            _progress: &ProverProgress,
-            _permit: &SubmissionCheckpointPermit,
-        ) -> Result<(), ProgressPersistenceError> {
-            Ok(())
-        }
-
-        async fn clear_pending_proof_checkpoint(
-            &self,
-            _identity: &PendingProofCheckpointIdentity,
-            _permit: &SubmissionCheckpointPermit,
-        ) -> Result<(), ProgressPersistenceError> {
-            Err(ProgressPersistenceError::Permanent(
-                "terminal checkpoint clear rejected".to_string(),
-            ))
-        }
-    }
-
-    #[tokio::test]
-    async fn clear_pending_checkpoint_forwards_exact_identity() {
-        let observer = Arc::new(ClearingObserver::default());
-        let observer_dyn: Arc<dyn ProverProgressObserver> = observer.clone();
-        let identity = PendingProofCheckpointIdentity {
-            backend: NetworkProverBackend::Boundless,
-            provider_request_id: "request-1".to_string(),
-            attempt: std::num::NonZeroU32::new(5).expect("non-zero attempt"),
-        };
-        let permit = SubmissionCheckpointPermit::tracked(());
-
-        clear_pending_proof_checkpoint(Some(&observer_dyn), &identity, &permit)
-            .await
-            .expect("clear pending checkpoint");
-
-        assert_eq!(
-            *observer.cleared.lock().expect("cleared checkpoint lock"),
-            vec![identity]
-        );
-    }
-
-    #[tokio::test]
-    async fn clear_pending_checkpoint_without_observer_is_a_noop() {
-        let identity = PendingProofCheckpointIdentity {
-            backend: NetworkProverBackend::Boundless,
-            provider_request_id: "request-1".to_string(),
-            attempt: std::num::NonZeroU32::MIN,
-        };
-        let permit = SubmissionCheckpointPermit::tracked(());
-
-        clear_pending_proof_checkpoint(None, &identity, &permit)
-            .await
-            .expect("unobserved clear is a no-op");
-    }
-
-    #[tokio::test]
-    async fn clear_pending_checkpoint_surfaces_permanent_failure() {
-        let observer: Arc<dyn ProverProgressObserver> = Arc::new(PermanentClearFailureObserver);
-        let identity = PendingProofCheckpointIdentity {
-            backend: NetworkProverBackend::Boundless,
-            provider_request_id: "request-1".to_string(),
-            attempt: std::num::NonZeroU32::MIN,
-        };
-        let permit = SubmissionCheckpointPermit::tracked(());
-
-        let error = clear_pending_proof_checkpoint(Some(&observer), &identity, &permit)
-            .await
-            .expect_err("permanent clear failure must be returned");
-
-        assert!(
-            error
-                .to_string()
-                .contains("terminal checkpoint clear rejected")
-        );
-    }
 
     #[test]
     fn checkpoint_retry_schedule_grows_caps_and_jitters_per_invocation() {
@@ -1217,58 +864,7 @@ mod tests {
     }
 
     #[test]
-    fn aggregate_validator_rejects_missing_boundless_receipt() {
-        let mut proof = aggregate_proof_fixture();
-        proof.quote = None;
-
-        let err = validate_external_aggregate_proofs(PipelineKey::ShastaRisc0Network, 0, &[proof])
-            .expect_err("missing receipt");
-        assert!(
-            err.to_string()
-                .contains("proof 0 is missing Boundless aggregation metadata")
-        );
-    }
-
-    #[test]
-    fn aggregate_validator_rejects_boundless_proof_without_carry_data() {
-        let proof = Proof {
-            proof: None,
-            input: None,
-            quote: Some("0xreceipt".to_string()),
-            uuid: None,
-            kzg_proof: None,
-            extra_data: None,
-        };
-
-        let err = validate_external_aggregate_proofs(PipelineKey::ShastaRisc0Network, 0, &[proof])
-            .expect_err("missing carry");
-        assert!(
-            err.to_string()
-                .contains("proof 0 is missing Boundless aggregation metadata")
-        );
-    }
-
-    #[test]
-    fn aggregate_validator_accepts_boundless_proof_with_receipt_and_carry_data() {
-        let proof = Proof {
-            proof: None,
-            input: None,
-            quote: Some("0xreceipt".to_string()),
-            uuid: None,
-            kzg_proof: None,
-            extra_data: Some(
-                encode_proof_carry_data(&ProofCarryData::default()).expect("encode carry data"),
-            ),
-        };
-
-        assert!(
-            validate_external_aggregate_proofs(PipelineKey::ShastaRisc0Network, 0, &[proof])
-                .is_ok()
-        );
-    }
-
-    #[test]
-    #[cfg(any(feature = "risc0", feature = "boundless"))]
+    #[cfg(feature = "risc0")]
     fn risc0_proposal_payload_encodes_seal_and_image_id() {
         let seal = vec![0x11, 0x22, 0x33];
         let image_id = B256::repeat_byte(0xaa);
@@ -1281,7 +877,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(any(feature = "risc0", feature = "boundless"))]
+    #[cfg(feature = "risc0")]
     fn risc0_aggregation_payload_encodes_seal_and_both_image_ids() {
         let seal = vec![0x44, 0x55, 0x66];
         let block_image_id = B256::repeat_byte(0xbb);

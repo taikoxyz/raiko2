@@ -9,8 +9,6 @@ pub(in super::super) enum BatchProofType {
     Native,
     Sp1,
     Risc0,
-    #[serde(rename = "boundless", alias = "BOUNDLESS")]
-    Boundless,
     Sgx,
     #[serde(rename = "sgxgeth", alias = "SGXGETH", alias = "sgx_geth")]
     SgxGeth,
@@ -23,18 +21,10 @@ impl BatchProofType {
             Self::Native => "native",
             Self::Sp1 => "sp1",
             Self::Risc0 => "risc0",
-            Self::Boundless => "boundless",
             Self::Sgx => "sgx",
             Self::SgxGeth => "sgxgeth",
             Self::ZkAny => "zk_any",
         }
-    }
-
-    pub(in super::super) const fn is_public_batch_request_type(self) -> bool {
-        matches!(
-            self,
-            Self::Native | Self::Sp1 | Self::Risc0 | Self::Sgx | Self::SgxGeth | Self::ZkAny
-        )
     }
 
     pub(in super::super) const fn is_concrete_public_proof_type(self) -> bool {

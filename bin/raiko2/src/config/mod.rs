@@ -18,7 +18,7 @@ pub use preflight::PreflightConfig;
 pub use prover::{ProverConfig, ZkAnyConfig, ZkAnyTargetConfig};
 pub use queue::QueueConfig;
 pub use raiko2_pipeline::{GuestSystem, RunnerKind};
-pub use rpc::{BoundlessPairConfig, NetworkPairConfig, ResolvedNetworkPair, RpcConfig};
+pub use rpc::{NetworkPairConfig, ResolvedNetworkPair, RpcConfig};
 #[cfg(test)]
 pub use runtime::StartupCleanupScope;
 pub use runtime::{PreflightCacheMode, RuntimeConfig, RuntimeStoreBackend};
@@ -166,19 +166,6 @@ impl Config {
             .context("Runtime configuration error")?;
         self.queue.validate().context("Queue configuration error")?;
 
-        if self.prover.runner(ProofType::Risc0) == Some(RunnerKind::Network) {
-            rpc::validate_boundless_pairs(&resolved_pairs)
-                .context("Boundless RPC pair configuration error")?;
-            for pair in &resolved_pairs {
-                self.prover
-                    .risc0
-                    .boundless
-                    .apply_pair_override(&pair.boundless)
-                    .with_context(|| {
-                        format!("Boundless configuration error for rpc pair {}", pair.key)
-                    })?;
-            }
-        }
         if self.prover.is_enabled(ProofType::Sp1) {
             rpc::validate_sp1_verifier_pairs(&resolved_pairs)
                 .context("SP1 verifier RPC pair configuration error")?;
@@ -312,20 +299,6 @@ mod tests {
             .apply_routes_override(&routes.parse().expect("valid prover routes"));
     }
 
-    fn enable_test_boundless_network(config: &mut Config) {
-        set_routes(config, "risc0/network");
-        config.prover.risc0.boundless.rpc_url = "https://boundless.example.com".to_string();
-        config.prover.risc0.boundless.signer_key = "configured-by-secret-store".to_string();
-        config.prover.risc0.boundless.transaction = Some(
-            raiko2_prover::boundless_config::BoundlessTransactionConfig {
-                receipt_timeout_ms: 90_000,
-                fee_bump_bps: 5_000,
-                max_replacements: 4,
-                max_fee_per_gas_wei: "1000000000".to_string(),
-            },
-        );
-    }
-
     fn route_override_config() -> &'static str {
         r#"
 [server]
@@ -405,8 +378,6 @@ backend = "memory"
     #[test]
     fn test_config_example_validates() {
         let _env_lock = lock_test_cli_environment();
-        let _signer_key_guard =
-            EnvVarGuard::set("RAIKO2_BOUNDLESS_SIGNER_KEY", "configured-by-secret-store");
         let path = workspace_config("config.example.toml");
         let config = Config::from_file(&path).expect("parse config.example.toml");
         config.validate().expect("validate config.example.toml");
@@ -595,14 +566,6 @@ backend = "memory"
         let path = workspace_config("docker/config.compose.toml");
         let config = Config::from_file(&path).expect("parse docker config");
         config.validate().expect("validate docker config");
-        assert_eq!(
-            config.prover.risc0.boundless.batch_quote,
-            raiko2_prover::boundless_config::QuoteSizing::Evaluated
-        );
-        assert_eq!(
-            config.prover.risc0.boundless.aggregation_quote,
-            raiko2_prover::boundless_config::QuoteSizing::Evaluated
-        );
     }
 
     #[test]
@@ -767,7 +730,6 @@ backend = "memory"
                 l2_witness_rpc: Some("https://witness.taiko-rpc.example.com".to_string()),
                 sp1_verifier_rpc_url: None,
                 sp1_verifier_address: None,
-                boundless: BoundlessPairConfig::default(),
             }],
             ..Default::default()
         };
@@ -787,7 +749,6 @@ backend = "memory"
                 l2_witness_rpc: None,
                 sp1_verifier_rpc_url: None,
                 sp1_verifier_address: None,
-                boundless: BoundlessPairConfig::default(),
             }],
             ..Default::default()
         };
@@ -809,7 +770,6 @@ backend = "memory"
                 l2_witness_rpc: None,
                 sp1_verifier_rpc_url: Some("https://verifier.example.com".to_string()),
                 sp1_verifier_address: None,
-                boundless: BoundlessPairConfig::default(),
             }],
             ..Default::default()
         };
@@ -842,7 +802,6 @@ backend = "memory"
                 sp1_verifier_address: Some(
                     "0x0000000000000000000000000000000000000001".to_string(),
                 ),
-                boundless: BoundlessPairConfig::default(),
             }],
             ..Default::default()
         };
@@ -868,7 +827,6 @@ backend = "memory"
                 sp1_verifier_address: Some(
                     "0x0000000000000000000000000000000000000000".to_string(),
                 ),
-                boundless: BoundlessPairConfig::default(),
             }],
             ..Default::default()
         };
@@ -892,32 +850,6 @@ backend = "memory"
             ..Default::default()
         };
         assert!(config.validate_base().is_err());
-    }
-
-    #[test]
-    fn config_validate_skips_pair_boundless_when_network_route_disabled() {
-        let mut config = Config::default();
-        set_routes(&mut config, "risc0/local");
-        config.rpc.pairs[0].boundless.rebid_timeout_ms = Some(0);
-
-        config
-            .validate()
-            .expect("disabled Boundless settings must not reject startup");
-    }
-
-    #[test]
-    fn config_validate_rejects_pair_boundless_when_network_route_enabled() {
-        let mut config = Config::default();
-        enable_test_boundless_network(&mut config);
-        config.rpc.pairs[0].boundless.rebid_timeout_ms = Some(0);
-
-        let err = config
-            .validate()
-            .expect_err("enabled Boundless settings must be validated");
-        assert!(
-            err.chain()
-                .any(|source| source.to_string().contains("rebid_timeout_ms"))
-        );
     }
 
     #[test]
@@ -952,36 +884,14 @@ backend = "memory"
     }
 
     #[test]
-    fn test_config_rejects_invalid_pair_specific_boundless_offer() {
-        let mut config = Config::default();
-        enable_test_boundless_network(&mut config);
-        config.rpc.pairs[0].boundless.offer_params.batch =
-            Some(raiko2_prover::boundless_config::BoundlessOfferParams {
-                timeouts: raiko2_prover::boundless_config::TimeoutPolicy::PerMcycle {
-                    lock_timeout_ms_per_mcycle: 100,
-                    timeout_ms_per_mcycle: 100,
-                    dynamic_pricing_timeout_modifier: None,
-                },
-                ..config.prover.risc0.boundless.offer_params.batch.clone()
-            });
-
-        let err = config.validate().expect_err("invalid pair offer config");
-        assert!(err.chain().any(|source| {
-            source
-                .to_string()
-                .contains("timeout_ms_per_mcycle must be greater than lock_timeout_ms_per_mcycle")
-        }));
-    }
-
-    #[test]
     fn test_pipeline_route_from_str() {
         assert_eq!(
             "risc0/local".parse::<PipelineRoute>().unwrap(),
             PipelineRoute::new(GuestSystem::Risc0, RunnerKind::Local)
         );
         assert_eq!(
-            "RISC0/NETWORK".parse::<PipelineRoute>().unwrap(),
-            PipelineRoute::new(GuestSystem::Risc0, RunnerKind::Network)
+            "SP1/NETWORK".parse::<PipelineRoute>().unwrap(),
+            PipelineRoute::new(GuestSystem::Sp1, RunnerKind::Network)
         );
         assert_eq!(
             "sp1/local".parse::<PipelineRoute>().unwrap(),
@@ -1104,7 +1014,7 @@ backend = "memory"
     #[test]
     fn prover_routes_cli_override_rejects_duplicate_entries() {
         let _environment = ConfigTestEnvironment::new();
-        let cli = Cli::parse_from(["raiko2", "--prover-routes", "risc0/local,risc0/network"]);
+        let cli = Cli::parse_from(["raiko2", "--prover-routes", "risc0/local,risc0/local"]);
 
         let err = Config::load(&cli).expect_err("duplicate route override must fail");
         assert!(err.to_string().contains("duplicate prover route"));
@@ -1122,27 +1032,6 @@ backend = "memory"
             .try_into::<Config>()
             .expect_err("runtime section must be explicit in deployment config");
         assert!(error.to_string().contains("runtime"));
-    }
-
-    #[test]
-    fn test_boundless_route_requires_signer_key() {
-        let mut config = Config::default();
-        set_routes(&mut config, "risc0/network");
-        config.prover.risc0.boundless.signer_key.clear();
-
-        let err = config.prover.validate().expect_err("missing signer key");
-        assert!(err.to_string().contains("signer_key"));
-    }
-
-    #[test]
-    fn test_boundless_route_requires_rpc_url() {
-        let mut config = Config::default();
-        set_routes(&mut config, "risc0/network");
-        config.prover.risc0.boundless.rpc_url.clear();
-        config.prover.risc0.boundless.signer_key = "dummy-test-signer-key".to_string();
-
-        let err = config.prover.validate().expect_err("missing rpc url");
-        assert!(err.to_string().contains("rpc_url"));
     }
 
     #[test]

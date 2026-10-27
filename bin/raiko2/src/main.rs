@@ -99,10 +99,6 @@ fn init_logging(cli: &Cli) {
 }
 
 fn credential_safe_dependency_log(target: &str, level: Level) -> bool {
-    if target.starts_with("boundless_market") {
-        return false;
-    }
-
     !target.starts_with("alloy_transport_http") || !matches!(level, Level::DEBUG | Level::TRACE)
 }
 
@@ -114,19 +110,6 @@ mod tests {
 
     #[test]
     fn credential_safety_filter_cannot_be_bypassed_by_verbose_dependency_logs() {
-        for level in [
-            Level::ERROR,
-            Level::WARN,
-            Level::INFO,
-            Level::DEBUG,
-            Level::TRACE,
-        ] {
-            assert!(!credential_safe_dependency_log(
-                "boundless_market::request_builder",
-                level
-            ));
-        }
-
         assert!(!credential_safe_dependency_log(
             "alloy_transport_http::reqwest_transport",
             Level::DEBUG
@@ -140,7 +123,7 @@ mod tests {
             Level::INFO
         ));
         assert!(credential_safe_dependency_log(
-            "raiko2_prover::boundless",
+            "raiko2_prover::sp1",
             Level::TRACE
         ));
     }

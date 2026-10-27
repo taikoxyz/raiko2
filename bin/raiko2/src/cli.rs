@@ -130,13 +130,13 @@ mod tests {
         let cli = Cli::try_parse_from([
             "raiko2",
             "--prover-routes",
-            "risc0/network,sp1/network,sgx/remote,sgxgeth/remote",
+            "risc0/local,sp1/network,sgx/remote,sgxgeth/remote",
         ])
         .expect("prover routes override should parse");
 
         assert_eq!(
             cli.prover_routes.as_deref(),
-            Some("risc0/network,sp1/network,sgx/remote,sgxgeth/remote")
+            Some("risc0/local,sp1/network,sgx/remote,sgxgeth/remote")
         );
     }
 

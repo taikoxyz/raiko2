@@ -15,8 +15,8 @@ witness block timestamp must meet the input chain's built-in Unzen activation.
 ## At a Glance
 
 - Typed v4 proposal-side proof endpoint
-- Canonical routes: `native/local`, `risc0/local`, `risc0/network`, `sp1/local`, `sp1/network`
-- Default binaries include RISC Zero local/network proving and SP1 proving
+- Canonical routes: `native/local`, `risc0/local`, `sp1/local`, `sp1/network`
+- Default binaries include RISC Zero local proving and SP1 proving
 - Optional remote SGX routes for configured external prover providers
 - Proposal pipeline for preflight, validation, proving, and aggregation
 - Config-driven RPC pair allowlist and optional L1 beacon overrides via `rpc.pairs`
@@ -41,16 +41,14 @@ Run the real server with an explicit config file:
 ```bash
 cp config.example.toml config.toml
 $EDITOR config.toml
-export RAIKO2_BOUNDLESS_SIGNER_KEY="replace-with-boundless-signer-key"
 cargo run -r -p raiko2 -- --config config.toml
 ```
 
 `config.example.toml` is a combined production sample. Before running, keep only the desired
 per-proof-type tables enabled and fill every setting, credential, and endpoint they require. For
 example, SP1 network proving requires `prover.sp1.enabled = true`, `prover.sp1.prover = "network"`,
-and `NETWORK_PRIVATE_KEY`, while RISC0 network proving requires `prover.risc0.enabled = true`,
-`prover.risc0.runner = "network"`, real nested Boundless credentials, and an explicit
-`prover.risc0.boundless.transaction` fee/replacement policy for on-chain submission.
+and `NETWORK_PRIVATE_KEY`. RISC0 proving runs locally with `prover.risc0.enabled = true`
+and `prover.risc0.runner = "local"`.
 
 Configuration is loaded from `--config` or `RAIKO2_CONFIG`. CLI flags and environment variables
 override values from the file. The real server checks configured RPC endpoints and hosted prover
@@ -63,9 +61,6 @@ A config file can keep a sensitive string outside version control by using an ex
 environment reference:
 
 ```toml
-[prover.risc0.boundless]
-signer_key = { env = "RAIKO2_BOUNDLESS_SIGNER_KEY" }
-
 [[server.acl.keys]]
 id = "submit"
 key = { env = "RAIKO2_SUBMIT_API_KEY" }
@@ -190,18 +185,15 @@ flowchart LR
   final proofs. A standalone SP1 proposal may therefore complete with `proof = null` while its
   readable artifact carries `quote`, `input`, `uuid`, and `extra_data`; aggregate completion always
   requires a separate artifact with a non-null final `proof`.
-- `proof_type=risc0` resolves to the server's configured RISC Zero prover type. The
-  `prover_type=network` path submits to Boundless and exposes Boundless quote metadata; Boundless
-  is not a separate proof type.
-- `proof_type=boundless` is not accepted; use `proof_type=risc0` with the server configured for
-  `risc0/network` when targeting Boundless.
 
 ## Routes
+
+Boundless support has been removed. This release is used after Boundless shutdown; old orders and
+databases are handled externally. The application has no migration or cleanup path for that state.
 
 - `native/local` executes the proving pipeline locally and returns public inputs
   instead of a zk proof.
 - `risc0/local` generates RISC Zero proofs locally.
-- `risc0/network` submits RISC Zero proving directly to Boundless from the `raiko2` process.
 - `sp1/local` and `sp1/network` select the SP1 pipeline. The task `prover_type` reports whether
   SP1 ran in `mock`, `local`, or `network` mode.
 - `sgx/remote` submits proposal proving to the dedicated remote SGX runtime. This repo now ships

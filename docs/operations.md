@@ -1,6 +1,6 @@
 # Operations Guide
 
-This guide covers runtime configuration, Docker, SGX operation, and Boundless operation.
+This guide covers runtime configuration, Docker, local proving, SP1 network proving, and SGX operation.
 API contracts live in [API.md](API.md), and the canonical config shape lives in
 [`config.example.toml`](../config.example.toml).
 
@@ -56,7 +56,7 @@ docker compose --env-file docker/.env -f docker/docker-compose.yml up --build
 ```
 
 The default compose stack runs a single `raiko2` container on port `8080` with the in-process
-memory queue. Default binaries include RISC Zero local/network proving and SP1 proving. The
+memory queue. Default binaries include RISC Zero local proving and SP1 proving. The
 operator env sample selects `risc0/local` for this one-container quickstart.
 
 To select proving routes, set `RAIKO2_PROVER_ROUTES` in `docker/.env` to a comma-separated list.
@@ -68,11 +68,10 @@ For a single local route:
 RAIKO2_PROVER_ROUTES=risc0/local
 ```
 
-Do not apply the four-route production value to `docker/config.compose.toml` as-is. That file is
-the SGX compose shape: its SP1 settings select the local prover, and its Boundless signer is only a
-placeholder.
+Do not apply the production route override to `docker/config.compose.toml` as-is. That file is
+the SGX compose shape and its SP1 settings select the local prover.
 
-For a production host serving both network ZK systems and both SGX lanes, start from the complete
+For a production host serving local RISC0, network SP1, and both SGX lanes, start from the complete
 production-oriented example instead:
 
 ```bash
@@ -82,21 +81,21 @@ $EDITOR config.toml
 
 In that edit, replace placeholder credentials, configure production RPC and runtime storage, and
 verify that each enabled backend section matches its route. In particular,
-`[prover.sp1]` must select the network prover, `[prover.risc0.boundless]` must contain real
-deployment credentials, and `[prover.sgx]` / `[prover.sgxgeth]` must point to their production
+`[prover.sp1]` must select the network prover and have its network credentials,
+and `[prover.sgx]` / `[prover.sgxgeth]` must point to their production
 services. The atomic override may then be passed to that completed config:
 
 ```bash
-RAIKO2_PROVER_ROUTES=risc0/network,sp1/network,sgx/remote,sgxgeth/remote \
+RAIKO2_PROVER_ROUTES=risc0/local,sp1/network,sgx/remote,sgxgeth/remote \
   ./target/release/raiko2 --config ./config.toml
 ```
 
-Supported pairs are `risc0/local`, `risc0/network`, `sp1/local`, `sp1/network`, `native/local`,
+Supported pairs are `risc0/local`, `sp1/local`, `sp1/network`, `native/local`,
 `sgx/remote`, and `sgxgeth/remote`. Without an override, each proof-type table owns its own
 `enabled` state and execution selector. One host may explicitly enable any supported combination.
 
 The queue is always in-process. Durable task state and remote-provider checkpoints use the
-configured namespaced GCS runtime store; Boundless does not need an extra feature flag.
+configured namespaced GCS runtime store.
 
 ## Hosted Aggregate Route
 
@@ -115,7 +114,7 @@ Operational notes:
 - `proof_type = "sp1"` requires proofs that include the SP1 aggregation metadata expected by the
   canonical aggregation path. Hosted SP1 batch proposal proving emits Compressed proofs, and the
   hosted aggregation route emits a Plonk proof.
-- `proof_type = "risc0"` uses the same hosted RISC0 network prover path as proposal proving.
+- `proof_type = "risc0"` uses the same local RISC0 prover path as proposal proving.
 - The request body is intentionally aligned with old `raiko`'s global body-limit posture; do not
   widen it ad hoc at the route level.
 
@@ -980,75 +979,6 @@ Current behavior:
 - `sp1` `*.vk.bin` artifacts are checked against the ELF-derived key before dry-run or apply.
   A mismatch means the release artifacts are inconsistent and registration stops before any
   transaction is sent.
-- Boundless program upload is a separate runtime concern and still happens automatically when
-  `risc0/network` submits a request.
-
-## Boundless Storage Upload
-
-Boundless storage uploader selection is environment-driven. Use your private GCS
-bucket:
-
-```bash
-BOUNDLESS_STORAGE_UPLOADER=gcs
-GCS_BUCKET=<your-gcs-bucket>
-GCS_PUBLIC_URL=false
-```
-
-The GCP project is selected by the current gcloud/ADC context, for example
-`<your-gcp-project>`; raiko2 does not carry a separate project id setting. The
-bucket should enforce public access prevention, so `GCS_PUBLIC_URL=false` returns
-private `gs://` URLs and Boundless downloaders must have GCS credentials. Set
-`GCS_PUBLIC_URL=true` only for a publicly readable bucket that should return HTTPS
-URLs.
-
-Authentication uses Google ADC from the active environment
-(`GOOGLE_APPLICATION_CREDENTIALS`, workload identity, metadata server, or local
-application-default credentials). Inline service account JSON through
-`GCS_CREDENTIALS_JSON` is only needed when ADC is not available. Optional `GCS_URL`
-supports custom endpoints. `STORAGE_UPLOADER` remains accepted as a compatibility
-alias. Pinata and File remain available in default builds. S3 requires a host built
-with the non-default `boundless-s3` feature; a default build rejects an explicit
-`BOUNDLESS_STORAGE_UPLOADER=s3` selection during startup. Without an explicit selector,
-GCS, Pinata, and File settings take precedence over S3 inference, so a stale `S3_BUCKET` cannot
-override one of those configured uploaders. If `S3_BUCKET` is the only implicit uploader setting,
-a default build fails startup and requires the `boundless-s3` feature. A Boundless network route
-also fails startup when no storage uploader is selected, because raiko2 always uploads both the
-program and guest input before creating a market request.
-
-## Boundless Funding Operations
-
-On-chain Boundless submissions use a process-local reservation ledger together with
-`BoundlessMarket.balanceOf(requestor)`. Operate exactly one active raiko2 writer for each Boundless
-signer. Multiple processes or namespaces sharing one signer are unsupported: their local
-reservations and nonce allocators cannot coordinate.
-
-The configured Boundless market RPC must provide a monotonic `latest` view. If the endpoint is a
-load balancer, remove nodes that lag the previously served head; a stale balance can temporarily
-understate the required top-up. Local reservations remain for 60 seconds after `lock_expires_at` so
-small local-clock and chain-time differences stay conservative.
-
-An authenticated market RPC carries its credential inside `prover.risc0.boundless.rpc_url`, as
-userinfo or as a query parameter: neither the alloy transport nor the Boundless SDK exposes a
-per-request header hook. Supply the whole URL through a `{ env = "..." }` reference so the token
-never reaches a plaintext config file. Raiko2 strips credentials, query, and fragment from every URL
-it renders into a Boundless error message or log field, so a failing request logs the endpoint but
-not the token. Its logging filter also suppresses Boundless SDK output and Alloy HTTP debug/trace
-output because those dependencies can render the provider URL before raiko2 receives and scrubs the
-error; `RUST_LOG` and `--verbose` cannot override this safety boundary. That protects raiko2's own
-output only: the credential still appears in the request line of any proxy or gateway in front of
-the endpoint, so rotate it on the same schedule as the signer key.
-
-Keep the signer wallet funded for the peak `attached_value` plus the configured transaction fee
-ceiling. Same-nonce replacements do not execute more than once, but the wallet must be able to pay
-the highest accepted replacement. Monitor the
-structured `Prepared Boundless funding decision` event (`reserved_count`, `market_balance`,
-`required_total`, and `attached_value`) and alert before the required top-up approaches available
-wallet funds. A restart does not reconstruct the exact funding amounts, but it restores a signer
-blocker for every durable unconfirmed on-chain checkpoint before workers start. New transactions
-remain blocked until exact-event recovery confirms the checkpoint, the checkpoint is explicitly
-cleared, or its lock deadline expires. The RPC pending/latest nonce check remains a second guard when
-the selected node still exposes the predecessor in its mempool.
-
 ## Release TEE Provider Metadata
 
 TEE-backed remote prover images have a separate pre-release metadata flow.
@@ -1227,39 +1157,8 @@ This command does not:
 
 Those steps remain part of later operator workflows.
 
-## RISC0 Network Route
+## Runtime Operations
 
-To use the network-backed RISC0 route, configure:
-
-```toml
-[prover.risc0]
-enabled = true
-runner = "network"
-
-[prover.risc0.boundless]
-offchain = false
-rpc_url = "https://base-rpc.publicnode.com"
-signer_key = "0xYOUR_PRIVATE_KEY"
-poll_interval_ms = 10000
-timeout_ms = 3600000
-rebid_timeout_ms = 300000
-rebid_price_step_bps = 5000
-rebid_max_attempts = 4
-
-[prover.risc0.boundless.transaction]
-# Optional bounded knobs default to 90 seconds, +50%, and four replacements.
-max_fee_per_gas_wei = "1000000000"
-
-[prover.risc0.boundless.deployment]
-deployment_type = "base"
-```
-
-Full deployment and offer parameter examples live in
-[`config.example.toml`](../config.example.toml).
-
-Operator notes:
-
-- `raiko2` uploads guest ELFs and submits Boundless requests directly.
 - Production runtime state, provider checkpoints, publication intents, pending proof blobs, and proof
   manifests are stored in the configured GCS namespace. Proof bytes are immutable objects, not fields
   in the runtime snapshot. The state and object repositories have separate semantics even when both
@@ -1274,7 +1173,7 @@ Operator notes:
   from GCS rather than Redis.
 - `runtime.startup_cleanup = ["proof"]` is an exceptional namespace-wide cutover for SGX/ZK guest,
   image, verifier, or proving-key upgrades. It deletes the sole runtime-state snapshot, including all
-  tasks, artifact records, pending publications, and durable Boundless/SP1 provider-request
+  tasks, artifact records, pending publications, and durable SP1 provider-request
   checkpoints, before deleting active proof manifests. Existing remote requests are not cancelled;
   client resubmission may create duplicate paid provider work. Add `"preflight"` only when derivation,
   fork, or witness-generation rules changed; that scope deletes canonical preflight cache objects
@@ -1340,14 +1239,6 @@ Operator notes:
   their artifact identity until deletion succeeds and are swept during startup reconciliation. A
   successor at the same artifact key does not inherit the predecessor incarnation's publication
   intent.
-- Boundless finalizes a non-zero market request ID and checkpoints it before either offchain or
-  onchain dispatch. Treat that durable checkpoint as the dispatch admission boundary: cancellation
-  that commits first prevents the provider call, while a later cancellation never causes a fresh
-  request ID. An uncertain offchain response is polled under the checkpointed ID and is not sent a
-  second time. The checkpoint is also bound to the exact guest image, Boundless market deployment,
-  and submission transport. Before changing any of them, settle or explicitly abandon every
-  outstanding remote request, then start the new configuration in a new namespace. An existing
-  checkpoint fails closed rather than crossing that provider boundary.
 - SP1 checkpoints the provider-assigned request ID together with its original submission time. A
   restart or late-joining root reprojects that exact timestamp and deadline; it never extends the
   paid request's timeout by treating recovery as a new submission.
@@ -1392,188 +1283,6 @@ Operator notes:
   remain available until every manifest that references it is gone, then the bucket lifecycle may
   reclaim it. Canonical preflight objects have an independent finite-age lifecycle because expiration
   is handled as a cache miss and rebuild.
-- Proposal and aggregation requests are sized by `prover.risc0.boundless.batch_quote` and
-  `prover.risc0.boundless.aggregation_quote`. When Boundless configuration is supplied explicitly,
-  both stage tables are required. Each table accepts exactly `strategy = "estimated"`,
-  `"evaluated"`, or `"fixed"`; `fixed` also requires a positive `mcycles` value. The removed
-  `raiko_agent` value is intentionally rejected: migrate every old explicit configuration before
-  rolling out this binary. `prover.risc0.boundless.proposal_zkgas_warning_threshold` is a positive
-  proposal-only observability threshold and defaults to `1000000000`. Exceeding it warns but never
-  changes the estimate path. Pair-specific `rpc.pairs[*].boundless` quote and threshold fields remain
-  optional and inherit the corresponding global value when omitted.
-- `evaluated` performs the exact local guest dry-run and quotes its cycle count. `fixed` still runs
-  the guest locally to obtain the journal, but quotes the configured count. `estimated` derives the
-  expected journal and quote from the typed input without local guest execution. The estimation step
-  itself does not submit a proof; the normal Boundless request still proves the original guest and
-  input. It is an explicit auction-cost/timeout optimization. The configured proposal warning
-  threshold is neither an availability boundary nor an accuracy promise. The committed Mainnet
-  evaluation data contains a
-  `21.9679%` production-integer overquote, which is an accepted pricing/timeout mismatch. The
-  artifact's historical `500000000` publication window and ten-percent check remain calibration
-  records and do not constrain runtime admission. Aggregation has no error-budget gate. Since an
-  in-policy request is not locally
-  executed first, its actual underquote or overquote is unknown and that mismatch is accepted.
-  Existing order-acceptance monitoring covers operational underquotes. With the deployed auction
-  starting at zero, overestimation raises the maximum-price ceiling but does not itself set the paid
-  price. Select `evaluated` when exact local cycles are required.
-- Each `estimated` stage table independently accepts `mcycles_offset`, measured in millions of
-  cycles. For the current legacy proposal pairing, set `batch_quote.mcycles_offset = 1300` (1.3
-  billion cycles) and `aggregation_quote.mcycles_offset = 0`; a batch offset never changes aggregate
-  sizing. The offset is added only after a successful estimate, before price/timeout sizing and quote
-  persistence. Estimate-unavailable and arithmetic-overflow cases perform the existing single local
-  evaluation without the offset. Remove or reset the stage offset after publishing matching
-  calibration data.
-- Proposal estimation currently supports any non-empty exact-Unzen input with
-  `execution_po2 >= 20`, non-zero zkGas in every witness, and representable checked arithmetic. It
-  does not gate on network name, block count, or total zkGas; block count remains an M2 formula
-  input. Combinations outside the collected sample rectangles are deliberately admitted without a
-  per-request error proof. Size that acceptance concretely: the collected rectangles are
-  `block_count` 155-192 and `total_zkgas` 216314230-562107601. The supported Unzen
-  derivation-source block limit is 768, and estimation only runs
-  on exact-Unzen input, so an admitted proposal can carry up to four times the calibrated block
-  count. Totals above the effective `proposal_zkgas_warning_threshold` (default `1000000000`) remain
-  estimated and emit a warning with the total, threshold, estimate, and model ID so operators can
-  select offline calibration samples. Later-fork, lower-`execution_po2`, zero-zkGas, and
-  arithmetic-overflow inputs emit a different warning and perform exactly one local evaluation. A
-  malformed or structurally invalid input fails directly rather than falling back. Proposal or
-  witness timestamps before Unzen fail shared input validation.
-- Estimated aggregation derives the journal on the host and quotes `180 * child_count` mcycles for
-  every structurally valid, non-empty input. Historical child-count observations are audit data,
-  never a runtime allowlist. The v4 API accepts 1-1024 proposals, so the quote ranges from 180 to
-  `184,320` mcycles—roughly 205 times the five-child quote—even though the largest historical
-  observation has five children. That older cohort measured about 175 mcycles at one child and
-  817-818 at five: 900 mcycles is 10.02-10.16% high at five, and extrapolating the observed trend
-  approaches roughly 12% overquote at larger counts. The aggregation guest recorded by the model
-  artifact has not been measured successfully. Its recorded ELF SHA-256 is
-  `fd56481a38855c3d85488cc267653ae390633c16ba1612fcf2d4891f5b30d924`, but its
-  `disable-dev-mode` build rejects the development-receipt probe and the artifact image ID is null;
-  the current checked-in aggregation guest no longer hashes to that value. Its actual error
-  direction is unknown. With the committed scalar and v4 limit,
-  multiplication/conversion overflow cannot occur. A configured
-  `mcycles_offset` addition can still overflow and use the generic local-evaluation fallback, but at
-  the documented aggregation offset of zero valid input has no estimate-unavailable local
-  evaluation. The host path also does not verify child receipt bytes; a bad receipt can enter the
-  auction and fail only during remote guest execution. Malformed input fails directly.
-- With the example aggregation per-mcycle timeout policy, a 1024-child estimate produces a
-  `552,960`-second lock timeout and a `1,105,920`-second fulfillment timeout. Market pricing also has no
-  absolute price cap unless `absolute_max_price_per_mcycle` is configured, so rebids may escalate
-  until the attempt limit. This is accepted extrapolation, not evidence that a 1024-child guest
-  execution was measured.
-- Upgrade note: a deployment already using `aggregation_quote.strategy = "estimated"` previously
-  performed one local evaluation because the committed calibrated-count set was empty. The same
-  configuration now skips execution, quotes `180 * child_count`, and persists
-  `evaluated_mcycles_count = None` without a startup warning. Switch aggregation to `evaluated`
-  before upgrading if exact pre-execution must remain in place.
-- `estimated` does not expose a `skip_preflight` configuration flag. It internally builds through a
-  request-scoped SDK builder with an independent preflight layer, so the successful estimate and its
-  local fallback do not download the uploaded input or read or modify the shared executor cache.
-  `evaluated` and `fixed` retain the shared SDK preflight behavior.
-- The model artifact records ELF, image, source-revision, and RISC0-version provenance for release
-  review, but the request path does not compare those values with the running binary. The release
-  owner decides whether a new guest/runtime remains compatible: retain `estimated` only after that
-  review, otherwise switch the affected stage to `evaluated` while refreshing measurements.
-- The committed artifact pins proposal ELF SHA-256
-  `d7a4aca3769005d30772a6a1d4c47c95f7d6692244a3b017b181935a855e6b35`, which predates the current
-  checked-in proposal guest; `crates/guests/elf/risc0_shasta_proposal.elf` no longer hashes to that
-  value. The calibration therefore describes a guest that is not the one being
-  proved. This release-pairing drift is known and explicitly accepted for quote-price and timeout
-  sizing when the release selects `estimated`; it does not affect proof validity. Select
-  `evaluated` instead when the running guest's exact local cycle count is required.
-- `prover.risc0.boundless.rebid_timeout_ms` controls how long an unlocked market request can remain
-  unclaimed before `raiko2` resubmits at a higher max price. The default is `300000` ms, and the
-  minimum is `1000` ms.
-- `prover.risc0.boundless.rebid_price_step_bps` controls the per-rebid max-price escalation, in basis
-  points, compounded over the base max price. The default is `5000` (+50% per rung). `0` is a valid
-  flat ladder; values in `1..100` are rejected as a likely basis-points/multiplier confusion.
-- `prover.risc0.boundless.rebid_max_attempts` caps replacement submissions across every retry path —
-  no-lock, expired, and poll-timeout requests all draw from the same budget. The default is `4`, the
-  maximum is `31`, and the default allows a final max price of about `5x` the base at the default
-  step, unless `absolute_max_price_per_mcycle` clamps it sooner.
-- `prover.risc0.boundless.transaction` controls the EIP-1559 transaction for each market attempt.
-  `max_fee_per_gas_wei` is required for on-chain mode. `receipt_timeout_ms` defaults to and is capped
-  at `90000`; `fee_bump_bps` defaults to `5000` and must be at least the standard `1000` txpool
-  replacement threshold; `max_replacements` defaults to `4`, and its effective maximum is derived
-  from the total-attempt budget (`4` at the default `90000` ms receipt timeout). Validation caps
-  the combined worst-case send and receipt windows across all attempts at ten minutes. The lock
-  deadline prevents every new broadcast. An already-started or ambiguously acknowledged send still
-  receives bounded known-hash and exact-event recovery after the deadline when necessary; this can
-  briefly retain the serialized signer but prevents a canonical submission from being misclassified
-  as unbroadcast. Receipt polling checks the account nonce once per round and queries replacement
-  receipts only after the nonce is mined. The gas limit is estimated
-  once and fixed across replacements so the configured cap remains the transaction's per-gas ceiling
-  rather than an input to the SDK's dynamic fee filler.
-- Market status errors fail closed after the polling budget and retain the request checkpoint. Only
-  a successful pinned chain snapshot proving the old request ID is no longer payable may authorize
-  request-ID rotation. Once fulfillment is observed, a missing fulfillment payload also retains the
-  checkpoint so an already-paid request is never replaced solely because the indexer or storage
-  backend is unavailable. Payload recovery is bounded by the remaining polling deadline. Exact
-  checkpoints search `ProofDelivered` events from their persisted request-lifecycle lower block
-  instead of relying on the SDK's recent-block default. Once an exact lower block exists, same-ID
-  rebids preserve it across later rungs. A migrated legacy checkpoint has no trustworthy lower block;
-  its first new rebid starts a fresh exact-event window at that rung's pre-broadcast head.
-- Same-nonce replacement hashes and fee rungs are process-local. Follow the non-overlapping drain
-  procedure for planned deployments. After an unplanned restart, the server leaves failed work for
-  client-driven retry. An on-chain retry may enter market polling only after the durable request-id
-  checkpoint resolves to a successful `RequestSubmitted` transaction with three confirmations. It
-  does not restart the old transaction ladder in the background. A checkpoint with no exact event
-  and no confirmed predecessor fails closed until its lock deadline, then is cleared so the next
-  client retry can make a fresh request. Legacy no-hash checkpoints without an exact digest use a
-  deterministic local blocker key and never invent a digest. They fail closed until the lock
-  deadline, then run one final market-status lifecycle so an already-paid fulfillment is recovered
-  before an unfulfilled terminal checkpoint can be replaced. Only a successful pinned status read
-  permits that replacement; RPC errors leave the checkpoint intact for a later client retry.
-  A rebid checkpoint with no exact event returns to polling
-  the same request id only when its metadata explicitly records an earlier confirmed rung. Durable
-  unconfirmed checkpoints restore signer blockers independently of the selected RPC's mempool view;
-  unknown pending signer nonces add a second guard. Completed tasks and already-expired checkpoints
-  do not restore signer blockers.
-- Enabling on-chain Boundless transaction replacement is an atomic image/config cutover. The new
-  image requires `[prover.risc0.boundless.transaction]` with `max_fee_per_gas_wei`, while an old image
-  rejects that table as unknown. Drain the old process, then switch the ConfigMap and image together;
-  rollback must likewise restore both. Runtime metadata omits the default false
-  unconfirmed-predecessor marker, which preserves previous-image readability only for records where
-  every new on-chain Boundless recovery field is absent, such as ordinary records without Boundless
-  progress and SP1-network checkpoints. Every on-chain Boundless checkpoint serializes
-  `request_digest` and `broadcast_from_block`, even when it has no confirmed predecessor, so rollback
-  across one of those records remains one-way unless the record is migrated. Never delete a paid
-  provider checkpoint to force rollback.
-- The mandatory pre-broadcast request checkpoint has a thirty-second retry budget while the signer
-  lane is serialized. The deadline prevents a new persistence attempt from starting, but never
-  cancels a runtime-store CAS that is already in flight. The current attempt must finish and install
-  its observed generation locally before the checkpoint call returns, so wall-clock time can exceed
-  thirty seconds by that store operation's remaining duration. If persistence completes after the
-  deadline, the submission still fails before reserving a nonce or broadcasting a transaction. That
-  leaves a durable but unbroadcast checkpoint, which blocks the signer lane across restart until
-  `lock_expires_at`. The first client retry after that deadline clears the checkpoint; a subsequent
-  retry resumes normal submission. The optional post-broadcast transaction-hash checkpoint uses the
-  same non-cancelling rule and reports a warning instead of failing an already-broadcast submission.
-- `prover.risc0.boundless.offer_params.{batch,aggregation}.pricing_mode` defaults to `manual`.
-  `manual` requires `max_price_per_mcycle` and optionally accepts `min_price_per_mcycle`;
-  `market` omits both price fields and lets the Boundless SDK price provider set the offer price.
-- `prover.risc0.boundless.offer_params.{batch,aggregation}.absolute_max_price_per_mcycle` is the
-  absolute per-mcycle bid ceiling: no attempt in either pricing mode ever bids above it. In
-  `manual` mode it bounds the bps rebid escalation and must be at least `max_price_per_mcycle`; in
-  `market` mode it is the canonical spelling of the safety cap (`max_price_per_mcycle` remains
-  accepted, but setting both is rejected).
-- When a Boundless request expires unfulfilled, `raiko2` resubmits it. Each resubmission escalates
-  the offer's max price by `prover.risc0.boundless.rebid_price_step_bps` (compounded) up to
-  `prover.risc0.boundless.rebid_max_attempts`, clamped to `absolute_max_price_per_mcycle` when it is
-  set; the min price is unchanged. `market` resubmissions are re-priced by the SDK price provider
-  and then escalated by the same step.
-- `prover.risc0.boundless.deployment.deployment_type` selects the Boundless market deployment.
-  Supported values are `base`, `sepolia`, and `taiko`; use `taiko` for Taiko mainnet market
-  submissions.
-- `rpc.pairs[*].boundless` can override `batch_quote`, `aggregation_quote`, runtime timeout/rebid
-  fields (including `rebid_price_step_bps`), and either offer param block for a specific
-  `(network, l1_network)` pair. This only affects `risc0/network`; SP1 ignores it.
-- Boundless progress and resume metadata optionally carries `quoted_mcycles_count`,
-  `evaluated_mcycles_count`, `quote_strategy`, and `quote_model_id` for checkpoint compatibility.
-  A successful estimate leaves `evaluated_mcycles_count` absent; evaluated, fixed, and Estimated
-  fallback requests record the actual local count. Same-request-ID rebids preserve the persisted
-  quote and provenance across restart or configuration/model changes; only request-ID rotation may
-  use the current quote strategy. A legacy checkpoint without a stored quote remains pollable but
-  fails closed before a same-ID rebid.
-
 Optional `zk_any` request sampling is configured at the server level:
 
 ```toml

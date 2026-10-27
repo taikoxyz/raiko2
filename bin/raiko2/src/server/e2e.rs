@@ -18,8 +18,8 @@ use raiko2_primitives::Proof;
 use raiko2_primitives_shasta::encode_proof_carry_data;
 use raiko2_protocol_shasta::shasta::ProofCarryData;
 use raiko2_prover::{
-    BoundlessQuoteStrategy, BoundlessSubmissionProgress,
-    boundless_config::BoundlessTransactionConfig, sp1::ProverMode as Sp1ProverMode,
+    Sp1FulfillmentStrategy, Sp1NetworkMode, Sp1NetworkSubmissionProgress,
+    sp1::ProverMode as Sp1ProverMode,
 };
 use raiko2_runtime::{RunnerStatus, TaskRegistration};
 use serde_json::{Value, json};
@@ -27,7 +27,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tower::ServiceExt;
 
 use super::app;
-use super::fixture::app_with_observed_risc0_boundless_fixture_engine;
 use super::fixture::{
     Sp1FixtureEngine, app_with_engine, app_with_observed_native_fixture_engine,
     app_with_observed_risc0_fixture_engine, app_with_observed_sp1_fixture_engine,
@@ -260,15 +259,6 @@ fn set_prover_routes(config: &mut Config, routes: &str) {
         .apply_routes_override(&routes.parse().expect("valid prover routes"));
 }
 
-fn set_test_boundless_transaction_policy(config: &mut Config) {
-    config.prover.risc0.boundless.transaction = Some(BoundlessTransactionConfig {
-        receipt_timeout_ms: 90_000,
-        fee_bump_bps: 5_000,
-        max_replacements: 4,
-        max_fee_per_gas_wei: "1000000000".to_string(),
-    });
-}
-
 fn sp1_fixture_app() -> (
     Router,
     raiko2_engine::Engine<super::fixture::Sp1FixtureSpec>,
@@ -278,16 +268,6 @@ fn sp1_fixture_app() -> (
     config.prover.sp1.prover = Sp1ProverMode::Local;
 
     app_with_observed_sp1_fixture_engine(config)
-}
-
-fn risc0_boundless_fixture_app() -> (
-    Router,
-    raiko2_engine::Engine<super::fixture::Risc0FixtureSpec>,
-) {
-    let mut config = base_config();
-    set_prover_routes(&mut config, "risc0/network");
-
-    app_with_observed_risc0_boundless_fixture_engine(config)
 }
 
 fn fixture_external_proof_extra_data() -> Value {
@@ -303,13 +283,6 @@ fn sp1_external_proof(proof_hex: String) -> Value {
         "proof": proof_hex,
         "input": format!("{:#066x}", 0),
         "uuid": "fixture-sp1-vk",
-        "extra_data": fixture_external_proof_extra_data()
-    })
-}
-
-fn risc0_boundless_external_proof() -> Value {
-    json!({
-        "quote": "0xfixture-boundless-receipt",
         "extra_data": fixture_external_proof_extra_data()
     })
 }
@@ -1135,53 +1108,6 @@ async fn e2e_ready_fails_after_runtime_begins_draining() {
 }
 
 #[tokio::test]
-async fn e2e_ready_fails_when_boundless_signer_is_invalid() {
-    let (l1_rpc, l1_handle) = match spawn_chain_id_rpc(1).await {
-        Ok(value) => value,
-        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => return,
-        Err(err) => panic!("bind mock l1 rpc listener: {err}"),
-    };
-    let (l2_rpc, l2_handle) = match spawn_chain_id_rpc(167_001).await {
-        Ok(value) => value,
-        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => return,
-        Err(err) => panic!("bind mock l2 rpc listener: {err}"),
-    };
-
-    let mut config = base_config();
-    config.rpc.pairs[0].l1_rpc = Some(l1_rpc);
-    config.rpc.pairs[0].l2_rpc = Some(l2_rpc);
-    set_prover_routes(&mut config, "risc0/network");
-    config.prover.risc0.boundless.rpc_url = "https://base-rpc.publicnode.com".to_string();
-    config.prover.risc0.boundless.signer_key = "not-a-private-key".to_string();
-    set_test_boundless_transaction_policy(&mut config);
-    let state = AppState::from_parts(
-        Arc::new(config),
-        Arc::new(StaticPipelineFactory::default()),
-        Arc::new(
-            RuntimeManager::new(unique_runtime_root("raiko2-e2e-ready-boundless-runtime"))
-                .expect("runtime manager"),
-        ),
-    );
-    let app = app::build_router_with_legacy_v3_for_tests(state);
-
-    let (status, body) = get_json(&app, "/ready").await;
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(body["status"], "error");
-    assert_eq!(body["reth"]["ok"], true);
-    assert_eq!(body["queue"]["ok"], true);
-    assert_eq!(body["prover"]["ok"], false);
-    assert!(
-        body["prover"]["error"]
-            .as_str()
-            .expect("prover error")
-            .contains("boundless signer_key is invalid")
-    );
-
-    l1_handle.abort();
-    l2_handle.abort();
-}
-
-#[tokio::test]
 async fn e2e_ready_fails_when_l2_witness_chain_id_mismatches() {
     let (l1_rpc, l1_handle) = match spawn_chain_id_rpc(1).await {
         Ok(value) => value,
@@ -1273,7 +1199,7 @@ async fn e2e_ready_fails_when_sp1_verification_is_disabled() {
 }
 
 #[tokio::test]
-async fn e2e_ready_checks_sp1_even_when_risc0_boundless_is_default() {
+async fn e2e_ready_checks_sp1_when_risc0_local_is_enabled() {
     let (l1_rpc, l1_handle) = match spawn_chain_id_rpc(1).await {
         Ok(value) => value,
         Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => return,
@@ -1288,11 +1214,7 @@ async fn e2e_ready_checks_sp1_even_when_risc0_boundless_is_default() {
     let mut config = base_config();
     config.rpc.pairs[0].l1_rpc = Some(l1_rpc);
     config.rpc.pairs[0].l2_rpc = Some(l2_rpc);
-    set_prover_routes(&mut config, "risc0/network,sp1/local");
-    config.prover.risc0.boundless.rpc_url = "https://base-rpc.publicnode.com".to_string();
-    config.prover.risc0.boundless.signer_key =
-        deterministic_test_private_key("raiko2:e2e-ready-boundless");
-    set_test_boundless_transaction_policy(&mut config);
+    set_prover_routes(&mut config, "risc0/local,sp1/local");
     config.prover.sp1.prover = Sp1ProverMode::Local;
     config.prover.sp1.verify = false;
     let state = AppState::from_parts(
@@ -1462,7 +1384,12 @@ async fn e2e_shasta_rejects_boundless_public_proof_type() {
     assert_eq!(status, StatusCode::OK, "{res}");
     assert_eq!(res["status"], "error");
     assert_eq!(res["error"], "invalid_request_config");
-    assert_eq!(res["message"], "proof_type=boundless is not supported");
+    assert!(
+        res["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("unknown variant")),
+        "{res}"
+    );
     assert!(report_task_ids(&app).await.is_empty());
 }
 
@@ -2994,7 +2921,7 @@ async fn e2e_duplicate_aggregate_post_returns_work_in_progress_when_runtime_has_
         provider_request_id: Some("0xsp1-aggregate".to_string()),
         expires_at: Some(7_201),
         submitted_at: Some(1),
-        rebid_attempt: Some(1),
+        request_attempt: Some(1),
         sp1_network_mode: Some(raiko2_prover::Sp1NetworkMode::Reserved),
         sp1_fulfillment_strategy: Some(raiko2_prover::Sp1FulfillmentStrategy::Reserved),
         sp1_skip_simulation: Some(false),
@@ -3107,40 +3034,6 @@ async fn e2e_aggregate_request_uses_default_pair_when_network_fields_are_omitted
 }
 
 #[tokio::test]
-async fn e2e_aggregate_risc0_boundless_external_proofs_completes_from_fixture() {
-    let (app, engine) = risc0_boundless_fixture_app();
-
-    let (status, res) = post_json(
-        &app,
-        "/v3/proof/aggregate",
-        json!({
-            "proofs": [
-                risc0_boundless_external_proof(),
-                risc0_boundless_external_proof()
-            ],
-            "proof_type": "risc0",
-            "network": "taiko_dev",
-            "l1_network": "ethereum"
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{res}");
-    assert_eq!(res["data"]["status"], "registered", "{res}");
-    assert!(res["data"].get("task_id").is_none(), "{res}");
-    let id = single_report_task_id(&app).await;
-
-    drive_engine_to_idle(&engine).await;
-
-    let (status, res) = get_json(&app, &format!("/v3/tasks/{id}")).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(res["data"]["route"], "risc0/network");
-    assert_eq!(res["data"]["prover_type"], "network");
-    assert_eq!(res["data"]["status"], "completed", "{res}");
-    assert_eq!(res["data"]["aggregate"]["status"], "completed");
-    assert_eq!(res["data"]["proof"], "0xfixture-risc0-aggregation");
-}
-
-#[tokio::test]
 async fn e2e_aggregate_rejects_zk_any() {
     let (app, _engine) = sp1_fixture_app();
 
@@ -3219,7 +3112,12 @@ async fn e2e_aggregate_rejects_boundless_public_proof_type() {
     assert_eq!(status, StatusCode::OK, "{res}");
     assert_eq!(res["status"], "error");
     assert_eq!(res["error"], "invalid_request_config");
-    assert_eq!(res["message"], "proof_type=boundless is not supported");
+    assert!(
+        res["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("unknown variant")),
+        "{res}"
+    );
     assert!(report_task_ids(&app).await.is_empty());
 }
 
@@ -3804,14 +3702,10 @@ async fn e2e_task_status_completes_after_single_proposal_task() {
 
 #[tokio::test]
 async fn e2e_task_status_falls_back_to_runtime_metadata_without_mutating_runtime_store() {
-    let config = base_config();
-    let engine = risc0_fixture_engine(json!({}));
-    let state = app_with_engine(
-        config,
-        "taiko_dev/ethereum",
-        PipelineKey::ShastaRisc0Network,
-        engine,
-    );
+    let mut config = base_config();
+    set_prover_routes(&mut config, "sp1/network");
+    let engine = sp1_fixture_engine(json!({}));
+    let state = app_with_engine(config, "taiko_dev/ethereum", PipelineKey::ShastaSp1, engine);
     let app = app::build_router_with_legacy_v3_for_tests(state.clone());
 
     let proposal_request = ProposalTaskRequest {
@@ -3825,12 +3719,12 @@ async fn e2e_task_status_falls_back_to_runtime_metadata_without_mutating_runtime
         graffiti: None,
         prover_config: Default::default(),
     };
-    let proposal_ref = proposal_task_ref(PipelineKey::ShastaRisc0Network, &proposal_request);
+    let proposal_ref = proposal_task_ref(PipelineKey::ShastaSp1, &proposal_request);
     let mut metadata = TaskMetadata {
         network_pair: "taiko_dev/ethereum".to_string(),
         network: "taiko_dev".to_string(),
         l1_network: "ethereum".to_string(),
-        proof_type: raiko2_primitives::ProofType::Risc0,
+        proof_type: raiko2_primitives::ProofType::Sp1,
         requested_proof_type: None,
         prover_type: None,
         execution_mode: None,
@@ -3858,31 +3752,23 @@ async fn e2e_task_status_falls_back_to_runtime_metadata_without_mutating_runtime
         .expect("time")
         .as_secs() as i64;
     metadata
-        .upsert_proposal_runtime(
+        .upsert_proposal_sp1_network_runtime(
             &proposal_ref,
-            &BoundlessSubmissionProgress {
+            &Sp1NetworkSubmissionProgress {
                 provider_request_id: "0x1234".to_string(),
-                remote_tx_hash: Some("0xabcd".to_string()),
-                request_id_has_confirmed_submission: false,
-                request_digest: None,
-                broadcast_from_block: None,
-                expires_at: 123_456,
-                lock_expires_at: 123_300,
                 submitted_at: 123_000,
-                image_ref: "0ximage".to_string(),
-                deployment: "base".to_string(),
-                offchain: false,
-                quoted_mcycles_count: Some(6_000),
-                evaluated_mcycles_count: Some(12_345),
-                quote_strategy: Some(BoundlessQuoteStrategy::Fixed),
-                quote_model_id: None,
-                max_price_multiplier: 4,
-                max_price_wei: Some("9000000000000".to_string()),
-                rebid_attempt: 2,
+                network_mode: Sp1NetworkMode::Reserved,
+                fulfillment_strategy: Sp1FulfillmentStrategy::Reserved,
+                skip_simulation: false,
+                cycle_limit: 1_000_000,
+                timeout_secs: 123_456 - 123_000,
+                attempt: 2,
+                max_price_per_pgu: None,
+                auction_timeout_secs: None,
             },
             updated_at,
         )
-        .expect("persist canonical Boundless progress");
+        .expect("persist canonical SP1 progress");
     let aggregate_request = AggregationTaskRequest {
         request_id: "aggregate-request".to_string(),
         proposal_ids: vec![3],
@@ -3890,45 +3776,35 @@ async fn e2e_task_status_falls_back_to_runtime_metadata_without_mutating_runtime
     };
     metadata.aggregate_requested = true;
     metadata.aggregate_task_id = Some(aggregate_task_ref(
-        PipelineKey::ShastaRisc0Network,
+        PipelineKey::ShastaSp1,
         &aggregate_request,
     ));
     metadata.aggregate_request = Some(aggregate_request);
     metadata
-        .upsert_aggregate_runtime(
-            &BoundlessSubmissionProgress {
+        .upsert_aggregate_sp1_network_runtime(
+            &Sp1NetworkSubmissionProgress {
                 provider_request_id: "0xaggregate".to_string(),
-                remote_tx_hash: None,
-                request_id_has_confirmed_submission: false,
-                request_digest: None,
-                broadcast_from_block: None,
-                expires_at: 223_456,
-                lock_expires_at: 223_300,
                 submitted_at: 223_000,
-                image_ref: "0xaggregate-image".to_string(),
-                deployment: "base".to_string(),
-                offchain: false,
-                quoted_mcycles_count: Some(900),
-                evaluated_mcycles_count: None,
-                quote_strategy: Some(BoundlessQuoteStrategy::Estimated),
-                quote_model_id: Some("risc0-zkgas-m2-v1".to_string()),
-                max_price_multiplier: 1,
-                max_price_wei: Some("1000".to_string()),
-                rebid_attempt: 1,
+                network_mode: Sp1NetworkMode::Reserved,
+                fulfillment_strategy: Sp1FulfillmentStrategy::Reserved,
+                skip_simulation: false,
+                cycle_limit: 1_000_000,
+                timeout_secs: 223_456 - 223_000,
+                attempt: 1,
+                max_price_per_pgu: None,
+                auction_timeout_secs: None,
             },
             updated_at,
         )
-        .expect("persist aggregate Boundless progress");
-    let artifact_refs = publication_proof_artifact_refs(&metadata, PipelineKey::ShastaRisc0Network);
+        .expect("persist aggregate SP1 progress");
+    let artifact_refs = publication_proof_artifact_refs(&metadata, PipelineKey::ShastaSp1);
 
     state
         .runtime
         .register_task(TaskRegistration {
             task_id: "task_runtime_fallback".to_string(),
-            pipeline_key: PipelineKey::ShastaRisc0Network,
-            route: "risc0/network"
-                .parse::<PipelineRoute>()
-                .expect("parse route"),
+            pipeline_key: PipelineKey::ShastaSp1,
+            route: "sp1/network".parse::<PipelineRoute>().expect("parse route"),
             task_kind: "hoodi_batch".to_string(),
             network_pair: "taiko_dev/ethereum".into(),
             artifact_refs,
@@ -3953,7 +3829,7 @@ async fn e2e_task_status_falls_back_to_runtime_metadata_without_mutating_runtime
 
     let (status, res) = get_json(&app, "/v3/tasks/task_runtime_fallback").await;
     assert_eq!(status, StatusCode::OK, "{res}");
-    assert_eq!(res["data"]["route"], "risc0/network");
+    assert_eq!(res["data"]["route"], "sp1/network");
     assert_eq!(res["data"]["status"], "proving");
     assert_eq!(res["data"]["runtime"]["runner_status"], "allocated");
     assert_eq!(res["data"]["runtime"]["active_stage"], "prove");
@@ -3967,47 +3843,18 @@ async fn e2e_task_status_falls_back_to_runtime_metadata_without_mutating_runtime
         res["data"]["proposals"][0]["runtime"]["provider_request_id"],
         "0x1234"
     );
-    assert_eq!(
-        res["data"]["proposals"][0]["runtime"]["remote_tx_hash"],
-        "0xabcd"
-    );
-    assert_eq!(
-        res["data"]["proposals"][0]["runtime"]["image_ref"],
-        "0ximage"
-    );
-    assert_eq!(res["data"]["proposals"][0]["runtime"]["deployment"], "base");
-    assert_eq!(res["data"]["proposals"][0]["runtime"]["offchain"], false);
-    assert_eq!(res["data"]["proposals"][0]["runtime"]["expires_at"], 123456);
-    assert_eq!(
-        res["data"]["proposals"][0]["runtime"]["quoted_mcycles_count"],
-        6000
-    );
-    assert_eq!(
-        res["data"]["proposals"][0]["runtime"]["evaluated_mcycles_count"],
-        12345
-    );
-    assert_eq!(
-        res["data"]["proposals"][0]["runtime"]["quote_strategy"],
-        "fixed"
-    );
-    assert!(
-        res["data"]["proposals"][0]["runtime"]
-            .get("quote_model_id")
-            .is_none(),
-        "fixed quote must omit an absent model ID: {res}"
-    );
+
     assert_eq!(
         res["data"]["proposals"][0]["runtime"]["submitted_at"],
         123000
     );
+    assert_eq!(res["data"]["proposals"][0]["runtime"]["expires_at"], 123456);
     assert_eq!(
-        res["data"]["proposals"][0]["runtime"]["max_price_multiplier"],
-        4
+        res["data"]["proposals"][0]["runtime"]["sp1_network_mode"],
+        "reserved"
     );
-    assert_eq!(
-        res["data"]["proposals"][0]["runtime"]["max_price_wei"],
-        "9000000000000"
-    );
+    assert_eq!(res["data"]["aggregate"]["runtime"]["sp1_timeout_secs"], 456);
+
     assert_eq!(
         res["data"]["proposals"][0]["runtime"]["engine_state_present"],
         false
@@ -4015,14 +3862,6 @@ async fn e2e_task_status_falls_back_to_runtime_metadata_without_mutating_runtime
     assert_eq!(
         res["data"]["aggregate"]["runtime"]["provider_request_id"],
         "0xaggregate"
-    );
-    assert_eq!(
-        res["data"]["aggregate"]["runtime"]["quote_strategy"],
-        "estimated"
-    );
-    assert_eq!(
-        res["data"]["aggregate"]["runtime"]["quote_model_id"],
-        "risc0-zkgas-m2-v1"
     );
 
     let runtime_task = state

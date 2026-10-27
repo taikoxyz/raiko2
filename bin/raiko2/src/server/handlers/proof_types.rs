@@ -7,7 +7,6 @@ pub(crate) use v3::{AggregateProofRequest, BatchShastaRequest};
 pub(super) use v3::{BatchProofType, PublicProverArgs, ShastaProposal};
 
 use raiko2_primitives::{Proof, ShastaCheckpoint};
-use raiko2_prover::BoundlessQuoteStrategy;
 use raiko2_runtime::RunnerStatus as RuntimeRunnerStatus;
 use serde::Serialize;
 use serde_json::Value;
@@ -147,31 +146,9 @@ pub(crate) struct TaskRuntime {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) provider_request_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) remote_tx_hash: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) image_ref: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) deployment: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) offchain: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) expires_at: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) submitted_at: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) quoted_mcycles_count: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) evaluated_mcycles_count: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) quote_strategy: Option<BoundlessQuoteStrategy>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) quote_model_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) max_price_multiplier: Option<u32>,
-    /// Exact escalated max price bid, in wei, as a decimal string (precise where the floored
-    /// `max_price_multiplier` collapses the common ×1.5 rung to `1`).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) max_price_wei: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) sp1_network_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -240,12 +217,11 @@ impl ProverTaskStatusCounts {
 #[derive(Default, Serialize)]
 pub(crate) struct ProverNetworkStatus {
     pub(crate) sp1: ProverNetworkBackendStatus,
-    pub(crate) risc0: ProverNetworkBackendStatus,
 }
 
 impl ProverNetworkStatus {
     pub(crate) const fn is_clean(&self) -> bool {
-        self.sp1.inflight_orders == 0 && self.risc0.inflight_orders == 0
+        self.sp1.inflight_orders == 0
     }
 }
 
@@ -300,11 +276,6 @@ mod tests {
     }
 
     #[test]
-    fn native_is_accepted_for_internal_batch_requests() {
-        assert!(BatchProofType::Native.is_public_batch_request_type());
-    }
-
-    #[test]
     fn prover_api_shapes_match_issue_93() {
         let status = serde_json::to_value(ApiData {
             status: "ok",
@@ -319,7 +290,6 @@ mod tests {
                 },
                 network: ProverNetworkStatus {
                     sp1: ProverNetworkBackendStatus { inflight_orders: 3 },
-                    risc0: ProverNetworkBackendStatus { inflight_orders: 0 },
                 },
                 skipped: ProverSkippedStatusCounts::default(),
             },
@@ -329,6 +299,7 @@ mod tests {
         assert_eq!(status["data"]["tasks"]["ready"], 2);
         assert_eq!(status["data"]["tasks"]["orphaned"], 5);
         assert_eq!(status["data"]["network"]["sp1"]["inflight_orders"], 3);
+        assert!(status["data"]["network"].get("risc0").is_none());
 
         let clear = serde_json::to_value(ClearProverStatus {
             status: "ok",

@@ -44,11 +44,6 @@ consume the pinned external fixture through `dump_gaiko2_shasta_fixture`. The ad
 shared witness references; simply wrapping raw JSON is insufficient. `raiko2` owns the adapter
 behavior and validates it in `crates/prover/tests/remote_prover_fixture.rs`.
 
-`risc0-zkgas/<version>/` contains compact, generated calibration inputs for the production RISC0
-zkGas estimator. Its config, fit rows, and validation rows are consumed by
-`scripts/modeling/risc0_zkgas_model.py` and the prover regression tests. Regenerate this subtree with
-the repo-local calibration skill; do not hand-edit fixture observations or audit hashes.
-
 ## Provenance
 
 This fixture was generated from a real post-Unzen Taiko mainnet preflight using:

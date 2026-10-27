@@ -67,7 +67,7 @@ flowchart TB
   Projection --> Engine["Engine and scheduler<br/>leases, dependencies, retries"]
   Engine --> Pipeline["Proposal pipeline"]
   Pipeline --> RPC["L1, L2, beacon, and witness RPC"]
-  Pipeline --> Prover["Local, Boundless, SP1, or remote SGX prover"]
+  Pipeline --> Prover["Local RISC0, SP1, native, or remote SGX prover"]
   Engine --> Observer["RuntimeObserver<br/>event adapter"]
   Observer --> Events["RuntimeTaskEvents"]
   Observer --> Publication
@@ -125,7 +125,7 @@ fields must match it exactly. A runtime namespace written by an older or incompa
 cut over explicitly rather than migrated in place.
 
 Proofs are never reused across environments, concrete proof types, or execution routes. A
-`risc0/local` proof therefore cannot satisfy a `risc0/network` request, even if the public proof
+`sp1/local` proof therefore cannot satisfy a `sp1/network` request, even if the public proof
 type and proposal range match.
 
 ## Request And Execution Flow
@@ -207,7 +207,7 @@ API request inspects the exact `RootOwner(task_id, incarnation_id)` projection. 
 (`Pending`, `Ready`, `Retrying`, or `Running`) in that projection blocks re-enqueue; a shared task
 owned by another root or a terminal engine record cannot strand a non-terminal runtime root. Startup
 restores and validates persisted runtime state without attaching an execution projection, so process
-restart alone cannot submit or rebid paid proof work.
+restart alone cannot submit paid proof work.
 
 Recovery, invalidation, cleanup, and replacement use snapshot-conditional runtime commands. A
 recovery attempt can reopen only the exact record whose metadata it used to build the recovery plan;
@@ -619,20 +619,8 @@ Important recovery cases are:
 
 ## Remote Prover Checkpoints And Cost Policy
 
-Boundless and SP1 submission progress is written through the fallible `ProverProgressObserver`.
+SP1 submission progress is written through the fallible `ProverProgressObserver`.
 The checkpoint contains the backend, attempt, submission time, deadline, and backend-specific payload.
-For Boundless, request construction produces a non-zero market request ID before dispatch. Persisting
-that ID is the dispatch admission point: if cancellation wins first, checkpoint persistence is
-rejected and no provider call starts; if the checkpoint wins, every uncertain response and restart
-continues with that exact ID for the current attempt. The offchain dispatch itself is attempted once
-per attempt, so an accepted response that is lost in transit cannot trigger a second payable
-request. A later attempt may rotate the ID only after provider state proves that the previous ID is
-terminal and no longer payable.
-The checkpoint also binds the request to its exact guest image, Boundless market deployment, and
-submission transport. A replacement configured for a different image, market, or transport fails
-closed instead of polling or resubmitting the identifier in another payable domain. Before such a
-cutover, settle or explicitly abandon every outstanding remote request, then start the new
-configuration in a new namespace.
 
 Remote checkpoints are task-scoped even though runtime metadata is projected into each root. Under
 the process-local lifecycle gate, a progress write refreshes and updates every current active owner
@@ -642,8 +630,7 @@ request even when the original owner is later cancelled. Progress merging is mon
 attempt cannot overwrite a newer checkpoint, and every retained projection of the same attempt must
 agree on the provider identity, original submission time, and submission context. SP1 restart
 re-notification projects the original submission timestamp and deadline into late owners instead of
-starting a new timeout window. Boundless may only enrich that identity by adding the transaction
-hash; removing or changing an observed hash is rejected permanently.
+starting a new timeout window.
 
 ```mermaid
 sequenceDiagram
@@ -653,39 +640,25 @@ sequenceDiagram
   participant Observer as ProverProgressObserver
   participant Runtime as Runtime store
 
-  alt Boundless: request ID finalized locally
-    loop Until checkpoint is durable or stage is stopped
-      Worker->>Observer: Persist finalized request ID
-      Observer->>Runtime: Permit-authorized repository commit
-      Runtime-->>Observer: Success or error
-    end
-    Observer-->>Worker: Checkpoint durable
-    Worker->>Provider: Submit the checkpointed request ID once
-    Provider-->>Worker: Accepted or uncertain response
-  else SP1: provider assigns request ID
-    Worker->>Provider: Submit request
-    Provider-->>Worker: Provider request ID
-    loop Until checkpoint is durable or stage is stopped
-      Worker->>Observer: Persist returned request ID
-      Observer->>Runtime: Permit-authorized repository commit
-      Runtime-->>Observer: Success or error
-    end
-    Observer-->>Worker: Checkpoint durable
+  Worker->>Provider: Submit request
+  Provider-->>Worker: Provider request ID
+  loop Until checkpoint is durable or stage is stopped
+    Worker->>Observer: Persist returned request ID
+    Observer->>Runtime: Permit-authorized repository commit
+    Runtime-->>Observer: Success or error
   end
+  Observer-->>Worker: Checkpoint durable
   Worker->>Provider: Poll the same request ID
 ```
 
 SP1 assigns its request ID during submission. A newly
 returned SP1 request ID is never treated as resumable before checkpoint persistence, and transient
-checkpoint failures are retried by the same worker without resubmission. Boundless checkpoints its
-already-finalized ID before the provider call instead.
-Checkpoint fields are strict: zero deadlines, zero attempts, missing Boundless lock deadlines, and
-missing exact bid data fail closed instead of entering a compatibility fallback. SP1 also persists
+checkpoint failures are retried by the same worker without resubmission.
+Checkpoint fields are strict: zero deadlines and zero attempts fail closed. SP1 also persists
 and verifies the network mode, fulfillment strategy, timeout, simulation policy, cycle limit, and
 price target before polling a stored request ID. An expired SP1 checkpoint performs a status read against the
 recorded request before any replacement can be submitted, allowing an already-paid fulfillment to be
-recovered. Boundless never changes to a fresh request ID after an ambiguous reused-ID submission
-failure. The effective SP1 request attempt limit is:
+recovered. The effective SP1 request attempt limit is:
 
 ```text
 min(operator network_request_max_attempts, non-zero request override)

@@ -21,11 +21,8 @@ use raiko2_runtime::{
     RunnerStatus as RuntimeRunnerStatus, RuntimeManager, RuntimeMutationOutcome, TaskRegistration,
     TaskRegistrationOutcome,
 };
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::{
-    collections::{HashMap, HashSet},
-    time::{SystemTime, UNIX_EPOCH},
-};
 use tracing::{info, warn};
 
 use super::super::auth::{
@@ -264,9 +261,6 @@ fn validate_request_shape(req: &BatchShastaRequest) -> Result<(), ApiError> {
     if req.proposals.is_empty() {
         return Err(ApiError::bad_request("proposals must not be empty"));
     }
-    if !req.proof_type.is_public_batch_request_type() {
-        return Err(unsupported_proof_type(req.proof_type));
-    }
     if req.aggregate && matches!(req.proof_type, BatchProofType::ZkAny) {
         return Err(ApiError::bad_request(
             "proof_type=zk_any is not supported for aggregate requests",
@@ -357,7 +351,6 @@ fn prover_type_for_proof_type(
             Ok(Some(sp1_prover_type(effective_config.prover)))
         }
         BatchProofType::Risc0 => Ok(Some(risc0_prover_type(state, route))),
-        BatchProofType::Boundless => Err(unsupported_proof_type(proof_type)),
         BatchProofType::Native | BatchProofType::Sgx | BatchProofType::SgxGeth => Ok(None),
         BatchProofType::ZkAny => Err(ApiError::bad_request(
             "proof_type=zk_any must be resolved before prover type selection",
@@ -1989,7 +1982,6 @@ async fn collect_prover_status(
     let mut skipped = ProverSkippedStatusCounts::default();
     let mut queue_groups: HashMap<ProverQueueKey, (Arc<dyn EngineHandle>, HashSet<EngineTaskId>)> =
         HashMap::new();
-    let now_secs = unix_now_secs();
 
     for record in records {
         let metadata = match parse_task_metadata(&record) {
@@ -2011,7 +2003,7 @@ async fn collect_prover_status(
         if is_terminal_runtime_status(record.runner_status) {
             continue;
         }
-        count_network_inflight(&metadata, &mut network, now_secs);
+        count_network_inflight(&metadata, &mut network);
         let engine = match resolve_engine(state, &record.network_pair, record.pipeline_key) {
             Ok(engine) => engine,
             Err(err) if err.status == StatusCode::NOT_FOUND => {
@@ -2256,16 +2248,12 @@ const fn count_queue_task_state(view: &EngineQueueTaskView, counts: &mut ProverT
     }
 }
 
-fn count_network_inflight(
-    metadata: &TaskMetadata,
-    network: &mut ProverNetworkStatus,
-    now_secs: u64,
-) {
+fn count_network_inflight(metadata: &TaskMetadata, network: &mut ProverNetworkStatus) {
     for runtime in metadata.runtime.proposals.values() {
-        count_runtime_network_inflight(runtime, network, now_secs);
+        count_runtime_network_inflight(runtime, network);
     }
     if let Some(runtime) = metadata.runtime.aggregate.as_ref() {
-        count_runtime_network_inflight(runtime, network, now_secs);
+        count_runtime_network_inflight(runtime, network);
     }
 }
 
@@ -2273,20 +2261,16 @@ fn count_network_inflight(
 fn count_runtime_network_inflight(
     runtime: &TaskRuntimeMetadata,
     network: &mut ProverNetworkStatus,
-    now_secs: u64,
 ) {
     if runtime.has_sp1_network_submission_progress() {
         network.sp1.inflight_orders = network.sp1.inflight_orders.saturating_add(1);
-    } else if runtime.has_boundless_submission_resume()
-        && matches!(runtime.expires_at, Some(expires_at) if expires_at > now_secs)
-    {
-        network.risc0.inflight_orders = network.risc0.inflight_orders.saturating_add(1);
     }
 }
 
+#[cfg(test)]
 fn unix_now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
 }
@@ -2726,18 +2710,8 @@ fn task_runtime_view(
         },
         engine_state_present,
         provider_request_id: runtime.provider_request_id,
-        remote_tx_hash: runtime.remote_tx_hash,
-        image_ref: runtime.image_ref,
-        deployment: runtime.deployment,
-        offchain: runtime.offchain,
         expires_at: runtime.expires_at,
         submitted_at: runtime.submitted_at,
-        quoted_mcycles_count: runtime.quoted_mcycles_count,
-        evaluated_mcycles_count: runtime.evaluated_mcycles_count,
-        quote_strategy: runtime.quote_strategy,
-        quote_model_id: runtime.quote_model_id,
-        max_price_multiplier: runtime.max_price_multiplier,
-        max_price_wei: runtime.max_price_wei,
         sp1_network_mode: runtime
             .sp1_network_mode
             .map(|mode| mode.as_str().to_string()),
@@ -3275,7 +3249,7 @@ mod tests {
         );
         Ok(())
     }
-    use crate::config::{BoundlessPairConfig, Config, ServerAclKey};
+    use crate::config::{Config, ServerAclKey};
     use crate::server::state::{EngineHandle, StaticPipelineFactory};
     use anyhow::{Context, Result, anyhow};
     use axum::{
@@ -3654,7 +3628,6 @@ mod tests {
             l2_witness_rpc: "http://l2w.example".to_string(),
             sp1_verifier_rpc_url: None,
             sp1_verifier_address: None,
-            boundless: BoundlessPairConfig::default(),
             l1_spec: specs
                 .get_chain_spec("ethereum")
                 .expect("ethereum chain spec"),
@@ -3874,7 +3847,7 @@ mod tests {
         runner_status: RuntimeRunnerStatus,
         metadata: &TaskMetadata,
     ) -> RuntimeTaskRecord {
-        let pipeline_key = PipelineKey::ShastaRisc0Network;
+        let pipeline_key = PipelineKey::ShastaSp1;
         let mut metadata = metadata.clone();
         canonicalize_test_metadata(&mut metadata, pipeline_key);
         let artifact_refs = publication_proof_artifact_refs(&metadata, pipeline_key);
@@ -3882,7 +3855,11 @@ mod tests {
             task_id: "task_public".to_string(),
             incarnation_id: uuid::Uuid::new_v4(),
             pipeline_key,
-            route: pipeline_key.route(),
+            route: if pipeline_key == PipelineKey::ShastaSp1 {
+                "sp1/network".parse().unwrap()
+            } else {
+                pipeline_key.route()
+            },
             task_kind: "hoodi_batch".to_string(),
             network_pair: metadata.network_pair.clone(),
             artifact_refs,
@@ -3914,6 +3891,7 @@ mod tests {
     }
 
     fn canonicalize_test_metadata(metadata: &mut TaskMetadata, pipeline_key: PipelineKey) {
+        metadata.proof_type = pipeline_key.proof_type();
         for proposal in &mut metadata.proposals {
             let request = &proposal.request;
             let previous_task_id = proposal.task_id.clone();
@@ -3947,7 +3925,7 @@ mod tests {
             network_pair: "taiko_dev/ethereum".to_string(),
             network: "taiko_dev".to_string(),
             l1_network: "ethereum".to_string(),
-            proof_type: ProofType::Risc0,
+            proof_type: ProofType::Sp1,
             requested_proof_type: None,
             prover_type: None,
             execution_mode: None,
@@ -3999,29 +3977,12 @@ mod tests {
         metadata.runtime.proposals.insert(task_id, runtime);
     }
 
-    fn test_boundless_runtime(
+    fn test_sp1_runtime_with_deadline(
         provider_request_id: &str,
         submitted_at: u64,
-        lock_expires_at: u64,
         expires_at: u64,
     ) -> TaskRuntimeMetadata {
-        TaskRuntimeMetadata {
-            provider_request_id: Some(provider_request_id.to_string()),
-            request_digest: Some(format!("{}", alloy_primitives::B256::repeat_byte(0x11))),
-            broadcast_from_block: Some(1),
-            image_ref: Some("0ximage".to_string()),
-            deployment: Some("base".to_string()),
-            offchain: Some(false),
-            expires_at: Some(expires_at),
-            lock_expires_at: Some(lock_expires_at),
-            submitted_at: Some(submitted_at),
-            quoted_mcycles_count: Some(1),
-            evaluated_mcycles_count: Some(1),
-            max_price_multiplier: Some(1),
-            max_price_wei: Some("1000".to_string()),
-            rebid_attempt: Some(1),
-            ..TaskRuntimeMetadata::default()
-        }
+        test_sp1_runtime(provider_request_id, submitted_at, expires_at - submitted_at)
     }
 
     fn test_sp1_runtime(
@@ -4033,7 +3994,7 @@ mod tests {
             provider_request_id: Some(provider_request_id.to_string()),
             expires_at: Some(submitted_at.saturating_add(timeout_secs)),
             submitted_at: Some(submitted_at),
-            rebid_attempt: Some(1),
+            request_attempt: Some(1),
             sp1_network_mode: Some(raiko2_prover::Sp1NetworkMode::Reserved),
             sp1_fulfillment_strategy: Some(raiko2_prover::Sp1FulfillmentStrategy::Reserved),
             sp1_skip_simulation: Some(false),
@@ -4054,29 +4015,23 @@ mod tests {
             prover_config: ProverTaskConfig::default(),
         };
         metadata.aggregate_requested = true;
-        metadata.aggregate_task_id = Some(aggregate_task_ref(
-            PipelineKey::ShastaRisc0Network,
-            &request,
-        ));
+        metadata.aggregate_task_id = Some(aggregate_task_ref(PipelineKey::ShastaSp1, &request));
         metadata.aggregate_request = Some(request);
     }
 
     #[test]
     fn network_inflight_counts_each_remote_checkpoint_for_exactly_one_backend() {
         let mut network = ProverNetworkStatus::default();
-        count_runtime_network_inflight(&test_sp1_runtime("sp1-request", 1, 100), &mut network, 10);
+        count_runtime_network_inflight(&test_sp1_runtime("sp1-request", 1, 100), &mut network);
 
         assert_eq!(network.sp1.inflight_orders, 1);
-        assert_eq!(network.risc0.inflight_orders, 0);
 
         count_runtime_network_inflight(
-            &test_boundless_runtime("0x1", 1, 50, 100),
+            &test_sp1_runtime_with_deadline("0x1", 1, 100),
             &mut network,
-            10,
         );
 
-        assert_eq!(network.sp1.inflight_orders, 1);
-        assert_eq!(network.risc0.inflight_orders, 1);
+        assert_eq!(network.sp1.inflight_orders, 2);
     }
 
     async fn upsert_test_record(
@@ -4093,7 +4048,11 @@ mod tests {
             &mut record,
             &mut canonical_metadata,
             pipeline_key,
-            pipeline_key.route(),
+            if pipeline_key == PipelineKey::ShastaSp1 {
+                "sp1/network".parse().unwrap()
+            } else {
+                pipeline_key.route()
+            },
         );
         record.request_fingerprint = format!("fingerprint-{task_id}");
         runtime.upsert_task(&record).await?;
@@ -4145,7 +4104,7 @@ mod tests {
             "missing-pipeline",
             RuntimeRunnerStatus::Running,
             &missing_pipeline_metadata,
-            PipelineKey::ShastaRisc0Network,
+            PipelineKey::ShastaSp1,
         )
         .await?;
 
@@ -4163,47 +4122,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prover_status_ignores_expired_boundless_inflight_order() -> Result<()> {
-        let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
-            "prover-status-expired-boundless",
-        ))?);
-        let mut metadata = zk_any_metadata(Some("prove"));
-        let expires_at = unix_now_secs().saturating_sub(1);
-        set_test_proposal_runtime(
-            &mut metadata,
-            test_boundless_runtime(
-                "0xexpired",
-                expires_at.saturating_sub(2),
-                expires_at.saturating_sub(1),
-                expires_at,
-            ),
-        );
-        upsert_test_record(
-            &runtime,
-            "expired-boundless",
-            RuntimeRunnerStatus::Running,
-            &metadata,
-            PipelineKey::ShastaRisc0Network,
-        )
-        .await?;
-
-        let state = test_state_with_engines(
-            runtime,
-            [(
-                PipelineKey::ShastaRisc0Network,
-                Arc::new(NoopEngine) as Arc<dyn EngineHandle>,
-            )],
-        );
-        let (_, network, skipped) = collect_prover_status(&state, ProverTaskScope::ZkAny)
-            .await
-            .map_err(|err| anyhow!(err.message))?;
-
-        assert_eq!(network.risc0.inflight_orders, 0);
-        assert!(skipped.is_clean());
-        Ok(())
-    }
-
-    #[tokio::test]
     async fn prover_status_counts_missing_queue_task_as_orphaned() -> Result<()> {
         let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
             "prover-status-orphaned",
@@ -4216,14 +4134,14 @@ mod tests {
             "orphaned-root",
             RuntimeRunnerStatus::Running,
             &metadata,
-            PipelineKey::ShastaRisc0Network,
+            PipelineKey::ShastaSp1,
         )
         .await?;
 
         let state = test_state_with_engines(
             runtime,
             [(
-                PipelineKey::ShastaRisc0Network,
+                PipelineKey::ShastaSp1,
                 Arc::new(NoopEngine) as Arc<dyn EngineHandle>,
             )],
         );
@@ -4247,7 +4165,7 @@ mod tests {
         let mut metadata = zk_any_metadata(Some("prove"));
         metadata.proposals[0].request = request.clone();
         let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
-            pipeline: PipelineKey::ShastaRisc0Network,
+            pipeline: PipelineKey::ShastaSp1,
             request,
         });
         upsert_test_record(
@@ -4255,7 +4173,7 @@ mod tests {
             "root",
             RuntimeRunnerStatus::Running,
             &metadata,
-            PipelineKey::ShastaRisc0Network,
+            PipelineKey::ShastaSp1,
         )
         .await?;
 
@@ -4266,7 +4184,7 @@ mod tests {
         let state = test_state_with_engines(
             runtime,
             [(
-                PipelineKey::ShastaRisc0Network,
+                PipelineKey::ShastaSp1,
                 Arc::clone(&engine) as Arc<dyn EngineHandle>,
             )],
         );
@@ -4293,7 +4211,7 @@ mod tests {
         let mut metadata = zk_any_metadata(Some("prove"));
         metadata.proposals[0].request = request.clone();
         let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
-            pipeline: PipelineKey::ShastaRisc0Network,
+            pipeline: PipelineKey::ShastaSp1,
             request,
         });
         upsert_test_record(
@@ -4301,7 +4219,7 @@ mod tests {
             "root-a",
             RuntimeRunnerStatus::Running,
             &metadata,
-            PipelineKey::ShastaRisc0Network,
+            PipelineKey::ShastaSp1,
         )
         .await?;
         upsert_test_record(
@@ -4309,7 +4227,7 @@ mod tests {
             "root-b",
             RuntimeRunnerStatus::Running,
             &metadata,
-            PipelineKey::ShastaRisc0Network,
+            PipelineKey::ShastaSp1,
         )
         .await?;
 
@@ -4326,7 +4244,7 @@ mod tests {
         let state = test_state_with_engines(
             runtime,
             [(
-                PipelineKey::ShastaRisc0Network,
+                PipelineKey::ShastaSp1,
                 Arc::clone(&engine) as Arc<dyn EngineHandle>,
             )],
         );
@@ -4357,7 +4275,7 @@ mod tests {
             "missing-pipeline",
             RuntimeRunnerStatus::Running,
             &missing_pipeline_metadata,
-            PipelineKey::ShastaRisc0Network,
+            PipelineKey::ShastaSp1,
         )
         .await?;
         upsert_test_record(
@@ -4365,33 +4283,28 @@ mod tests {
             "clearable",
             RuntimeRunnerStatus::Running,
             &metadata,
-            PipelineKey::ShastaRisc0Network,
+            PipelineKey::ShastaSp1,
         )
         .await?;
         let mut remote_metadata = metadata.clone();
         let now = unix_now_secs();
         set_test_proposal_runtime(
             &mut remote_metadata,
-            test_boundless_runtime(
-                "0xremote",
-                now,
-                now.saturating_add(300),
-                now.saturating_add(600),
-            ),
+            test_sp1_runtime_with_deadline("0xremote", now, now.saturating_add(600)),
         );
         upsert_test_record(
             &runtime,
             "remote-progress",
             RuntimeRunnerStatus::Running,
             &remote_metadata,
-            PipelineKey::ShastaRisc0Network,
+            PipelineKey::ShastaSp1,
         )
         .await?;
 
         let state = test_state_with_acl(
             Arc::clone(&runtime),
             [(
-                PipelineKey::ShastaRisc0Network,
+                PipelineKey::ShastaSp1,
                 Arc::new(NoopEngine) as Arc<dyn EngineHandle>,
             )],
         );
@@ -4444,14 +4357,14 @@ mod tests {
             "clearable",
             RuntimeRunnerStatus::Running,
             &metadata,
-            PipelineKey::ShastaRisc0Network,
+            PipelineKey::ShastaSp1,
         )
         .await?;
 
         let state = test_state_with_acl(
             Arc::clone(&runtime),
             [(
-                PipelineKey::ShastaRisc0Network,
+                PipelineKey::ShastaSp1,
                 Arc::new(CancelFailEngine) as Arc<dyn EngineHandle>,
             )],
         );
@@ -4503,7 +4416,6 @@ mod tests {
             PipelineKey::ShastaNative,
             PipelineKey::ShastaRisc0,
             PipelineKey::ShastaSp1,
-            PipelineKey::ShastaRisc0Network,
         ] {
             let mut record = runtime_record(RuntimeRunnerStatus::Failed, &metadata);
             record.pipeline_key = pipeline_key;
@@ -4527,38 +4439,6 @@ mod tests {
         );
         let record = runtime_record(RuntimeRunnerStatus::Failed, &metadata);
 
-        assert!(!should_reenqueue_existing_submission_without_engine(
-            &record, &metadata
-        ));
-    }
-
-    #[test]
-    fn failed_submission_with_boundless_resume_metadata_is_reenqueueable_for_failed_prove_stage() {
-        let mut metadata = task_metadata_with_stage(Some("prove"));
-        set_test_proposal_runtime(
-            &mut metadata,
-            test_boundless_runtime("0x1234", 123_000, 123_400, 123_456),
-        );
-        let record = runtime_record(RuntimeRunnerStatus::Failed, &metadata);
-        let metadata = TaskMetadata::decode_for_record(&record).expect("canonical Boundless root");
-
-        assert!(should_reenqueue_existing_submission_without_engine(
-            &record, &metadata
-        ));
-    }
-
-    #[test]
-    fn failed_submission_with_incomplete_boundless_metadata_is_not_reenqueueable() {
-        let mut metadata = task_metadata_with_stage(Some("prove"));
-        set_test_proposal_runtime(
-            &mut metadata,
-            TaskRuntimeMetadata {
-                provider_request_id: Some("0x1234".to_string()),
-                expires_at: Some(123_456),
-                ..TaskRuntimeMetadata::default()
-            },
-        );
-        let record = runtime_record(RuntimeRunnerStatus::Failed, &metadata);
         assert!(!should_reenqueue_existing_submission_without_engine(
             &record, &metadata
         ));
@@ -4690,8 +4570,9 @@ mod tests {
 
     #[tokio::test]
     async fn remote_progress_recovery_failure_preserves_checkpointed_root() -> Result<()> {
-        let pipeline = PipelineKey::ShastaRisc0Network;
-        let route = CanonicalProofRoute::new(pipeline.route(), pipeline);
+        let pipeline = PipelineKey::ShastaSp1;
+        let network_route = "sp1/network".parse().expect("SP1 network route");
+        let route = CanonicalProofRoute::new(network_route, pipeline);
         let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
             "remote-progress-recovery-failure",
         ))?);
@@ -4699,11 +4580,11 @@ mod tests {
         let mut metadata = task_metadata_with_stage(Some("prove"));
         set_test_proposal_runtime(
             &mut metadata,
-            test_boundless_runtime("0xpending", 123_000, 123_400, 123_456),
+            test_sp1_runtime_with_deadline("0xpending", 123_000, 123_456),
         );
         let mut record = runtime_record(RuntimeRunnerStatus::Running, &metadata);
         record.task_id.clone_from(&submission.public_task_id);
-        align_runtime_record_identity(&mut record, &mut metadata, pipeline, pipeline.route());
+        align_runtime_record_identity(&mut record, &mut metadata, pipeline, network_route);
         record.request_fingerprint = batch_request_fingerprint_for_test(&submission)?;
         runtime.upsert_task(&record).await?;
         submission.public_task_id.clone_from(&record.task_id);
@@ -4738,7 +4619,7 @@ mod tests {
         metadata.requested_proof_type = Some("zk_any".to_string());
         set_test_proposal_runtime(
             &mut metadata,
-            test_boundless_runtime("0x1234", 123_000, 123_400, 123_456),
+            test_sp1_runtime_with_deadline("0x1234", 123_000, 123_456),
         );
         let record = runtime_record(RuntimeRunnerStatus::Cancelled, &metadata);
         runtime.upsert_task(&record).await?;
@@ -4751,7 +4632,6 @@ mod tests {
         assert!(tasks.is_clean());
         assert!(network.is_clean());
         assert!(skipped.is_clean());
-        assert_eq!(network.risc0.inflight_orders, 0);
         assert_eq!(network.sp1.inflight_orders, 0);
 
         Ok(())
@@ -6033,7 +5913,7 @@ mod tests {
         set_test_proposal_runtime(
             &mut metadata,
             TaskRuntimeMetadata {
-                remote_tx_hash: Some("0xremote".to_string()),
+                provider_request_id: Some("remote-request".to_string()),
                 ..TaskRuntimeMetadata::default()
             },
         );
@@ -6061,7 +5941,7 @@ mod tests {
         configure_test_aggregate(&mut metadata);
         set_test_proposal_runtime(
             &mut metadata,
-            test_boundless_runtime("0xproposal", 123_000, 123_400, 123_456),
+            test_sp1_runtime_with_deadline("0xproposal", 123_000, 123_456),
         );
         let record = runtime_record(RuntimeRunnerStatus::Failed, &metadata);
         let metadata = TaskMetadata::decode_for_record(&record).expect("canonical aggregate root");
@@ -6077,12 +5957,11 @@ mod tests {
         configure_test_aggregate(&mut metadata);
         set_test_proposal_runtime(
             &mut metadata,
-            test_boundless_runtime("0xproposal", 123_000, 123_400, 123_456),
+            test_sp1_runtime_with_deadline("0xproposal", 123_000, 123_456),
         );
-        metadata.runtime.aggregate = Some(test_boundless_runtime(
+        metadata.runtime.aggregate = Some(test_sp1_runtime_with_deadline(
             "0xaggregate",
             456_000,
-            456_700,
             456_789,
         ));
         let record = runtime_record(RuntimeRunnerStatus::Failed, &metadata);
@@ -6227,7 +6106,7 @@ mod tests {
         let mut metadata = task_metadata_with_stage(Some("prove"));
         set_test_proposal_runtime(
             &mut metadata,
-            test_boundless_runtime("0xpending", 123_000, 123_400, 123_456),
+            test_sp1_runtime_with_deadline("0xpending", 123_000, 123_456),
         );
         let record = runtime_record(RuntimeRunnerStatus::Running, &metadata);
         let task_id = record.task_id.clone();
@@ -6237,7 +6116,7 @@ mod tests {
         let state = test_state_with_engines(
             Arc::clone(&runtime),
             [(
-                PipelineKey::ShastaRisc0Network,
+                PipelineKey::ShastaSp1,
                 recorder.clone() as Arc<dyn EngineHandle>,
             )],
         );
@@ -6308,7 +6187,7 @@ mod tests {
         let mut metadata = task_metadata_with_stage(Some("prove"));
         set_test_proposal_runtime(
             &mut metadata,
-            test_boundless_runtime("0xpending", 123_000, 123_400, 123_456),
+            test_sp1_runtime_with_deadline("0xpending", 123_000, 123_456),
         );
         let record = runtime_record(RuntimeRunnerStatus::Running, &metadata);
 
@@ -7311,14 +7190,13 @@ mod tests {
             ),
         );
 
-        let Err(err) = resolve_engine(&state, &pair.key, PipelineKey::ShastaRisc0Network) else {
+        let Err(err) = resolve_engine(&state, &pair.key, PipelineKey::ShastaSp1) else {
             panic!("network pipeline should be unavailable");
         };
 
         assert_eq!(err.status, StatusCode::NOT_FOUND);
         assert!(
-            err.message
-                .contains("pipeline not available: shasta-risc0-network"),
+            err.message.contains("pipeline not available: shasta-sp1"),
             "unexpected error: {}",
             err.message
         );

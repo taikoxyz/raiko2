@@ -32,4 +32,4 @@ raiko2-primitives-shasta.workspace = true
 
 [features]
 default = ["local-provers"]
-local-provers = ["raiko2-prover/risc0", "raiko2-prover/sp1", "raiko2-prover/boundless"]
+local-provers = ["raiko2-prover/risc0", "raiko2-prover/sp1"]

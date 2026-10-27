@@ -5011,8 +5011,8 @@ mod tests {
     async fn superseded_runtime_state_schema_fails_closed() -> Result<()> {
         let record = build_task_record(&TaskRegistration {
             task_id: "legacy-root".into(),
-            pipeline_key: PipelineKey::ShastaRisc0Network,
-            route: PipelineKey::ShastaRisc0Network.route(),
+            pipeline_key: PipelineKey::ShastaSp1,
+            route: PipelineKey::ShastaSp1.route(),
             task_kind: "aggregate".into(),
             network_pair: "taiko_dev/taiko_dev_l1".into(),
             artifact_refs: vec!["legacy-proof".into()],
@@ -5023,8 +5023,8 @@ mod tests {
             environment: "test".into(),
             network_pair: "taiko_dev/taiko_dev_l1".into(),
             proof_ref: "legacy-proof".into(),
-            pipeline_key: PipelineKey::ShastaRisc0Network,
-            route: PipelineKey::ShastaRisc0Network.route(),
+            pipeline_key: PipelineKey::ShastaSp1,
+            route: PipelineKey::ShastaSp1.route(),
             proof_uri: "memory://legacy-proof".into(),
             content_hash: "legacy-hash".into(),
             generation: None,
@@ -5034,8 +5034,8 @@ mod tests {
         })?;
         let legacy_artifact_key = artifact_record_key(
             "taiko_dev/taiko_dev_l1",
-            PipelineKey::ShastaRisc0Network,
-            PipelineKey::ShastaRisc0Network.route(),
+            PipelineKey::ShastaSp1,
+            PipelineKey::ShastaSp1.route(),
             "legacy-proof",
         );
         let current_state = serde_json::json!({

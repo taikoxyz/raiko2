@@ -260,7 +260,7 @@ For the first external provider migration, see
 ## Offline Proposal Regression
 
 Use fixed post-Unzen proposal inputs from
-[`taikoxyz/zkgas-bench`](https://github.com/taikoxyz/zkgas-bench). Pin a fixture revision, verify its
+[`taikoxyz/raiko2-atlas`](https://github.com/taikoxyz/raiko2-atlas). Pin a fixture revision, verify its
 checksums, then replay the cached GuestInput with the candidate software. See
 [acquisition and offline replay](docs/development.md#guestinput-replay) for Raiko commands and the
 Gaiko request adapter. Consumers own assertions and backend selection; online regression may use

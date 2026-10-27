@@ -8,8 +8,8 @@ The fixture contains real post-Unzen mainnet blocks `12556056`-`12556247`. Propo
 proving require both the proposal and every witness block to be Unzen or later.
 
 Future offline Raiko/Gaiko proposal regression uses pinned external fixtures from
-[`taikoxyz/zkgas-bench`](https://github.com/taikoxyz/zkgas-bench), beginning at Unzen. The shared
-[`mainnet-unzen-proposal-41455-v1`](https://github.com/taikoxyz/zkgas-bench/tree/main/fixtures/regressions/mainnet-unzen-proposal-41455-v1)
+[`taikoxyz/raiko2-atlas`](https://github.com/taikoxyz/raiko2-atlas), beginning at Unzen. The shared
+[`mainnet-unzen-proposal-41455-v1`](https://github.com/taikoxyz/raiko2-atlas/tree/main/fixtures/regressions/mainnet-unzen-proposal-41455-v1)
 case records input provenance, Release asset checksums, and its expected public commitment.
 See [external fixture acquisition and offline replay](../../docs/development.md#guestinput-replay)
 for consumer commands. Replay this case with `guest-launcher` to preserve its supplied proof-carry

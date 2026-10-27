@@ -498,7 +498,7 @@ and execution frequency. Online regression may follow current software and chain
 Pin the fixture repository to an immutable commit chosen for the regression. Record that commit,
 the fixture ID, and the candidate Raiko/Gaiko revision separately: the software under test may be
 newer than the fixture producer. Input-format changes require a new fixture revision. Ordinary
-unit/protocol tests retain their local fixtures and require no private repository access.
+unit/protocol tests retain their local fixtures and require no fixture repository access.
 
 ### Acquire and verify the fixture cache
 
@@ -509,8 +509,8 @@ case references the existing `fixture-mainnet-proposal-41455-v1` Release asset
 with proposal and all witnesses after Unzen activation. Follow the case README at the selected
 fixture commit for its provenance and expectations.
 
-Acquisition requires authenticated access to the private fixture repository. From the Raiko root,
-with that repository checked out alongside Raiko at the chosen commit:
+While the fixture repository is private, acquisition requires authenticated access to it. From
+the Raiko root, with that repository checked out alongside Raiko at the chosen commit:
 
 ```bash
 set -eu
@@ -533,7 +533,7 @@ gzip -dc "$cache/guest-input.json.gz" > "$cache/guest-input.json"
 This verifies cached archives on reruns as well as first downloads. Prepare candidate binaries,
 dependencies, and any selected guest ELFs before entering an offline environment; build-time
 fetching is separate from replay. The following execution steps need no chain RPC, explorer,
-private repository connection, or preflight.
+fixture repository connection, or preflight.
 
 ### Replay the cached input offline
 

@@ -490,7 +490,7 @@ not a fork selector. See the `Frozen identifier` entry in
 [../CONTEXT.md](../CONTEXT.md).
 
 Future offline proposal regression uses fixed external fixtures from
-[`taikoxyz/zkgas-bench`](https://github.com/taikoxyz/zkgas-bench), starting at Unzen. The shared
+[`taikoxyz/raiko2-atlas`](https://github.com/taikoxyz/raiko2-atlas), starting at Unzen. The shared
 repository owns input bytes, provenance, checksums, semantic expectations, and retained measurement
 baselines. Raiko and Gaiko own their runners, adapters, case selection, assertions, backend choices,
 and execution frequency. Online regression may follow current software and chain data.
@@ -503,7 +503,7 @@ unit/protocol tests retain their local fixtures and require no fixture repositor
 ### Acquire and verify the fixture cache
 
 The shared
-[`fixtures/regressions/mainnet-unzen-proposal-41455-v1`](https://github.com/taikoxyz/zkgas-bench/tree/main/fixtures/regressions/mainnet-unzen-proposal-41455-v1)
+[`fixtures/regressions/mainnet-unzen-proposal-41455-v1`](https://github.com/taikoxyz/raiko2-atlas/tree/main/fixtures/regressions/mainnet-unzen-proposal-41455-v1)
 case references the existing `fixture-mainnet-proposal-41455-v1` Release asset
 `guest-input.json.gz`. It contains mainnet proposal `41455`, L2 blocks `12556056..12556247`,
 with proposal and all witnesses after Unzen activation. Follow the case README at the selected
@@ -515,7 +515,7 @@ the Raiko root, with that repository checked out alongside Raiko at the chosen c
 ```bash
 set -eu
 : "${FIXTURE_REV:?Set the full immutable fixture repository commit}"
-fixture_repo=$(cd ../zkgas-bench && pwd)
+fixture_repo=$(cd ../raiko2-atlas && pwd)
 test "$(git -C "$fixture_repo" rev-parse HEAD)" = "$FIXTURE_REV"
 fixture="$fixture_repo/fixtures/regressions/mainnet-unzen-proposal-41455-v1"
 cache="$PWD/target/offline-fixtures/mainnet-unzen-proposal-41455-v1"
@@ -523,7 +523,7 @@ mkdir -p "$cache"
 (cd "$fixture" && sha256sum -c SHA256SUMS)
 if [ ! -f "$cache/guest-input.json.gz" ]; then
   timeout 120s gh release download fixture-mainnet-proposal-41455-v1 \
-    --repo taikoxyz/zkgas-bench --pattern guest-input.json.gz --dir "$cache"
+    --repo taikoxyz/raiko2-atlas --pattern guest-input.json.gz --dir "$cache"
 fi
 (cd "$cache" && sha256sum -c "$fixture/archive.sha256")
 gzip -dc "$cache/guest-input.json.gz" > "$cache/guest-input.json"

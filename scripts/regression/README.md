@@ -55,8 +55,8 @@ server. For current preflight, feed it metadata from
 external inputs. Online runs may follow latest software and current completed proposals.
 
 For future offline proposal regression, use fixed Unzen-or-later fixtures from
-[`taikoxyz/zkgas-bench`](https://github.com/taikoxyz/zkgas-bench), starting with
-[`mainnet-unzen-proposal-41455-v1`](https://github.com/taikoxyz/zkgas-bench/tree/main/fixtures/regressions/mainnet-unzen-proposal-41455-v1).
+[`taikoxyz/raiko2-atlas`](https://github.com/taikoxyz/raiko2-atlas), starting with
+[`mainnet-unzen-proposal-41455-v1`](https://github.com/taikoxyz/raiko2-atlas/tree/main/fixtures/regressions/mainnet-unzen-proposal-41455-v1).
 Follow [the acquisition and replay workflow](../../docs/development.md#guestinput-replay): pin the
 fixture revision, acquire and verify the Release asset once, then execute the cached JSON without
 RPC using `guest-launcher --input`, preserving the supplied proof-carry context. The existing

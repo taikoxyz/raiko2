@@ -19,7 +19,7 @@ may follow current software and chain data. Execution tools, adapters, backend
 choices, and test policy remain in the consuming repositories.
 
 The local fixtures below remain for unit, API, and protocol tests. Ordinary tests must not fetch the
-private shared repository or acquire its Release assets.
+shared repository or acquire its Release assets.
 
 `shasta_guest_input_taiko_mainnet_proposal_41455_l2_12556056_12556247.json` is a checked-in
 `GuestInput` fixture used by:

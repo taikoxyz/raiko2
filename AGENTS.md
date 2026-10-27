@@ -151,12 +151,13 @@ Run the smallest set of checks that proves the change safely, then scale up when
 
 ## Alethia Reth Integration
 
-- Use `https://github.com/taikoxyz/alethia-reth` `origin/main` as the canonical source for raiko2
-  alethia-reth dependencies.
-- Raiko2 Cargo manifests should reference alethia-reth with explicit `rev` pins to reviewed commits
-  from `origin/main`; do not depend on a moving branch in manifests.
-- When raiko2 requires an alethia-reth fix, land that fix upstream on alethia-reth `main` first, then
-  update raiko2 manifests and lockfiles to the resulting commit.
+- Use `https://github.com/taikoxyz/alethia-reth` `origin/main` as the normal source for raiko2
+  production fixes. Land those fixes upstream first, then update manifests and lockfiles.
+- The maintained internal shadow-pricing branch tracked by alethia-reth PR #260 is an explicit
+  exception for raiko2's shadow-pricing APIs and experiments. Keep that work on the maintained
+  branch rather than one-off local workaround layers.
+- Raiko2 Cargo manifests must use explicit `rev` pins to reviewed commits from `origin/main` or
+  that maintained branch; never depend on a moving branch in manifests.
 - Do not keep raiko2-required alethia-reth fixes only in one-off PR branches, local worktrees, or
   raiko2-side workaround layers.
 - Treat reth test utilities as non-production support code. Do not solve guest or no-std issues by

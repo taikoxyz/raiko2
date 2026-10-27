@@ -1328,6 +1328,20 @@ where
         last_success != 0 && now_millis().saturating_sub(last_success) <= max_age_ms
     }
 
+    /// Report whether every registered worker group is still running.
+    ///
+    /// An engine with no worker groups registered reports `true`; liveness of a never-started
+    /// pool is signalled separately by [`Self::queue_maintenance_ready`]. Once workers have been
+    /// started, this returns `false` if any group has shut down or lost a supervisor task.
+    #[must_use]
+    pub fn workers_healthy(&self) -> bool {
+        let groups = match self.inner.worker_groups.lock() {
+            Ok(groups) => groups,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        groups.iter().all(|group| group.all_alive())
+    }
+
     async fn get_guest_input(
         &self,
         id: EngineTaskId,

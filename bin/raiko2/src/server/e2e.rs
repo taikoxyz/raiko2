@@ -550,6 +550,8 @@ async fn e2e_ready_ok_with_matching_chain_id() {
     assert_eq!(body["runtime"]["ok"], true);
     assert_eq!(body["queue"]["ok"], true);
     assert_eq!(body["prover"]["ok"], true);
+    assert_eq!(body["accelerator"]["ok"], true);
+    assert_eq!(body["workers"]["ok"], true);
 
     l1_handle.abort();
     l2_handle.abort();

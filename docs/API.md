@@ -63,7 +63,7 @@ GET /ready
 Readiness checks every configured `(network, l1_network)` pair in `rpc.pairs`, the global runtime
 lifecycle and authoritative-store coherence, the in-memory queue, the hosted proving capabilities,
 the responsiveness of any enabled GPU/accelerator (SGX/SGXGETH TEE) proving backend via its
-`/health` endpoint, and the liveness of the proving worker pool. Each check is reported as an
+health endpoint (`/health` for SGX, `/healthz` for SGXGETH), and the liveness of the proving worker pool. Each check is reported as an
 individual field (`reth`, `runtime`, `queue`, `prover`, `accelerator`, `workers`) with an `ok` flag
 and an optional `error` string. The endpoint returns HTTP `200` only when every check passes;
 draining, an inaccessible runtime store, an unresponsive accelerator backend, or a dead worker pool

@@ -455,7 +455,7 @@ pub fn sp1_vk_digest(vk: &SP1VerifyingKey) -> String {
 /// Parses either an SP1 verifying key JSON string or a 32-byte hex image id.
 ///
 /// SP1 verifying key JSON is kept in SP1's native `hash_u32` word form. Raw 32-byte
-/// image ids are encoded into little-endian `u32` words so RISC0/Boundless aggregation
+/// image ids are encoded into little-endian `u32` words so RISC0 aggregation
 /// paths can round-trip them back to their original bytes.
 ///
 /// # Errors

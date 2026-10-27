@@ -32,8 +32,8 @@ use async_trait::async_trait;
 use raiko2_pipeline::{Pipeline, PipelineSpec, PipelineStage, PipelineStageResult, ProverBackend};
 use raiko2_primitives::{AggregationGuestInput, Proof, ProofContext, ShastaRequest};
 use raiko2_prover::{
-    NetworkProverBackend, PendingProofCheckpoint, PendingProofCheckpointIdentity, Prover,
-    ProverProgress, ProverProgressObserver, SubmissionCheckpointPermit,
+    NetworkProverBackend, PendingProofCheckpoint, Prover, ProverProgress, ProverProgressObserver,
+    SubmissionCheckpointPermit,
 };
 use raiko2_provider::Provider;
 use raiko2_queue::{
@@ -412,19 +412,6 @@ pub trait EngineObserver: Send + Sync {
         Ok(None)
     }
 
-    async fn clear_pending_proof_checkpoint(
-        &self,
-        _id: &EngineTaskId,
-        _task: &EngineTask,
-        _identity: &PendingProofCheckpointIdentity,
-        _permit: &SubmissionCheckpointPermit,
-        _execution_permit: &TaskExecutionPermit,
-    ) -> Result<(), EngineObserverError> {
-        Err(EngineObserverError::ProgressRejected(
-            "provider checkpoint clearing is unsupported".to_string(),
-        ))
-    }
-
     async fn load_proof_artifact(
         &self,
         _artifact: &ProofArtifactRef,
@@ -552,33 +539,6 @@ impl ProverProgressObserver for EngineProgressObserver {
         self.observer
             .load_pending_proof_checkpoint(&self.task_id, &self.task, backend)
             .await
-    }
-
-    async fn clear_pending_proof_checkpoint(
-        &self,
-        identity: &PendingProofCheckpointIdentity,
-        permit: &SubmissionCheckpointPermit,
-    ) -> Result<(), raiko2_prover::ProgressPersistenceError> {
-        match self
-            .observer
-            .clear_pending_proof_checkpoint(
-                &self.task_id,
-                &self.task,
-                identity,
-                permit,
-                &self.execution_permit,
-            )
-            .await
-        {
-            Ok(()) => Ok(()),
-            Err(
-                EngineObserverError::RuntimeInactive(error)
-                | EngineObserverError::ProgressRejected(error),
-            ) => Err(raiko2_prover::ProgressPersistenceError::Permanent(error)),
-            Err(error) => Err(raiko2_prover::ProgressPersistenceError::Retryable(
-                error.to_string(),
-            )),
-        }
     }
 }
 
@@ -2692,9 +2652,9 @@ mod tests {
         }};
     }
 
-    fn boundless_test_engine(scheduler_config: SchedulerConfig) -> Engine<TestSpec<MockProver>> {
+    fn network_test_engine(scheduler_config: SchedulerConfig) -> Engine<TestSpec<MockProver>> {
         Engine::with_store_and_scheduler_config(
-            TestSpec::new(MockProver).with_pipeline_key(PipelineKey::ShastaRisc0Network),
+            TestSpec::new(MockProver).with_pipeline_key(PipelineKey::ShastaSp1),
             test_context(),
             raiko2_queue::MemoryStore::new(),
             scheduler_config,
@@ -3018,7 +2978,7 @@ mod tests {
                 delay: Duration::from_millis(25),
             },
         };
-        let engine = boundless_test_engine(scheduler_config.clone());
+        let engine = network_test_engine(scheduler_config.clone());
         let task_policy = raiko2_queue::TaskExecutionPolicy {
             lease_duration: scheduler_config.lease_duration,
             retry: scheduler_config.retry.clone(),

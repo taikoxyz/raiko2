@@ -56,56 +56,6 @@ enabled = true
 base_url = "http://gaiko2-sgxgeth:8080"
 timeout_ms = 300000
 
-[prover.risc0.boundless]
-offchain = false
-rpc_url = "https://base-rpc.publicnode.com"
-signer_key = "0xYOUR_PRIVATE_KEY"
-poll_interval_ms = 10000
-timeout_ms = 3600000
-
-[prover.risc0.boundless.batch_quote]
-strategy = "evaluated"
-
-[prover.risc0.boundless.aggregation_quote]
-strategy = "evaluated"
-
-[prover.risc0.boundless.transaction]
-max_fee_per_gas_wei = "1000000000"
-
-[prover.risc0.boundless.deployment]
-deployment_type = "base"
-
-[prover.risc0.boundless.deployment.overrides]
-order_stream_url = "https://base-mainnet.boundless.network"
-
-[prover.risc0.boundless.offer_params.batch]
-pricing_mode = "manual"
-ramp_up_start_sec = 20
-# Ramp-up duration in seconds (auction price climbs from min to max over this window).
-ramp_up_period_sec = 120
-max_price_per_mcycle = "0.0000006"
-min_price_per_mcycle = "0.000000010"
-lock_collateral = "20"
-
-[prover.risc0.boundless.offer_params.batch.timeouts]
-mode = "per_mcycle"
-lock_timeout_ms_per_mcycle = 300
-timeout_ms_per_mcycle = 900
-
-[prover.risc0.boundless.offer_params.aggregation]
-pricing_mode = "manual"
-ramp_up_start_sec = 20
-# Ramp-up duration in seconds (auction price climbs from min to max over this window).
-ramp_up_period_sec = 120
-max_price_per_mcycle = "0.0000008"
-min_price_per_mcycle = "0.000000006"
-lock_collateral = "20"
-
-[prover.risc0.boundless.offer_params.aggregation.timeouts]
-mode = "per_mcycle"
-lock_timeout_ms_per_mcycle = 3000
-timeout_ms_per_mcycle = 6000
-
 [queue]
 workers = 6
 maintenance_interval_ms = 200

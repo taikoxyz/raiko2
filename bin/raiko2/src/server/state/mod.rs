@@ -21,11 +21,7 @@ use raiko2_pipeline::{
     forks::shasta::{ShastaSpec, preflight_cache::PreflightCoordinator},
 };
 use raiko2_primitives::ProofType;
-use raiko2_prover::{
-    boundless::{BoundlessAccountBlocker, QuoteSizing, validate_estimation_model},
-    gaiko2::Gaiko2Prover,
-    native::NativeProver,
-};
+use raiko2_prover::{gaiko2::Gaiko2Prover, native::NativeProver};
 use raiko2_provider::NetworkProvider;
 use raiko2_queue::{MemoryStore, SchedulerConfig};
 use raiko2_runtime::{RuntimeManager, StartupCleanupMask};
@@ -37,20 +33,17 @@ use tracing::warn;
 const SUBMISSION_CHECKPOINT_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[cfg(feature = "local-provers")]
-use raiko2_pipeline::forks::shasta::{ShastaBackends, load_shasta_backends};
-#[cfg(all(feature = "host", not(feature = "local-provers")))]
-use raiko2_pipeline::forks::shasta::{
-    load_risc0_boundless_shasta_backend, load_sp1_shasta_backend,
-};
+use raiko2_pipeline::Risc0ShastaBackend;
 #[cfg(feature = "host")]
-use raiko2_pipeline::{Risc0ShastaBackend, Sp1ShastaBackend};
+use raiko2_pipeline::Sp1ShastaBackend;
+#[cfg(all(feature = "host", not(feature = "local-provers")))]
+use raiko2_pipeline::forks::shasta::load_sp1_shasta_backend;
+#[cfg(feature = "local-provers")]
+use raiko2_pipeline::forks::shasta::{ShastaBackends, load_shasta_backends};
 #[cfg(feature = "local-provers")]
 use raiko2_prover::risc0::Risc0Prover;
 #[cfg(feature = "host")]
-use raiko2_prover::{
-    boundless::{BoundlessBalanceGate, BoundlessProver},
-    sp1::Sp1Prover,
-};
+use raiko2_prover::sp1::Sp1Prover;
 
 #[cfg(feature = "local-provers")]
 type Risc0Spec = ShastaSpec<Risc0Prover, Risc0ShastaBackend, NetworkProvider>;
@@ -58,13 +51,10 @@ type Risc0Spec = ShastaSpec<Risc0Prover, Risc0ShastaBackend, NetworkProvider>;
 type Sp1Spec = ShastaSpec<Sp1Prover, Sp1ShastaBackend, NetworkProvider>;
 type NativeSpec = ShastaSpec<NativeProver, NativeBackend, NetworkProvider>;
 type Gaiko2Spec = ShastaSpec<Gaiko2Prover, NativeBackend, NetworkProvider>;
-#[cfg(feature = "host")]
-type BoundlessSpec = ShastaSpec<BoundlessProver, Risc0ShastaBackend, NetworkProvider>;
 
 use super::lifecycle::ProofLifecycle;
 use super::sampling::ZkAnySampler;
 use super::task_cleanup::spawn_runtime_cleanup_loop;
-use super::task_metadata::TaskMetadata;
 use super::telemetry::{
     PreflightCacheMetricsObserver, record_startup_cleanup_failure, record_startup_cleanup_report,
     record_startup_reconciliation, runtime_lifecycle_observer,
@@ -148,7 +138,6 @@ fn enabled_pipeline_registrations(config: &Config) -> Result<Vec<PipelineRegistr
         .map(|(proof_type, runner)| {
             let pipeline_key = match (proof_type, runner) {
                 (ProofType::Risc0, RunnerKind::Local) => PipelineKey::ShastaRisc0,
-                (ProofType::Risc0, RunnerKind::Network) => PipelineKey::ShastaRisc0Network,
                 (ProofType::Sp1, RunnerKind::Local | RunnerKind::Network) => PipelineKey::ShastaSp1,
                 (ProofType::Native, RunnerKind::Local) => PipelineKey::ShastaNative,
                 (ProofType::Sgx, RunnerKind::Remote) => PipelineKey::ShastaSgx,
@@ -168,56 +157,6 @@ fn enabled_pipeline_registrations(config: &Config) -> Result<Vec<PipelineRegistr
             })
         })
         .collect()
-}
-
-fn validate_enabled_boundless_estimation_models(
-    config: &Config,
-    pairs: &[ResolvedNetworkPair],
-    pipelines: &[PipelineRegistration],
-) -> Result<()> {
-    validate_enabled_boundless_estimation_models_with(config, pairs, pipelines, || {
-        validate_estimation_model()
-    })
-}
-
-fn validate_enabled_boundless_estimation_models_with<F>(
-    config: &Config,
-    pairs: &[ResolvedNetworkPair],
-    pipelines: &[PipelineRegistration],
-    mut validate_model: F,
-) -> Result<()>
-where
-    F: FnMut() -> Result<(), String>,
-{
-    let boundless_enabled = pipelines
-        .iter()
-        .any(|registration| registration.pipeline_key == PipelineKey::ShastaRisc0Network);
-    if !boundless_enabled {
-        return Ok(());
-    }
-
-    for pair in pairs {
-        let effective = config
-            .prover
-            .risc0
-            .boundless
-            .apply_pair_override(&pair.boundless)
-            .with_context(|| format!("Boundless configuration error for rpc pair {}", pair.key))?;
-        if matches!(&effective.batch_quote, QuoteSizing::Estimated { .. })
-            || matches!(&effective.aggregation_quote, QuoteSizing::Estimated { .. })
-        {
-            validate_model()
-                .map_err(anyhow::Error::msg)
-                .with_context(|| {
-                    format!(
-                        "Boundless estimation model validation failed for rpc pair {}",
-                        pair.key
-                    )
-                })?;
-        }
-    }
-
-    Ok(())
 }
 
 async fn build_runtime(config: &Config) -> Result<RuntimeManager> {
@@ -306,79 +245,29 @@ async fn initialize_runtime(config: &Config, runtime: &RuntimeManager) -> Result
     Ok(())
 }
 
-async fn restored_boundless_account_blockers(
-    runtime: &RuntimeManager,
-) -> Result<Vec<BoundlessAccountBlocker>> {
-    let mut blockers = HashMap::<_, u64>::new();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .context("system clock is before the UNIX epoch")?
-        .as_secs();
-    for record in runtime.list_tasks().await? {
-        let metadata = TaskMetadata::decode_for_record(&record).with_context(|| {
-            format!(
-                "failed to restore Boundless signer checkpoint from runtime task {}",
-                record.task_id
-            )
-        })?;
-        for blocker in metadata.boundless_account_blockers(record.runner_status, now)? {
-            blockers
-                .entry(blocker.checkpoint_key)
-                .and_modify(|deadline| *deadline = (*deadline).max(blocker.lock_expires_at))
-                .or_insert(blocker.lock_expires_at);
-        }
-    }
-    Ok(blockers
-        .into_iter()
-        .map(
-            |(checkpoint_key, lock_expires_at)| BoundlessAccountBlocker {
-                checkpoint_key,
-                lock_expires_at,
-            },
-        )
-        .collect())
-}
-
 struct PipelineResources {
     #[cfg(feature = "local-provers")]
     shasta_backends: Option<ShastaBackends>,
     #[cfg(all(feature = "host", not(feature = "local-provers")))]
-    boundless_backend: Option<Risc0ShastaBackend>,
-    #[cfg(all(feature = "host", not(feature = "local-provers")))]
     sp1_backend: Option<Sp1ShastaBackend>,
     #[cfg(feature = "host")]
     sp1_prover: Option<Sp1Prover>,
-    #[cfg(feature = "host")]
-    boundless_balance_gate: Option<BoundlessBalanceGate>,
 }
 
 #[cfg(any(feature = "host", feature = "local-provers"))]
 impl PipelineResources {
-    fn prepare(
-        config: &Config,
-        pipelines: &[PipelineRegistration],
-        boundless_account_blockers: Vec<BoundlessAccountBlocker>,
-    ) -> Result<Self> {
+    fn prepare(config: &Config, pipelines: &[PipelineRegistration]) -> Result<Self> {
         #[cfg(not(feature = "host"))]
-        let _ = (config, boundless_account_blockers);
+        let _ = config;
 
         #[cfg(feature = "local-provers")]
         let shasta_backends = if pipelines.iter().any(|registration| {
             matches!(
                 registration.pipeline_key,
-                PipelineKey::ShastaRisc0 | PipelineKey::ShastaRisc0Network | PipelineKey::ShastaSp1
+                PipelineKey::ShastaRisc0 | PipelineKey::ShastaSp1
             )
         }) {
             Some(load_shasta_backends().map_err(anyhow::Error::msg)?)
-        } else {
-            None
-        };
-        #[cfg(all(feature = "host", not(feature = "local-provers")))]
-        let boundless_backend = if pipelines
-            .iter()
-            .any(|registration| registration.pipeline_key == PipelineKey::ShastaRisc0Network)
-        {
-            Some(load_risc0_boundless_shasta_backend().map_err(anyhow::Error::msg)?)
         } else {
             None
         };
@@ -426,30 +315,13 @@ impl PipelineResources {
             None
         };
 
-        // Every pair uses the same market account, so reservations share one balance gate.
-        #[cfg(feature = "host")]
-        let boundless_enabled = pipelines
-            .iter()
-            .any(|registration| registration.pipeline_key == PipelineKey::ShastaRisc0Network);
-        #[cfg(feature = "host")]
-        if boundless_enabled {
-            BoundlessProver::validate_storage_configuration().map_err(anyhow::Error::msg)?;
-        }
-        #[cfg(feature = "host")]
-        let boundless_balance_gate = boundless_enabled
-            .then(|| BoundlessBalanceGate::with_durable_blockers(boundless_account_blockers));
-
         Ok(Self {
             #[cfg(feature = "local-provers")]
             shasta_backends,
             #[cfg(all(feature = "host", not(feature = "local-provers")))]
-            boundless_backend,
-            #[cfg(all(feature = "host", not(feature = "local-provers")))]
             sp1_backend,
             #[cfg(feature = "host")]
             sp1_prover,
-            #[cfg(feature = "host")]
-            boundless_balance_gate,
         })
     }
 }
@@ -472,12 +344,8 @@ fn build_pipeline_factory(
             pipelines,
             runtime: Arc::clone(runtime),
             preflight_coordinator,
-            #[cfg(feature = "host")]
-            boundless_balance_gate: resources.boundless_balance_gate.clone(),
             #[cfg(feature = "local-provers")]
             shasta_backends: resources.shasta_backends.as_ref(),
-            #[cfg(all(feature = "host", not(feature = "local-provers")))]
-            boundless_backend: resources.boundless_backend.as_ref(),
             #[cfg(all(feature = "host", not(feature = "local-provers")))]
             sp1_backend: resources.sp1_backend.as_ref(),
             #[cfg(feature = "host")]
@@ -509,40 +377,14 @@ impl AppState {
         config.validate()?;
         let pipeline_registrations = enabled_pipeline_registrations(&config)?;
         let resolved_pairs = config.rpc.resolved_pairs()?;
-        validate_enabled_boundless_estimation_models(
-            &config,
-            &resolved_pairs,
-            &pipeline_registrations,
-        )?;
         let runtime = Arc::new(build_runtime(&config).await?);
         runtime.set_lifecycle_observer(runtime_lifecycle_observer());
         initialize_runtime(&config, &runtime).await?;
         let scheduler_config = setup::scheduler_config(&config);
-        let boundless_enabled = pipeline_registrations
-            .iter()
-            .any(|registration| registration.pipeline_key == PipelineKey::ShastaRisc0Network);
-        let boundless_account_blockers = if boundless_enabled {
-            restored_boundless_account_blockers(&runtime).await?
-        } else {
-            Vec::new()
-        };
-        if !boundless_account_blockers.is_empty() {
-            tracing::info!(
-                blocker_count = boundless_account_blockers.len(),
-                "restored unresolved Boundless signer checkpoints before worker startup"
-            );
-        }
         #[cfg(any(feature = "host", feature = "local-provers"))]
-        let resources = PipelineResources::prepare(
-            &config,
-            &pipeline_registrations,
-            boundless_account_blockers,
-        )?;
+        let resources = PipelineResources::prepare(&config, &pipeline_registrations)?;
         #[cfg(not(any(feature = "host", feature = "local-provers")))]
-        let resources = {
-            let _ = boundless_account_blockers;
-            PipelineResources {}
-        };
+        let resources = PipelineResources {};
 
         let factory = build_pipeline_factory(
             &config,
@@ -648,13 +490,8 @@ struct PairPipelineRegistration<'a> {
     pipelines: &'a [PipelineRegistration],
     runtime: Arc<RuntimeManager>,
     preflight_coordinator: Option<Arc<PreflightCoordinator>>,
-    /// Balance gate shared across all pairs by `PipelineResources`.
-    #[cfg(feature = "host")]
-    boundless_balance_gate: Option<BoundlessBalanceGate>,
     #[cfg(feature = "local-provers")]
     shasta_backends: Option<&'a ShastaBackends>,
-    #[cfg(all(feature = "host", not(feature = "local-provers")))]
-    boundless_backend: Option<&'a Risc0ShastaBackend>,
     #[cfg(all(feature = "host", not(feature = "local-provers")))]
     sp1_backend: Option<&'a Sp1ShastaBackend>,
     #[cfg(feature = "host")]
@@ -697,41 +534,6 @@ fn register_pair_pipelines(
                 }
                 #[cfg(not(feature = "local-provers"))]
                 unreachable!("local routes are rejected before pipeline construction");
-            }
-            (ProofType::Risc0, RunnerKind::Network) => {
-                #[cfg(feature = "host")]
-                {
-                    #[cfg(feature = "local-provers")]
-                    let backend = registration
-                        .shasta_backends
-                        .expect("RISC0 network route requires Shasta backends")
-                        .risc0_boundless
-                        .clone();
-                    #[cfg(all(feature = "host", not(feature = "local-provers")))]
-                    let backend = registration
-                        .boundless_backend
-                        .expect("RISC0 network route requires Boundless backend")
-                        .clone();
-                    let engine = build_boundless_engine(
-                        registration.config,
-                        registration.pair,
-                        backend,
-                        setup::boundless_scheduler_config(registration.config),
-                        observer,
-                        registration
-                            .boundless_balance_gate
-                            .clone()
-                            .expect("RISC0 network route requires Boundless balance gate"),
-                        registration.preflight_coordinator.clone(),
-                    )?;
-                    factory.insert(
-                        registration.pair.key.clone(),
-                        pipeline.pipeline_key,
-                        Arc::new(engine),
-                    );
-                }
-                #[cfg(not(feature = "host"))]
-                unreachable!("network routes are rejected before pipeline construction");
             }
             (ProofType::Sp1, RunnerKind::Local | RunnerKind::Network) => {
                 #[cfg(feature = "host")]
@@ -893,38 +695,6 @@ fn build_native_engine(
     Ok(engine)
 }
 
-#[cfg(feature = "host")]
-fn build_boundless_engine(
-    config: &Config,
-    pair: &ResolvedNetworkPair,
-    backend: Risc0ShastaBackend,
-    scheduler_config: SchedulerConfig,
-    observer: Arc<dyn EngineObserver>,
-    balance_gate: BoundlessBalanceGate,
-    preflight_coordinator: Option<Arc<PreflightCoordinator>>,
-) -> Result<Engine<BoundlessSpec>> {
-    let agent_config = setup::boundless_prover_config(config, pair);
-
-    let provider = setup::build_provider(config, pair)?;
-    let context = setup::build_context(config, pair, ProofType::Risc0)?;
-    let spec = ShastaSpec::new(
-        PipelineKey::ShastaRisc0Network,
-        BoundlessProver::with_balance_gate(agent_config, balance_gate),
-        backend,
-        provider,
-    )
-    .with_optional_preflight_coordinator(preflight_coordinator);
-    let engine = Engine::with_store_scheduler_config_and_observer(
-        spec,
-        context,
-        MemoryStore::with_lease(scheduler_config.lease_duration),
-        scheduler_config,
-        Some(observer),
-    );
-
-    Ok(engine)
-}
-
 struct RemoteSgxLane {
     pipeline_key: PipelineKey,
     proof_type: ProofType,
@@ -967,7 +737,6 @@ fn build_remote_sgx_engine(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::BoundlessPairConfig;
     use raiko2_primitives::ChainSpec;
     use raiko2_provider::L2ProviderKind;
     use raiko2_runtime::{
@@ -991,7 +760,6 @@ mod tests {
             l2_witness_rpc: "http://l2.example.invalid".to_string(),
             sp1_verifier_rpc_url: None,
             sp1_verifier_address: None,
-            boundless: BoundlessPairConfig::default(),
             l1_spec: ChainSpec::default(),
             l2_spec: ChainSpec::default(),
         }
@@ -1009,34 +777,6 @@ mod tests {
         config.runtime.preflight_cache = PreflightCacheMode::Off;
         assert!(preflight_coordinator(&config, &runtime, &pair).is_none());
         Ok(())
-    }
-
-    #[test]
-    fn estimated_pair_override_validates_the_estimation_model_at_startup() {
-        let mut config = Config::default();
-        config.prover.risc0.boundless.offchain = true;
-        let mut pair = preflight_cache_test_pair();
-        pair.boundless.batch_quote = Some(QuoteSizing::Estimated { mcycles_offset: 0 });
-        let pipelines = [PipelineRegistration {
-            pipeline_key: PipelineKey::ShastaRisc0Network,
-            proof_type: ProofType::Risc0,
-            runner: RunnerKind::Network,
-            remote_url: None,
-        }];
-        let mut validation_calls = 0;
-
-        let error =
-            validate_enabled_boundless_estimation_models_with(&config, &[pair], &pipelines, || {
-                validation_calls += 1;
-                Err("model artifact rejected".to_string())
-            })
-            .expect_err("an effective estimated pair must validate the model");
-
-        assert_eq!(validation_calls, 1);
-        assert!(
-            format!("{error:#}").contains("model artifact rejected"),
-            "{error:#}"
-        );
     }
 
     impl PipelineFactory for ShutdownProbeFactory {
@@ -1064,7 +804,7 @@ mod tests {
         let second_observer = RuntimeObserver::new(
             Arc::clone(&runtime),
             "taiko_dev/ethereum".to_string(),
-            PipelineKey::ShastaRisc0Network.route(),
+            PipelineKey::ShastaSp1.route(),
         );
         let first_permit = first_observer
             .acquire_submission_checkpoint_permit()
@@ -1357,18 +1097,6 @@ mod tests {
 
     #[cfg(all(feature = "host", not(feature = "local-provers")))]
     #[test]
-    fn host_only_risc0_network_selects_only_boundless() -> Result<()> {
-        let config = config_with_routes("risc0/network");
-
-        assert_eq!(
-            selected_pipeline_keys(&config)?,
-            vec![PipelineKey::ShastaRisc0Network]
-        );
-        Ok(())
-    }
-
-    #[cfg(all(feature = "host", not(feature = "local-provers")))]
-    #[test]
     fn host_only_sp1_network_selects_only_sp1() -> Result<()> {
         let config = config_with_routes("sp1/network");
 
@@ -1382,12 +1110,11 @@ mod tests {
     #[cfg(feature = "host")]
     #[test]
     fn combined_routes_select_every_configured_pipeline() -> Result<()> {
-        let config = config_with_routes("risc0/network,sp1/network,sgx/remote,sgxgeth/remote");
+        let config = config_with_routes("sp1/network,sgx/remote,sgxgeth/remote");
 
         assert_eq!(
             selected_pipeline_keys(&config)?,
             vec![
-                PipelineKey::ShastaRisc0Network,
                 PipelineKey::ShastaSp1,
                 PipelineKey::ShastaSgx,
                 PipelineKey::ShastaSgxGeth,

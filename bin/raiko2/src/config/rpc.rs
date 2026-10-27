@@ -1,10 +1,6 @@
 use alloy_primitives::Address;
 use anyhow::{Context, Result, bail};
 use raiko2_primitives::{ChainSpec, SupportedChainSpecs};
-use raiko2_prover::boundless_config::{
-    BoundlessOfferParams, MIN_REBID_TIMEOUT_MS, QuoteSizing, REBID_MAX_ATTEMPTS_LIMIT,
-    validate_offer_spec,
-};
 use raiko2_provider::{
     DEFAULT_RPC_TIMEOUT_MS, L2ProviderKind, RpcClientConfig as ProviderRpcClientConfig,
     RpcRetryConfig as ProviderRpcRetryConfig,
@@ -47,7 +43,6 @@ fn default_rpc_pairs() -> Vec<NetworkPairConfig> {
         l2_witness_rpc: None,
         sp1_verifier_rpc_url: None,
         sp1_verifier_address: None,
-        boundless: BoundlessPairConfig::default(),
     }]
 }
 
@@ -79,8 +74,6 @@ pub struct NetworkPairConfig {
     pub sp1_verifier_rpc_url: Option<String>,
     #[serde(default)]
     pub sp1_verifier_address: Option<String>,
-    #[serde(default)]
-    pub boundless: BoundlessPairConfig,
 }
 
 impl NetworkPairConfig {
@@ -102,78 +95,8 @@ pub struct ResolvedNetworkPair {
     pub l2_witness_rpc: String,
     pub sp1_verifier_rpc_url: Option<String>,
     pub sp1_verifier_address: Option<String>,
-    pub boundless: BoundlessPairConfig,
     pub l1_spec: ChainSpec,
     pub l2_spec: ChainSpec,
-}
-
-/// Pair-specific Boundless overrides for RISC0 network routes.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-#[serde(default, deny_unknown_fields)]
-pub struct BoundlessPairConfig {
-    pub proposal_zkgas_warning_threshold: Option<u64>,
-    pub batch_quote: Option<QuoteSizing>,
-    pub aggregation_quote: Option<QuoteSizing>,
-    pub poll_interval_ms: Option<u64>,
-    pub timeout_ms: Option<u64>,
-    pub rebid_timeout_ms: Option<u64>,
-    pub rebid_price_step_bps: Option<u32>,
-    pub rebid_max_attempts: Option<u32>,
-    pub offer_params: BoundlessOfferParamsOverride,
-}
-
-impl BoundlessPairConfig {
-    /// Validate the optional pair-specific Boundless overrides.
-    pub fn validate(&self, pair_key: &str) -> Result<()> {
-        if matches!(self.proposal_zkgas_warning_threshold, Some(0)) {
-            bail!("{pair_key}: boundless.proposal_zkgas_warning_threshold must be > 0");
-        }
-        if let Some(q) = &self.batch_quote {
-            q.validate(&format!("{pair_key}: boundless.batch_quote"))
-                .map_err(anyhow::Error::msg)?;
-        }
-        if let Some(q) = &self.aggregation_quote {
-            q.validate(&format!("{pair_key}: boundless.aggregation_quote"))
-                .map_err(anyhow::Error::msg)?;
-        }
-        if matches!(self.poll_interval_ms, Some(0)) {
-            bail!("{pair_key}: boundless.poll_interval_ms must be > 0");
-        }
-        if matches!(self.timeout_ms, Some(0)) {
-            bail!("{pair_key}: boundless.timeout_ms must be > 0");
-        }
-        if matches!(self.rebid_timeout_ms, Some(value) if value < MIN_REBID_TIMEOUT_MS) {
-            bail!("{pair_key}: boundless.rebid_timeout_ms must be >= {MIN_REBID_TIMEOUT_MS}");
-        }
-        if let Some(rebid_max_attempts) = self.rebid_max_attempts
-            && rebid_max_attempts > REBID_MAX_ATTEMPTS_LIMIT
-        {
-            bail!("{pair_key}: boundless.rebid_max_attempts must be <= {REBID_MAX_ATTEMPTS_LIMIT}");
-        }
-        if let Some(batch) = &self.offer_params.batch {
-            validate_offer_spec(batch)
-                .map_err(anyhow::Error::msg)
-                .map_err(|err| {
-                    anyhow::anyhow!("{pair_key}: boundless.offer_params.batch: {err}")
-                })?;
-        }
-        if let Some(aggregation) = &self.offer_params.aggregation {
-            validate_offer_spec(aggregation)
-                .map_err(anyhow::Error::msg)
-                .map_err(|err| {
-                    anyhow::anyhow!("{pair_key}: boundless.offer_params.aggregation: {err}")
-                })?;
-        }
-        Ok(())
-    }
-}
-
-/// Optional pair-specific overrides for the Boundless batch and aggregation offer params.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-#[serde(default, deny_unknown_fields)]
-pub struct BoundlessOfferParamsOverride {
-    pub batch: Option<BoundlessOfferParams>,
-    pub aggregation: Option<BoundlessOfferParams>,
 }
 
 impl ResolvedNetworkPair {
@@ -355,13 +278,6 @@ impl RpcConfig {
     }
 }
 
-pub(super) fn validate_boundless_pairs(pairs: &[ResolvedNetworkPair]) -> Result<()> {
-    for pair in pairs {
-        pair.boundless.validate(&pair.key)?;
-    }
-    Ok(())
-}
-
 pub(super) fn validate_sp1_verifier_pairs(pairs: &[ResolvedNetworkPair]) -> Result<()> {
     for pair in pairs {
         match (&pair.sp1_verifier_rpc_url, &pair.sp1_verifier_address) {
@@ -426,7 +342,7 @@ fn resolve_pair(
         l2_witness_rpc: pair.l2_witness_rpc.clone().unwrap_or(l2_rpc),
         sp1_verifier_rpc_url: pair.sp1_verifier_rpc_url.clone(),
         sp1_verifier_address: pair.sp1_verifier_address.clone(),
-        boundless: pair.boundless.clone(),
+
         l1_spec,
         l2_spec,
     })
@@ -448,102 +364,6 @@ mod tests {
     }
 
     #[test]
-    fn boundless_pair_config_rejects_zero_aggregation_quote() {
-        let config = BoundlessPairConfig {
-            aggregation_quote: Some(QuoteSizing::Fixed { mcycles: 0 }),
-            ..Default::default()
-        };
-
-        assert!(
-            config
-                .validate("taiko_hoodi/hoodi")
-                .expect_err("zero aggregation quote should fail")
-                .to_string()
-                .contains("aggregation_quote")
-        );
-    }
-
-    #[test]
-    fn boundless_pair_config_rejects_zero_proposal_zkgas_warning_threshold() {
-        let config = BoundlessPairConfig {
-            proposal_zkgas_warning_threshold: Some(0),
-            ..Default::default()
-        };
-
-        let error = config
-            .validate("taiko_hoodi/hoodi")
-            .expect_err("zero proposal zkGas warning threshold must fail");
-
-        assert!(
-            error
-                .to_string()
-                .contains("proposal_zkgas_warning_threshold"),
-            "{error}"
-        );
-    }
-
-    #[test]
-    fn boundless_pair_config_rejects_zero_rebid_timeout() {
-        let config = BoundlessPairConfig {
-            rebid_timeout_ms: Some(0),
-            ..Default::default()
-        };
-
-        assert!(
-            config
-                .validate("taiko_hoodi/hoodi")
-                .expect_err("zero rebid timeout should fail")
-                .to_string()
-                .contains("rebid_timeout_ms")
-        );
-    }
-
-    #[test]
-    fn boundless_pair_config_rejects_subsecond_rebid_timeout() {
-        let config = BoundlessPairConfig {
-            rebid_timeout_ms: Some(999),
-            ..Default::default()
-        };
-
-        assert!(
-            config
-                .validate("taiko_hoodi/hoodi")
-                .expect_err("subsecond rebid timeout should fail")
-                .to_string()
-                .contains("rebid_timeout_ms")
-        );
-    }
-
-    #[test]
-    fn boundless_pair_config_accepts_zero_rebid_price_step_bps() {
-        let config = BoundlessPairConfig {
-            rebid_price_step_bps: Some(0),
-            ..Default::default()
-        };
-
-        // 0 bps is a valid flat (no-escalation) ladder.
-        config
-            .validate("taiko_hoodi/hoodi")
-            .expect("zero rebid price step bps should be accepted");
-    }
-
-    #[test]
-    fn boundless_pair_config_rejects_excessive_rebid_max_attempts() {
-        let config = BoundlessPairConfig {
-            rebid_max_attempts: Some(REBID_MAX_ATTEMPTS_LIMIT + 1),
-            ..Default::default()
-        };
-
-        assert!(
-            config
-                .validate("taiko_hoodi/hoodi")
-                .expect_err("excessive rebid attempts should fail")
-                .to_string()
-                .contains("rebid_max_attempts")
-        );
-    }
-
-    #[test]
     fn rpc_pair_beacon_rpc_overrides_l1_chain_spec() {
         let beacon_rpc = "https://beacon.example.test/".to_string();
         let config = RpcConfig {
@@ -557,7 +377,6 @@ mod tests {
                 l2_witness_rpc: None,
                 sp1_verifier_rpc_url: None,
                 sp1_verifier_address: None,
-                boundless: BoundlessPairConfig::default(),
             }],
             ..Default::default()
         };
@@ -585,7 +404,6 @@ mod tests {
                 l2_witness_rpc: None,
                 sp1_verifier_rpc_url: None,
                 sp1_verifier_address: None,
-                boundless: BoundlessPairConfig::default(),
             }],
             ..Default::default()
         };

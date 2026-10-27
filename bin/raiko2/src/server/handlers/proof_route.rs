@@ -53,7 +53,6 @@ pub(super) fn route_for_proof_type(
         BatchProofType::Native => ProofType::Native,
         BatchProofType::Sgx => ProofType::Sgx,
         BatchProofType::SgxGeth => ProofType::SgxGeth,
-        BatchProofType::Boundless => return Err(unsupported_proof_type(proof_type)),
         BatchProofType::ZkAny => {
             return Err(ApiError::bad_request(
                 "proof_type=zk_any must be resolved before route selection",
@@ -73,9 +72,6 @@ pub(super) fn route_for_proof_type(
     let (guest_system, pipeline_key) = match (proof_type, runner) {
         (BatchProofType::Risc0, RunnerKind::Local) => {
             (GuestSystem::Risc0, PipelineKey::ShastaRisc0)
-        }
-        (BatchProofType::Risc0, RunnerKind::Network) => {
-            (GuestSystem::Risc0, PipelineKey::ShastaRisc0Network)
         }
         (BatchProofType::Sp1, RunnerKind::Local | RunnerKind::Network) => {
             (GuestSystem::Sp1, PipelineKey::ShastaSp1)
@@ -301,15 +297,15 @@ mod tests {
     #[test]
     fn all_production_routes_resolve_independently_on_one_host() {
         let mut config =
-            config_with_routes("risc0/network,sp1/network,native/local,sgx/remote,sgxgeth/remote");
+            config_with_routes("risc0/local,sp1/network,native/local,sgx/remote,sgxgeth/remote");
         config.prover.sp1.prover = Sp1ProverMode::Network;
         let state = test_state_with_config(config);
 
         for (proof_type, expected_route, expected_pipeline) in [
             (
                 BatchProofType::Risc0,
-                PipelineRoute::new(GuestSystem::Risc0, RunnerKind::Network),
-                PipelineKey::ShastaRisc0Network,
+                PipelineRoute::new(GuestSystem::Risc0, RunnerKind::Local),
+                PipelineKey::ShastaRisc0,
             ),
             (
                 BatchProofType::Sp1,

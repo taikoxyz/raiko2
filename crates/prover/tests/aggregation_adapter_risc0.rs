@@ -1,4 +1,4 @@
-#![cfg(feature = "boundless")]
+#![cfg(feature = "risc0")]
 #![allow(missing_docs)]
 
 use alloy_primitives::{Address, B256, Uint, address, b256};
@@ -10,7 +10,7 @@ use raiko2_protocol_shasta::{
     libhash::hash_shasta_subproof_input,
     shasta::{Checkpoint, ProofCarryData, ShastaTransitionInput, TransitionInputData},
 };
-use raiko2_prover::boundless::aggregation::build_risc0_aggregation_input;
+use raiko2_prover::risc0::build_risc0_aggregation_input;
 use serde_json::json;
 
 mod fixtures;

@@ -29,7 +29,7 @@
 - [x] **Raiko integration:** Own `crates/zkgas-trace/src/{proposal_inputs,runtime_quote,reconstruct}.rs`, their tests, CLI projections/docs and exact dependency pins. Use upstream reviewed interfaces, reconcile committed payload with real block contents and retain additional-input charges once. Write mismatch/double-counting tests before the implementation.
 - [x] **Independent engineering review:** Reviewer inspects the original request and whole cross-repo diff; tester independently checks rollback/admission boundaries, Unzen invariance, proposal residuals and evidence re-quotes. Investigate and fix all material findings, then have their authors re-check.
 - [x] **Fixed-evidence evaluation:** Rebuild only a coherent cached native quote closure if necessary, keep old executables, re-quote frozen Atlas inputs under the new authenticated model. Bind input/model/executable identities and assert complete totals remain unchanged versus e529 for ownership-only changes; separately attribute prior MULMOD changes versus #284's older pin. Review historical node impacts without treating raw Unzen scores as PGU.
-- [ ] **Publication:** Inspect final diffs, commit scoped upstream changes and update #260, pin its reviewed exact rev in #284 and update that PR. Keep both Draft/do-not-merge, no activation/merge/deployment. Read back pushed heads and actions. Experimental evidence stays separate from published Atlas revisions.
+- [x] **Publication:** Inspect final diffs, commit scoped upstream changes and update #260, pin its reviewed exact rev in #284 and update that PR. Keep both Draft/do-not-merge, no activation/merge/deployment. Read back pushed heads and actions. Experimental evidence stays separate from published Atlas revisions.
 
 ## Verification checkpoint
 
@@ -40,3 +40,6 @@ no-default-features checks passed; focused Raiko zkgas/trace Clippy and formatti
 Full Raiko workspace Clippy stopped at the free-disk guard and remains incomplete. Cached native
 test closures passed; this is not a full Cargo test run or a new guest/SP1 certification.
 Upstream #260 is published at `db54157ebd4de9fc4c1a2edc499b0db297d1bc15`.
+Companion #284 payload implementation was published as `007fd8bc`; both PRs were read back
+as OPEN, Draft and do-not-merge. The only reported upstream title check was skipped; downstream
+CI results were not yet available at publication. No merge or deployment was performed.

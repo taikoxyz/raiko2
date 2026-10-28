@@ -860,9 +860,44 @@ mod tests {
             quote.prove.proposal_once.transaction_payload_scaled, 0,
             "every input transaction is committed, so proposal payload must be exhausted"
         );
+        let selectors = &quote.prove.selectors;
+        let parent = selectors.parent_mpt;
+        let full_payload_once = ZkGasModel
+            .price_proposal_once(&ProposalPricingInput {
+                canonical_transaction_bytes: selectors.payload.canonical_transaction_bytes,
+                nonempty_payload_transactions: selectors.payload.nonempty_payload_transactions,
+                true_unattempted_transactions: selectors.true_unattempted_transactions,
+                source_blob_counts: &selectors.blobs.source_blob_counts,
+                proposal_blob_hash_count: selectors.blobs.proposal_blob_hash_count,
+                provider_blob_count: selectors.blobs.provider_blob_count,
+                provider_commitment_count: selectors.blobs.provider_commitment_count,
+                provider_proof_count: selectors.blobs.provider_proof_count,
+                parent_mpt: MptSelectors {
+                    path_node_visits: parent.path_node_visits,
+                    materialization_work_units: parent.materialization_work_units,
+                    hydration_hash_blocks: parent.hydration_hash_blocks,
+                    dirty_encoded_nodes: parent.dirty_encoded_nodes,
+                    dirty_hash_blocks: parent.dirty_hash_blocks,
+                    structural_branch_extension_churn_nodes: parent
+                        .structural_branch_extension_churn_nodes,
+                    dropped_trie_nodes: parent.dropped_trie_nodes,
+                },
+            })
+            .unwrap();
+        let committed_payload_scaled: i128 = quote
+            .blocks
+            .iter()
+            .map(|block| block.prove.pricing.transaction_payload_scaled)
+            .sum();
         assert_eq!(
-            quote.prove.total_scaled, 4_804_098_422_373_488_496_509_519_544,
-            "moving ownership must preserve complete fixed-point pricing"
+            committed_payload_scaled,
+            full_payload_once.transaction_payload_scaled
+        );
+        assert_eq!(
+            quote.prove.total_scaled,
+            quote.prove.block_local_scaled - committed_payload_scaled
+                + full_payload_once.total_scaled,
+            "charging all payload at proposal scope must equal charging committed payload in blocks"
         );
     }
 
@@ -1160,7 +1195,7 @@ mod tests {
             ),
             (
                 247_097_387_893_866_428_488_965_859,
-                3_160_041_535_744_141_665_900_594_819,
+                3_187_806_573_010_541_525_400_160_675,
                 0,
                 35_600_428_000_000_000_000_000_000,
             )
@@ -1178,7 +1213,7 @@ mod tests {
             ),
             (
                 247_097_387_893_866_428_488_965_859,
-                3_160_041_535_744_141_665_900_594_819,
+                3_187_806_573_010_541_525_400_160_675,
                 0,
                 35_600_428_000_000_000_000_000_000,
                 1_185_183_312_000_000_000_000_000_000,
@@ -1188,9 +1223,9 @@ mod tests {
             quote.node,
             NodeProposalWorkloadQuote {
                 unzen_zkgas_sum: 259_514_910,
-                block_local_known_scaled: 3_458_293_399_638_008_094_389_560_678,
-                block_local_known_pgu: 3_458_293_400,
-                sum_of_block_known_pgu: 3_458_293_528,
+                block_local_known_scaled: 3_486_058_436_904_407_953_889_126_534,
+                block_local_known_pgu: 3_486_058_437,
+                sum_of_block_known_pgu: 3_486_058_454,
             }
         );
         assert_eq!(
@@ -1238,16 +1273,16 @@ mod tests {
         );
         assert_eq!(
             quote.prove.block_local_scaled,
-            4_643_476_711_638_008_094_389_560_678
+            4_671_241_748_904_407_953_889_126_534
         );
-        assert_eq!(quote.prove.block_local_pgu, 4_643_476_712);
-        assert_eq!(quote.prove.sum_of_block_local_pgu, 4_643_476_840);
+        assert_eq!(quote.prove.block_local_pgu, 4_671_241_749);
+        assert_eq!(quote.prove.sum_of_block_local_pgu, 4_671_241_766);
         assert_eq!(quote.prove.proposal_once_pgu, 160_621_711);
         assert_eq!(
             quote.prove.total_scaled,
-            4_804_098_422_373_488_496_509_519_544
+            4_831_863_459_639_888_356_009_085_400
         );
-        assert_eq!(quote.prove.total_pgu, 4_804_098_423);
+        assert_eq!(quote.prove.total_pgu, 4_831_863_460);
         quote.blocks.iter().for_each(assert_block_formula_closes);
         assert_proposal_formula_closes(&quote);
     }

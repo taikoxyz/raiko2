@@ -587,8 +587,41 @@ to `zkgas-quote --input-json <input> --corpus-id <corpus> --sample-id <sample> -
 The empty control is `samples/fee-replay/payload-zero-n0-b30/guest-input.json`.
 Use the archive's asset manifest and internal SHA256SUMS before executing input; keep the
 original reports fixed and save new model results separately. These values are a model-specific
-checkpoint, not an exhaustive bound or production-program accuracy certification. ADDMOD
-operand and MCOPY overlap tariff corrections remain separate work.
+checkpoint, not an exhaustive bound or production-program accuracy certification. The following
+block-cost refinement supersedes its arithmetic and MCOPY prices.
+
+### Block-aware arithmetic and copy refinement checkpoint
+
+Current model `80459b4dd85741f04703e2ab6b4760f2a6a5736c6c77fd69a5dd98b61e2d325d`
+adds normally executed event floors of 800 PGU for DIV/MOD/SMOD, 900 for SDIV and
+1,100 for ADDMOD. MCOPY charges 48 PGU per copied 32-byte word, retaining its
+additive dispatch, constant and memory-expansion terms. The preceding MULMOD floor,
+committed payload ownership and other tariffs remain intact. Node and prover operation
+terms use the same model. Default Unzen/admission behavior remains unchanged.
+
+The [upstream pricing document](https://github.com/taikoxyz/alethia-reth/blob/1ef47962868b73cf45a81bd16f50f671493cda83/docs/zk-gas-pricing-model.md)
+contains the exact-fraction derivation from 123 fit rows and four zero-word controls,
+with 25% headroom and upward rounding. Reserved holdouts are excluded. Controlled
+primary counts describe the user program; repriced Anchor operations may conservatively
+increase a full native replay beyond the primary-only fit projection.
+
+| Fixed mainnet cohort | Proposals / blocks | Parent P50 quote/actual | Current P50 | Weighted price uplift | Maximum proposal uplift | Complete underquotes, before/after |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| October 19–22, 2026 | 90 / 17,280 | 2.005949 | 2.031725 | 0.951806% | 1.450460% | 0 / 0 |
+| October 23–26, 2026 | 90 / 17,280 | 2.102697 | 2.128474 | 0.916790% | 1.447198% | 0 / 0 |
+
+P50 uses the existing nearest-rank convention. These paired re-quotes preserve input,
+public output, Unzen scores, selectors and non-operation prices. Actual PGU remains
+bound to each archived SP1 task/program identity; historical calibration/program compatibility
+limits remain in force. This is pricing-regression evidence, not current-program certification.
+
+All 298 retained native-valid boundary rows were re-quoted (297 have measured PGU).
+Complete underquotes fall from 56 to three rows, representing two distinct dense EXP
+inputs at four/five exponent bytes; those remain explicit follow-up work. All six refined
+routes' retained cases are covered. Seven fresh prospective arithmetic/copy inputs, sealed
+after choosing prices and excluded from fitting, also pass native/SP1 identity checks and
+complete-price coverage. These local actuals use frozen ELF416f/local SDK6.3; neither
+new guest artifacts nor production-SDK parity are claimed.
 
 ## Opcode Workload-Metric Experiments
 

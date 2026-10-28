@@ -25,16 +25,22 @@
 
 ## Tasks
 
-- [x] **Evidence and baseline:** Independently derive event/word floors from current complete quotes and bound measurements; re-quote both90-proposal mainnet cohorts at model0a3 and seal exact observation identities. Save required-price maxima/exclusions.
-- [x] **Upstream implementation:** In existing Alethia worktree, add immutable0a3 snapshot/compact evidence; write failing exact-rounding/scope/provenance tests, implement the deterministic successor and regenerate artifacts. Add runtime floor/memory/error regressions and pricing docs. Verify focused Python/Rust/no-std/Clippy as available. Do not push before historical gate.
-- [x] **Replay gate:** Rebuild only affected native quote closure; re-quote retained boundary cases and180 mainnet proposals. Check selectors/public outputs/Unzen invariance, exact component deltas and ratio distributions. Pause for discussion if triggers fire. Seal then measure prospective holdouts with unchanged ELF/options.
-- [ ] **Review and integration:** Independent reviewer inspects complete diff; independent tester checks behavior, fits, mainnet and holdouts. Fix/recheck material findings; update reviewed upstream#260 and exact-rev companion#284 with tests/docs. Read back heads/body/flags and actual CI; no auto-merge.
+- [x] **Evidence and baseline:** Independently derive event/word floors from current complete quotes and bound measurements; re-quote both 90-proposal mainnet cohorts at model0a3 and seal exact observation identities. Save required-price maxima/exclusions.
+- [x] **Upstream implementation:** In existing Alethia worktree, add immutable model0a3 snapshot/compact evidence; write failing exact-rounding/scope/provenance tests, implement the deterministic successor and regenerate artifacts. Add runtime floor/memory/error regressions and pricing docs. Verify focused Python/Rust/no-std/Clippy as available. Do not push before historical gate.
+- [x] **Replay gate:** Rebuild only affected native quote closure; re-quote retained boundary cases and 180 mainnet proposals. Check selectors/public outputs/Unzen invariance, exact component deltas and ratio distributions. Pause for discussion if triggers fire. Seal then measure prospective holdouts with unchanged ELF/options.
+- [x] **Review and integration:** Independent reviewer inspects complete diff; independent tester checks behavior, fits, mainnet and holdouts. Fix/recheck material findings; update reviewed upstream #260 and exact-rev companion #284 with tests/docs. Read back heads/body/flags and actual CI; no auto-merge.
 
 ## Verified checkpoint
 
-Candidate80459b4 covers all123fit+4zero-word controls and seven fresh prospective checks.
-All298 retained inputs replay with price-only changes; 297 have measured PGU. Complete
-underquotes fall56→3rows/two distinct dense EXP inputs, retained for follow-up. Two disjoint
+Candidate `80459b4` covers all 123 fit rows and four zero-word controls and seven fresh prospective checks.
+All 298 retained inputs replay with price-only changes; 297 have measured PGU. Complete
+underquotes fall from 56 to three rows/two distinct dense EXP inputs, retained for follow-up. Two disjoint
 90-proposal cohorts preserve roughly2x quotes; weighted uplift below1%, maximum proposal
 uplift below1.46%, zero historical complete underquotes before/after. Independent source,
-evidence and behavioral reviews passed. Upstream committed at1ef47962868b73cf45a81bd16f50f671493cda83.
+evidence and behavioral reviews passed. Upstream committed at `1ef47962868b73cf45a81bd16f50f671493cda83`.
+
+Publication readback confirmed upstream #260 at `1ef4796` and companion #284 at `3cf6e696`,
+both OPEN/Draft/do-not-merge. The prospective fixture Release was published and its
+remote asset hash verified before advancing Atlas #8. Raiko full workspace Clippy passed
+after reclaiming duplicate immutable caches; 23 trace and 81 CLI cached native tests passed.
+Remote CI is tracked separately; no merge, activation, guest rebuild or deployment.

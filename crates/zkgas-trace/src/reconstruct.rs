@@ -700,6 +700,13 @@ mod tests {
             )
             .expect("EIP-7702 execution");
         assert!(result.is_success());
+        // Raw TxEnv fixtures have no signed envelope; supply explicit synthetic metadata.
+        evm.record_transaction_payload(
+            alethia_reth_evm::zk_gas::pricing::TransactionPayloadSelectors {
+                canonical_transaction_bytes: 100,
+                nonempty_payload_transactions: 0,
+            },
+        );
         evm.commit_transaction_zk_gas_pricing()
             .expect("pricing commit");
         let local = evm
@@ -986,6 +993,13 @@ mod tests {
             )
             .expect("outer execution");
         assert!(result.is_success(), "outer transaction must commit");
+        // Raw TxEnv fixtures have no signed envelope; supply explicit synthetic metadata.
+        evm.record_transaction_payload(
+            alethia_reth_evm::zk_gas::pricing::TransactionPayloadSelectors {
+                canonical_transaction_bytes: 100,
+                nonempty_payload_transactions: 0,
+            },
+        );
         evm.commit_transaction_zk_gas_pricing()
             .expect("pricing commit");
         let local = evm

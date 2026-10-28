@@ -292,6 +292,7 @@ fn validate_complete_quote(complete: &CompleteQuoteV1) -> Result<()> {
                 node.operations_scaled,
                 node.feature_error_scaled,
                 node.evm_local_resources_scaled,
+                node.transaction_payload_scaled,
                 node.known_subtotal_scaled,
             ]
             .into_iter()
@@ -308,6 +309,7 @@ fn validate_complete_quote(complete: &CompleteQuoteV1) -> Result<()> {
                     node.fixed_scaled,
                     node.operations_scaled,
                     node.evm_local_resources_scaled,
+                    node.transaction_payload_scaled,
                 ])?,
             "node pricing subtotal mismatch"
         );
@@ -317,6 +319,23 @@ fn validate_complete_quote(complete: &CompleteQuoteV1) -> Result<()> {
         );
         let prove = &block.prove.pricing;
         validate_pricing_breakdown(prove)?;
+        let committed = block.prove.committed_payload;
+        committed
+            .residual_after_committed(Default::default())
+            .context("invalid committed transaction payload domain")?;
+        ensure!(
+            committed.total_transaction_count > 0
+                && committed.total_transaction_count <= block.prove.attempted_transaction_count
+                && node.transaction_payload.canonical_transaction_bytes
+                    == committed.canonical_transaction_bytes
+                && node.transaction_payload.nonempty_payload_transactions
+                    == committed.nonempty_payload_transactions,
+            "committed transaction payload does not match node selectors"
+        );
+        ensure!(
+            prove.transaction_payload_scaled == node.transaction_payload_scaled,
+            "prove block payload price does not match committed node payload"
+        );
         ensure!(
             prove.fixed_scaled >= node.fixed_scaled
                 && prove.operations_scaled >= node.operations_scaled
@@ -337,6 +356,7 @@ fn validate_complete_quote(complete: &CompleteQuoteV1) -> Result<()> {
                     native_value_transfers: 0,
                     operation_routes: &[],
                     resources: resource_selectors(node.evm_local_resources),
+                    transaction_payload: Default::default(),
                     mpt: MptSelectors::default(),
                 })
                 .context("EVM-local selector domain is invalid")?;
@@ -350,6 +370,7 @@ fn validate_complete_quote(complete: &CompleteQuoteV1) -> Result<()> {
                     native_value_transfers: 0,
                     operation_routes: &[],
                     resources: resource_selectors(block.prove.exact_resources),
+                    transaction_payload: Default::default(),
                     mpt: mpt_selectors(block.prove.mpt),
                 })
                 .context("exact block selector domain is invalid")?;
@@ -358,10 +379,16 @@ fn validate_complete_quote(complete: &CompleteQuoteV1) -> Result<()> {
                     && prove.mpt_scaled == exact_pricing.mpt_scaled,
                 "exact block resource or MPT price mismatch"
             );
+            let payload_pricing = ZkGasModel
+                .price_transaction_payload(node.transaction_payload.into())
+                .context("committed payload selector domain is invalid")?;
+            ensure!(
+                node.transaction_payload_scaled == payload_pricing.transaction_payload_scaled,
+                "committed payload price mismatch"
+            );
         }
         ensure!(
             prove.startup_scaled == 0
-                && prove.transaction_payload_scaled == 0
                 && prove.blob_source_scaled == 0
                 && prove.parent_mpt_scaled == 0,
             "block pricing contains proposal-only components"
@@ -500,12 +527,35 @@ fn validate_complete_quote(complete: &CompleteQuoteV1) -> Result<()> {
         "nonempty payload transaction count mismatch"
     );
     let selectors = &quote.prove.selectors;
+    let committed_payload = quote.blocks.iter().try_fold(
+        raiko2_zkgas_trace::ProposalPayloadSelectors::default(),
+        |mut total, block| -> Result<_> {
+            let payload = block.prove.committed_payload;
+            total.total_transaction_count = total
+                .total_transaction_count
+                .checked_add(payload.total_transaction_count)
+                .context("committed transaction count overflow")?;
+            total.canonical_transaction_bytes = total
+                .canonical_transaction_bytes
+                .checked_add(payload.canonical_transaction_bytes)
+                .context("committed canonical bytes overflow")?;
+            total.nonempty_payload_transactions = total
+                .nonempty_payload_transactions
+                .checked_add(payload.nonempty_payload_transactions)
+                .context("committed nonempty transaction count overflow")?;
+            Ok(total)
+        },
+    )?;
+    let residual_payload = selectors
+        .payload
+        .residual_after_committed(committed_payload)
+        .context("invalid residual transaction payload")?;
     validate_blob_selector_domain(&selectors.blobs)?;
     if current_model {
         let expected_proposal_once = ZkGasModel
             .price_proposal_once(&ProposalPricingInput {
-                canonical_transaction_bytes: selectors.payload.canonical_transaction_bytes,
-                nonempty_payload_transactions: selectors.payload.nonempty_payload_transactions,
+                canonical_transaction_bytes: residual_payload.canonical_transaction_bytes,
+                nonempty_payload_transactions: residual_payload.nonempty_payload_transactions,
                 true_unattempted_transactions: selectors.true_unattempted_transactions,
                 source_blob_counts: &selectors.blobs.source_blob_counts,
                 proposal_blob_hash_count: selectors.blobs.proposal_blob_hash_count,

@@ -8,12 +8,51 @@ use reth_ethereum_primitives::TransactionSigned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Canonical signed transaction payload and its transaction-count domain.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProposalPayloadSelectors {
     pub total_transaction_count: u64,
     pub canonical_transaction_bytes: u64,
     pub nonempty_payload_transactions: u64,
+}
+
+impl ProposalPayloadSelectors {
+    /// Removes payload already owned by committed block pricing.
+    ///
+    /// # Errors
+    /// Rejects inconsistent count, byte, or nonempty-transaction domains, including an invalid
+    /// residual. No selector is clamped when committed observations disagree with input payload.
+    pub fn residual_after_committed(&self, committed: Self) -> Result<Self> {
+        self.validate_domain()?;
+        committed.validate_domain()?;
+        let residual = Self {
+            total_transaction_count: self
+                .total_transaction_count
+                .checked_sub(committed.total_transaction_count)
+                .context("committed transaction count exceeds input payload")?,
+            canonical_transaction_bytes: self
+                .canonical_transaction_bytes
+                .checked_sub(committed.canonical_transaction_bytes)
+                .context("committed canonical bytes exceed input payload")?,
+            nonempty_payload_transactions: self
+                .nonempty_payload_transactions
+                .checked_sub(committed.nonempty_payload_transactions)
+                .context("committed nonempty count exceeds input payload")?,
+        };
+        residual.validate_domain()?;
+        Ok(residual)
+    }
+
+    fn validate_domain(&self) -> Result<()> {
+        if self.canonical_transaction_bytes < self.total_transaction_count
+            || self.nonempty_payload_transactions > self.total_transaction_count
+            || (self.total_transaction_count == 0 && self.canonical_transaction_bytes != 0)
+        {
+            bail!("inconsistent transaction payload domain");
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,7 +85,7 @@ impl PayloadAccumulator {
         Ok(())
     }
 
-    fn record_transaction(&mut self, transaction: &TransactionSigned) -> Result<()> {
+    pub(crate) fn record_transaction(&mut self, transaction: &TransactionSigned) -> Result<()> {
         self.total_transaction_count = self
             .total_transaction_count
             .checked_add(1)
@@ -54,7 +93,7 @@ impl PayloadAccumulator {
         self.canonical_transaction_bytes = self
             .canonical_transaction_bytes
             .checked_add(
-                u64::try_from(transaction.encoded_2718().len())
+                u64::try_from(transaction.encode_2718_len())
                     .context("canonical transaction length exceeds u64")?,
             )
             .context("canonical transaction byte total overflows")?;
@@ -153,6 +192,74 @@ mod tests {
         }
         .into_signed(Signature::test_signature())
         .into()
+    }
+
+    #[test]
+    fn residual_payload_charges_only_additional_candidates() {
+        let input = ProposalPayloadSelectors {
+            total_transaction_count: 3,
+            canonical_transaction_bytes: 450,
+            nonempty_payload_transactions: 2,
+        };
+        let committed = ProposalPayloadSelectors {
+            total_transaction_count: 2,
+            canonical_transaction_bytes: 300,
+            nonempty_payload_transactions: 1,
+        };
+        assert_eq!(
+            input.residual_after_committed(committed).unwrap(),
+            ProposalPayloadSelectors {
+                total_transaction_count: 1,
+                canonical_transaction_bytes: 150,
+                nonempty_payload_transactions: 1,
+            }
+        );
+        assert_eq!(
+            input.residual_after_committed(input).unwrap(),
+            ProposalPayloadSelectors::default()
+        );
+    }
+
+    #[test]
+    fn residual_payload_rejects_underflow_and_inconsistent_residual_domains() {
+        let input = ProposalPayloadSelectors {
+            total_transaction_count: 3,
+            canonical_transaction_bytes: 450,
+            nonempty_payload_transactions: 2,
+        };
+        for committed in [
+            ProposalPayloadSelectors {
+                total_transaction_count: 4,
+                ..input
+            },
+            ProposalPayloadSelectors {
+                canonical_transaction_bytes: 451,
+                ..input
+            },
+            ProposalPayloadSelectors {
+                nonempty_payload_transactions: 3,
+                ..input
+            },
+            ProposalPayloadSelectors {
+                total_transaction_count: 2,
+                canonical_transaction_bytes: 450,
+                nonempty_payload_transactions: 1,
+            },
+            ProposalPayloadSelectors {
+                total_transaction_count: 2,
+                canonical_transaction_bytes: 300,
+                nonempty_payload_transactions: 0,
+            },
+            ProposalPayloadSelectors {
+                canonical_transaction_bytes: 449,
+                ..input
+            },
+        ] {
+            assert!(
+                input.residual_after_committed(committed).is_err(),
+                "accepted {committed:?}"
+            );
+        }
     }
 
     #[test]

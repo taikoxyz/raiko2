@@ -1,7 +1,7 @@
 use alethia_reth_evm::zk_gas::pricing::{
     FIXED_POINT_SCALE, MptSelectors, PricingBreakdown, ProposalPricingInput, RUNTIME_SPEC_SHA256,
-    ResourceSelectors, ZkGasCompletionError, ZkGasError, ZkGasKnownBlockBreakdown, ZkGasModel,
-    ZkGasShadowReport, ZkGasShadowStatus,
+    ResourceSelectors, TransactionPayloadSelectors, ZkGasCompletionError, ZkGasError,
+    ZkGasKnownBlockBreakdown, ZkGasModel, ZkGasShadowReport, ZkGasShadowStatus,
 };
 use alloy_consensus::BlockHeader as _;
 use alloy_primitives::B256;
@@ -82,6 +82,34 @@ pub struct PricingBreakdownSnapshot {
     pub total_pgu: u128,
 }
 
+/// Signed-envelope bytes and nonempty calldata transactions committed by the node.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TransactionPayloadSelectorsSnapshot {
+    /// Total canonical signed EIP-2718 encoded bytes.
+    pub canonical_transaction_bytes: u64,
+    /// Transactions whose calldata is nonempty, including Anchor and failed receipts.
+    pub nonempty_payload_transactions: u64,
+}
+
+impl From<TransactionPayloadSelectors> for TransactionPayloadSelectorsSnapshot {
+    fn from(value: TransactionPayloadSelectors) -> Self {
+        Self {
+            canonical_transaction_bytes: value.canonical_transaction_bytes,
+            nonempty_payload_transactions: value.nonempty_payload_transactions,
+        }
+    }
+}
+
+impl From<TransactionPayloadSelectorsSnapshot> for TransactionPayloadSelectors {
+    fn from(value: TransactionPayloadSelectorsSnapshot) -> Self {
+        Self {
+            canonical_transaction_bytes: value.canonical_transaction_bytes,
+            nonempty_payload_transactions: value.nonempty_payload_transactions,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NodePricingBreakdownSnapshot {
@@ -90,6 +118,10 @@ pub struct NodePricingBreakdownSnapshot {
     pub feature_error_scaled: i128,
     pub evm_local_resources: ResourceSelectorsSnapshot,
     pub evm_local_resources_scaled: i128,
+    /// Node-owned payload selectors sealed with committed transaction inclusion.
+    pub transaction_payload: TransactionPayloadSelectorsSnapshot,
+    /// Shared-model price for the committed payload selectors.
+    pub transaction_payload_scaled: i128,
     pub known_subtotal_scaled: i128,
     pub known_subtotal_pgu: u128,
 }
@@ -102,6 +134,8 @@ impl From<ZkGasKnownBlockBreakdown> for NodePricingBreakdownSnapshot {
             feature_error_scaled: value.feature_error_scaled(),
             evm_local_resources: value.evm_local_resources().into(),
             evm_local_resources_scaled: value.evm_local_resources_scaled(),
+            transaction_payload: value.transaction_payload().into(),
+            transaction_payload_scaled: value.transaction_payload_scaled(),
             known_subtotal_scaled: value.evm_local_known_subtotal_scaled(),
             known_subtotal_pgu: value.evm_local_known_subtotal_pgu(),
         }
@@ -153,6 +187,8 @@ pub struct ProveBlockWorkloadQuote {
     pub consumed_candidate_count: u64,
     pub attempted_transaction_count: u64,
     pub true_unattempted_transactions: u64,
+    /// Independently observed signed payload in the canonical committed block contents.
+    pub committed_payload: ProposalPayloadSelectors,
     pub exact_resources: ResourceSelectorsSnapshot,
     pub mpt: MptSelectorsSnapshot,
     pub pricing: PricingBreakdownSnapshot,
@@ -288,6 +324,7 @@ fn complete_block_pricing(
     block_index: usize,
     committed_report: &ZkGasShadowReport,
     attempted_report: &ZkGasShadowReport,
+    committed_payload: ProposalPayloadSelectors,
     exact_resources: ResourceSelectors,
     mpt: MptSelectors,
 ) -> Result<(NodePricingBreakdownSnapshot, PricingBreakdownSnapshot), RuntimeQuoteError> {
@@ -303,6 +340,14 @@ fn complete_block_pricing(
         })?;
     let committed_known =
         committed_known.ok_or(RuntimeQuoteError::Missing("node_shadow_breakdown"))?;
+    if committed_known.transaction_payload()
+        != (TransactionPayloadSelectors {
+            canonical_transaction_bytes: committed_payload.canonical_transaction_bytes,
+            nonempty_payload_transactions: committed_payload.nonempty_payload_transactions,
+        })
+    {
+        return Err(RuntimeQuoteError::Topology("committed_transaction_payload"));
+    }
 
     let attempted_known = match attempted_report.status() {
         ZkGasShadowStatus::Incomplete { known, .. } => Some(known),
@@ -330,7 +375,10 @@ fn complete_block_pricing(
         )?,
         checked_add_i128(
             committed_priced.resources_scaled,
-            committed_priced.mpt_scaled,
+            checked_add_i128(
+                committed_priced.mpt_scaled,
+                committed_priced.transaction_payload_scaled,
+            )?,
         )?,
     )?;
     let prove = PricingBreakdownSnapshot {
@@ -339,6 +387,7 @@ fn complete_block_pricing(
         feature_error_scaled: attempted_priced.feature_error_scaled,
         resources_scaled: committed_priced.resources_scaled,
         mpt_scaled: committed_priced.mpt_scaled,
+        transaction_payload_scaled: committed_priced.transaction_payload_scaled,
         total_scaled,
         total_pgu: ceil_scaled(total_scaled)?,
         ..Default::default()
@@ -353,6 +402,7 @@ struct ReplayedBlock {
     consumed_candidate_count: u64,
     attempted_transaction_count: u64,
     true_unattempted_transactions: u64,
+    committed_payload: ProposalPayloadSelectors,
     mpt: alethia_reth_evm::zk_gas::pricing::MptSelectors,
     execution: BlockExecutionObservation,
 }
@@ -421,10 +471,12 @@ pub fn quote_shasta_proposal(
                 )
                 .map_err(anyhow::Error::from)?;
                 let block_number = outcome.filtered_block.header().number();
-                let committed = u64::try_from(
-                    outcome.filtered_block.body().transactions().count(),
-                )
-                .context("committed transaction count exceeds u64")?;
+                let mut committed_payload = PayloadAccumulator::default();
+                for transaction in outcome.filtered_block.body().transactions() {
+                    committed_payload.record_transaction(transaction)?;
+                }
+                let committed_payload = committed_payload.finish();
+                let committed = committed_payload.total_transaction_count;
                 observe_discarded_attempts(
                     &guest_input_sha256,
                     request.index,
@@ -442,6 +494,7 @@ pub fn quote_shasta_proposal(
                     consumed_candidate_count: consumed,
                     attempted_transaction_count: attempted,
                     true_unattempted_transactions: true_unattempted,
+                    committed_payload,
                     mpt: mpt::selectors(&metrics)
                         .map_err(|error| anyhow::anyhow!(error.to_string()))?,
                     execution,
@@ -484,6 +537,7 @@ pub fn quote_shasta_proposal(
     let mut block_quotes = Vec::with_capacity(blocks.len());
     let mut total_transaction_count = 0_u64;
     let mut total_unattempted = 0_u64;
+    let mut committed_payload = ProposalPayloadSelectors::default();
     let mut unzen_zkgas_sum = 0_u128;
     let mut block_local_known_scaled = 0_i128;
     let mut sum_of_block_known_pgu = 0_u128;
@@ -498,6 +552,7 @@ pub fn quote_shasta_proposal(
             position,
             &block.execution.committed_report,
             &block.execution.attempted_report,
+            block.committed_payload,
             block.execution.exact_resources,
             block.mpt,
         )?;
@@ -505,6 +560,18 @@ pub fn quote_shasta_proposal(
             checked_add_u64(total_transaction_count, block.input_transaction_count)?;
         total_unattempted =
             checked_add_u64(total_unattempted, block.true_unattempted_transactions)?;
+        committed_payload.total_transaction_count = checked_add_u64(
+            committed_payload.total_transaction_count,
+            block.committed_payload.total_transaction_count,
+        )?;
+        committed_payload.canonical_transaction_bytes = checked_add_u64(
+            committed_payload.canonical_transaction_bytes,
+            block.committed_payload.canonical_transaction_bytes,
+        )?;
+        committed_payload.nonempty_payload_transactions = checked_add_u64(
+            committed_payload.nonempty_payload_transactions,
+            block.committed_payload.nonempty_payload_transactions,
+        )?;
         unzen_zkgas_sum = unzen_zkgas_sum
             .checked_add(u128::from(block.execution.finalized_block_zkgas))
             .ok_or(RuntimeQuoteError::ArithmeticOverflow)?;
@@ -529,6 +596,7 @@ pub fn quote_shasta_proposal(
                 consumed_candidate_count: block.consumed_candidate_count,
                 attempted_transaction_count: block.attempted_transaction_count,
                 true_unattempted_transactions: block.true_unattempted_transactions,
+                committed_payload: block.committed_payload,
                 exact_resources: block.execution.exact_resources.into(),
                 mpt: block.mpt.into(),
                 pricing: prove_pricing,
@@ -541,9 +609,12 @@ pub fn quote_shasta_proposal(
         return Err(RuntimeQuoteError::Topology("transaction_payload_domain"));
     }
 
+    let residual_payload = payload
+        .residual_after_committed(committed_payload)
+        .map_err(|_| RuntimeQuoteError::Topology("transaction_payload_residual"))?;
     let proposal_once = ZkGasModel.price_proposal_once(&ProposalPricingInput {
-        canonical_transaction_bytes: payload.canonical_transaction_bytes,
-        nonempty_payload_transactions: payload.nonempty_payload_transactions,
+        canonical_transaction_bytes: residual_payload.canonical_transaction_bytes,
+        nonempty_payload_transactions: residual_payload.nonempty_payload_transactions,
         true_unattempted_transactions: total_unattempted,
         source_blob_counts: &blob.source_blob_counts,
         proposal_blob_hash_count: blob.proposal_blob_hash_count,
@@ -674,6 +745,21 @@ mod tests {
                 .is_some()
         );
         assert!(
+            json["blocks"][0]["node"]["pricing"]
+                .get("transaction_payload")
+                .is_some()
+        );
+        assert!(
+            json["blocks"][0]["node"]["pricing"]
+                .get("transaction_payload_scaled")
+                .is_some()
+        );
+        assert!(
+            json["blocks"][0]["prove"]
+                .get("committed_payload")
+                .is_some()
+        );
+        assert!(
             json["blocks"][0]["prove"]
                 .get("started_transaction_count")
                 .is_none()
@@ -697,16 +783,38 @@ mod tests {
             block.node.pricing.known_subtotal_scaled,
             block.node.pricing.fixed_scaled
                 + block.node.pricing.operations_scaled
-                + block.node.pricing.evm_local_resources_scaled,
+                + block.node.pricing.evm_local_resources_scaled
+                + block.node.pricing.transaction_payload_scaled,
         );
         assert_eq!(
             block.prove.pricing.total_scaled,
             block.prove.pricing.fixed_scaled
                 + block.prove.pricing.operations_scaled
                 + block.prove.pricing.resources_scaled
-                + block.prove.pricing.mpt_scaled,
+                + block.prove.pricing.mpt_scaled
+                + block.prove.pricing.transaction_payload_scaled,
         );
         assert_exact_resources_cover_evm_local(block);
+        assert_eq!(
+            block
+                .node
+                .pricing
+                .transaction_payload
+                .canonical_transaction_bytes,
+            block.prove.committed_payload.canonical_transaction_bytes
+        );
+        assert_eq!(
+            block
+                .node
+                .pricing
+                .transaction_payload
+                .nonempty_payload_transactions,
+            block.prove.committed_payload.nonempty_payload_transactions
+        );
+        assert_eq!(
+            block.node.pricing.transaction_payload_scaled,
+            block.prove.pricing.transaction_payload_scaled
+        );
     }
 
     fn assert_proposal_formula_closes(quote: &ProposalWorkloadQuote) {
@@ -740,11 +848,31 @@ mod tests {
     }
 
     #[test]
+    fn committed_payload_moves_to_block_scope_without_changing_complete_price() {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join(
+            "../../tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_41455_l2_12556056_12556247.json",
+        );
+        let input: GuestInput =
+            serde_json::from_str(&fs::read_to_string(fixture).unwrap()).unwrap();
+        let quote = quote_shasta_proposal(&input).unwrap();
+
+        assert_eq!(
+            quote.prove.proposal_once.transaction_payload_scaled, 0,
+            "every input transaction is committed, so proposal payload must be exhausted"
+        );
+        assert_eq!(
+            quote.prove.total_scaled, 4_804_098_422_373_488_496_509_519_544,
+            "moving ownership must preserve complete fixed-point pricing"
+        );
+    }
+
+    #[test]
     fn block_completion_preserves_typed_shadow_diagnostic_and_block_index() {
         let error = complete_block_pricing(
             7,
             &ZkGasShadowReport::collector_unavailable(),
             &ZkGasShadowReport::collector_unavailable(),
+            ProposalPayloadSelectors::default(),
             ResourceSelectors::default(),
             MptSelectors::default(),
         )
@@ -767,6 +895,7 @@ mod tests {
             9,
             &ZkGasBlockSnapshot::default().shadow_report(),
             &ZkGasShadowReport::collector_unavailable(),
+            ProposalPayloadSelectors::default(),
             ResourceSelectors::default(),
             MptSelectors::default(),
         )
@@ -805,6 +934,10 @@ mod tests {
         let committed = ZkGasBlockSnapshot {
             operation_routes: vec![operation(10, 0)],
             resources: committed_resources,
+            transaction_payload: TransactionPayloadSelectors {
+                canonical_transaction_bytes: 100,
+                nonempty_payload_transactions: 1,
+            },
             ..Default::default()
         }
         .shadow_report();
@@ -812,6 +945,10 @@ mod tests {
             started_non_anchor_transactions: 1,
             operation_routes: vec![operation(50, 7)],
             resources: attempted_resources,
+            transaction_payload: TransactionPayloadSelectors {
+                canonical_transaction_bytes: 400,
+                nonempty_payload_transactions: 3,
+            },
             ..Default::default()
         }
         .shadow_report();
@@ -820,6 +957,11 @@ mod tests {
             0,
             &committed,
             &attempted,
+            ProposalPayloadSelectors {
+                total_transaction_count: 1,
+                canonical_transaction_bytes: 100,
+                nonempty_payload_transactions: 1,
+            },
             committed_resources,
             MptSelectors::default(),
         )
@@ -831,9 +973,55 @@ mod tests {
         assert_ne!(prove.fixed_scaled, node.fixed_scaled);
         assert_eq!(prove.resources_scaled, node.evm_local_resources_scaled);
         assert_eq!(
-            prove.total_scaled,
-            prove.fixed_scaled + prove.operations_scaled + prove.resources_scaled
+            prove.transaction_payload_scaled,
+            node.transaction_payload_scaled
         );
+        assert_eq!(
+            prove.transaction_payload_scaled,
+            ZkGasModel
+                .price_transaction_payload(TransactionPayloadSelectors {
+                    canonical_transaction_bytes: 100,
+                    nonempty_payload_transactions: 1
+                })
+                .unwrap()
+                .transaction_payload_scaled
+        );
+        assert_eq!(
+            prove.total_scaled,
+            prove.fixed_scaled
+                + prove.operations_scaled
+                + prove.resources_scaled
+                + prove.transaction_payload_scaled
+        );
+    }
+
+    #[test]
+    fn block_completion_rejects_committed_payload_mismatch() {
+        let report = ZkGasBlockSnapshot {
+            transaction_payload: TransactionPayloadSelectors {
+                canonical_transaction_bytes: 100,
+                nonempty_payload_transactions: 1,
+            },
+            ..Default::default()
+        }
+        .shadow_report();
+        for (bytes, nonempty) in [(99, 1), (101, 1), (100, 0), (100, 2)] {
+            assert!(matches!(
+                complete_block_pricing(
+                    0,
+                    &report,
+                    &report,
+                    ProposalPayloadSelectors {
+                        total_transaction_count: 2,
+                        canonical_transaction_bytes: bytes,
+                        nonempty_payload_transactions: nonempty
+                    },
+                    ResourceSelectors::default(),
+                    MptSelectors::default(),
+                ),
+                Err(RuntimeQuoteError::Topology("committed_transaction_payload"))
+            ));
+        }
     }
 
     #[test]
@@ -929,10 +1117,7 @@ mod tests {
 
         assert_eq!(quote.public_output, expected_output);
         assert_initial_json_schema(&quote);
-        assert_eq!(
-            quote.model_id,
-            "93d04eddda3779393807808859eb36561d35aad0cdd8a8a3960ec3e279a93046"
-        );
+        assert_eq!(quote.model_id, RUNTIME_SPEC_SHA256);
         assert_eq!(
             quote.guest_input_sha256,
             "10e26ee7c6c05eecf23e3c19c58e9c0c4269a877de83df1f1b70a33f06008506"
@@ -1003,9 +1188,9 @@ mod tests {
             quote.node,
             NodeProposalWorkloadQuote {
                 unzen_zkgas_sum: 259_514_910,
-                block_local_known_scaled: 3_442_739_351_638_008_094_389_560_678,
-                block_local_known_pgu: 3_442_739_352,
-                sum_of_block_known_pgu: 3_442_739_480,
+                block_local_known_scaled: 3_458_293_399_638_008_094_389_560_678,
+                block_local_known_pgu: 3_458_293_400,
+                sum_of_block_known_pgu: 3_458_293_528,
             }
         );
         assert_eq!(
@@ -1044,20 +1229,20 @@ mod tests {
                 resources_scaled: 0,
                 mpt_scaled: 0,
                 startup_scaled: 154_263_870_735_480_402_119_958_866,
-                transaction_payload_scaled: 15_554_048_000_000_000_000_000_000,
+                transaction_payload_scaled: 0,
                 blob_source_scaled: 0,
                 parent_mpt_scaled: 6_357_840_000_000_000_000_000_000,
-                total_scaled: 176_175_758_735_480_402_119_958_866,
-                total_pgu: 176_175_759,
+                total_scaled: 160_621_710_735_480_402_119_958_866,
+                total_pgu: 160_621_711,
             }
         );
         assert_eq!(
             quote.prove.block_local_scaled,
-            4_627_922_663_638_008_094_389_560_678
+            4_643_476_711_638_008_094_389_560_678
         );
-        assert_eq!(quote.prove.block_local_pgu, 4_627_922_664);
-        assert_eq!(quote.prove.sum_of_block_local_pgu, 4_627_922_792);
-        assert_eq!(quote.prove.proposal_once_pgu, 176_175_759);
+        assert_eq!(quote.prove.block_local_pgu, 4_643_476_712);
+        assert_eq!(quote.prove.sum_of_block_local_pgu, 4_643_476_840);
+        assert_eq!(quote.prove.proposal_once_pgu, 160_621_711);
         assert_eq!(
             quote.prove.total_scaled,
             4_804_098_422_373_488_496_509_519_544

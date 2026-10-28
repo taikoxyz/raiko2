@@ -1,7 +1,8 @@
 mod common;
 
 use alethia_reth_evm::zk_gas::pricing::{
-    MptSelectors, PricingBreakdown, ProposalPricingInput, ZkGasModel,
+    MptSelectors, PricingBreakdown, ProposalPricingInput, RUNTIME_SPEC_SHA256,
+    TransactionPayloadSelectors, ZkGasModel,
 };
 use common::trusted_temp_root;
 use raiko2_zkgas_trace::PricingBreakdownSnapshot;
@@ -58,18 +59,29 @@ fn snapshot(pricing: PricingBreakdown) -> PricingBreakdownSnapshot {
         total_pgu: pricing.total_pgu.unwrap(),
     }
 }
+
+// This synthetic profile exercises current-model validation. The unchanged historical program
+// and normalization identities are fixtures for matching tests, not a new calibration claim.
+fn current_model_profiles() -> CompatibilityProfilesV1 {
+    let mut profiles = embedded_profiles().unwrap();
+    let profile = &mut profiles.profiles[0];
+    profile.profile_id = "current-model-test-profile".into();
+    profile.model_id = RUNTIME_SPEC_SHA256.into();
+    profile.runtime_spec_sha256 = Some(RUNTIME_SPEC_SHA256.into());
+    profiles
+}
+
 fn quote() -> CompleteQuoteV1 {
-    let p = embedded_profiles().unwrap().profiles.remove(0);
     let public_output = format!("0x{}", "00".repeat(32));
     let mut quote: CompleteQuoteV1 = serde_json::from_value(json!({
         "schema_version":1,"key":{"corpus_id":"corpus","sample_id":"sample","guest_input_sha256":"input"},
         "executable":executable(),"input_source":{"kind":"single","descriptor_sha256":"descriptor"},"guest_input_byte_length":12,
         "proposal":{"proposal_id":1,"chain":{"name":"sample-chain","chain_id":167000},"proof_carry_chain_id":167000,"proof_carry_proposal_id":1,"witness_chain_spec_sha256":["spec"],"first_block":2,"last_block":2,"block_count":1,"public_output":public_output,"fork_segments":[{"fork":"SHASTA","first_block":2,"last_block":2}]},
-        "prediction_unit":"sp1_pgu","prediction_surface":"prove","calibration_profile":p.model_id,
-        "quote":{"schema_version":1,"model_id":p.model_id,"guest_input_sha256":"input","guest_input_bincode_length":12,"public_output":public_output,"blocks":[{
+        "prediction_unit":"sp1_pgu","prediction_surface":"prove","calibration_profile":RUNTIME_SPEC_SHA256,
+        "quote":{"schema_version":1,"model_id":RUNTIME_SPEC_SHA256,"guest_input_sha256":"input","guest_input_bincode_length":12,"public_output":public_output,"blocks":[{
             "block_index":0,"block_number":2,
-            "node":{"unzen_zkgas":2,"pricing":{"fixed_scaled":"0","operations_scaled":"0","feature_error_scaled":"0","evm_local_resources":{"unique_account_count":0,"unique_storage_slot_access_count":0,"unique_storage_slot_write_count":0,"unique_code_hash_count":0,"unique_code_bytes":0},"evm_local_resources_scaled":"0","known_subtotal_scaled":"0","known_subtotal_pgu":"0"}},
-            "prove":{"input_transaction_count":1,"consumed_candidate_count":1,"attempted_transaction_count":1,"true_unattempted_transactions":0,"exact_resources":{"unique_account_count":0,"unique_storage_slot_access_count":0,"unique_storage_slot_write_count":0,"unique_code_hash_count":0,"unique_code_bytes":0},"mpt":{"path_node_visits":0,"materialization_work_units":0,"hydration_hash_blocks":0,"dirty_encoded_nodes":0,"dirty_hash_blocks":0,"structural_branch_extension_churn_nodes":0,"dropped_trie_nodes":0},"pricing":{"fixed_scaled":"0","operations_scaled":"0","feature_error_scaled":"0","resources_scaled":"0","mpt_scaled":"0","startup_scaled":"0","transaction_payload_scaled":"0","blob_source_scaled":"0","parent_mpt_scaled":"0","total_scaled":"0","total_pgu":"0"}}
+            "node":{"unzen_zkgas":2,"pricing":{"fixed_scaled":"0","operations_scaled":"0","feature_error_scaled":"0","evm_local_resources":{"unique_account_count":0,"unique_storage_slot_access_count":0,"unique_storage_slot_write_count":0,"unique_code_hash_count":0,"unique_code_bytes":0},"evm_local_resources_scaled":"0","transaction_payload":{"canonical_transaction_bytes":1,"nonempty_payload_transactions":0},"transaction_payload_scaled":"0","known_subtotal_scaled":"0","known_subtotal_pgu":"0"}},
+            "prove":{"input_transaction_count":1,"consumed_candidate_count":1,"attempted_transaction_count":1,"true_unattempted_transactions":0,"committed_payload":{"total_transaction_count":1,"canonical_transaction_bytes":1,"nonempty_payload_transactions":0},"exact_resources":{"unique_account_count":0,"unique_storage_slot_access_count":0,"unique_storage_slot_write_count":0,"unique_code_hash_count":0,"unique_code_bytes":0},"mpt":{"path_node_visits":0,"materialization_work_units":0,"hydration_hash_blocks":0,"dirty_encoded_nodes":0,"dirty_hash_blocks":0,"structural_branch_extension_churn_nodes":0,"dropped_trie_nodes":0},"pricing":{"fixed_scaled":"0","operations_scaled":"0","feature_error_scaled":"0","resources_scaled":"0","mpt_scaled":"0","startup_scaled":"0","transaction_payload_scaled":"0","blob_source_scaled":"0","parent_mpt_scaled":"0","total_scaled":"0","total_pgu":"0"}}
         }],
             "node":{"unzen_zkgas_sum":"2","block_local_known_scaled":"0","block_local_known_pgu":"0","sum_of_block_known_pgu":"0"},
             "prove":{"selectors":{"payload":{"total_transaction_count":1,"canonical_transaction_bytes":1,"nonempty_payload_transactions":0},"true_unattempted_transactions":0,"blobs":{"source_blob_counts":[1],"proposal_blob_hash_count":1,"provider_blob_count":1,"provider_commitment_count":1,"provider_proof_count":1},"parent_mpt":{"path_node_visits":0,"materialization_work_units":0,"hydration_hash_blocks":0,"dirty_encoded_nodes":0,"dirty_hash_blocks":0,"structural_branch_extension_churn_nodes":0,"dropped_trie_nodes":0}},
@@ -79,8 +91,8 @@ fn quote() -> CompleteQuoteV1 {
     let parent = selectors.parent_mpt;
     let expected = ZkGasModel
         .price_proposal_once(&ProposalPricingInput {
-            canonical_transaction_bytes: selectors.payload.canonical_transaction_bytes,
-            nonempty_payload_transactions: selectors.payload.nonempty_payload_transactions,
+            canonical_transaction_bytes: 0,
+            nonempty_payload_transactions: 0,
             true_unattempted_transactions: selectors.true_unattempted_transactions,
             source_blob_counts: &selectors.blobs.source_blob_counts,
             proposal_blob_hash_count: selectors.blobs.proposal_blob_hash_count,
@@ -101,8 +113,25 @@ fn quote() -> CompleteQuoteV1 {
         .unwrap();
     quote.quote.prove.proposal_once = snapshot(expected);
     quote.quote.prove.proposal_once_pgu = expected.total_pgu.unwrap();
-    quote.quote.prove.total_scaled = expected.total_scaled;
-    quote.quote.prove.total_pgu = expected.total_pgu.unwrap();
+    let payload = ZkGasModel
+        .price_transaction_payload(TransactionPayloadSelectors {
+            canonical_transaction_bytes: 1,
+            nonempty_payload_transactions: 0,
+        })
+        .unwrap();
+    let node = &mut quote.quote.blocks[0].node.pricing;
+    node.transaction_payload_scaled = payload.transaction_payload_scaled;
+    node.known_subtotal_scaled = payload.total_scaled;
+    node.known_subtotal_pgu = payload.total_pgu.unwrap();
+    quote.quote.blocks[0].prove.pricing = snapshot(payload);
+    quote.quote.node.block_local_known_scaled = payload.total_scaled;
+    quote.quote.node.block_local_known_pgu = payload.total_pgu.unwrap();
+    quote.quote.node.sum_of_block_known_pgu = payload.total_pgu.unwrap();
+    quote.quote.prove.block_local_scaled = payload.total_scaled;
+    quote.quote.prove.block_local_pgu = payload.total_pgu.unwrap();
+    quote.quote.prove.sum_of_block_local_pgu = payload.total_pgu.unwrap();
+    quote.quote.prove.total_scaled = expected.total_scaled + payload.total_scaled;
+    quote.quote.prove.total_pgu = expected.total_pgu.unwrap() + payload.total_pgu.unwrap();
     quote
 }
 fn observation() -> CompleteObservationV1 {
@@ -147,11 +176,25 @@ fn write_inputs(
         .unwrap(),
     )
     .unwrap();
+    let profiles = current_model_profiles();
+    let profiles_path = dir.path().join("current-model-profiles.toml");
+    for profile in &profiles.profiles {
+        if let Some(normalization) = &profile.normalization {
+            let artifact = dir.path().join(&normalization.artifact_path);
+            fs::create_dir_all(artifact.parent().unwrap()).unwrap();
+            fs::write(
+                artifact,
+                include_bytes!("../profiles/artifacts/unzen-sp1-block-comparison-v1.json"),
+            )
+            .unwrap();
+        }
+    }
+    fs::write(&profiles_path, toml::to_string(&profiles).unwrap()).unwrap();
     CompareArgs {
         quotes: vec![quote_file],
         observations: vec![observation_file],
         output: dir.path().join("store"),
-        ..Default::default()
+        profiles: Some(profiles_path),
     }
 }
 fn complete_quote() -> QuoteRowV1 {
@@ -180,10 +223,15 @@ fn rows(path: &Path) -> Vec<ComparisonRowV1> {
 }
 
 #[test]
+fn quote_fixture_uses_current_model_for_selector_price_validation() {
+    assert_eq!(quote().quote.model_id, RUNTIME_SPEC_SHA256);
+}
+
+#[test]
 fn profile_resolution_matches_named_algorithms_and_exactly_one_profile() {
     let q = quote();
     let o = observation();
-    let mut p = embedded_profiles().unwrap();
+    let mut p = current_model_profiles();
     assert!(matches!(
         resolve_profile(&q, &o, &p),
         ProfileResolution::Matched(_)
@@ -197,13 +245,13 @@ fn profile_resolution_matches_named_algorithms_and_exactly_one_profile() {
     );
     p.profiles.clear();
     assert_eq!(resolve_profile(&q, &o, &p), ProfileResolution::NoMatch);
-    let mut p = embedded_profiles().unwrap();
+    let mut p = current_model_profiles();
     let mut second = p.profiles[0].clone();
     second.profile_id = "second".into();
     p.profiles.push(second);
     assert_eq!(
         resolve_profile(&q, &o, &p),
-        ProfileResolution::Ambiguous(vec!["sp1-pricing-calibration-v1".into(), "second".into()])
+        ProfileResolution::Ambiguous(vec!["current-model-test-profile".into(), "second".into()])
     );
     let mut q = q.clone();
     q.prediction_surface = "node".into();
@@ -463,26 +511,32 @@ fn quote_with_feature_error(
 ) -> CompleteQuoteV1 {
     const SCALE: i128 = 1_000_000_000_000_000_000;
     let mut quote = quote();
+    let payload_scaled = quote.quote.blocks[0]
+        .node
+        .pricing
+        .transaction_payload_scaled;
+    let payload_pgu = u128::try_from(payload_scaled / SCALE).unwrap();
     let operation_pgu = u128::try_from(operations_scaled / SCALE).unwrap();
     let node = &mut quote.quote.blocks[0].node.pricing;
     node.operations_scaled = operations_scaled;
     node.feature_error_scaled = feature_error_scaled;
-    node.known_subtotal_scaled = operations_scaled;
-    node.known_subtotal_pgu = operation_pgu;
+    node.known_subtotal_scaled = operations_scaled + payload_scaled;
+    node.known_subtotal_pgu = operation_pgu + payload_pgu;
     let prove = &mut quote.quote.blocks[0].prove.pricing;
     prove.operations_scaled = operations_scaled;
     prove.feature_error_scaled = feature_error_scaled;
-    prove.total_scaled = operations_scaled;
-    prove.total_pgu = operation_pgu;
-    quote.quote.node.block_local_known_scaled = operations_scaled;
-    quote.quote.node.block_local_known_pgu = operation_pgu;
-    quote.quote.node.sum_of_block_known_pgu = operation_pgu;
-    quote.quote.prove.block_local_scaled = operations_scaled;
-    quote.quote.prove.block_local_pgu = operation_pgu;
-    quote.quote.prove.sum_of_block_local_pgu = operation_pgu;
+    prove.total_scaled = operations_scaled + payload_scaled;
+    prove.total_pgu = operation_pgu + payload_pgu;
+    quote.quote.node.block_local_known_scaled = operations_scaled + payload_scaled;
+    quote.quote.node.block_local_known_pgu = operation_pgu + payload_pgu;
+    quote.quote.node.sum_of_block_known_pgu = operation_pgu + payload_pgu;
+    quote.quote.prove.block_local_scaled = operations_scaled + payload_scaled;
+    quote.quote.prove.block_local_pgu = operation_pgu + payload_pgu;
+    quote.quote.prove.sum_of_block_local_pgu = operation_pgu + payload_pgu;
     quote.quote.prove.total_scaled =
-        operations_scaled + quote.quote.prove.proposal_once.total_scaled;
-    quote.quote.prove.total_pgu = operation_pgu + quote.quote.prove.proposal_once.total_pgu;
+        operations_scaled + payload_scaled + quote.quote.prove.proposal_once.total_scaled;
+    quote.quote.prove.total_pgu =
+        operation_pgu + payload_pgu + quote.quote.prove.proposal_once.total_pgu;
     quote
 }
 
@@ -546,6 +600,76 @@ fn complete_quote_accepts_attempted_pricing_above_the_committed_node_prefix() {
 }
 
 #[test]
+fn proposal_payload_prices_only_candidates_outside_the_committed_block() {
+    let dir = TestDir::new();
+    let mut q = quote();
+    q.quote.blocks[0].prove.input_transaction_count = 2;
+    q.quote.blocks[0].prove.consumed_candidate_count = 2;
+    q.quote.prove.selectors.payload.total_transaction_count = 2;
+    q.quote.prove.selectors.payload.canonical_transaction_bytes = 101;
+    q.quote
+        .prove
+        .selectors
+        .payload
+        .nonempty_payload_transactions = 1;
+    let proposal = ZkGasModel
+        .price_proposal_once(&ProposalPricingInput {
+            canonical_transaction_bytes: 100,
+            nonempty_payload_transactions: 1,
+            true_unattempted_transactions: 0,
+            source_blob_counts: &[1],
+            proposal_blob_hash_count: 1,
+            provider_blob_count: 1,
+            provider_commitment_count: 1,
+            provider_proof_count: 1,
+            parent_mpt: MptSelectors::default(),
+        })
+        .unwrap();
+    q.quote.prove.proposal_once = snapshot(proposal);
+    q.quote.prove.proposal_once_pgu = proposal.total_pgu.unwrap();
+    q.quote.prove.total_scaled = q.quote.prove.block_local_scaled + proposal.total_scaled;
+    q.quote.prove.total_pgu = q.quote.prove.block_local_pgu + proposal.total_pgu.unwrap();
+
+    let all_payload = ZkGasModel
+        .price_transaction_payload(TransactionPayloadSelectors {
+            canonical_transaction_bytes: 101,
+            nonempty_payload_transactions: 1,
+        })
+        .unwrap();
+    assert_eq!(
+        q.quote.blocks[0].prove.pricing.transaction_payload_scaled
+            + proposal.transaction_payload_scaled,
+        all_payload.transaction_payload_scaled
+    );
+    let args = write_inputs(
+        &dir,
+        &[QuoteRowV1::Complete(Box::new(q))],
+        &[complete_observation()],
+    );
+    assert_eq!(run_compare(&args, &executable()).unwrap().exit_code(), 0);
+}
+
+#[test]
+fn committed_payload_selectors_are_required_in_the_initial_schema() {
+    for path in ["node", "prove"] {
+        let mut value = serde_json::to_value(quote()).unwrap();
+        let block = &mut value["quote"]["blocks"][0];
+        if path == "node" {
+            block["node"]["pricing"]
+                .as_object_mut()
+                .unwrap()
+                .remove("transaction_payload");
+        } else {
+            block["prove"]
+                .as_object_mut()
+                .unwrap()
+                .remove("committed_payload");
+        }
+        assert!(serde_json::from_value::<CompleteQuoteV1>(value).is_err());
+    }
+}
+
+#[test]
 fn complete_quote_rejects_cross_surface_underquote_and_selector_domain_forgery() {
     const SCALE: i128 = 1_000_000_000_000_000_000;
     for mutation in [
@@ -565,6 +689,11 @@ fn complete_quote_rejects_cross_surface_underquote_and_selector_domain_forgery()
         "node-resource-price",
         "prove-resource-price",
         "prove-mpt-price",
+        "node-payload-selectors",
+        "committed-payload-selectors",
+        "committed-payload-count",
+        "payload-price",
+        "proposal-payload-price",
     ] {
         let dir = TestDir::new();
         let mut q = if mutation == "shared-feature-attribution" {
@@ -644,11 +773,11 @@ fn complete_quote_rejects_cross_surface_underquote_and_selector_domain_forgery()
             "node-resource-price" => {
                 let node = &mut q.quote.blocks[0].node.pricing;
                 node.evm_local_resources_scaled = SCALE;
-                node.known_subtotal_scaled = SCALE;
-                node.known_subtotal_pgu = 1;
-                q.quote.node.block_local_known_scaled = SCALE;
-                q.quote.node.block_local_known_pgu = 1;
-                q.quote.node.sum_of_block_known_pgu = 1;
+                node.known_subtotal_scaled += SCALE;
+                node.known_subtotal_pgu += 1;
+                q.quote.node.block_local_known_scaled += SCALE;
+                q.quote.node.block_local_known_pgu += 1;
+                q.quote.node.sum_of_block_known_pgu += 1;
             }
             "prove-resource-price" => {
                 q.quote.blocks[0].prove.pricing.resources_scaled = SCALE;
@@ -657,6 +786,45 @@ fn complete_quote_rejects_cross_surface_underquote_and_selector_domain_forgery()
             "prove-mpt-price" => {
                 q.quote.blocks[0].prove.pricing.mpt_scaled = SCALE;
                 add_block_price(&mut q, SCALE);
+            }
+            "node-payload-selectors" => {
+                q.quote.blocks[0]
+                    .node
+                    .pricing
+                    .transaction_payload
+                    .canonical_transaction_bytes += 1;
+            }
+            "committed-payload-selectors" => {
+                q.quote.blocks[0]
+                    .prove
+                    .committed_payload
+                    .canonical_transaction_bytes += 1;
+            }
+            "committed-payload-count" => {
+                q.quote.blocks[0]
+                    .prove
+                    .committed_payload
+                    .total_transaction_count += 1;
+            }
+            "payload-price" => {
+                let node = &mut q.quote.blocks[0].node.pricing;
+                node.transaction_payload_scaled += SCALE;
+                node.known_subtotal_scaled += SCALE;
+                node.known_subtotal_pgu += 1;
+                q.quote.node.block_local_known_scaled += SCALE;
+                q.quote.node.block_local_known_pgu += 1;
+                q.quote.node.sum_of_block_known_pgu += 1;
+                q.quote.blocks[0].prove.pricing.transaction_payload_scaled += SCALE;
+                add_block_price(&mut q, SCALE);
+            }
+            "proposal-payload-price" => {
+                let proposal = &mut q.quote.prove.proposal_once;
+                proposal.transaction_payload_scaled += SCALE;
+                proposal.total_scaled += SCALE;
+                proposal.total_pgu += 1;
+                q.quote.prove.proposal_once_pgu += 1;
+                q.quote.prove.total_scaled += SCALE;
+                q.quote.prove.total_pgu += 1;
             }
             _ => unreachable!(),
         }
@@ -670,6 +838,23 @@ fn complete_quote_rejects_cross_surface_underquote_and_selector_domain_forgery()
             error.to_string().contains("complete quote invariant"),
             "wrong error for {mutation}: {error:#}"
         );
+        let expected_model_diagnostic = match mutation {
+            "node-resource-price" => Some("EVM-local resource price mismatch"),
+            "prove-resource-price" | "prove-mpt-price" => {
+                Some("exact block resource or MPT price mismatch")
+            }
+            "payload-price" => Some("committed payload price mismatch"),
+            "proposal-payload-price" => {
+                Some("proposal-once pricing does not match sealed selectors")
+            }
+            _ => None,
+        };
+        if let Some(diagnostic) = expected_model_diagnostic {
+            assert!(
+                format!("{error:#}").contains(diagnostic),
+                "wrong model diagnostic for {mutation}: {error:#}"
+            );
+        }
         assert!(!args.output.exists());
     }
 }
@@ -682,21 +867,23 @@ fn schema_v1_quote_from_an_explicit_different_model_remains_comparable() {
     q.quote.model_id = "model-m2".into();
     q.calibration_profile = q.quote.model_id.clone();
 
+    let payload_scaled = q.quote.blocks[0].node.pricing.transaction_payload_scaled;
+    let payload_pgu = u128::try_from(payload_scaled / SCALE).unwrap();
     let block = &mut q.quote.blocks[0];
     block.node.pricing.evm_local_resources.unique_account_count = 1;
     block.node.pricing.evm_local_resources_scaled = SCALE;
-    block.node.pricing.known_subtotal_scaled = SCALE;
-    block.node.pricing.known_subtotal_pgu = 1;
+    block.node.pricing.known_subtotal_scaled = SCALE + payload_scaled;
+    block.node.pricing.known_subtotal_pgu = 1 + payload_pgu;
     block.prove.exact_resources.unique_account_count = 1;
     block.prove.pricing.resources_scaled = SCALE;
-    block.prove.pricing.total_scaled = SCALE;
-    block.prove.pricing.total_pgu = 1;
-    q.quote.node.block_local_known_scaled = SCALE;
-    q.quote.node.block_local_known_pgu = 1;
-    q.quote.node.sum_of_block_known_pgu = 1;
-    q.quote.prove.block_local_scaled = SCALE;
-    q.quote.prove.block_local_pgu = 1;
-    q.quote.prove.sum_of_block_local_pgu = 1;
+    block.prove.pricing.total_scaled = SCALE + payload_scaled;
+    block.prove.pricing.total_pgu = 1 + payload_pgu;
+    q.quote.node.block_local_known_scaled = SCALE + payload_scaled;
+    q.quote.node.block_local_known_pgu = 1 + payload_pgu;
+    q.quote.node.sum_of_block_known_pgu = 1 + payload_pgu;
+    q.quote.prove.block_local_scaled = SCALE + payload_scaled;
+    q.quote.prove.block_local_pgu = 1 + payload_pgu;
+    q.quote.prove.sum_of_block_local_pgu = 1 + payload_pgu;
 
     q.quote.prove.proposal_once.startup_scaled += SCALE;
     q.quote.prove.proposal_once.total_scaled += SCALE;
@@ -707,7 +894,7 @@ fn schema_v1_quote_from_an_explicit_different_model_remains_comparable() {
 
     let mut o = observation();
     o.workload.value = q.quote.prove.total_pgu * 2;
-    let mut profiles = embedded_profiles().unwrap();
+    let mut profiles = current_model_profiles();
     let profile = &mut profiles.profiles[0];
     profile.profile_id = "model-m2-profile".into();
     profile.model_id = q.quote.model_id.clone();
@@ -754,7 +941,7 @@ fn incompatibility_and_ambiguity_emit_one_row_with_the_correct_metric_eligibilit
     for mode in ["program", "unit", "no-profile", "ambiguous", "custom"] {
         let dir = TestDir::new();
         let mut o = observation();
-        let mut profiles = embedded_profiles().unwrap();
+        let mut profiles = current_model_profiles();
         match mode {
             "program" => o.program.elf_sha256 = "other".into(),
             "unit" => {
@@ -877,7 +1064,7 @@ fn manifest_binds_all_ordered_inputs_executable_profiles_arithmetic_and_row_byte
     );
     assert_eq!(
         manifest.profiles_sha256,
-        sha256_hex(zkgas::compare::EMBEDDED_PROFILES.as_bytes())
+        sha256_hex(&fs::read(args.profiles.as_ref().unwrap()).unwrap())
     );
     assert_eq!(
         manifest.row_sequence_sha256,
@@ -1018,7 +1205,7 @@ fn normalization_requires_every_named_identity_and_both_independent_artifact_has
         "target_unit",
     ] {
         let dir = TestDir::new();
-        let mut p = embedded_profiles().unwrap();
+        let mut p = current_model_profiles();
         let n = p.profiles[0].normalization.as_mut().unwrap();
         match identity {
             "source_program" => n.source_program.elf_sha256 = "other".into(),
@@ -1176,6 +1363,8 @@ fn binary_exit_codes_cover_complete_partial_incompatible_and_structural_errors()
             .arg(&args.quotes[0])
             .arg("--observations")
             .arg(&args.observations[0])
+            .arg("--profiles")
+            .arg(args.profiles.as_ref().unwrap())
             .arg("--output")
             .arg(&args.output)
             .output()

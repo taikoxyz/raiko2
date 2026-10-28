@@ -460,12 +460,16 @@ All `*_scaled` values use a fixed-point scale of `10^18`. For each block `b`, th
 implemented node-side Shadow subtotal is:
 
 ```text
-N_b = fixed_b + operations_b + evm_local_resources_b
+N_b = fixed_b + operations_b + evm_local_resources_b + committed_payload_b
 ```
 
 These terms are reported under `blocks[b].node.pricing`. `feature_error_scaled` is attribution
 inside `operations_scaled`, not an additional term. The raw five-selector EVM-local resource set is
-reported as `evm_local_resources`. In PGU before the final ceiling, the sealed formula is:
+reported as `evm_local_resources`. The node's `transaction_payload` records canonical signed
+EIP-2718 encoded bytes and transactions with nonempty calldata; `transaction_payload_scaled`
+prices them with the shared model. This includes Anchor and included REVERT/HALT transactions.
+Payload observations commit atomically with inclusion, so discarded candidates do not change the
+node subtotal. In PGU before the final ceiling, the sealed formula is:
 
 ```text
 fixed = 1,280,652.929819390011787524
@@ -496,6 +500,10 @@ block-end resource term, and actual stateless MPT work:
 
 ```text
 B_b = attempted_fixed_b + attempted_operations_b + committed_exact_resources_b + mpt_b
+    + committed_payload_b
+
+committed_payload_b = 256*committed_canonical_tx_bytes_b
+                    + 16,384*committed_nonempty_payload_tx_b
 
 mpt(P, M, Hh, De, Dh, Sc, Dn)
   = 256*P + 5,000*M + 3,000*Hh + 8,000*De + 3,000*Dh
@@ -503,12 +511,14 @@ mpt(P, M, Hh, De, Dh, Sc, Dn)
 ```
 
 The raw exact resource and seven MPT selectors are under `blocks[b].prove`; their priced terms are
-`prove.pricing.resources_scaled` and `prove.pricing.mpt_scaled`. Proposal-once work is:
+`prove.pricing.resources_scaled` and `prove.pricing.mpt_scaled`. `prove.committed_payload` independently
+records payload from the canonical committed block's actual signed transactions. Its byte and
+nonempty selectors must exactly match the sealed node selectors. Proposal-once work is:
 
 ```text
 Q = 154,263,870.735480402119958866
-  + 256*canonical_tx_bytes
-  + 16,384*nonempty_payload_tx
+  + 256*additional_canonical_tx_bytes
+  + 16,384*additional_nonempty_payload_tx
   + 131,072*true_unattempted_tx
   + 19,922,944*extra_blobs
   + 1,048,576*extra_sources
@@ -517,7 +527,14 @@ Q = 154,263,870.735480402119958866
 P = ceil((sum_b B_b + Q) / 10^18)
 ```
 
-The raw inputs to `Q` are under `prove.selectors`, its priced breakdown is
+`prove.selectors.payload` preserves all manifest payload, including Anchor and extra candidates.
+The additional byte and nonempty selectors in `Q` are this manifest total minus summed committed
+payload. Count, byte, and nonempty domains are checked before and after subtraction; inconsistent
+observations fail instead of clamping. Attempted discarded candidates retain fixed/operation work
+in `B_b` and their additional payload in `Q`, so payload is charged once. The node payload selectors,
+price, and replay committed payload are required fields of the initial schema version 1.
+
+The other raw inputs to `Q` are under `prove.selectors`, its priced breakdown is
 `prove.proposal_once`, and `prove.total_pgu` is `P`. `node.block_local_known_pgu` and
 `prove.block_local_pgu` apply one ceiling after summing their respective block fixed-point values;
 the corresponding `sum_of_block_*_pgu` fields preserve the sum of per-block ceilings for direct
@@ -533,6 +550,45 @@ runtime repository.
 The optional `raiko2-stateless/mpt-metrics` feature remains available for companion
 [PR #284](https://github.com/taikoxyz/raiko2/pull/284)'s calibration tooling. The normal production
 path does not enable this instrumentation.
+
+The embedded calibration/Unzen-normalization profile retains its original model and program
+identities. It is historical provenance, not a runtime pricing selector or certification for
+a newer model. A new runtime content address requires an explicitly matching comparison
+profile; do not retag the old calibration or treat raw Unzen scores as PGU. Archived quotes
+retain their producer revision. The initial report structure now requires committed payload
+selectors; use that pinned producer for old serialized reports, or re-quote their unchanged
+GuestInput with the current tools. Missing selectors are rejected rather than defaulted to zero.
+
+### Block-local payload pricing checkpoint
+
+Model `0a3a9663ca0b2c399bce514ae06ee009b43781f957898dfec5cf1ea27f80a885` is an
+ownership-only successor of `e529`; it retains the preceding MULMOD tariff correction and
+uses the existing 256 PGU per canonical signed EIP-2718 byte and 16,384 PGU per
+nonempty calldata transaction. It adds the committed term to node pricing and charges
+only additional input payload during proposal completion. Startup, blob/source and MPT
+terms keep their existing ownership. Default Unzen admission is unchanged.
+
+| Frozen input | Previous node PGU | New node PGU | Complete PGU, unchanged | Archived actual SP1 PGU |
+| --- | ---: | ---: | ---: | ---: |
+| Empty STOP, 30 blocks | 97,830,164 | 100,763,924 | 274,913,627 | 242,584,415 |
+| 1MiB calldata + STOP, 30 blocks | 97,830,164 | 8,154,359,316 | 8,328,509,019 | 4,751,019,705 |
+| Mainnet proposal 41455 | 3,442,739,352 | 3,458,293,400 | 4,804,098,423 | See its original observation |
+
+Re-quoting all 257 native-valid inputs from the immutable
+[Atlas boundary fixture](https://github.com/taikoxyz/raiko2-atlas/releases/tag/fixture-unzen-underpricing-boundaries-v1)
+preserved complete fixed-point totals, public outputs and Unzen scores. The node increase
+equaled the committed payload price for every input. The archive contains 256 accepted
+SP1 observations plus one native-valid input rejected by the estimator's JSON size cap;
+the latter has no measured PGU. No guest or SP1 rerun is part of this ownership check.
+
+For the large paired case, feed
+`samples/fee-replay/payload-zero-n1048576-b30/guest-input.json` from the verified archive
+to `zkgas-quote --input-json <input> --corpus-id <corpus> --sample-id <sample> --output <new-quote.jsonl>`.
+The empty control is `samples/fee-replay/payload-zero-n0-b30/guest-input.json`.
+Use the archive's asset manifest and internal SHA256SUMS before executing input; keep the
+original reports fixed and save new model results separately. These values are a model-specific
+checkpoint, not an exhaustive bound or production-program accuracy certification. ADDMOD
+operand and MCOPY overlap tariff corrections remain separate work.
 
 ## Opcode Workload-Metric Experiments
 

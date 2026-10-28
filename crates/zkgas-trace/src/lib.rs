@@ -12,5 +12,6 @@ pub use runtime_quote::{
     BlockWorkloadQuote, MptSelectorsSnapshot, NodeBlockWorkloadQuote, NodePricingBreakdownSnapshot,
     NodeProposalWorkloadQuote, PricingBreakdownSnapshot, ProposalPricingSelectorsSnapshot,
     ProposalWorkloadQuote, ProveBlockWorkloadQuote, ProveProposalWorkloadQuote,
-    ResourceSelectorsSnapshot, RuntimeQuoteError, quote_shasta_proposal,
+    ResourceSelectorsSnapshot, RuntimeQuoteError, TransactionPayloadSelectorsSnapshot,
+    quote_shasta_proposal,
 };

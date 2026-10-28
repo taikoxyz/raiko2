@@ -1306,11 +1306,13 @@ where
     }
 
     pub async fn shutdown_workers(&self) {
+        // Keep the stopped groups registered so `workers_healthy` keeps reporting false once the
+        // pool has been shut down, instead of treating an empty registry as "never started".
         let groups = match self.inner.worker_groups.lock() {
-            Ok(mut groups) => groups.drain(..).collect::<Vec<_>>(),
+            Ok(groups) => groups.clone(),
             Err(poisoned) => {
                 tracing::error!("worker group lock poisoned during engine shutdown");
-                poisoned.into_inner().drain(..).collect::<Vec<_>>()
+                poisoned.into_inner().clone()
             }
         };
         for group in groups {
@@ -1326,6 +1328,20 @@ where
             .load(Ordering::Acquire);
         let max_age_ms = u64::try_from(max_age.as_millis()).unwrap_or(u64::MAX);
         last_success != 0 && now_millis().saturating_sub(last_success) <= max_age_ms
+    }
+
+    /// Report whether every registered worker group is still running.
+    ///
+    /// An engine with no worker groups registered reports `true`; liveness of a never-started
+    /// pool is signalled separately by [`Self::queue_maintenance_ready`]. Once workers have been
+    /// started, this returns `false` if any group has shut down or lost a supervisor task.
+    #[must_use]
+    pub fn workers_healthy(&self) -> bool {
+        let groups = match self.inner.worker_groups.lock() {
+            Ok(groups) => groups,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        groups.iter().all(|group| group.all_alive())
     }
 
     async fn get_guest_input(
@@ -3221,6 +3237,24 @@ mod tests {
             .store(super::now_millis().saturating_sub(100), Ordering::Release);
         assert!(!engine.queue_maintenance_ready(Duration::from_millis(50)));
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn workers_healthy_reports_false_after_shutdown() {
+        let engine = Engine::with_store_and_scheduler_config(
+            TestSpec::new(MockProver),
+            test_context(),
+            raiko2_queue::MemoryStore::new(),
+            Engine::<TestSpec<MockProver>>::default_scheduler_config(),
+        );
+
+        assert!(engine.workers_healthy(), "never-started engine is healthy");
+        engine.start_workers_with_maintenance_interval(1, Duration::from_secs(60));
+        assert!(engine.workers_healthy());
+
+        engine.shutdown_workers().await;
+
+        assert!(!engine.workers_healthy());
     }
 
     #[tokio::test]

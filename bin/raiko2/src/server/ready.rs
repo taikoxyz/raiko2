@@ -2,8 +2,9 @@ use crate::config::{Config, RunnerKind};
 use crate::server::state::AppState;
 use alloy::providers::{Provider as AlloyProvider, ProviderBuilder};
 use alloy_signer_local::PrivateKeySigner;
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use raiko2_primitives::ProofType;
+use raiko2_prover::gaiko2::{Gaiko2Config, Gaiko2Prover};
 use raiko2_prover::sp1_config::{
     ExecutionMode as Sp1ExecutionMode, Sp1Config, Sp1RemoteVerifyConfig, Sp1SystemConfig,
 };
@@ -59,6 +60,10 @@ pub struct ReadyResponse {
     pub runtime: ReadyCheck,
     pub queue: ReadyCheck,
     pub prover: ReadyCheck,
+    /// Responsiveness of the GPU/accelerator (SGX/SGXGETH TEE) proving backend.
+    pub accelerator: ReadyCheck,
+    /// Liveness of the proving worker pool.
+    pub workers: ReadyCheck,
 }
 
 pub async fn evaluate_readiness(state: &AppState) -> ReadyResponse {
@@ -94,7 +99,18 @@ pub async fn evaluate_readiness(state: &AppState) -> ReadyResponse {
         Err(err) => ReadyCheck::err(&err),
     };
 
-    readiness_response(reth, runtime, queue, prover)
+    let accelerator = match check_accelerator_health(&state.config).await {
+        Ok(()) => ReadyCheck::ok(),
+        Err(err) => ReadyCheck::err(&err),
+    };
+
+    let workers = if state.pipelines.workers_healthy() {
+        ReadyCheck::ok()
+    } else {
+        ReadyCheck::err(&anyhow!("proving workers are not alive"))
+    };
+
+    readiness_response(reth, runtime, queue, prover, accelerator, workers)
 }
 
 const fn readiness_response(
@@ -102,8 +118,10 @@ const fn readiness_response(
     runtime: ReadyCheck,
     queue: ReadyCheck,
     prover: ReadyCheck,
+    accelerator: ReadyCheck,
+    workers: ReadyCheck,
 ) -> ReadyResponse {
-    let status = if reth.ok && runtime.ok && queue.ok && prover.ok {
+    let status = if reth.ok && runtime.ok && queue.ok && prover.ok && accelerator.ok && workers.ok {
         "ok"
     } else {
         "error"
@@ -114,6 +132,8 @@ const fn readiness_response(
         runtime,
         queue,
         prover,
+        accelerator,
+        workers,
     }
 }
 
@@ -193,6 +213,34 @@ fn check_prover(config: &Config) -> Result<()> {
     Ok(())
 }
 
+/// Probe the responsiveness of every enabled GPU/accelerator proving backend.
+///
+/// The accelerator analogue in this service is the remote TEE prover (SGX/SGXGETH), reached over
+/// HTTP via its configured `base_url`. For each enabled remote backend this performs the `/health`
+/// probe that the TEE runtime already exposes. Backends that are not enabled are skipped, so a
+/// pure CPU/local configuration reports ready.
+async fn check_accelerator_health(config: &Config) -> Result<()> {
+    for (proof_type, remote) in [
+        (ProofType::Sgx, &config.prover.sgx),
+        (ProofType::SgxGeth, &config.prover.sgxgeth),
+    ] {
+        if !remote.enabled {
+            continue;
+        }
+        let gaiko_config = Gaiko2Config {
+            base_url: remote.base_url.clone(),
+            timeout_ms: remote.timeout_ms,
+        };
+        let prover = Gaiko2Prover::new_for_proof_type(&gaiko_config, proof_type)
+            .map_err(|err| anyhow!("failed to build {proof_type} health client: {err}"))?;
+        prover
+            .health_check()
+            .await
+            .with_context(|| format!("{proof_type} accelerator backend is not responsive"))?;
+    }
+    Ok(())
+}
+
 const fn sp1_network_credentials_required(config: &Config) -> bool {
     matches!(
         config.prover.runner(ProofType::Sp1),
@@ -257,8 +305,8 @@ fn sp1_effective_pair_config(
 #[cfg(test)]
 mod tests {
     use super::{
-        Sp1RemoteVerifyConfig, check_prover, format_error_chain, sp1_effective_pair_config,
-        sp1_network_credentials_required,
+        ReadyCheck, Sp1RemoteVerifyConfig, check_prover, format_error_chain, readiness_response,
+        sp1_effective_pair_config, sp1_network_credentials_required,
     };
     use crate::config::Config;
     use raiko2_prover::sp1_config::ProverMode as Sp1ProverMode;
@@ -267,6 +315,58 @@ mod tests {
         config
             .prover
             .apply_routes_override(&routes.parse().expect("valid prover routes"));
+    }
+
+    fn failed_check(message: &str) -> ReadyCheck {
+        ReadyCheck {
+            ok: false,
+            error: Some(message.to_string()),
+        }
+    }
+
+    #[test]
+    fn readiness_ok_only_when_every_check_passes() {
+        let response = readiness_response(
+            ReadyCheck::ok(),
+            ReadyCheck::ok(),
+            ReadyCheck::ok(),
+            ReadyCheck::ok(),
+            ReadyCheck::ok(),
+            ReadyCheck::ok(),
+        );
+        assert_eq!(response.status, "ok");
+        assert!(response.accelerator.ok);
+        assert!(response.workers.ok);
+    }
+
+    #[test]
+    fn readiness_errors_when_accelerator_backend_is_down() {
+        let response = readiness_response(
+            ReadyCheck::ok(),
+            ReadyCheck::ok(),
+            ReadyCheck::ok(),
+            ReadyCheck::ok(),
+            failed_check("sgx accelerator backend is not responsive"),
+            ReadyCheck::ok(),
+        );
+        assert_eq!(response.status, "error");
+        assert!(!response.accelerator.ok);
+        assert!(response.workers.ok);
+    }
+
+    #[test]
+    fn readiness_errors_when_workers_are_down() {
+        let response = readiness_response(
+            ReadyCheck::ok(),
+            ReadyCheck::ok(),
+            ReadyCheck::ok(),
+            ReadyCheck::ok(),
+            ReadyCheck::ok(),
+            failed_check("proving workers are not alive"),
+        );
+        assert_eq!(response.status, "error");
+        assert!(response.accelerator.ok);
+        assert!(!response.workers.ok);
     }
 
     #[test]

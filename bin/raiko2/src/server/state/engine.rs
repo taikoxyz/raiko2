@@ -19,6 +19,12 @@ pub trait EngineHandle: Send + Sync {
     fn queue_maintenance_ready(&self, _max_age: std::time::Duration) -> bool {
         true
     }
+
+    /// Whether this engine's proving workers are alive and able to accept work.
+    fn workers_healthy(&self) -> bool {
+        true
+    }
+
     fn get_status(
         &self,
         id: EngineTaskId,
@@ -126,6 +132,10 @@ where
 
     fn queue_maintenance_ready(&self, max_age: std::time::Duration) -> bool {
         Engine::queue_maintenance_ready(self, max_age)
+    }
+
+    fn workers_healthy(&self) -> bool {
+        Engine::workers_healthy(self)
     }
 
     fn get_status(

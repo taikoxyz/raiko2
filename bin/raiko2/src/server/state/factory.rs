@@ -23,6 +23,11 @@ pub trait PipelineFactory: Send + Sync {
         true
     }
 
+    /// Whether every bound engine's proving workers are alive and able to accept work.
+    fn workers_healthy(&self) -> bool {
+        true
+    }
+
     fn shutdown(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
         Box::pin(async {})
     }
@@ -71,6 +76,10 @@ impl PipelineFactory for StaticPipelineFactory {
         self.engines
             .values()
             .all(|engine| engine.queue_maintenance_ready(max_age))
+    }
+
+    fn workers_healthy(&self) -> bool {
+        self.engines.values().all(|engine| engine.workers_healthy())
     }
 
     fn shutdown(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {

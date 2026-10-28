@@ -14400,6 +14400,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "zisk-bench"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bincode",
+ "clap",
+ "hex",
+ "raiko2-guest-common",
+ "raiko2-primitives-shasta",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+]
+
+[[package]]
 name = "zmij"
 version = "1.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"

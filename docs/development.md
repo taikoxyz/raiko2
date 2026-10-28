@@ -592,14 +592,14 @@ block-cost refinement supersedes its arithmetic and MCOPY prices.
 
 ### Block-aware arithmetic and copy refinement checkpoint
 
-Current model `80459b4dd85741f04703e2ab6b4760f2a6a5736c6c77fd69a5dd98b61e2d325d`
+The arithmetic/copy checkpoint `80459b4dd85741f04703e2ab6b4760f2a6a5736c6c77fd69a5dd98b61e2d325d`
 adds normally executed event floors of 800 PGU for DIV/MOD/SMOD, 900 for SDIV and
 1,100 for ADDMOD. MCOPY charges 48 PGU per copied 32-byte word, retaining its
 additive dispatch, constant and memory-expansion terms. The preceding MULMOD floor,
 committed payload ownership and other tariffs remain intact. Node and prover operation
 terms use the same model. Default Unzen/admission behavior remains unchanged.
 
-The [upstream pricing document](https://github.com/taikoxyz/alethia-reth/blob/1ef47962868b73cf45a81bd16f50f671493cda83/docs/zk-gas-pricing-model.md)
+The [upstream pricing document](https://github.com/taikoxyz/alethia-reth/blob/5ac54f8c13e2e6c4c0755cfb3216503f21fd2e40/docs/zk-gas-pricing-model.md)
 contains the exact-fraction derivation from 123 fit rows and four zero-word controls,
 with 25% headroom and upward rounding. Reserved holdouts are excluded. Controlled
 primary counts describe the user program; repriced Anchor operations may conservatively
@@ -617,11 +617,36 @@ limits remain in force. This is pricing-regression evidence, not current-program
 
 All 298 retained native-valid boundary rows were re-quoted (297 have measured PGU).
 Complete underquotes fall from 56 to three rows, representing two distinct dense EXP
-inputs at four/five exponent bytes; those remain explicit follow-up work. All six refined
+inputs at four/five exponent bytes; the following EXP refinement addresses those cases. All six refined
 routes' retained cases are covered. Seven fresh prospective arithmetic/copy inputs, sealed
 after choosing prices and excluded from fitting, also pass native/SP1 identity checks and
 complete-price coverage. These local actuals use frozen ELF416f/local SDK6.3; neither
 new guest artifacts nor production-SDK parity are claimed.
+
+### EXP per-event refinement checkpoint
+
+Current model `67d0b01fee7f5ba208dfd2311e5be469ec96421156ecf5f0c14962c27e7b4df9`
+preserves the arithmetic/copy checkpoint and charges each normal EXP the maximum of
+its original accepted price and `24 * (10 + 50 * L)` PGU, where `L` is its typed
+exponent byte length in `0..=32`. The maximum occurs before event accumulation;
+different lengths cannot dilute each other's winning candidate. No new execution
+selector, public model version, default activation or Unzen change is introduced.
+
+The deterministic upstream successor authenticates 29 local observations: 21 complete
+parent-price deficits constrain the coefficient, while eight covered rows validate the
+preserved original curve. Exact fractions, 25% headroom and upward integer rounding
+yield 24. Independent native replay checked those 29, six fresh shape/mixed-length
+holdouts excluded from fitting, and 13 retained EXP observations. All 48 complete quotes
+cover their saved actuals; the fresh six have quote/actual ratios 1.1597–1.2361. Actual
+SP1 PGU divided by node subtotal remains the workload-search metric, distinct from
+complete-proposal diagnostics and raw Unzen scores.
+
+Both fixed mainnet cohorts above were replayed again against model80459: all 180
+proposals and 34,560 blocks have identical node and complete prices, selectors, gas and
+outputs. Thus this refinement does not change the historical roughly 2x overquote
+conclusion. Local measurements retain frozen ELF416f/SDK6.3; production-program parity
+and a universal workload upper bound remain unestablished. Subsequent complex cases
+extend coverage to substantive child work before successful return or caught revert.
 
 ## Opcode Workload-Metric Experiments
 

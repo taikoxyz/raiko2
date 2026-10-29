@@ -229,6 +229,36 @@ This adds 12 independent rows: 64 KiB self RETURN and caught REVERT at 256 and 5
 DELEGATECALL repetitions, each with zero/half/full output capacity. It uses the same runtime
 and gates. Retain any native budget rejection; neither profile changes the existing cohorts.
 
+For a small BN254 ECMUL proving-workload capacity probe, generate a separate catalog:
+
+```sh
+~/.venv/bin/python bin/zkgas/bench/cases/precompile_workload.py \
+  --solc /path/to/solc --output-dir experiment/precompile-workload
+```
+
+The eleven cases use one runtime and fixed 128-byte calldata: count, scalar and two expected
+coordinates. Two scalar families use 0/1/4/16/32 STATICCALLs to address `0x07` with point
+`G=(1,2)`: the group order minus two and `dense254 = (3 << 252) - 1`. A single-call comparison
+adds `dense253 = (1 << 253) - 1`. Both dense scalars are below the group order and have 253
+set bits; the former has one more bit of length. This tests a value axis as well as repetition,
+without claiming an absolute maximum. Expected points come from independent Python affine
+scalar multiplication; the group-order-minus-two result is also checked against `-2G`.
+Each iteration clears both output words before calling, then checks success, exactly 64
+returned bytes and both expected coordinates. Exact native STATICCALL and root RETURN counts
+exclude skipped work. Input/output areas are preallocated once and reused. The native tests
+qualify all three single-call points and equal executed-opcode maps across scalar variants;
+intrinsic calldata and fixture data differences remain visible. Keep the two zero-call controls
+and use the same explicit `evm-gas-only` profile and reviewed program manifest for all
+measurements. These are initial capacity probes, not gas-saturated maxima: the producer's
+15M transaction and 31M block gas budgets are tool settings, not claims about current chain
+limits. The generator and runtime accept counts up to 4096, above the maximum successful ECMUL call
+count permitted by Osaka's 16,777,216 transaction-gas cap at 6000 gas per call before wrapper
+and intrinsic costs. This generator bound therefore does not exclude a later legal
+gas-saturation probe; increasing a requested count does not raise the producer's gas budget.
+Run progressively with the existing resource guards; a larger actual workload is a
+measurement result, not a reason to change tariffs automatically. Set `SOLC_BIN` and
+`NATIVE_FIXTURE_BIN` to run the real compiler/native qualification tests.
+
 ```sh
 ~/.venv/bin/python bin/zkgas/bench/workload.py screen \
   --config experiment/config.json --catalog experiment/spawn-memory/catalog.json \

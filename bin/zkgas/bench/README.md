@@ -151,6 +151,39 @@ stays zero. This separates input allocation/copy work from output allocation; co
 family against its own fixed-bytecode zero-length controls. Use the input catalog in a fresh
 output root; its sample IDs differ from the output-memory family.
 
+To isolate actual automatic returndata copying from caller memory growth, generate the
+90-case preallocated return-copy catalog with the explicitly selected compiler:
+
+```sh
+~/.venv/bin/python bin/zkgas/bench/cases/return_copy.py \
+  --solc /path/to/solc --output-dir experiment/return-copy
+```
+
+Each triplet uses one runtime and fixed 256-byte calldata, changing only CALL output capacity
+between zero, half and full. The parent preallocates distinct input/output ranges and guard
+words once, then reuses them. Self RETURN and caught REVERT span all four CALL variants;
+IDENTITY provides selected negative controls. Successful modes execute the same validation
+loads and branches, including alternating first-byte, copy-boundary and untouched-sentinel
+checks. Exact native CALL/RETURN/REVERT counts reject early exits; no RETURNDATACOPY is emitted.
+The finite grid includes 0/1/31/32/33-byte boundaries, 64 KiB repetition ramps and bounded larger
+allocations. Zero/half/full modes with equal capacities at short lengths remain separate rows.
+Use the new catalog in a fresh output root, retain resource/native rejections, and compare
+actual/node ratios before using paired deltas as diagnostics. Set `SOLC_BIN` and
+`NATIVE_FIXTURE_BIN` when running `test_return_copy.py` to qualify the compiler and verify
+complete native opcode-map equality for the tiny zero/full pair.
+
+The default `--profile boundary` keeps those 90 cases. For a separate bounded repetition
+extension, use a new catalog directory and a fresh harness output root:
+
+```sh
+~/.venv/bin/python bin/zkgas/bench/cases/return_copy.py \
+  --solc /path/to/solc --profile repetition --output-dir experiment/return-copy-repetition
+```
+
+This adds 12 independent rows: 64 KiB self RETURN and caught REVERT at 256 and 512
+DELEGATECALL repetitions, each with zero/half/full output capacity. It uses the same runtime
+and gates. Retain any native budget rejection; neither profile changes the existing cohorts.
+
 ```sh
 ~/.venv/bin/python bin/zkgas/bench/workload.py screen \
   --config experiment/config.json --catalog experiment/spawn-memory/catalog.json \

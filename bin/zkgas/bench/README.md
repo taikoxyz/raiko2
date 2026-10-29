@@ -1,0 +1,227 @@
+# Reproducible workload experiments
+
+These tools retain finite ProgramRequest experiments and measure saved ordinary GuestInputs.
+The objective is **actual SP1 PGU / node-known PGU**. Complete quotes and paired differences
+are diagnostics. Controls, native rejections, failed measurements and unattempted cases stay
+visible. A proposal's actual PGU cannot be assigned to individual blocks.
+
+The sampler executes locally with SDK6.3.0 and an explicit ELF. It never proves, fetches data,
+selects an embedded program, patches an input or establishes production SDK parity. Raiko's
+normal workspace SDK and production launcher remain independent. The ELF must understand the
+input schema: qualify a real native control first, then require identical input identities and
+public outputs. Preserve an incompatibility as a failed observation; select a compatible ELF
+explicitly in a new run configuration.
+
+For guarded measurements the sampler receives `--resource-receipt sp1-resources.json`. Before
+the first execution chunk it records the four newly owned SDK shared-memory/semaphore objects
+using names derived from its open descriptors plus exact device/inode/UID identities. After
+every exit the supervisor waits for owned descendants to stop, then removes only still-matching
+receipted objects; normal SDK cleanup already removes them on successful execution. Cleanup
+results remain in the stage outcome. This prevents SIGKILL from retaining heavy shared-memory
+pages across failed attempts. Objects outside the receipt are never deleted. Termination during
+constructor/receipt publication can leave small initial headers or semaphore objects; a missing
+or corrupt receipt records incomplete cleanup and requires investigation before retrying.
+
+## Build and check
+
+Run from the repository root. Use an existing bounded Cargo target directory when local disk is
+small; these commands can otherwise build substantial dependencies. No guest build is needed.
+
+```sh
+cargo build --release --locked -p zkgas --bin zkgas-quote
+cargo build --release --locked -p zkgas --features fixture --bin zkgas-fixture
+cargo test --locked -p zkgas --features fixture --test fixture
+cargo build --release --locked --manifest-path bin/zkgas/sp1-estimator/Cargo.toml
+cargo test --locked --manifest-path bin/zkgas/sp1-estimator/Cargo.toml
+~/.venv/bin/python -m unittest discover -s bin/zkgas/bench/tests -v
+```
+
+The optional fixture feature supplies the native constructor. Default quote/report builds do
+not require the constructor or independent sampler. The sampler has its own manifest and
+Cargo.lock, pins SDK/executor/runner6.3.0, and tests the raw one-buffer stdin framing against
+`SP1Stdin::write(value)`. Do not pass serialized `SP1Stdin` or serialize the input bytes again.
+Input and ELF must each be regular files of at most64MiB. Output uses exclusive creation;
+failure may retain an empty report reservation, which must never be mistaken for success.
+
+For source attribution, set `ZKGAS_SOURCE_REVISION` to the reviewed source revision when
+building. Reports include the executable/program/input hashes, manifest and lock hashes,
+complete executor options, SDK identities, PGU, instructions, syscalls and raw public values.
+
+## Frozen configuration
+
+Create a private operator configuration, for example `experiment/config.json`. Artifact paths
+are relative to that file. Every SHA256 below must be replaced with the lowercase64-digit hash
+of the actual file; the harness rejects placeholders. Use `sha256sum` to inspect identities.
+Supply `model` as the artifact used to build the selected quote binary. Its file hash and
+top-level `artifact_sha256` metadata (equal to `model_id`) are checked. Quote authority is bound
+by the frozen executable hash and its reported model ID; the harness does not reimplement
+the model's content-addressing or derive embedded binary data from that separate file.
+Changing either identity requires a fresh root.
+
+```json
+{
+  "schema_version": 1,
+  "corpus_id": "copy-frame-control-v1",
+  "model_id": "EXPLICIT_MODEL_ID",
+  "artifacts": {
+    "native": {"path": "tools/zkgas-fixture", "sha256": "REPLACE_WITH_SHA256"},
+    "quote": {"path": "tools/zkgas-quote", "sha256": "REPLACE_WITH_SHA256"},
+    "sp1": {"path": "tools/zkgas-sp1-estimator", "sha256": "REPLACE_WITH_SHA256"},
+    "elf": {"path": "programs/proposal.elf", "sha256": "REPLACE_WITH_SHA256"},
+    "model": {"path": "models/model.json", "sha256": "REPLACE_WITH_SHA256"}
+  },
+  "limits": {
+    "pss_mib": 6144,
+    "min_free_mib": 256,
+    "output_mib": 192,
+    "log_mib": 16,
+    "timeout_seconds": 600
+  },
+  "provenance": {"source_revision": "EXPLICIT_REVIEWED_REVISION"}
+}
+```
+
+The harness freezes identities and resources in `contract.json`, rechecks tools during each
+attempt, and serializes access to one output root with a lock. Run only one estimator across
+all output roots on a host. Operator-configured directories can live on disk or tmpfs.
+Memory accounting requires Linux `/proc` and includes sampled full descendant plus runner
+PSS; the ceiling is6GiB. The SDK's24GiB VM policy has different semantics and remains frozen.
+Do not equate the two limits. The minimum disk floor is256MiB, with320MiB additional reserved
+headroom before an attempt. Sampled output/disk/time guards bound ordinary artifacts; a
+supervisor pipe strictly caps retained log bytes. Native/quote stages also have a kernel
+per-file cap. SP1 omits that cap because the SDK uses large sparse shared-memory reservations
+through `ftruncate`, which Linux also subjects to `RLIMIT_FSIZE`; resident pages remain under
+the PSS guard. Ordinary SP1 report size and disk use are sampled, so they may briefly overshoot
+their configured bounds between checks.
+Choose timeouts for the finite cohort; a timeout is retained, never retried automatically.
+
+## Generate and screen a finite catalog
+
+Case generators under `cases/` emit ordinary ProgramRequest files and a catalog. A catalog
+contains metadata without an executable vendor schema:
+
+```json
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "sample_id": "control-stop-b1",
+      "request_path": "requests/control-stop-b1.json",
+      "request_sha256": "REPLACE_WITH_SHA256",
+      "role": "control",
+      "pair_group": "copy-mode-b1"
+    }
+  ]
+}
+```
+
+Request paths are relative to the catalog. IDs must be unique portable path components.
+Generation is separate from measurement: preserve the generated catalog, requests and compiler
+artifacts before running. When adding a case, write one ProgramRequest using the native
+constructor's supported fields, include expected observed opcode/terminal counts, add its hash
+and metadata to the catalog, and include a matched control. Freeze transaction gas, input,
+bytecode and memory-layout envelopes when comparing one variable; document intentional changes.
+The initial producer covers one user transaction per block, not arbitrary multi-user state.
+
+For the retained CALL output-memory boundary cohort, use an explicit Solidity0.8.21 compiler:
+
+```sh
+~/.venv/bin/python bin/zkgas/bench/cases/spawn_memory.py \
+  --solc /path/to/solc --output-dir experiment/spawn-memory
+```
+
+This emits44 requests, compiler source/settings/output and a catalog at
+`experiment/spawn-memory/catalog.json`. Four CALL variants have matched zero-length controls;
+the leaf returns no data and each iteration creates fresh caller memory. Count/status gates
+exclude early failure. Bytecode is identical across the cohort; calldata changes the requested
+length, repetition or CALL variant. Use this catalog with the following `screen`/`run` commands.
+See the [selector ownership investigation](../../../docs/research/2026-10-29-call-memory-selector-ownership.md)
+for the motivating observation and its evidence limits.
+
+The complementary input-memory cohort uses the same compiler and completion gates:
+
+```sh
+~/.venv/bin/python bin/zkgas/bench/cases/spawn_input.py \
+  --solc /path/to/solc --output-dir experiment/spawn-input
+```
+
+Its44 requests expand the middle frame's CALL input range and pass128 header bytes plus
+the selected zero-filled length to a leaf that reads only the header. CALL output length
+stays zero. This separates input allocation/copy work from output allocation; compare each
+family against its own fixed-bytecode zero-length controls. Use the input catalog in a fresh
+output root; its sample IDs differ from the output-memory family.
+
+```sh
+~/.venv/bin/python bin/zkgas/bench/workload.py screen \
+  --config experiment/config.json --catalog experiment/spawn-memory/catalog.json \
+  --output-root experiment/run
+~/.venv/bin/python bin/zkgas/bench/workload.py run \
+  --config experiment/config.json --catalog experiment/spawn-memory/catalog.json \
+  --output-root experiment/run
+```
+
+`screen` performs native construction and canonical quote validation. `run` performs the same
+stages followed by SP1 measurement; an already screened sample is restored into a new attempt
+and measured without reconstructing it. Each stage records its exact command, log, resource
+outcome and artifacts. The native CLI receives `--input`, `--output`, `--output-bincode`, and
+`--report`. The quote and sampler both consume `--input-bincode`; the sampler also takes `--elf`.
+Native, quote and sampler hashes/lengths and32-byte public output must join before ranking.
+
+## Measure an already retained input
+
+No generator or compiler is required. Supply the canonical bincode and its matching native
+report; the current quote validates the bincode/type and execution output before the opaque
+sampler runs. The JSON GuestInput is optional for this path.
+
+```sh
+~/.venv/bin/python bin/zkgas/bench/workload.py measure \
+  --config experiment/config.json --input-bincode saved/input.bin \
+  --native-report saved/native.json --sample-id retained-control \
+  --output-root experiment/retained-run
+```
+
+For direct composition, call `zkgas-sp1-estimator --input-bincode saved/input.bin --elf
+programs/proposal.elf --output saved/sp1.json --resource-receipt saved/sp1-resources.json`.
+The receipt option is optional for standalone execution; forced termination without a supervisor
+can retain SDK shared memory. The backend treats bytes as opaque; direct callers
+must perform canonical quote validation and the identity/output join themselves.
+
+## Verify, resume and report
+
+```sh
+~/.venv/bin/python bin/zkgas/bench/workload.py verify --output-root experiment/run
+~/.venv/bin/python bin/zkgas/bench/workload.py report \
+  --output-root experiment/run --output experiment/summary.json
+```
+
+Repeating `run`, `screen` or `measure` validates the frozen contract, successful artifacts,
+gzip contents, input/output joins and recomputed metrics before skipping a completed sample.
+Failed/partial attempts require explicit `--retry-failed` and always produce fresh attempt
+directories. Corrupt successful attempts require investigation and cannot be bypassed with
+that flag. `verify` fails on incomplete or corrupt evidence. `report` retains those outcomes
+as unscored rows and includes catalog cases never attempted after fail-fast termination.
+Reports and all attempt files use exclusive creation; choose a new summary filename to rerun.
+
+`screen` and `run` stop at the first retained failure by default. Add
+`--continue-after-failure` to attempt the remaining finite catalog while keeping every failure;
+the command still exits nonzero if any attempt failed. This option never retries or skips a
+previous failed attempt implicitly: a later invocation still requires `--retry-failed`.
+
+Successful attempts retain gzip inputs only after a verified roundtrip. A single input is
+restored at a time. Failed stages preserve partial bytes and logs. Cancellation by SIGINT,
+SIGTERM or SIGHUP terminates owned descendants, including detached children, and retains the
+attempt. A surviving child after leader exit is a failure. Do not use the supervisor in a
+process with unrelated child workloads.
+
+`native_rejected` means construction/execution/count screening failed; consult its native log
+and receipts, including out-of-gas outcomes. `quote_failed` means canonical/native pricing
+validation failed. `measurement_failed` means the SP1 process failed. `guard_failed` identifies
+resource/process cleanup limits. `validation_failed` identifies an identity, model, policy or
+output mismatch. None receives an actual PGU score. `screened` is accepted but unmeasured.
+
+The summary sorts exact rational actual/node values using integer fractions and preserves
+the full-quote ratio separately. It embeds standard observation rows consumable through the
+existing zkGas comparison contract. Paired deltas must be interpreted with the frozen catalog
+envelope and controls; they do not replace the literal ratio objective. Atlas exports should
+contain only fixed inputs, original measurement/quote/native evidence and portable manifests;
+exclude runner code, executable files, private operator configuration and host paths.

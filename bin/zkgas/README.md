@@ -5,6 +5,12 @@ proposal workload pricing. They exchange files and may be used independently. Pr
 `raiko2-zkgas-trace::quote_shasta_proposal`; quote performs native proposal replay, while compare
 and report consume saved results.
 
+For offline workload construction and local SP1 measurement, see the
+[reproducible workload toolkit](bench/README.md): optional `zkgas-fixture`, an independent
+explicit-input SP1 sampler, finite case generators, and guarded screening/measurement/report
+commands. These are separate developer tools; the quote/compare/report contracts below remain
+usable with inputs and observations from any producer.
+
 The alethia-reth shadow-pricing APIs come from the maintained internal branch tracked by
 [alethia-reth PR #260](https://github.com/taikoxyz/alethia-reth/pull/260). Cargo manifests pin a
 reviewed commit from that branch; updating the branch does not automatically update raiko2.

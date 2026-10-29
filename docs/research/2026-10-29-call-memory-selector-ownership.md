@@ -92,8 +92,11 @@ Workload-weighted full/actual changes from 2.0851253703 to 2.0851253801, with ze
 in both versions. External observations retain their SP1 v6.1.0 identity; controlled samples
 retain local SDK 6.3.0. No new proving-throughput or production-program parity claim follows.
 
-Next tests should separate actual returned-byte copying from reservation, including success,
-caught REVERT and preallocated buffers, then combine frame depth, storage and rollback/exception
+The [preallocated return-copy checkpoint](2026-10-29-return-copy-boundaries.md) now separates
+actual returned-byte copying from reservation, including success and caught REVERT. Its 102
+plans yielded 84 actual SP1 measurements and 18 retained legacy-admission exclusions. It adds
+no pricing change: all complete quotes and all 21 matched repetition increments cover the
+measured work. Further tests should combine frame depth, storage and rollback/exception
 contexts. Continue retaining the literal actual/node controls and synthetic overquotes. The
 native producer's multi-user-transaction capability remains a named extension, not implemented
 coverage.

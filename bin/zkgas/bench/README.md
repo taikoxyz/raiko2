@@ -84,6 +84,51 @@ Changing either identity requires a fresh root.
 The harness freezes identities and resources in `contract.json`, rechecks tools during each
 attempt, and serializes access to one output root with a lock. Run only one estimator across
 all output roots on a host. Operator-configured directories can live on disk or tmpfs.
+
+For workload tests beyond the legacy Unzen admission cap, use a fresh root with the explicit
+configuration field `"execution_profile": "evm-gas-only"` and an additional entry under
+`artifacts`:
+
+```json
+{
+  "program_manifest": {
+    "path": "programs/program-manifest.json",
+    "sha256": "REPLACE_WITH_SHA256"
+  }
+}
+```
+
+The manifest belongs to the reviewed experimental program and must contain:
+
+```json
+{
+  "schema_version": 1,
+  "execution_profile": "evm-gas-only",
+  "elf_sha256": "REPLACE_WITH_ELF_SHA256",
+  "sp1_sdk_version": "6.3.0"
+}
+```
+
+Additional source/build provenance is retained in the manifest. Its hash, profile, SDK and
+ELF identity are checked before sampling; the native constructor, complete quote and SP1
+report must agree with the frozen profile. Native and quote commands receive the same
+`--execution-profile` value; the sampler receives `--program-manifest`. The GuestInput stays
+one opaque canonical bincode buffer. A manifest binds a program's declared policy and bytes;
+it does not inspect arbitrary ELF behavior. Qualify the reviewed experimental program with
+both previously admitted controls and cases that exceed the old cap.
+
+`evm-gas-only` retains EVM gas and complete proposal validation while removing the legacy
+100M admission boundary from the workload experiment. It does not activate new pricing in
+production. Legacy rejection alone is not coverage of inputs the new model could admit.
+Keep observations from different program hashes separate and compare paired controls under
+the same program. Do not combine old-program controls with a new program's candidates.
+
+Configurations without `execution_profile` keep their existing frozen contract and legacy
+report compatibility. Explicit `legacy-unzen` is also supported. An absent profile in an old
+report is accepted only as legacy. Without a manifest the opaque sampler makes no policy
+claim; accepting such a program for legacy measurement remains the operator's choice.
+Changing the profile, ELF or manifest requires a fresh output root.
+
 Memory accounting requires Linux `/proc` and includes sampled full descendant plus runner
 PSS; the ceiling is6GiB. The SDK's24GiB VM policy has different semantics and remains frozen.
 Do not equate the two limits. The minimum disk floor is256MiB, with320MiB additional reserved
@@ -215,6 +260,9 @@ sampler runs. The JSON GuestInput is optional for this path.
 
 For direct composition, call `zkgas-sp1-estimator --input-bincode saved/input.bin --elf
 programs/proposal.elf --output saved/sp1.json --resource-receipt saved/sp1-resources.json`.
+For a reviewed experimental program, add `--program-manifest programs/program-manifest.json`;
+the sampler rejects mismatched ELF/SDK metadata before execution and reports the manifest hash
+and its declared execution profile. Omitting the manifest preserves opaque-program behavior.
 The receipt option is optional for standalone execution; forced termination without a supervisor
 can retain SDK shared memory. The backend treats bytes as opaque; direct callers
 must perform canonical quote validation and the identity/output join themselves.

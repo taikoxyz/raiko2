@@ -423,6 +423,10 @@ fn validate_complete_quote(complete: &CompleteQuoteV1) -> Result<()> {
         !quote.model_id.is_empty() && complete.calibration_profile == quote.model_id,
         "prediction model identity mismatch"
     );
+    ensure!(
+        complete.execution_profile == quote.execution_profile,
+        "quote execution profile mismatch"
+    );
     let unzen_sum = quote
         .blocks
         .iter()

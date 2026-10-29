@@ -106,6 +106,7 @@ impl<DB: Database> Inspector<TaikoEvmContext<DB>, EthInterpreter> for FixtureIns
 #[derive(Default)]
 pub(super) struct FixtureExecutor {
     pub observation: OpcodeObservation,
+    pub execution_profile: raiko2_stateless::workload_lab::ExecutionProfile,
 }
 impl raiko2_stateless::DerivedBlockExecutor for FixtureExecutor {
     fn execute<DB: Database + std::fmt::Debug>(
@@ -135,7 +136,7 @@ impl raiko2_stateless::DerivedBlockExecutor for FixtureExecutor {
         let environment = config
             .next_evm_env(parent, &attributes)
             .map_err(BlockExecutionError::other)?;
-        let evm = config.evm_factory().create_evm_with_inspector(
+        let mut evm = config.evm_factory().create_evm_with_inspector(
             &mut state,
             environment,
             FixtureInspector {
@@ -143,6 +144,11 @@ impl raiko2_stateless::DerivedBlockExecutor for FixtureExecutor {
                 pending: BTreeMap::new(),
             },
         );
+        raiko2_stateless::workload_lab::apply_execution_profile(
+            evm.meter_mut(),
+            self.execution_profile,
+        )
+        .map_err(BlockExecutionError::other)?;
         let context = config
             .context_for_next_block(parent, attributes)
             .map_err(BlockExecutionError::other)?;

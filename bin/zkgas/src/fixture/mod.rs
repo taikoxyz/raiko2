@@ -108,6 +108,9 @@ pub struct FixtureArgs {
     pub output_bincode: Option<PathBuf>,
     #[arg(long)]
     pub report: Option<PathBuf>,
+    /// Offline admission policy; production-style Unzen filtering remains the default.
+    #[arg(long, default_value = "legacy-unzen")]
+    pub execution_profile: raiko2_zkgas_trace::ExecutionProfile,
 }
 fn read_request(path: &Path) -> Result<Vec<u8>> {
     use rustix::fs::{CWD, Mode, OFlags, openat};
@@ -181,6 +184,7 @@ pub fn run(args: &FixtureArgs) -> Result<serde_json::Value> {
         &program_bytes(&request.program.input_hex)?,
         request.program.block_count,
         request.program.storage_state.as_ref(),
+        args.execution_profile,
     )?;
     ensure!(
         built.receipts.len() == request.program.block_count
@@ -210,8 +214,12 @@ pub fn run(args: &FixtureArgs) -> Result<serde_json::Value> {
             "native route event count differs for {route}: expected {expected}, observed {actual}"
         );
     }
-    // Complete production proposal replay validates blob decoding, derivation and output identity.
-    let quote = raiko2_zkgas_trace::quote_shasta_proposal(&built.input)?;
+    // Full proposal replay retains blob decoding, derivation and output validation under the
+    // explicitly selected admission policy; only the default profile is production admission.
+    let quote = raiko2_zkgas_trace::quote_shasta_proposal_with_execution_profile(
+        &built.input,
+        args.execution_profile,
+    )?;
     let length = bincode::serialized_size(&built.input)?;
     ensure!(
         length <= MAX_OUTPUT_BYTES,
@@ -225,7 +233,7 @@ pub fn run(args: &FixtureArgs) -> Result<serde_json::Value> {
         "transaction_count":built.receipts[index].len(),"user_transaction_gas_used":built.receipts[index][1].gas_used,
         "parent_hash":witness.block.header.parent_hash,"state_root":witness.block.header.state_root,
     })).collect::<Vec<_>>();
-    let report = serde_json::json!({
+    let mut report = serde_json::json!({
         "schema_version":1,"construction_request_sha256":sha256_hex(&bytes),"guest_input_sha256":hash,
         "guest_input_bincode_length":length,"public_output":quote.public_output,"public_values":quote.public_output.as_slice(),
         "chain_id":built.input.taiko.chain_spec.chain_id,"fork_profile":"controlled_mainnet_post_unzen",
@@ -239,6 +247,9 @@ pub fn run(args: &FixtureArgs) -> Result<serde_json::Value> {
         "gas_source":"native execution receipt cumulative_gas_used deltas (charged gas including intrinsic/floor/refund effects)",
         "opcode_count_policy":"completed step_end instructions including REVERT and reverted child work; exceptional instructions reported separately",
     });
+    if args.execution_profile != raiko2_zkgas_trace::ExecutionProfile::LegacyUnzen {
+        report["execution_profile"] = serde_json::to_value(args.execution_profile)?;
+    }
     let mut outputs = vec![stage_json(&args.output, &built.input)?];
     if let Some(path) = &args.output_bincode {
         let mut file = AtomicFileWriter::new(path, MAX_OUTPUT_BYTES)?;

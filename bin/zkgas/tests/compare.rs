@@ -438,6 +438,7 @@ fn complete_quotes_reject_every_inconsistent_embedded_identity_before_joining() 
         "prediction-surface",
         "calibration-model",
         "quote-model",
+        "execution-profile",
         "prediction-total",
     ] {
         let dir = TestDir::new();
@@ -487,6 +488,9 @@ fn complete_quotes_reject_every_inconsistent_embedded_identity_before_joining() 
             "prediction-surface" => q.prediction_surface = "node".into(),
             "calibration-model" => q.calibration_profile = "other".into(),
             "quote-model" => q.quote.model_id = "other".into(),
+            "execution-profile" => {
+                q.execution_profile = raiko2_zkgas_trace::ExecutionProfile::EvmGasOnly;
+            }
             "prediction-total" => q.quote.prove.total_pgu += 1,
             _ => unreachable!(),
         }

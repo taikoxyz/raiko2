@@ -229,6 +229,8 @@ pub struct ProveProposalWorkloadQuote {
 #[serde(deny_unknown_fields)]
 pub struct ProposalWorkloadQuote {
     pub schema_version: u32,
+    #[serde(default, skip_serializing_if = "execution_profile_is_legacy")]
+    pub execution_profile: crate::ExecutionProfile,
     pub model_id: String,
     pub guest_input_sha256: String,
     pub guest_input_bincode_length: usize,
@@ -236,6 +238,11 @@ pub struct ProposalWorkloadQuote {
     pub blocks: Vec<BlockWorkloadQuote>,
     pub node: NodeProposalWorkloadQuote,
     pub prove: ProveProposalWorkloadQuote,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)] // Serde's skip predicate receives a reference.
+fn execution_profile_is_legacy(profile: &crate::ExecutionProfile) -> bool {
+    *profile == crate::ExecutionProfile::LegacyUnzen
 }
 
 #[derive(Debug, Error)]
@@ -418,9 +425,26 @@ struct ReplayedBlock {
 /// Returns an error when proposal validation fails, a required observation is missing, the replay
 /// topology differs from the supplied input, arithmetic overflows, or sealed pricing completion
 /// rejects the observed selectors.
-#[allow(clippy::too_many_lines)]
 pub fn quote_shasta_proposal(
     input: &GuestInput,
+) -> Result<ProposalWorkloadQuote, RuntimeQuoteError> {
+    quote_shasta_proposal_with_execution_profile(input, crate::ExecutionProfile::LegacyUnzen)
+}
+
+/// Replays a proposal under an explicitly selected offline execution profile.
+///
+/// The experimental profile only relaxes the legacy Unzen admission cap. It preserves the
+/// EVM gas envelope, fork, transaction validation, state reconstruction and pricing model.
+/// Inputs admitted only by that profile describe an experiment, not a production-valid block.
+/// The existing [`quote_shasta_proposal`] entrypoint retains legacy admission.
+///
+/// # Errors
+///
+/// Returns the same validation, observation and checked-pricing errors as the default entrypoint.
+#[allow(clippy::too_many_lines)]
+pub fn quote_shasta_proposal_with_execution_profile(
+    input: &GuestInput,
+    execution_profile: crate::ExecutionProfile,
 ) -> Result<ProposalWorkloadQuote, RuntimeQuoteError> {
     let (guest_input_sha256, guest_input_bincode_length) = guest_input_identity(input)
         .map_err(|error| RuntimeQuoteError::Validation(error.to_string()))?;
@@ -444,7 +468,7 @@ pub fn quote_shasta_proposal(
                     .and_then(|count| {
                         u64::try_from(count).context("block input transaction count exceeds u64")
                     })?;
-                let mut executor = QuoteDerivedBlockExecutor::default();
+                let mut executor = QuoteDerivedBlockExecutor::new(execution_profile);
                 let (outcome, metrics) =
                     raiko2_stateless::reconstruct_block_from_transactions_with_executor_and_mpt_metrics(
                         request.anchor_tx,
@@ -633,6 +657,7 @@ pub fn quote_shasta_proposal(
     let total_scaled = checked_add_i128(block_local_scaled, proposal_once.total_scaled)?;
     Ok(ProposalWorkloadQuote {
         schema_version: 1,
+        execution_profile,
         model_id: RUNTIME_SPEC_SHA256.to_owned(),
         guest_input_sha256,
         guest_input_bincode_length,

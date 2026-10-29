@@ -12,7 +12,9 @@ use anyhow::{Context, Result, ensure};
 use bincode::Options;
 use clap::Args;
 use raiko2_primitives_shasta::GuestInput;
-use raiko2_zkgas_trace::{ProposalWorkloadQuote, quote_shasta_proposal};
+use raiko2_zkgas_trace::{
+    ExecutionProfile, ProposalWorkloadQuote, quote_shasta_proposal_with_execution_profile,
+};
 #[cfg(not(target_os = "linux"))]
 use rustix::fs::openat;
 #[cfg(target_os = "linux")]
@@ -111,6 +113,9 @@ impl QuoteLimits {
 #[command(about = "Quote current Shasta GuestInput files without fetching data or running guests")]
 #[command(group(clap::ArgGroup::new("input").required(true).args(["input_bincode", "input_json", "manifest"])))]
 pub struct QuoteArgs {
+    /// Offline replay policy; EVM gas-only mode is an explicitly labelled experiment.
+    #[arg(long, default_value = "legacy-unzen")]
+    pub execution_profile: ExecutionProfile,
     #[arg(long)]
     pub input_bincode: Option<PathBuf>,
     /// Developer convenience; parsed exactly as supplied, without proof-carry backfill.
@@ -448,6 +453,7 @@ fn quote_input(
     input: &GuestInput,
     started: Instant,
     limits: &QuoteLimits,
+    execution_profile: ExecutionProfile,
 ) -> InputResult<(ProposalIdentityV1, ProposalWorkloadQuote)> {
     let mut proposal = proposal_identity(input)?;
     if started.elapsed() >= Duration::from_secs(limits.max_elapsed_seconds) {
@@ -456,7 +462,7 @@ fn quote_input(
             "elapsed replay budget exhausted",
         ));
     }
-    let result = quote_shasta_proposal(input);
+    let result = quote_shasta_proposal_with_execution_profile(input, execution_profile);
     if started.elapsed() >= Duration::from_secs(limits.max_elapsed_seconds) {
         return Err(failed(
             "elapsed_time_limit",
@@ -531,7 +537,7 @@ pub fn run_quote(args: &QuoteArgs, executable: &ExecutableIdentity) -> Result<Qu
         identity.observe(&bytes);
         let (input, canonical) = decode(&bytes, args.input_json.is_some())?;
         identity.verify(&canonical);
-        quote_input(&input, started, &args.limits)
+        quote_input(&input, started, &args.limits, args.execution_profile)
     })();
     #[derive(serde::Serialize)]
     struct SingleDescriptor<'a> {
@@ -547,6 +553,8 @@ pub fn run_quote(args: &QuoteArgs, executable: &ExecutableIdentity) -> Result<Qu
         #[serde(skip_serializing_if = "Option::is_none")]
         observed_guest_input_byte_length: Option<u64>,
         limits: &'a QuoteLimits,
+        #[serde(skip_serializing_if = "execution_profile_is_legacy")]
+        execution_profile: ExecutionProfile,
     }
     let source = InputSourceV1::Single {
         descriptor_sha256: content_id(
@@ -568,10 +576,18 @@ pub fn run_quote(args: &QuoteArgs, executable: &ExecutableIdentity) -> Result<Qu
                     None
                 },
                 limits: &args.limits,
+                execution_profile: args.execution_profile,
             },
         )?,
     };
-    let row = make_row(identity, source, None, executable, result);
+    let row = make_row(
+        identity,
+        source,
+        None,
+        executable,
+        result,
+        args.execution_profile,
+    );
     let partial = matches!(row, QuoteRowV1::Failed(_));
     let mut bytes = canonical_json(&row)?;
     bytes.push(b'\n');
@@ -708,11 +724,18 @@ fn run_manifest(
             identity.verify(&canonical);
             drop(raw);
             drop(canonical);
-            quote_input(&input, started, &args.limits)
+            quote_input(&input, started, &args.limits, args.execution_profile)
         })();
         // The closure's GuestInput and all replay scratch have been dropped before serializing
         // this row. Serialize and release the quote before opening the next input.
-        let row = make_row(identity, source, sample.metadata, executable, result);
+        let row = make_row(
+            identity,
+            source,
+            sample.metadata,
+            executable,
+            result,
+            args.execution_profile,
+        );
         partial |= matches!(row, QuoteRowV1::Failed(_));
         let mut bytes = canonical_json(&row)?;
         bytes.push(b'\n');
@@ -729,10 +752,12 @@ fn make_row(
     metadata: Option<OpaqueObject>,
     executable: &ExecutableIdentity,
     result: InputResult<(ProposalIdentityV1, ProposalWorkloadQuote)>,
+    execution_profile: ExecutionProfile,
 ) -> QuoteRowV1 {
     match result {
         Ok((proposal, quote)) => QuoteRowV1::Complete(Box::new(CompleteQuoteV1 {
             schema_version: 1,
+            execution_profile: quote.execution_profile,
             key: identity
                 .verified_key
                 .expect("complete quote has canonical identity"),
@@ -750,6 +775,7 @@ fn make_row(
         })),
         Err(failure) => QuoteRowV1::Failed(Box::new(FailedQuoteV1 {
             schema_version: 1,
+            execution_profile,
             corpus_id: identity.corpus_id,
             sample_id: identity.sample_id,
             verified_key: identity.verified_key,

@@ -34,6 +34,19 @@ fn export(request: &Value) -> (Output, TempDir) {
     let output = command(&dir).output().unwrap();
     (output, dir)
 }
+fn export_with_profile(request: &Value, profile: &str) -> (Output, TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("request.json"),
+        serde_json::to_vec(request).unwrap(),
+    )
+    .unwrap();
+    let output = command(&dir)
+        .args(["--execution-profile", profile])
+        .output()
+        .unwrap();
+    (output, dir)
+}
 fn success(output: &Output) {
     assert!(
         output.status.success(),
@@ -145,6 +158,112 @@ fn out_of_gas_is_attempted_without_counting_the_failed_store() {
     assert_eq!(report["attempted_route_counts"]["opcode:0x52"], 1);
     assert!(report["observed_route_counts"].get("opcode:0x52").is_none());
     assert_eq!(report["receipts_by_block"][0][1]["gas_used"], 15_000_000);
+}
+#[test]
+fn explicit_profile_admits_work_above_legacy_cap_in_every_block() {
+    use raiko2_zkgas_trace::{ExecutionProfile, quote_shasta_proposal_with_execution_profile};
+
+    // Two MiB expansion costs less than 15M EVM gas but more than 100M legacy
+    // Unzen units. The same request must retain the default legacy rejection.
+    let mut value = request("0x5f621fffff5200", json!({"opcode:0x52":2,"opcode:0x00":2}));
+    value["program"]["block_count"] = 2.into();
+    let (legacy, legacy_dir) = export(&value);
+    assert!(!legacy.status.success());
+    absent_outputs(&legacy_dir);
+
+    let (experimental, dir) = export_with_profile(&value, "evm-gas-only");
+    success(&experimental);
+    let report = report(&dir);
+    assert_eq!(report["execution_profile"], "evm-gas-only");
+    assert_eq!(report["observed_route_counts"]["opcode:0x52"], 2);
+    assert_eq!(report["observed_route_counts"]["opcode:0x00"], 2);
+    let input = input(&dir);
+    for witness in &input.witnesses {
+        assert!(witness.block.header.difficulty > alloy_primitives::U256::from(100_000_000));
+        assert!(witness.block.header.gas_used < 15_500_000);
+    }
+    assert!(raiko2_zkgas_trace::quote_shasta_proposal(&input).is_err());
+    let quote =
+        quote_shasta_proposal_with_execution_profile(&input, ExecutionProfile::EvmGasOnly).unwrap();
+    assert_eq!(quote.execution_profile, ExecutionProfile::EvmGasOnly);
+    assert_eq!(quote.blocks.len(), 2);
+    for block in &quote.blocks {
+        assert!(block.node.unzen_zkgas > 100_000_000);
+    }
+    assert_eq!(
+        serde_json::to_value(quote.public_output).unwrap(),
+        report["public_output"]
+    );
+
+    let quote_path = dir.path().join("experimental-quote.jsonl");
+    let output = Command::new(env!("CARGO_BIN_EXE_zkgas-quote"))
+        .arg("--input-bincode")
+        .arg(dir.path().join("input.bin"))
+        .args([
+            "--corpus-id",
+            "profile-test",
+            "--sample-id",
+            "above-legacy-cap",
+        ])
+        .args(["--execution-profile", "evm-gas-only"])
+        .arg("--output")
+        .arg(&quote_path)
+        .output()
+        .unwrap();
+    success(&output);
+    let envelope: Value = serde_json::from_slice(&fs::read(quote_path).unwrap()).unwrap();
+    assert_eq!(envelope["execution_profile"], "evm-gas-only");
+    assert_eq!(envelope["quote"]["execution_profile"], "evm-gas-only");
+    assert_eq!(envelope["quote"]["public_output"], report["public_output"]);
+
+    let mut invalid_state = input;
+    invalid_state.witnesses[0].block.header.state_root = alloy_primitives::B256::ZERO;
+    assert!(
+        quote_shasta_proposal_with_execution_profile(&invalid_state, ExecutionProfile::EvmGasOnly,)
+            .is_err()
+    );
+}
+
+#[test]
+fn explicit_legacy_profile_preserves_default_bytes_and_wire_shape() {
+    let value = request("0x00", json!({"opcode:0x00":1}));
+    let (default, default_dir) = export(&value);
+    let (explicit, explicit_dir) = export_with_profile(&value, "legacy-unzen");
+    success(&default);
+    success(&explicit);
+    for filename in ["input.bin", "input.json", "report.json"] {
+        assert_eq!(
+            fs::read(default_dir.path().join(filename)).unwrap(),
+            fs::read(explicit_dir.path().join(filename)).unwrap(),
+            "default/explicit legacy changed {filename}"
+        );
+    }
+    assert!(report(&default_dir).get("execution_profile").is_none());
+    let input = input(&default_dir);
+    let quote = raiko2_zkgas_trace::quote_shasta_proposal(&input).unwrap();
+    assert!(
+        serde_json::to_value(quote)
+            .unwrap()
+            .get("execution_profile")
+            .is_none()
+    );
+}
+
+#[test]
+fn experimental_admission_preserves_evm_gas_failure_and_success_checks() {
+    let mut value = request("0x5f62ffffff52", json!({"opcode:0x52":0}));
+    let (unexpected_failure, dir) = export_with_profile(&value, "evm-gas-only");
+    assert!(!unexpected_failure.status.success());
+    absent_outputs(&dir);
+    value["expected_user_success"] = false.into();
+    let (expected_failure, dir) = export_with_profile(&value, "evm-gas-only");
+    success(&expected_failure);
+    let report = report(&dir);
+    assert_eq!(report["execution_profile"], "evm-gas-only");
+    assert_eq!(report["receipts_by_block"][0][1]["success"], false);
+    assert_eq!(report["receipts_by_block"][0][1]["gas_used"], 15_000_000);
+    assert_eq!(report["attempted_route_counts"]["opcode:0x52"], 1);
+    assert!(report["observed_route_counts"].get("opcode:0x52").is_none());
 }
 #[test]
 fn raw_storage_preimages_produce_valid_mutation_multiproof() {

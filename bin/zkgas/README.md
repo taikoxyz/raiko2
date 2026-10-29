@@ -26,6 +26,15 @@ They add no server configuration or deployment behavior. Comparison checks the a
 compatibility, **not the truth of a producer's measurement**. Reports make no capacity, admission,
 or model promotion claim.
 
+Offline `zkgas-fixture` and `zkgas-quote` accept `--execution-profile legacy-unzen`
+(the default) or `--execution-profile evm-gas-only`. The latter preserves the EVM fork,
+gas limits, transaction rules and full proposal validation while relaxing only the old
+Unzen admission cap. It is an explicitly labelled workload experiment, not a change to
+node or production-guest policy. The guarded workload harness freezes one profile and
+rejects mismatched stage reports. SP1 measurement needs the matching
+[dedicated workload program](../../guests/workload-sp1/README.md), a manifest bound to
+its ELF, and a fresh campaign with controls measured against that same program.
+
 ## Build and command workflows
 
 From the repository root:

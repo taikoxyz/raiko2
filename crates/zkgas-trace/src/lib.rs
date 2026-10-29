@@ -8,10 +8,11 @@ mod reconstruct;
 mod runtime_quote;
 
 pub use proposal_inputs::{ProposalBlobSelectors, ProposalPayloadSelectors};
+pub use raiko2_stateless::workload_lab::ExecutionProfile;
 pub use runtime_quote::{
     BlockWorkloadQuote, MptSelectorsSnapshot, NodeBlockWorkloadQuote, NodePricingBreakdownSnapshot,
     NodeProposalWorkloadQuote, PricingBreakdownSnapshot, ProposalPricingSelectorsSnapshot,
     ProposalWorkloadQuote, ProveBlockWorkloadQuote, ProveProposalWorkloadQuote,
     ResourceSelectorsSnapshot, RuntimeQuoteError, TransactionPayloadSelectorsSnapshot,
-    quote_shasta_proposal,
+    quote_shasta_proposal, quote_shasta_proposal_with_execution_profile,
 };

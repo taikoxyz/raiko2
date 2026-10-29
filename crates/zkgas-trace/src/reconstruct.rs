@@ -405,9 +405,19 @@ pub(crate) struct BlockExecutionObservation {
 #[derive(Debug, Default)]
 pub(crate) struct QuoteDerivedBlockExecutor {
     completed: Option<BlockExecutionObservation>,
+    execution_profile: raiko2_stateless::workload_lab::ExecutionProfile,
 }
 
 impl QuoteDerivedBlockExecutor {
+    pub(crate) const fn new(
+        execution_profile: raiko2_stateless::workload_lab::ExecutionProfile,
+    ) -> Self {
+        Self {
+            completed: None,
+            execution_profile,
+        }
+    }
+
     pub(crate) const fn take(&mut self) -> Option<BlockExecutionObservation> {
         self.completed.take()
     }
@@ -462,11 +472,16 @@ impl raiko2_stateless::DerivedBlockExecutor for QuoteDerivedBlockExecutor {
         let environment = evm_config
             .next_evm_env(parent_header, &attributes)
             .map_err(BlockExecutionError::other)?;
-        let evm = evm_config.evm_factory().create_evm_with_inspector(
+        let mut evm = evm_config.evm_factory().create_evm_with_inspector(
             &mut state,
             environment,
             ResourceInspector::with_ledger(ledger.clone()),
         );
+        raiko2_stateless::workload_lab::apply_execution_profile(
+            evm.meter_mut(),
+            self.execution_profile,
+        )
+        .map_err(BlockExecutionError::other)?;
         let execution_context = evm_config
             .context_for_next_block(parent_header, attributes)
             .map_err(BlockExecutionError::other)?;

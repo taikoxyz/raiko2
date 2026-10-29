@@ -23,6 +23,7 @@ DEFAULT_LIMITS = {'pss_mib': 6144, 'min_free_mib': 256, 'output_mib': 192,
 SUCCESS = ('complete', 'screened')
 FAILURES = ('native_rejected', 'quote_failed', 'measurement_failed', 'guard_failed',
             'validation_failed', 'stage_failed', 'interrupted', 'retention_failed')
+EXECUTION_PROFILES = ('legacy-unzen', 'evm-gas-only')
 
 
 class RetainedFailure(ValueError):
@@ -68,6 +69,25 @@ def public_bytes(value):
     return raw.hex()
 
 
+def validate_program_manifest(manifest, profile, elf_sha256):
+    require(type(manifest.get('schema_version')) is int and manifest['schema_version'] == 1,
+            'unsupported program manifest schema')
+    require(manifest.get('execution_profile') == profile,
+            'program manifest execution profile mismatch')
+    require(manifest.get('elf_sha256') == elf_sha256, 'program manifest ELF identity mismatch')
+    require(manifest.get('sp1_sdk_version') == '6.3.0', 'program manifest SDK identity mismatch')
+
+
+def validate_report_profile(report, contract):
+    expected = contract.get('execution_profile', 'legacy-unzen')
+    require(expected in EXECUTION_PROFILES, 'unknown execution profile in contract')
+    actual = report.get('execution_profile')
+    if actual is None:
+        require(expected == 'legacy-unzen', 'missing execution profile in report')
+    else:
+        require(actual == expected, 'report execution profile mismatch')
+
+
 def load_config(path):
     config = read_json(path)
     require(config['schema_version'] == 1, 'unsupported configuration schema')
@@ -76,8 +96,17 @@ def load_config(path):
     frozen = {'schema_version': 1, 'corpus_id': config['corpus_id'], 'model_id': config['model_id'],
               'identities': {}, 'measurement_kind': 'local execute-only SP1; not a proof',
               'production_sdk_parity_verified': False}
+    if 'execution_profile' in config:
+        require(config['execution_profile'] in EXECUTION_PROFILES, 'unknown execution profile')
+        frozen['execution_profile'] = config['execution_profile']
+    has_manifest = 'program_manifest' in config['artifacts']
+    require(frozen.get('execution_profile') != 'evm-gas-only' or has_manifest,
+            'experimental execution profile requires a bound program manifest')
+    require(not has_manifest or 'execution_profile' in frozen,
+            'program manifest requires an explicit execution profile')
     paths = {}
-    for name in ('native', 'quote', 'sp1', 'elf', 'model'):
+    names = ('native', 'quote', 'sp1', 'elf', 'model') + (('program_manifest',) if has_manifest else ())
+    for name in names:
         item = config['artifacts'][name]
         source = (path.parent / item['path']).resolve(strict=True)
         expected = sha(item['sha256'])
@@ -89,6 +118,10 @@ def load_config(path):
         if name == 'model':
             require(read_json(source)['artifact_sha256'] == config['model_id'],
                     'model artifact metadata ID differs from configured model ID')
+        if name == 'program_manifest':
+            require(identity(source)[1] <= MIB, 'program manifest exceeds 1 MiB')
+            validate_program_manifest(read_json(source), frozen['execution_profile'],
+                                      frozen['identities']['elf'])
         paths[name] = source
         frozen['identities'][name] = expected
     limits = dict(DEFAULT_LIMITS, **config.get('limits', {}))
@@ -132,8 +165,9 @@ def load_catalog(path):
     return catalog['cases']
 
 
-def validate_native(native, input_identity, source):
+def validate_native(native, input_identity, source, contract=None):
     require(native['schema_version'] == 1, 'unsupported native report schema')
+    validate_report_profile(native, contract or {})
     require(native['guest_input_sha256'] == input_identity[0] and
             native['guest_input_bincode_length'] == input_identity[1], 'native/input identity mismatch')
     require(public_bytes(native['public_values']) == public_bytes(native['public_output']),
@@ -146,6 +180,8 @@ def validate_native(native, input_identity, source):
 def validate_quote(quote, native, input_identity, sid, contract):
     require(quote['status'] == 'complete', 'quote rejected input')
     require(quote['schema_version'] == 1, 'unsupported quote schema')
+    validate_report_profile(quote, contract)
+    validate_report_profile(quote['quote'], contract)
     require(quote['key'] == {'corpus_id': contract['corpus_id'], 'sample_id': sid,
                            'guest_input_sha256': input_identity[0]}, 'quote key mismatch')
     require(quote['guest_input_byte_length'] == input_identity[1], 'quote input length mismatch')
@@ -160,6 +196,12 @@ def validate_quote(quote, native, input_identity, sid, contract):
 
 def validate_sp1(report, native, input_identity, contract):
     require(report['schema_version'] == 1 and report['exit_code'] == 0, 'SP1 guest did not complete')
+    manifest_sha256 = contract['identities'].get('program_manifest')
+    require(contract.get('execution_profile') != 'evm-gas-only' or manifest_sha256,
+            'experimental SP1 validation requires a bound program manifest')
+    validate_report_profile(report, contract)
+    require(report.get('program_manifest_sha256') == manifest_sha256,
+            'SP1 program manifest identity mismatch')
     require(report['measurement_policy'] == 'sp1-6.3-streaming-v1' and
             report['sp1_execution_engine'] == 'gas-estimator', 'unexpected measurement policy')
     for key in ('sp1_sdk_version', 'sp1_core_executor_version', 'sp1_core_executor_runner_version'):
@@ -200,12 +242,19 @@ def read_attempt(folder):
     require(read_json(folder / 'started.json') == {'schema_version': 1, 'source': status['source'],
                                                 'contract': status['contract']}, 'started/status mismatch')
     validate_artifacts(folder, status['artifacts'])
+    manifest_sha256 = status['contract']['identities'].get('program_manifest')
+    manifest_path = folder / 'program-manifest.json'
+    if manifest_sha256 and (status['status'] in SUCCESS or manifest_path.exists()):
+        require(identity(manifest_path, limit=MIB)[0] == manifest_sha256,
+                'retained program manifest identity mismatch')
+        validate_program_manifest(read_json(manifest_path), status['contract']['execution_profile'],
+                                  status['contract']['identities']['elf'])
     if status['status'] in SUCCESS:
         record = next(r for r in status['artifacts'] if r['path'] == 'input.bin.gz')
         input_identity = record['uncompressed_sha256'], record['uncompressed_length']
         native = read_json(folder / 'native.json')
         quote = read_json(folder / 'quote.jsonl')
-        validate_native(native, input_identity, status['source'])
+        validate_native(native, input_identity, status['source'], status['contract'])
         validate_quote(quote, native, input_identity, status['sample_id'], status['contract'])
         if status['status'] == 'complete':
             report = read_json(folder / 'sp1.json')
@@ -220,7 +269,7 @@ def read_attempt(folder):
 
 
 def observation(status, quote, report):
-    return {'status': 'complete', 'observation_id': status['sample_id'],
+    result = {'status': 'complete', 'observation_id': status['sample_id'],
             'attempt_id': status['attempt_id'], 'quote_key': quote['key'], 'backend': 'sp1',
             'workload': {'value': str(number(report['prover_gas'])), 'unit': 'sp1_pgu'},
             'measurement_stage': 'execute', 'program': {'elf_sha256': report['elf_sha256']},
@@ -228,6 +277,11 @@ def observation(status, quote, report):
             'software_version': report['executable_sha256'],
             'source': {'measurement_policy': report['measurement_policy'],
                        'production_sdk_parity_verified': False}}
+    if 'execution_profile' in status['contract']:
+        result['source']['execution_profile'] = status['contract']['execution_profile']
+    if 'program_manifest' in status['contract']['identities']:
+        result['source']['program_manifest_sha256'] = status['contract']['identities']['program_manifest']
+    return result
 
 
 def failed_observation(status):
@@ -303,10 +357,17 @@ def execute_source(root, source, paths, contract, through, retry=False, catalog_
     exclusive_json(folder / 'started.json', {'schema_version': 1, 'source': source, 'contract': contract})
     records, phase = [], 'setup'
     input_path, native_path, quote_path = folder / 'input.bin', folder / 'native.json', folder / 'quote.jsonl'
+    profile_args = (['--execution-profile', contract['execution_profile']]
+                    if 'execution_profile' in contract else [])
     try:
         require(shutil.disk_usage(folder).free >= contract['limits']['min_free_mib'] * MIB + 5 * MAX_INPUT,
                 'insufficient disk for bounded input/output plus verified retention')
         recheck(paths, contract)
+        manifest_path = None
+        if 'program_manifest' in paths:
+            manifest_path = folder / 'program-manifest.json'
+            copy_exclusive(paths['program_manifest'], manifest_path,
+                           contract['identities']['program_manifest'])
         if prior:
             origin, old = prior
             record = next(r for r in old['artifacts'] if r['path'] == 'input.bin.gz')
@@ -319,7 +380,7 @@ def execute_source(root, source, paths, contract, through, retry=False, catalog_
                            source['case']['request_sha256'])
             phase = 'native'
             run([str(paths['native']), '--input', str(request), '--output', str(folder / 'guest-input.json'),
-                 '--output-bincode', str(input_path), '--report', str(native_path)], folder, phase,
+                 '--output-bincode', str(input_path), '--report', str(native_path)] + profile_args, folder, phase,
                 contract['limits'], [input_path, native_path, folder / 'guest-input.json'])
         else:
             copy_exclusive(Path(source['input_path']), input_path, source['input_sha256'])
@@ -327,11 +388,12 @@ def execute_source(root, source, paths, contract, through, retry=False, catalog_
         phase = 'validation'
         input_identity = identity(input_path, limit=MAX_INPUT)
         native = read_json(native_path)
-        validate_native(native, input_identity, source)
+        validate_native(native, input_identity, source, contract)
         if not prior:
             phase = 'quote'
             run([str(paths['quote']), '--input-bincode', str(input_path), '--corpus-id', contract['corpus_id'],
-                 '--sample-id', sid, '--output', str(quote_path)], folder, phase, contract['limits'], [quote_path])
+                 '--sample-id', sid, '--output', str(quote_path)] + profile_args,
+                folder, phase, contract['limits'], [quote_path])
         phase = 'validation'
         quote = read_json(quote_path)
         validate_quote(quote, native, input_identity, sid, contract)
@@ -339,8 +401,10 @@ def execute_source(root, source, paths, contract, through, retry=False, catalog_
             phase = 'sp1'
             report_path = folder / 'sp1.json'
             resource_path = folder / 'sp1-resources.json'
+            manifest_args = (['--program-manifest', str(manifest_path)]
+                             if manifest_path is not None else [])
             run([str(paths['sp1']), '--input-bincode', str(input_path), '--elf', str(paths['elf']),
-                 '--output', str(report_path), '--resource-receipt', str(resource_path)], folder, phase,
+                 '--output', str(report_path), '--resource-receipt', str(resource_path)] + manifest_args, folder, phase,
                 contract['limits'], [report_path, resource_path], resource_receipt=resource_path)
             phase = 'validation'
             report = read_json(report_path)

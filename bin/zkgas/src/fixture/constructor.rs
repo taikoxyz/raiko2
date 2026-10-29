@@ -414,6 +414,7 @@ pub(super) fn build_program(
     input: &[u8],
     block_count: usize,
     storage_state: Option<&ProgramStorageState>,
+    execution_profile: raiko2_stateless::workload_lab::ExecutionProfile,
 ) -> Result<BuiltProgram> {
     if code.is_empty()
         || code.len() > 24_576
@@ -548,7 +549,10 @@ pub(super) fn build_program(
         };
         let anchor_nonce = u64::try_from(index)?;
         let anchor = anchor_tx(&checkpoint, anchor_address, anchor_nonce, base_fee_per_gas)?;
-        let mut executor = FixtureExecutor::default();
+        let mut executor = FixtureExecutor {
+            execution_profile,
+            ..Default::default()
+        };
         let outcome = reconstruct_block_from_transactions_with_executor_and_witness_resources(
             anchor
                 .try_into_recovered()

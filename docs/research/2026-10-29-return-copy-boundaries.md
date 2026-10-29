@@ -24,6 +24,11 @@ charge. An unpriced marginal increment alone does not establish a scalable total
 
 ## Admission and qualification
 
+The legacy-cap exclusions below are a limitation of that original experiment, not valid
+new-model admission boundaries. The [explicit execution-profile follow-up](2026-10-29-execution-profile-admission.md)
+removes that selection bias using a separate, identified workload program and same-program
+controls. Do not treat this cohort alone as complete new-model stress coverage.
+
 All 102 plans are retained: 84 pass native construction and 18 are rejected. All 28 accepted
 triplets have identical complete native opcode maps and equal node and complete quotes.
 Additional negative verification deliberately requested an incorrect REVERT count and was

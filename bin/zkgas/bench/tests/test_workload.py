@@ -33,23 +33,30 @@ if '--input' in args:
     if case.get('native_sleep'): time.sleep(10)
     pathlib.Path(args['--output-bincode']).write_bytes(request)
     write(args['--output'], {'ordinary_guest_input': True})
-    write(args['--report'], {'schema_version': 1,
+    native = {'schema_version': 1,
         'guest_input_sha256': hashlib.sha256(request).hexdigest(),
         'guest_input_bincode_length': len(request),
         'construction_request_sha256': hashlib.sha256(request).hexdigest(),
-        'public_values': output, 'public_output': '0x'+bytes(output).hex()})
+        'public_values': output, 'public_output': '0x'+bytes(output).hex()}
+    if '--execution-profile' in args:
+        native['execution_profile'] = case.get('native_profile', args['--execution-profile'])
+    write(args['--report'], native)
 else:
     raw = pathlib.Path(args['--input-bincode']).read_bytes()
     case = json.loads(raw)
     sha = hashlib.sha256(raw).hexdigest()
     if '--corpus-id' in args:
-        write(args['--output'], {'schema_version': 1, 'status': 'complete',
+        quote = {'schema_version': 1, 'status': 'complete',
             'key': {'corpus_id': args['--corpus-id'], 'sample_id': args['--sample-id'],
                     'guest_input_sha256': sha}, 'guest_input_byte_length': len(raw),
             'executable': {'sha256': digest(sys.argv[0])}, 'calibration_profile': 'model-v1',
             'proposal': {'public_output': '0x'+bytes(output).hex()},
             'quote': {'model_id': 'model-v1', 'node': {'block_local_known_pgu': str(case.get('node', 3))},
-                      'prove': {'total_pgu': '100'}}})
+                      'prove': {'total_pgu': '100'}}}
+        if '--execution-profile' in args:
+            quote['execution_profile'] = case.get('quote_profile', args['--execution-profile'])
+            quote['quote']['execution_profile'] = case.get('nested_quote_profile', args['--execution-profile'])
+        write(args['--output'], quote)
     else:
         if case.get('sp1_fail'): sys.exit(4)
         sdkid = 'sp1_'+base64.urlsafe_b64encode(uuid.uuid4().bytes).decode()
@@ -61,7 +68,7 @@ else:
             resources.append({'name': name, 'device': info.st_dev, 'inode': info.st_ino, 'uid': info.st_uid})
         write(args['--resource-receipt'], {'schema_version': 1, 'stage': 'sp1_owned_shared_memory',
               'producer_pid': os.getpid(), 'resources': resources})
-        write(args['--output'], {'schema_version': 1, 'exit_code': 0,
+        report = {'schema_version': 1, 'exit_code': 0,
             'measurement_policy': 'sp1-6.3-streaming-v1', 'sp1_execution_engine': 'gas-estimator',
             'sp1_sdk_version': '6.3.0', 'sp1_core_executor_version': '6.3.0',
             'sp1_core_executor_runner_version': '6.3.0',
@@ -74,7 +81,12 @@ else:
             'executor_opts': {'memory_limit': 24*1024**3, 'gas_trace_chunk_threshold': 134217728,
                 'gas_trace_chunk_slots': 2, 'shard_size': 1<<24,
                 'minimal_trace_chunk_threshold': 16777216, 'trace_chunk_slots': 5,
-                'sharding_threshold': {'element_threshold': 402653184, 'height_threshold': 4194304}}})
+                'sharding_threshold': {'element_threshold': 402653184, 'height_threshold': 4194304}}}
+        if '--program-manifest' in args:
+            manifest = read(args['--program-manifest'])
+            report['execution_profile'] = case.get('sp1_profile', manifest['execution_profile'])
+            report['program_manifest_sha256'] = case.get('manifest_hash', digest(args['--program-manifest']))
+        write(args['--output'], report)
         for resource in resources:
             (pathlib.Path(sys.argv[0]).parent/'fake-shm'/resource['name']).unlink()
 '''
@@ -134,6 +146,144 @@ class HarnessTests(unittest.TestCase):
 
     def attempts(self, sid):
         return sorted((self.runroot / sid).glob('attempt-*'))
+
+    def execution_profile(self, profile='evm-gas-only', manifest=True, **manifest_fields):
+        config = artifacts.read_json(self.config)
+        config['execution_profile'] = profile
+        if manifest:
+            path = self.root / 'program-manifest.json'
+            self.write(path, dict(schema_version=1, execution_profile=profile,
+                elf_sha256=artifacts.identity(self.elf)[0], sp1_sdk_version='6.3.0',
+                **manifest_fields))
+            config['artifacts']['program_manifest'] = {'path': path.name,
+                'sha256': artifacts.identity(path)[0]}
+        self.config.write_text(json.dumps(config))
+
+    def test_implicit_legacy_config_contract_remains_byte_identical(self):
+        config = artifacts.read_json(self.config)
+        _, frozen = workload.load_config(self.config)
+        expected = {'schema_version': 1, 'corpus_id': 'test-corpus', 'model_id': 'model-v1',
+            'identities': {name: item['sha256'] for name, item in config['artifacts'].items()},
+            'measurement_kind': 'local execute-only SP1; not a proof',
+            'production_sdk_parity_verified': False, 'limits': workload.DEFAULT_LIMITS,
+            'provenance': {}}
+        self.assertEqual(frozen, expected)
+
+    def test_experimental_profile_binds_manifest_and_all_stages(self):
+        self.execution_profile()
+        catalog = self.catalog([('control', {})])
+        self.assertEqual(self.invoke('run', catalog), 0)
+        folder = self.attempts('control')[0]
+        status = workload.read_attempt(folder)
+        self.assertEqual(status['contract']['execution_profile'], 'evm-gas-only')
+        for stage in ('native', 'quote'):
+            command = artifacts.read_json(folder / (stage + '-command.json'))['command']
+            self.assertEqual(command[command.index('--execution-profile')+1], 'evm-gas-only')
+        command = artifacts.read_json(folder / 'sp1-command.json')['command']
+        self.assertEqual(Path(command[command.index('--program-manifest')+1]),
+                         folder / 'program-manifest.json')
+        self.assertEqual((folder / 'program-manifest.json').read_bytes(),
+                         (self.root / 'program-manifest.json').read_bytes())
+        self.assertEqual(artifacts.read_json(folder / 'sp1.json')['execution_profile'], 'evm-gas-only')
+        self.assertEqual(self.invoke('verify'), 0)
+        self.assertEqual(self.invoke('run', catalog), 0)
+        self.assertEqual(len(self.attempts('control')), 1)
+
+    def test_experimental_profile_requires_bound_matching_program_manifest(self):
+        self.execution_profile(manifest=False)
+        with self.assertRaisesRegex(ValueError, 'program.manifest'):
+            workload.load_config(self.config)
+        config = artifacts.read_json(self.config)
+        for field, wrong in (('execution_profile', 'legacy-unzen'), ('elf_sha256', '0'*64),
+                             ('sp1_sdk_version', '6.8.1'), ('schema_version', 2)):
+            manifest = dict(schema_version=1, execution_profile='evm-gas-only',
+                elf_sha256=artifacts.identity(self.elf)[0], sp1_sdk_version='6.3.0')
+            manifest[field] = wrong
+            path = self.root / 'wrong-program-manifest.json'
+            path.write_text(json.dumps(manifest))
+            config['artifacts']['program_manifest'] = {'path': path.name,
+                'sha256': artifacts.identity(path)[0]}
+            self.config.write_text(json.dumps(config))
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                workload.load_config(self.config)
+
+    def test_profile_mismatch_at_any_report_stage_is_unscored(self):
+        self.execution_profile()
+        for key in ('native_profile', 'quote_profile', 'nested_quote_profile', 'sp1_profile', 'manifest_hash'):
+            with self.subTest(stage=key):
+                sub = self.root / key
+                sub.mkdir()
+                request = sub / 'request.json'
+                self.write(request, {key: '0'*64 if key == 'manifest_hash' else 'legacy-unzen'})
+                catalog = sub / 'catalog.json'
+                self.write(catalog, {'schema_version': 1, 'cases': [{'sample_id': key,
+                    'request_path': 'request.json', 'request_sha256': artifacts.identity(request)[0]}]})
+                self.runroot = sub / 'run'
+                self.assertEqual(self.invoke('run', catalog), 1)
+                state = workload.read_attempt(self.attempts(key)[0])
+                self.assertEqual(state['status'], 'validation_failed')
+                self.assertNotIn('metrics', state)
+
+    def test_execution_profile_and_manifest_are_frozen_for_resume(self):
+        self.execution_profile()
+        catalog = self.catalog([('control', {})])
+        self.assertEqual(self.invoke('screen', catalog), 0)
+        config = artifacts.read_json(self.config)
+        config['execution_profile'] = 'legacy-unzen'
+        manifest = self.root / 'program-manifest.json'
+        data = artifacts.read_json(manifest)
+        data['execution_profile'] = 'legacy-unzen'
+        manifest.write_text(json.dumps(data))
+        config['artifacts']['program_manifest']['sha256'] = artifacts.identity(manifest)[0]
+        self.config.write_text(json.dumps(config))
+        with self.assertRaisesRegex(ValueError, 'contract changed'):
+            self.invoke('run', catalog)
+
+    def test_program_manifest_identity_cannot_change_within_same_profile(self):
+        self.execution_profile()
+        catalog = self.catalog([('control', {})])
+        self.assertEqual(self.invoke('screen', catalog), 0)
+        manifest = self.root / 'program-manifest.json'
+        data = artifacts.read_json(manifest)
+        data['source_revision'] = 'another-reviewed-build'
+        manifest.write_text(json.dumps(data))
+        config = artifacts.read_json(self.config)
+        config['artifacts']['program_manifest']['sha256'] = artifacts.identity(manifest)[0]
+        self.config.write_text(json.dumps(config))
+        with self.assertRaisesRegex(ValueError, 'contract changed'):
+            self.invoke('run', catalog)
+
+    def test_only_legacy_reports_may_omit_execution_profile(self):
+        for contract in ({}, {'execution_profile': 'legacy-unzen'}):
+            workload.validate_report_profile({}, contract)
+            workload.validate_report_profile({'execution_profile': 'legacy-unzen'}, contract)
+            with self.assertRaisesRegex(ValueError, 'profile mismatch'):
+                workload.validate_report_profile({'execution_profile': 'evm-gas-only'}, contract)
+        with self.assertRaisesRegex(ValueError, 'missing execution profile'):
+            workload.validate_report_profile({}, {'execution_profile': 'evm-gas-only'})
+
+    def test_sp1_validator_does_not_accept_experimental_contract_without_manifest(self):
+        self.execution_profile()
+        catalog = self.catalog([('control', {})])
+        self.assertEqual(self.invoke('run', catalog), 0)
+        folder = self.attempts('control')[0]
+        status = workload.read_attempt(folder)
+        contract = json.loads(json.dumps(status['contract']))
+        del contract['identities']['program_manifest']
+        report = artifacts.read_json(folder / 'sp1.json')
+        del report['program_manifest_sha256']
+        native = artifacts.read_json(folder / 'native.json')
+        with self.assertRaisesRegex(ValueError, 'program manifest'):
+            workload.validate_sp1(report, native,
+                (native['guest_input_sha256'], native['guest_input_bincode_length']), contract)
+
+    def test_explicit_legacy_profile_accepts_manifestless_opaque_program(self):
+        self.execution_profile('legacy-unzen', manifest=False)
+        catalog = self.catalog([('control', {})])
+        self.assertEqual(self.invoke('run', catalog), 0)
+        folder = self.attempts('control')[0]
+        self.assertEqual(workload.read_attempt(folder)['contract']['execution_profile'], 'legacy-unzen')
+        self.assertNotIn('execution_profile', artifacts.read_json(folder / 'sp1.json'))
 
     def test_full_pipeline_exact_ranking_and_validated_resume(self):
         # Values chosen so converting to float would lose the ordering.

@@ -92,7 +92,84 @@ profile identities and cleanup of all 12 owned resource objects across the two s
 runs and the old-program negative control. These initial checks establish the experiment
 path, not coverage of the previously excluded return-copy cases.
 
-The next measurement uses the exact same 102 ProgramRequests in a fresh campaign, including
-the formerly excluded 18 and same-program controls. Retain EVM-gas/status failures if they
-occur; only legacy pricing is removed as a selection boundary. Revisit older legacy-cap
-exclusions separately rather than treating them as stress coverage.
+## Completed same-program campaign
+
+The fresh campaign completed all 102 original ProgramRequests, including all 18 previously
+excluded candidates. There are no native, quote, SP1 or integrity failures and no pending
+samples. The maximum charged user gas is 14,744,273, within the unchanged 15M transaction
+envelope. All 84 previously admitted canonical inputs, public outputs and node/full prices
+match their original versions; their old-program actual PGU remains a separate observation.
+
+| Full-copy workload | Actual SP1 PGU | Node-known PGU | Complete quote PGU | Charged user EVM gas |
+| --- | ---: | ---: | ---: | ---: |
+| 1 MiB RETURN, one call | 209,189,963 | 82,899,863 | 237,841,694 | 12,547,324 |
+| 1 MiB RETURN, two calls | 210,085,558 | 91,087,146 | 246,028,977 | 14,744,259 |
+| 64 KiB RETURN, 512 calls | 212,261,536 | 118,644,619 | 273,586,450 | 8,274,309 |
+
+All 34 capacity triplets have equal complete native opcode maps and equal node/full prices.
+Automatic copying still changes actual work: the largest full-minus-zero increment is
+9,103,463 PGU for 512 caught-REVERT calls. All 33 same-program repetition increments are
+covered by node increments; the largest incremental actual/node ratio is 0.442011799.
+
+Complete quotes cover all 102 observations. The largest actual/full ratio is 0.999498627
+(161,170,337 / 161,251,184), leaving 80,847 PGU in that small-return control. The literal
+actual/node maximum is 25.562661300 for the empty-return control, dominated by proposal
+startup. The opposite tail is also retained: the constructed zero-copy 512-REVERT case has
+full/actual ratio 13.613619575. It is not a historical Mainnet regression.
+
+Independent verification checked all request bytes against the original immutable archive,
+all raw normalized PGU/input/output/profile/manifest/model/tool identities and cleanup of
+408 owned resource objects. Maximum sampled process-tree PSS was 1,725,415,424 bytes.
+No pricing coefficient was adjusted. This supports the current pricing on the measured
+return-copy surface after removing the old selection bias; it is not an exhaustive bound.
+
+The complete data is retained in [Atlas #11](https://github.com/taikoxyz/raiko2-atlas/pull/11)
+and its immutable `fixture-unzen-return-copy-evm-gas-only-v1` Release. The actual remote asset
+passed the unchanged Atlas integrity CI body: 1,742 archive files, including canonical inputs,
+raw reports and explicitly labelled local-metadata projections. The reference ELF and host
+executables are excluded; consumers record their own rebuilt program and repeat its controls.
+
+## Next: workload at the EVM gas boundary
+
+Retain the original `actual PGU / new node-known zkGas` objective and add a separate capacity
+experiment: maximize actual SP1 workload subject only to the legal EVM gas envelope. First
+verify actual chain transaction, block and proposal limits; the constructor's current
+15M/31M/32-block bounds are experimental choices, not chain-limit evidence. Account for
+refunds and distinguish charged receipt gas from execution gas when filling a budget.
+
+Start with single-block saturation across precompiles, opcode combinations, memory, state/trie
+and payload paths, then measure multi-block proposals with startup charged once. Use these
+results to test the hypothesis that EVM gas alone could provide an acceptable proving-workload
+bound. No conclusion about removing production zkGas limits follows before that work. Revisit
+older legacy-cap exclusions separately rather than treating them as completed stress coverage.
+
+### Current pinned protocol envelope
+
+Source inspection of the pinned Alethia executor and Shasta derivation establishes:
+
+| Boundary | Current rule | Enforcement |
+| --- | --- | --- |
+| Transaction | 16,777,216 gas including intrinsic cost | Osaka EIP-7825, executor configuration and REVM validation |
+| Manifest block | 10M–45M, parent limit change at most 200 ppm | Shasta derivation validation |
+| Derived header | Manifest limit plus 1M Anchor allowance; maximum 46M | Guest block construction |
+| Normal source | At most 768 blocks | Unzen derivation constant |
+| Forced sources | At most 10, each deriving one block | Inbox source count and forced derivation |
+
+These imply a coarse topological ceiling of 778 blocks and 35.788B charged EVM gas per
+proposal, before parent-limit and timestamp constraints. This is not a measured capacity or
+an assertion that every such envelope is reachable from an arbitrary parent. Non-default
+manifests require increasing timestamps no later than the proposal timestamp; fallback/default
+handling differs, so a universal 360-block cap cannot be inferred from a six-minute interval.
+The current tool still constructs one user transaction per block, with its own lower bounds.
+
+A public Mainnet RPC observation at 2026-10-29T15:38:40Z verified chain ID 167000 and block
+13,322,530 with header gas limit 46,000,000 (hash
+`0x79b5c4cb2c9059a6d816afd8e6d14f88437e5094b4b310d7dfc351a58231c759`).
+This confirms a real header setting, not a proposal-capacity measurement.
+
+Block accounting uses receipt gas after refunds. London refunds can reduce charged gas by
+up to 20%, so report charged gas separately from spent gas/refunds when testing refund paths.
+User budget is header gas minus actual Anchor usage; the extra 1M allowance must not simply
+be discarded or treated as a separate user-gas rule without checking executor enforcement.
+Full proposal measurements also include startup once, Anchor, state/trie, payload and validation
+work. Gas-per-transaction extrapolation alone cannot establish the full proving bound.

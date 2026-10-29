@@ -43,8 +43,9 @@ Those protocol components remain dependencies, not checks that may be silently o
 
 ## 2. Source snapshot
 
-Checked on 2026-10-29. All Taiko design and implementation PRs below were open at this snapshot.
-Their source is a design input, not evidence of deployment or real proof generation.
+Initial check on 2026-10-29. All Taiko design and implementation PRs in this table were open at
+that check. The ancestry follow-up below records later revisions separately. These sources are
+design inputs, not evidence of deployment or real ZK proof generation.
 
 | Source | Revision | Use |
 | --- | --- | --- |
@@ -73,6 +74,14 @@ with the current PoS verifier interface as written.
 Older sketches that put an L1 **block hash** in `parentBeaconBlockRoot`, omit the anchor number from
 `extraData`, or require an `OlderThanWindow` inference do not describe the current anchor-less design.
 Implementers must refresh this source table before planning against upstream code.
+
+Ancestry follow-up on 2026-10-29: PoS design #22303 subsequently merged; its
+[updated section 6.3](https://github.com/taikoxyz/taiko-mono/blob/689c1d50cbe2b65f14620cc90288ea64de1743c2/packages/protocol/docs/etna-pos-zk/SPEC.md)
+still describes a linear ancestry budget of 131,072 headers. The
+[L1 reference reader at #22286](https://github.com/taikoxyz/taiko-mono/blob/1b14b634c8d213b5b30d8fc61ca6f6dcec344389/packages/protocol/contracts/layer1/etna/impl/EtnaInbox.sol)
+authenticates a recent execution block hash using BLOCKHASH or EIP-2935. Section 5.1.1 proposes
+another way to authenticate older anchors; it does not claim that the current upstream ancestry
+policy or guest implementation already supports that path.
 
 ## 3. Responsibility boundary
 
@@ -157,6 +166,81 @@ There are two input modes, not two competing execution implementations: the anch
 proposal mode retains proposal/source derivation; the PoS mode validates decided CometBFT envelopes.
 PoS `extraData[1..7]` is a generation, not a legacy proposal ID. Do not force PoS ranges through the
 old proposal-event decoder. Share execution primitives while keeping these protocol bindings explicit.
+
+### 5.1.1 L1 ancestry: link nearby references, use a historical proof for long delays
+
+Let the distinct L1 anchor heights used by the range start at N and end at L. Let Q be the recent
+L1 execution reference authenticated by L1 when the proposal/landing is submitted at height P,
+with `N <= L <= Q < P`. Q is chosen before final proof generation; it need not equal P-1.
+Separate the range's own anchor span `L-N` from the submission-delay tail `Q-L`.
+
+The selected policy is:
+
+- **Nearby L:** preserve the existing parentHash linkage from N through L to Q. This is the
+  expected normal path; ordinary proposals should rarely need historical Merkle witnesses.
+- **Distant L:** preserve parentHash linkage from N through L, then authenticate only header L
+  against a recent Ethereum beacon root using `historical_summaries`. Do not attach an independent
+  historical proof to every anchor or fetch/hash every header in the delay tail L..Q.
+
+```text
+near: N -- parentHash links --> L -- parentHash links --> Q
+far:  N -- parentHash links --> L -- historical Merkle proof --> recent beacon root
+```
+
+The near/far threshold is a prover cost choice, based on header hashing versus witness collection
+and verification. This document fixes no number, config key or wire encoding. Either witness must
+establish the same canonical L1 ancestry. The host may choose the representation; the guest must
+verify it. Distance selects a proof path, never whether an otherwise valid block is accepted.
+
+Keep the existing execution reference number/hash as the public authority. The proposed far-path
+witness authenticates header Q against that hash, then uses Q's **Ethereum L1**
+`parentBeaconBlockRoot` as the trusted beacon root. This is different from the L2 field of the same
+name, which carries the anchor's execution state root. A beacon root must never be substituted
+into a public field that means execution block hash. The experiment below also checked a direct
+L1 EIP-4788 lookup; that lookup does not by itself require a new production statement ABI.
+
+For a completed historical period, the guest verifies:
+
+```text
+authenticated beacon root -> BeaconBlock.state_root -> BeaconState.historical_summaries
+  -> period.block_summary_root -> old BeaconBlock -> execution_payload.block_hash
+  == keccak256(RLP(header L))
+```
+
+Bind the chain/fork interpretation, slot, historical-list index and length, and exact SSZ paths.
+Check the authenticated header's number, timestamp and state root as required by existing anchor
+rules; an unauthenticated host root or a successful RPC response is not ancestry evidence.
+For a recent beacon block not yet included in a completed period, the corresponding `block_roots`
+membership path exists; normal nearby references should continue using header links instead.
+
+The far-path cost is proportional to `L-N` header checks plus a small historical proof, rather
+than all `Q-N` headers. Crossing an 8192-slot historical-period boundary within N..L does not
+require another Merkle proof: only L receives the historical proof. Repeated anchors are deduplicated.
+Allowed anchor age, progression and unusually large gaps within N..L belong to protocol/L2 block
+validity rules. Proving must enforce those rules without inventing an additional anchor-gap cap.
+
+**Measured witness, not a ZK throughput claim:** a complete Fulu historical proof connected
+execution header 25,198,983 to a beacon root authenticated at execution height 26,298,983, a gap
+of 1,100,000 blocks / 153.37 days. It used 60 SHA-256 Merkle siblings: **1,920 bytes for the entire
+historical bridge**, plus headers and metadata, not 1,920 bytes per anchor. The roughly 339 MB
+state downloaded to construct the witness was host-side source data, not GuestInput. A second
+recent root reused the same lower 25 siblings. See the
+[experiment and committed proof fixture](../../research/2026-10-29-ethereum-historical-header-proof.md).
+
+Providers must supply and retain the historical branch material: ordinary beacon RPCs may expose
+old blocks while disabling state export or pruning the data needed to construct branches. The
+fixed old-block-to-period branch is available after the period completes and can be archived;
+the upper branch is generated for the selected recent state. A full proof is bound to that root,
+not automatically reusable with every future root. Reference lookup windows still apply to Q;
+if a direct EIP-4788 lookup is selected, its root lookup window also applies. An expired reference
+needs a newly bound wrapper or an explicitly authenticated retained reference, not changed calldata
+on an existing proof. Archive availability and large-input resource handling remain engineering
+work, not grounds to treat missing data as a valid witness.
+
+The upstream linear ancestry budget must be reconciled with this policy before implementation:
+`Q-N` must not force rejection/recovery solely because the submission delay is large when the
+historical path can authenticate it. This does not silently remove other recovery rules or
+freeze a new landing interface. Committee authority/applicability remains a separate dependency.
 
 ### 5.2 BFT certificate verification
 
@@ -274,6 +358,9 @@ silently changing the meaning of the v4 proposal identifiers is not an acceptabl
   contradictory authenticated data as validation failures.
 - Blobs can reconstruct the landed EL chain but do not contain all consensus/proving history.
   Define an authenticated archive source and independently reproduce a real proof from it.
+- Follow section 5.1.1 for L1 ancestry: a distant latest anchor selects the historical witness
+  path. Missing/pruned historical material is a collection failure; never accept an unverified
+  anchor, reinterpret the reference hash, or introduce a new anchor-gap validity limit.
 - Do not silently rebind an in-flight job to a new generation, image, committee or reference block.
   Build a new final wrapper/job identity when its statement changes; reuse only compatible children.
 - Proving lag may be nonzero but must remain stable under sustained load. Measure execution,
@@ -311,6 +398,9 @@ Protocol/prover reviewers must resolve these before an implementation plan is ac
    versus full PoS support and the Unzen transition boundary.
 4. **Delivery scope:** first support fixed-range aggregation. If recursive extension is included,
    freeze its complete continuation journal and content commitment before writing it.
+5. **L1 ancestry:** confirm the reference-header/beacon-root binding, historical-witness collection
+   and retention, fork-correct SSZ paths, and alignment of the upstream linear ancestry budget
+   with section 5.1.1. Keep the near/far threshold a proving-cost choice.
 
 The implementing owner may choose crate factoring, compact witness storage and bounded collection
 concurrency, provided these do not change the approved statement or verification responsibilities.
@@ -331,6 +421,10 @@ The later implementation plan must include at least:
   generations. A terminal-only committee check must not accept an invalid earlier QC.
 - Exact envelope/execution/blob binding, changed order/count/headers, empty blocks, anchor number
   or root tampering and standard EIP-4788/EIP-2935 effects.
+- Near/far L1 ancestry witnesses establishing the same anchor history; late submission with a
+  short N..L span; ranges crossing historical-period boundaries; repeated anchors; SSZ list-length,
+  index, fork, header and root tampering; unavailable archives and expired references. Replay the
+  committed historical fixture, then measure the actual guest paths on supported backends.
 - FI inclusion, invalid encoding/nonce/balance, ordinary revert/OOG, over-limit rollback and the
   counterfactual trial witness. Real guest execution must independently reproduce each decision.
 - Valid overlapping landings with the identical proof/blob transaction, p/c/h boundary cases,

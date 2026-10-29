@@ -21,6 +21,15 @@ from process_guard import StageFailure, interruption_handlers, run
 DEFAULT_LIMITS = {'pss_mib': 6144, 'min_free_mib': 256, 'output_mib': 192,
                   'log_mib': 16, 'timeout_seconds': 600}
 SUCCESS = ('complete', 'screened')
+FAILURES = ('native_rejected', 'quote_failed', 'measurement_failed', 'guard_failed',
+            'validation_failed', 'stage_failed', 'interrupted', 'retention_failed')
+
+
+class RetainedFailure(ValueError):
+    """A failed attempt whose artifacts, source and contract have all been validated."""
+    def __init__(self, folder, status):
+        self.folder, self.status = folder, status
+        super().__init__('failed attempt retained; use --retry-failed to create a new attempt')
 
 
 def sha(value):
@@ -262,11 +271,13 @@ def previous(sample, source, contract, retry):
     if completed:
         return completed[0]
     screened = [result for result in results if result[1]['status'] == 'screened']
+    failures = [result for result in results if result[1]['status'] != 'screened']
+    if failures and not retry:
+        require(all(result[1]['status'] in FAILURES for result in failures),
+                'unknown retained attempt status; investigate before resuming')
+        raise RetainedFailure(*failures[-1])
     if screened:
-        require(retry or all(result[1]['status'] == 'screened' for result in results),
-                'failed measurement after screening retained; use --retry-failed')
         return screened[-1]
-    require(not results or retry, 'failed attempt retained; use --retry-failed')
     return None
 
 
@@ -489,9 +500,15 @@ def main(argv=None):
         else:
             exclusive_json(manifest, contract)
         for source in sources:
-            outcome = execute_source(root, source, paths, contract,
-                                     'screen' if args.action == 'screen' else 'measure',
-                                     args.retry_failed, catalog_dir)
+            try:
+                outcome = execute_source(root, source, paths, contract,
+                                         'screen' if args.action == 'screen' else 'measure',
+                                         args.retry_failed, catalog_dir)
+            except RetainedFailure as error:
+                if not getattr(args, 'continue_after_failure', False):
+                    raise
+                outcome = {'sample_id': error.status['sample_id'], 'status': 'retained_failure',
+                           'retained_status': error.status['status'], 'attempt': error.folder.name}
             print(json.dumps(outcome), flush=True)
             if outcome['status'] not in (*SUCCESS, 'validated_resume'):
                 failed = True

@@ -238,7 +238,11 @@ Reports and all attempt files use exclusive creation; choose a new summary filen
 `screen` and `run` stop at the first retained failure by default. Add
 `--continue-after-failure` to attempt the remaining finite catalog while keeping every failure;
 the command still exits nonzero if any attempt failed. This option never retries or skips a
-previous failed attempt implicitly: a later invocation still requires `--retry-failed`.
+previous failed attempt without validating it. On resume it validates retained failure artifacts,
+source and contract, reports `retained_failure` with the original status and attempt, and continues
+to later cases without creating another attempt. The overall exit remains nonzero. Creating a
+fresh attempt still requires `--retry-failed`. Corrupt successful artifacts, unvalidated partial
+attempts and source/contract changes remain fatal even with continuation enabled.
 
 Successful attempts retain gzip inputs only after a verified roundtrip. A single input is
 restored at a time. Failed stages preserve partial bytes and logs. Cancellation by SIGINT,

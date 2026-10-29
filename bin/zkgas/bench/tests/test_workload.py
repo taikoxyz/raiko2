@@ -75,6 +75,8 @@ else:
                 'gas_trace_chunk_slots': 2, 'shard_size': 1<<24,
                 'minimal_trace_chunk_threshold': 16777216, 'trace_chunk_slots': 5,
                 'sharding_threshold': {'element_threshold': 402653184, 'height_threshold': 4194304}}})
+        for resource in resources:
+            (pathlib.Path(sys.argv[0]).parent/'fake-shm'/resource['name']).unlink()
 '''
 
 
@@ -215,9 +217,50 @@ class HarnessTests(unittest.TestCase):
         result = workload.summary(self.runroot)
         self.assertEqual([row['status'] for row in result['attempts']], ['complete', 'native_rejected'])
         self.assertEqual(result['ranked_sample_ids'], ['control'])
-        with self.assertRaisesRegex(ValueError, 'retry-failed'):
-            self.invoke('run', catalog, ['--continue-after-failure'])
+        self.assertEqual(self.invoke('run', catalog, ['--continue-after-failure']), 1)
         self.assertEqual(len(self.attempts('rejected')), 1)
+
+    def test_real_cli_resume_continues_after_validated_rejection_without_retry(self):
+        catalog = self.catalog([('rejected', {'native_reject': True}), ('later', {})])
+        self.assertEqual(self.invoke('screen', catalog, ['--continue-after-failure']), 1)
+        rejected = self.attempts('rejected')[0]
+        before = {path.name: path.read_bytes() for path in rejected.iterdir()}
+        result = subprocess.run([sys.executable, str(Path(workload.__file__)), 'run',
+            '--config', str(self.config), '--catalog', str(catalog), '--output-root', str(self.runroot),
+            '--continue-after-failure'], capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        outcomes = [json.loads(line) for line in result.stdout.splitlines()]
+        self.assertEqual(outcomes[0]['status'], 'retained_failure')
+        self.assertEqual(outcomes[0]['retained_status'], 'native_rejected')
+        self.assertEqual(outcomes[1]['status'], 'complete')
+        self.assertEqual(len(self.attempts('rejected')), 1)
+        self.assertEqual(len(self.attempts('later')), 2)
+        self.assertEqual(before, {path.name: path.read_bytes() for path in rejected.iterdir()})
+
+    def test_retained_failed_measurement_does_not_retry_its_screened_input(self):
+        catalog = self.catalog([('failed', {'sp1_fail': True}), ('later', {})])
+        self.assertEqual(self.invoke('screen', catalog), 0)
+        self.assertEqual(self.invoke('run', catalog), 1)
+        self.assertEqual(len(self.attempts('failed')), 2)
+        self.assertEqual(len(self.attempts('later')), 1)
+        self.assertEqual(self.invoke('run', catalog, ['--continue-after-failure']), 1)
+        self.assertEqual(len(self.attempts('failed')), 2)
+        self.assertEqual(len(self.attempts('later')), 2)
+
+    def test_continue_never_ignores_retained_source_or_contract_changes(self):
+        catalog = self.catalog([('rejected', {'native_reject': True}), ('later', {})])
+        self.assertEqual(self.invoke('run', catalog), 1)
+        folder = self.attempts('rejected')[0]
+        original = artifacts.read_json(folder / 'status.json')
+        for field in ('source', 'contract'):
+            changed = json.loads(json.dumps(original))
+            changed[field]['unexpected_change'] = True
+            (folder / 'status.json').write_text(json.dumps(changed))
+            (folder / 'started.json').write_text(json.dumps({'schema_version': 1,
+                'source': changed['source'], 'contract': changed['contract']}))
+            with self.assertRaisesRegex(ValueError, 'source/contract changed'):
+                self.invoke('run', catalog, ['--continue-after-failure'])
+            self.assertFalse((self.runroot / 'later').exists())
 
     def test_corrupt_successful_retention_cannot_be_retried(self):
         catalog = self.catalog([('control', {})])
@@ -227,6 +270,8 @@ class HarnessTests(unittest.TestCase):
         archive.write_bytes(b'corrupt')
         with self.assertRaisesRegex(ValueError, 'corrupt successful'):
             self.invoke('run', catalog, ['--retry-failed'])
+        with self.assertRaisesRegex(ValueError, 'corrupt successful'):
+            self.invoke('run', catalog, ['--continue-after-failure'])
 
     def test_partial_status_requires_explicit_retry_and_remains_immutable(self):
         catalog = self.catalog([('control', {})])

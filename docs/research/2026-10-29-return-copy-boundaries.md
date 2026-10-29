@@ -106,8 +106,11 @@ output root for each profile. Keep native rejects, failures and controls in the 
 
 The initial base catalog predates the optional profile selector. The final committed
 generator reproduces all 90 request files, runtime, compiler record and Solidity source
-byte for byte; only catalog generator identity and profile metadata differ. Preserve both
-catalog identities when archiving this checkpoint.
+byte for byte; only catalog generator identity and profile metadata differ. Both catalog
+identities are retained in [Atlas #10](https://github.com/taikoxyz/raiko2-atlas/pull/10).
+The [immutable fixture Release](https://github.com/taikoxyz/raiko2-atlas/releases/tag/fixture-unzen-return-copy-boundaries-v1)
+contains the inputs and original observations; its actual remote download passed all archive
+and metadata checks for 1,807 files.
 
 The campaign also found and fixed a CLI resume bug: a previously rejected input stopped
 `--continue-after-failure` before later screened cases could be measured. Continuation now

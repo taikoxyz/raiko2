@@ -33,6 +33,10 @@ This directory contains the contributor- and operator-facing documentation for `
 
 ## Design and Review Notes
 
+- [Etna PoS proving design](superpowers/specs/2026-10-29-etna-pos-proving-design.md):
+  draft for protocol and prover review; L1 committee authentication, guest QC verification,
+  anchor-less execution and range-proof integration. Implementation is deferred pending review.
+
 The files under [`plans/`](plans) and [`issues/`](issues) are design, implementation, and review
 notes. Not all of them are historical — `plans/README.md` tracks plans in `Draft for discussion`,
 `Accepted`, and `In progress` states alongside `Superseded` and `Archived` ones. None of them are

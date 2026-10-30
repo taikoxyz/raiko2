@@ -102,6 +102,7 @@ fn validate_pricing_breakdown(
             pricing.fixed_scaled,
             pricing.authorization_scaled,
             pricing.access_list_scaled,
+            pricing.code_preparation_scaled,
             pricing.operations_scaled,
             pricing.feature_error_scaled,
             pricing.resources_scaled,
@@ -127,6 +128,7 @@ fn validate_pricing_breakdown(
                 pricing.fixed_scaled,
                 pricing.authorization_scaled,
                 pricing.access_list_scaled,
+                pricing.code_preparation_scaled,
                 pricing.operations_scaled,
                 pricing.resources_scaled,
                 pricing.mpt_scaled,
@@ -183,6 +185,7 @@ fn snapshot_matches_pricing(
     snapshot.fixed_scaled == pricing.fixed_scaled
         && snapshot.authorization_scaled == pricing.authorization_scaled
         && snapshot.access_list_scaled == pricing.access_list_scaled
+        && snapshot.code_preparation_scaled == pricing.code_preparation_scaled
         && snapshot.operations_scaled == pricing.operations_scaled
         && snapshot.feature_error_scaled == pricing.feature_error_scaled
         && snapshot.resources_scaled == pricing.resources_scaled
@@ -297,6 +300,7 @@ fn validate_complete_quote(complete: &CompleteQuoteV1) -> Result<()> {
                 node.fixed_scaled,
                 node.authorization_scaled,
                 node.access_list_scaled,
+                node.code_preparation_scaled,
                 node.operations_scaled,
                 node.feature_error_scaled,
                 node.evm_local_resources_scaled,
@@ -317,6 +321,7 @@ fn validate_complete_quote(complete: &CompleteQuoteV1) -> Result<()> {
                     node.fixed_scaled,
                     node.authorization_scaled,
                     node.access_list_scaled,
+                    node.code_preparation_scaled,
                     node.operations_scaled,
                     node.evm_local_resources_scaled,
                     node.transaction_payload_scaled,
@@ -344,6 +349,20 @@ fn validate_complete_quote(complete: &CompleteQuoteV1) -> Result<()> {
             prove.access_list_scaled >= node.access_list_scaled,
             "attempted access-list price does not cover committed price"
         );
+        ensure!(
+            block.prove.code_preparation.nonempty_events >= node.code_preparation.nonempty_events
+                && block.prove.code_preparation.total_bytes >= node.code_preparation.total_bytes
+                && prove.code_preparation_scaled >= node.code_preparation_scaled,
+            "attempted code preparation does not cover committed selectors or price"
+        );
+        // Validate the typed domain even for diagnostic comparisons with another model identity.
+        // Only the current model's prices are reconciled below.
+        let node_preparation = ZkGasModel
+            .price_code_preparation(node.code_preparation.into())
+            .context("committed code preparation selector domain is invalid")?;
+        let prove_preparation = ZkGasModel
+            .price_code_preparation(block.prove.code_preparation.into())
+            .context("attempted code preparation selector domain is invalid")?;
         validate_pricing_breakdown(prove)?;
         let committed = block.prove.committed_payload;
         committed
@@ -376,12 +395,18 @@ fn validate_complete_quote(complete: &CompleteQuoteV1) -> Result<()> {
             "exact resources do not cover EVM-local resources"
         );
         if current_model {
+            ensure!(
+                node.code_preparation_scaled == node_preparation
+                    && prove.code_preparation_scaled == prove_preparation,
+                "code preparation price mismatch"
+            );
             let local_pricing = ZkGasModel
                 .price_block(&BlockPricingInput {
                     started_non_anchor_transactions: 0,
                     native_value_transfers: 0,
                     authorization_validations: node.authorization_validations,
                     access_list_items: node.access_list_items,
+                    code_preparation: node.code_preparation.into(),
                     operation_routes: &[],
                     resources: resource_selectors(node.evm_local_resources),
                     transaction_payload: Default::default(),
@@ -398,6 +423,7 @@ fn validate_complete_quote(complete: &CompleteQuoteV1) -> Result<()> {
                     native_value_transfers: 0,
                     authorization_validations: block.prove.authorization_validations,
                     access_list_items: block.prove.access_list_items,
+                    code_preparation: block.prove.code_preparation.into(),
                     operation_routes: &[],
                     resources: resource_selectors(block.prove.exact_resources),
                     transaction_payload: Default::default(),
@@ -518,6 +544,10 @@ fn validate_complete_quote(complete: &CompleteQuoteV1) -> Result<()> {
     ensure!(
         quote.prove.proposal_once.access_list_scaled == 0,
         "proposal-only pricing contains access-list items"
+    );
+    ensure!(
+        quote.prove.proposal_once.code_preparation_scaled == 0,
+        "proposal-only pricing contains code preparation"
     );
     let block_scaled = checked_sum(quote.blocks.iter().map(|b| b.prove.pricing.total_scaled))?;
     ensure!(

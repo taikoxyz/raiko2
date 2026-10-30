@@ -1,7 +1,8 @@
 use alethia_reth_evm::zk_gas::pricing::{
-    FIXED_POINT_SCALE, MptSelectors, PricingBreakdown, ProposalPricingInput, RUNTIME_SPEC_SHA256,
-    ResourceSelectors, TransactionPayloadSelectors, ZkGasCompletionError, ZkGasError,
-    ZkGasKnownBlockBreakdown, ZkGasModel, ZkGasShadowReport, ZkGasShadowStatus,
+    CodePreparationSelectors, FIXED_POINT_SCALE, MptSelectors, PricingBreakdown,
+    ProposalPricingInput, RUNTIME_SPEC_SHA256, ResourceSelectors, TransactionPayloadSelectors,
+    ZkGasCompletionError, ZkGasError, ZkGasKnownBlockBreakdown, ZkGasModel, ZkGasShadowReport,
+    ZkGasShadowStatus,
 };
 use alloy_consensus::BlockHeader as _;
 use alloy_primitives::B256;
@@ -17,6 +18,32 @@ use crate::{
     },
     reconstruct::{BlockExecutionObservation, QuoteDerivedBlockExecutor},
 };
+
+/// Successful nonempty code preparations, counted per occurrence rather than per code hash.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CodePreparationSelectorsSnapshot {
+    pub nonempty_events: u64,
+    pub total_bytes: u64,
+}
+
+impl From<CodePreparationSelectors> for CodePreparationSelectorsSnapshot {
+    fn from(value: CodePreparationSelectors) -> Self {
+        Self {
+            nonempty_events: value.nonempty_events,
+            total_bytes: value.total_bytes,
+        }
+    }
+}
+
+impl From<CodePreparationSelectorsSnapshot> for CodePreparationSelectors {
+    fn from(value: CodePreparationSelectorsSnapshot) -> Self {
+        Self {
+            nonempty_events: value.nonempty_events,
+            total_bytes: value.total_bytes,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -74,6 +101,8 @@ pub struct PricingBreakdownSnapshot {
     pub authorization_scaled: i128,
     /// Raw access-list address-item contribution in normalized fixed-point PGU.
     pub access_list_scaled: i128,
+    /// Per-occurrence accepted code preparation, including work later reverted.
+    pub code_preparation_scaled: i128,
     pub operations_scaled: i128,
     pub feature_error_scaled: i128,
     pub resources_scaled: i128,
@@ -117,6 +146,8 @@ impl From<TransactionPayloadSelectorsSnapshot> for TransactionPayloadSelectors {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NodePricingBreakdownSnapshot {
+    /// Successful nonempty preparations in committed outer transaction scopes.
+    pub code_preparation: CodePreparationSelectorsSnapshot,
     /// Raw entries in committed non-Anchor EIP-7702 transactions, including ignored entries.
     pub authorization_validations: u64,
     /// Raw non-legacy access-list address items in committed scopes, including Anchor when carried.
@@ -126,6 +157,8 @@ pub struct NodePricingBreakdownSnapshot {
     pub authorization_scaled: i128,
     /// Raw access-list address-item contribution in normalized fixed-point PGU.
     pub access_list_scaled: i128,
+    /// Per-occurrence accepted code preparation, including work later reverted.
+    pub code_preparation_scaled: i128,
     pub operations_scaled: i128,
     pub feature_error_scaled: i128,
     pub evm_local_resources: ResourceSelectorsSnapshot,
@@ -141,6 +174,8 @@ pub struct NodePricingBreakdownSnapshot {
 impl From<ZkGasKnownBlockBreakdown> for NodePricingBreakdownSnapshot {
     fn from(value: ZkGasKnownBlockBreakdown) -> Self {
         Self {
+            code_preparation: value.code_preparation().into(),
+            code_preparation_scaled: value.code_preparation_scaled(),
             fixed_scaled: value.fixed_scaled(),
             authorization_validations: value.authorization_validations(),
             authorization_scaled: value.authorization_scaled(),
@@ -166,6 +201,7 @@ impl TryFrom<PricingBreakdown> for PricingBreakdownSnapshot {
             fixed_scaled: value.fixed_scaled,
             authorization_scaled: value.authorization_scaled,
             access_list_scaled: value.access_list_scaled,
+            code_preparation_scaled: value.code_preparation_scaled,
             operations_scaled: value.operations_scaled,
             feature_error_scaled: value.feature_error_scaled,
             resources_scaled: value.resources_scaled,
@@ -201,6 +237,8 @@ pub struct NodeBlockWorkloadQuote {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProveBlockWorkloadQuote {
+    /// Preparations in all begun scopes, including discarded outer candidates.
+    pub code_preparation: CodePreparationSelectorsSnapshot,
     pub input_transaction_count: u64,
     pub consumed_candidate_count: u64,
     pub attempted_transaction_count: u64,
@@ -362,6 +400,7 @@ fn complete_block_pricing(
         PricingBreakdownSnapshot,
         u64,
         u64,
+        CodePreparationSelectorsSnapshot,
     ),
     RuntimeQuoteError,
 > {
@@ -410,6 +449,7 @@ fn complete_block_pricing(
         attempted_priced.fixed_scaled,
         attempted_priced.authorization_scaled,
         attempted_priced.access_list_scaled,
+        attempted_priced.code_preparation_scaled,
         attempted_priced.operations_scaled,
         committed_priced.resources_scaled,
         committed_priced.mpt_scaled,
@@ -421,6 +461,7 @@ fn complete_block_pricing(
         fixed_scaled: attempted_priced.fixed_scaled,
         authorization_scaled: attempted_priced.authorization_scaled,
         access_list_scaled: attempted_priced.access_list_scaled,
+        code_preparation_scaled: attempted_priced.code_preparation_scaled,
         operations_scaled: attempted_priced.operations_scaled,
         feature_error_scaled: attempted_priced.feature_error_scaled,
         resources_scaled: committed_priced.resources_scaled,
@@ -435,6 +476,7 @@ fn complete_block_pricing(
         prove,
         attempted_known.authorization_validations(),
         attempted_known.access_list_items(),
+        attempted_known.code_preparation().into(),
     ))
 }
 
@@ -608,15 +650,20 @@ pub fn quote_shasta_proposal_with_execution_profile(
         {
             return Err(RuntimeQuoteError::Topology("block_identity"));
         }
-        let (node_pricing, prove_pricing, authorization_validations, access_list_items) =
-            complete_block_pricing(
-                position,
-                &block.execution.committed_report,
-                &block.execution.attempted_report,
-                block.committed_payload,
-                block.execution.exact_resources,
-                block.mpt,
-            )?;
+        let (
+            node_pricing,
+            prove_pricing,
+            authorization_validations,
+            access_list_items,
+            code_preparation,
+        ) = complete_block_pricing(
+            position,
+            &block.execution.committed_report,
+            &block.execution.attempted_report,
+            block.committed_payload,
+            block.execution.exact_resources,
+            block.mpt,
+        )?;
         total_transaction_count =
             checked_add_u64(total_transaction_count, block.input_transaction_count)?;
         total_unattempted =
@@ -658,6 +705,7 @@ pub fn quote_shasta_proposal_with_execution_profile(
                 attempted_transaction_count: block.attempted_transaction_count,
                 authorization_validations,
                 access_list_items,
+                code_preparation,
                 true_unattempted_transactions: block.true_unattempted_transactions,
                 committed_payload: block.committed_payload,
                 exact_resources: block.execution.exact_resources.into(),
@@ -886,6 +934,7 @@ mod tests {
             block.node.pricing.fixed_scaled
                 + block.node.pricing.authorization_scaled
                 + block.node.pricing.access_list_scaled
+                + block.node.pricing.code_preparation_scaled
                 + block.node.pricing.operations_scaled
                 + block.node.pricing.evm_local_resources_scaled
                 + block.node.pricing.transaction_payload_scaled,
@@ -895,6 +944,7 @@ mod tests {
             block.prove.pricing.fixed_scaled
                 + block.prove.pricing.authorization_scaled
                 + block.prove.pricing.access_list_scaled
+                + block.prove.pricing.code_preparation_scaled
                 + block.prove.pricing.operations_scaled
                 + block.prove.pricing.resources_scaled
                 + block.prove.pricing.mpt_scaled
@@ -1075,6 +1125,10 @@ mod tests {
         let committed = ZkGasBlockSnapshot {
             authorization_validations: 4,
             access_list_items: 3,
+            code_preparation: CodePreparationSelectors {
+                nonempty_events: 1,
+                total_bytes: 32,
+            },
             operation_routes: vec![operation(10, 0)],
             resources: committed_resources,
             transaction_payload: TransactionPayloadSelectors {
@@ -1087,6 +1141,10 @@ mod tests {
         let attempted = ZkGasBlockSnapshot {
             authorization_validations: 16,
             access_list_items: 7,
+            code_preparation: CodePreparationSelectors {
+                nonempty_events: 2,
+                total_bytes: 64,
+            },
             started_non_anchor_transactions: 1,
             operation_routes: vec![operation(50, 7)],
             resources: attempted_resources,
@@ -1098,20 +1156,47 @@ mod tests {
         }
         .shadow_report();
 
-        let (node, prove, authorization_validations, access_list_items) = complete_block_pricing(
-            0,
-            &committed,
-            &attempted,
-            ProposalPayloadSelectors {
-                total_transaction_count: 1,
-                canonical_transaction_bytes: 100,
-                nonempty_payload_transactions: 1,
-            },
-            committed_resources,
-            MptSelectors::default(),
-        )
-        .expect("complete mixed-scope block pricing");
+        let (node, prove, authorization_validations, access_list_items, code_preparation) =
+            complete_block_pricing(
+                0,
+                &committed,
+                &attempted,
+                ProposalPayloadSelectors {
+                    total_transaction_count: 1,
+                    canonical_transaction_bytes: 100,
+                    nonempty_payload_transactions: 1,
+                },
+                committed_resources,
+                MptSelectors::default(),
+            )
+            .expect("complete mixed-scope block pricing");
 
+        assert_eq!(
+            node.code_preparation,
+            CodePreparationSelectorsSnapshot {
+                nonempty_events: 1,
+                total_bytes: 32
+            }
+        );
+        assert_eq!(
+            code_preparation,
+            CodePreparationSelectorsSnapshot {
+                nonempty_events: 2,
+                total_bytes: 64
+            }
+        );
+        assert_eq!(node.code_preparation_scaled, 9_216 * FIXED_POINT_SCALE);
+        assert_eq!(prove.code_preparation_scaled, 18_432 * FIXED_POINT_SCALE);
+        assert_eq!(
+            node.known_subtotal_scaled,
+            node.fixed_scaled
+                + node.authorization_scaled
+                + node.access_list_scaled
+                + node.code_preparation_scaled
+                + node.operations_scaled
+                + node.evm_local_resources_scaled
+                + node.transaction_payload_scaled
+        );
         assert_eq!(node.access_list_items, 3);
         assert_eq!(access_list_items, 7);
         assert_eq!(node.access_list_scaled, 3 * 8192 * FIXED_POINT_SCALE);
@@ -1144,6 +1229,7 @@ mod tests {
             prove.fixed_scaled
                 + prove.authorization_scaled
                 + prove.access_list_scaled
+                + prove.code_preparation_scaled
                 + prove.operations_scaled
                 + prove.resources_scaled
                 + prove.transaction_payload_scaled
@@ -1259,8 +1345,8 @@ mod tests {
     #[allow(clippy::too_many_lines)] // One assertion table pins the complete fixture quote contract.
     fn checked_in_current_guest_input_completes_quote_with_public_output_parity() {
         let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join(
-            "../../tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_41455_l2_12556056_12556247.json",
-        );
+                "../../tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_41455_l2_12556056_12556247.json",
+            );
         let input: GuestInput = serde_json::from_str(
             &fs::read_to_string(&fixture)
                 .unwrap_or_else(|error| panic!("read {}: {error}", fixture.display())),
@@ -1303,6 +1389,45 @@ mod tests {
             quote.node.unzen_zkgas_sum, 259_514_910,
             "the checked-in proposal uses mainnet Unzen pricing"
         );
+        // This fixture has no accepted nonempty creation. Its only successor uplift
+        // is 62 PGU per code byte: 64 PGU/B replaces the parent's 2 PGU/B.
+        assert_eq!(
+            quote
+                .blocks
+                .iter()
+                .map(|block| block.node.pricing.evm_local_resources.unique_code_bytes)
+                .sum::<u64>(),
+            1_503_474
+        );
+        assert_eq!(
+            quote
+                .blocks
+                .iter()
+                .map(|block| block.prove.exact_resources.unique_code_bytes)
+                .sum::<u64>(),
+            1_503_474
+        );
+        assert!(quote.blocks.iter().all(|block| {
+            block.node.pricing.code_preparation == CodePreparationSelectorsSnapshot::default()
+                && block.prove.code_preparation == CodePreparationSelectorsSnapshot::default()
+                && block.node.pricing.code_preparation_scaled == 0
+                && block.prove.pricing.code_preparation_scaled == 0
+        }));
+        assert_eq!(
+            quote
+                .blocks
+                .iter()
+                .map(|block| block.node.pricing.evm_local_resources_scaled)
+                .sum::<i128>()
+                - 35_600_428_000_000_000_000_000_000,
+            62 * i128::from(
+                quote
+                    .blocks
+                    .iter()
+                    .map(|block| block.node.pricing.evm_local_resources.unique_code_bytes)
+                    .sum::<u64>()
+            ) * FIXED_POINT_SCALE
+        );
         assert_eq!(
             quote.blocks.iter().fold(
                 (0_i128, 0_i128, 0_i128, 0_i128),
@@ -1317,7 +1442,7 @@ mod tests {
                 247_097_387_893_866_428_488_965_859,
                 3_187_806_573_010_541_525_400_160_675,
                 0,
-                35_600_428_000_000_000_000_000_000,
+                128_815_816_000_000_000_000_000_000,
             )
         );
         assert_eq!(
@@ -1335,7 +1460,7 @@ mod tests {
                 247_097_387_893_866_428_488_965_859,
                 3_187_806_573_010_541_525_400_160_675,
                 0,
-                35_600_428_000_000_000_000_000_000,
+                128_815_816_000_000_000_000_000_000,
                 1_185_183_312_000_000_000_000_000_000,
             )
         );
@@ -1343,9 +1468,9 @@ mod tests {
             quote.node,
             NodeProposalWorkloadQuote {
                 unzen_zkgas_sum: 259_514_910,
-                block_local_known_scaled: 3_486_058_436_904_407_953_889_126_534,
-                block_local_known_pgu: 3_486_058_437,
-                sum_of_block_known_pgu: 3_486_058_454,
+                block_local_known_scaled: 3_579_273_824_904_407_953_889_126_534,
+                block_local_known_pgu: 3_579_273_825,
+                sum_of_block_known_pgu: 3_579_273_842,
             }
         );
         assert_eq!(
@@ -1381,6 +1506,7 @@ mod tests {
                 fixed_scaled: 0,
                 authorization_scaled: 0,
                 access_list_scaled: 0,
+                code_preparation_scaled: 0,
                 operations_scaled: 0,
                 feature_error_scaled: 0,
                 resources_scaled: 0,
@@ -1395,16 +1521,16 @@ mod tests {
         );
         assert_eq!(
             quote.prove.block_local_scaled,
-            4_671_241_748_904_407_953_889_126_534
+            4_764_457_136_904_407_953_889_126_534
         );
-        assert_eq!(quote.prove.block_local_pgu, 4_671_241_749);
-        assert_eq!(quote.prove.sum_of_block_local_pgu, 4_671_241_766);
+        assert_eq!(quote.prove.block_local_pgu, 4_764_457_137);
+        assert_eq!(quote.prove.sum_of_block_local_pgu, 4_764_457_154);
         assert_eq!(quote.prove.proposal_once_pgu, 160_621_711);
         assert_eq!(
             quote.prove.total_scaled,
-            4_831_863_459_639_888_356_009_085_400
+            4_925_078_847_639_888_356_009_085_400
         );
-        assert_eq!(quote.prove.total_pgu, 4_831_863_460);
+        assert_eq!(quote.prove.total_pgu, 4_925_078_848);
         quote.blocks.iter().for_each(assert_block_formula_closes);
         assert_proposal_formula_closes(&quote);
     }

@@ -307,6 +307,15 @@ Anchor items count when carried. Proposal-once pricing adds zero access-list con
 current-model comparator checks each count against the shared tariff, attempted counts/prices covering
 committed ones, and all total boundaries.
 
+Successful nonempty code preparation is counted per occurrence, including CREATE/CREATE2 results
+whose work is later reverted by an ancestor. Node pricing records committed outer-scope selectors
+`code_preparation.{nonempty_events,total_bytes}` and `code_preparation_scaled`; the prove block uses
+the attempted prefix, retaining preparations in discarded outer candidates. The shared model prices
+that term once per block as `8192 × nonempty_events + 32 × total_bytes` PGU. It separately prices
+unique code bytes at 64 PGU/byte; unique code resources do not replace the per-occurrence term.
+Proposal-once preparation is zero. The comparator checks both selector domains, attempted coverage,
+the shared tariff and every subtotal. Missing selectors or contributions are rejected.
+
 These fields are required by the initial schema; missing counts or contributions are rejected rather
 than inferred as zero. The current-model comparator validates each count against the shared model and
 checks all block/proposal sum boundaries. Authorization recovery for outer input transactions filtered

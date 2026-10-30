@@ -259,6 +259,31 @@ Run progressively with the existing resource guards; a larger actual workload is
 measurement result, not a reason to change tariffs automatically. Set `SOLC_BIN` and
 `NATIVE_FIXTURE_BIN` to run the real compiler/native qualification tests.
 
+For a finite MODEXP input-value boundary probe, generate another catalog:
+
+```sh
+~/.venv/bin/python bin/zkgas/bench/cases/modexp_values.py \
+  --solc /path/to/solc --output-dir experiment/modexp-values
+```
+
+The 32 cases share one runtime and call precompile `0x05`. For each byte width
+`L=128/256/512`, the base is `2^(8L)-1`, the exponent is one byte with value `0/1/3`,
+and the modulus is odd (`2^(8L)-189`), a power of two (`2^(8L-1)`), or even CRT
+(`3*2^(8L-2)`). The 27 single-call combinations retain exponent-zero controls;
+three zero-call CRT/exponent-three controls and width-512 CRT/exponent-three repetitions
+at four and sixteen calls complete the matrix. Every call clears all output words,
+checks success and exact returndata length, and compares every word with Python `pow`.
+The native qualification additionally checks independent closed-form expected results,
+exact STATICCALL/root RETURN counts, and malformed-input/output rejection. Input is copied
+once and separate output memory is allocated before the loop, including zero-call controls.
+The recorded 512/2048/8192 per-call gas values are source-derived precompile costs, not
+measured transaction gas or whole-node quotes. Use the same explicit `evm-gas-only` profile
+and reviewed program manifest for the entire experiment; retain failures and controls.
+The generator/runtime bound of 65536 exceeds the legal Osaka call count even at the
+minimum 500 gas per call, and does not raise the producer's transaction gas budget.
+These are finite unsaturated value-axis probes, not a global workload maximum or a tariff
+change. Set `SOLC_BIN` and `NATIVE_FIXTURE_BIN` to run the real compiler/native tests.
+
 ```sh
 ~/.venv/bin/python bin/zkgas/bench/workload.py screen \
   --config experiment/config.json --catalog experiment/spawn-memory/catalog.json \

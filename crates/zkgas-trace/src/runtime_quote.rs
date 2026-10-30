@@ -70,6 +70,8 @@ impl From<MptSelectors> for MptSelectorsSnapshot {
 #[serde(deny_unknown_fields)]
 pub struct PricingBreakdownSnapshot {
     pub fixed_scaled: i128,
+    /// Normalized raw-authorization validation contribution in fixed-point PGU.
+    pub authorization_scaled: i128,
     pub operations_scaled: i128,
     pub feature_error_scaled: i128,
     pub resources_scaled: i128,
@@ -113,7 +115,11 @@ impl From<TransactionPayloadSelectorsSnapshot> for TransactionPayloadSelectors {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NodePricingBreakdownSnapshot {
+    /// Raw entries in committed non-Anchor EIP-7702 transactions, including ignored entries.
+    pub authorization_validations: u64,
     pub fixed_scaled: i128,
+    /// Normalized raw-authorization validation contribution in fixed-point PGU.
+    pub authorization_scaled: i128,
     pub operations_scaled: i128,
     pub feature_error_scaled: i128,
     pub evm_local_resources: ResourceSelectorsSnapshot,
@@ -130,6 +136,8 @@ impl From<ZkGasKnownBlockBreakdown> for NodePricingBreakdownSnapshot {
     fn from(value: ZkGasKnownBlockBreakdown) -> Self {
         Self {
             fixed_scaled: value.fixed_scaled(),
+            authorization_validations: value.authorization_validations(),
+            authorization_scaled: value.authorization_scaled(),
             operations_scaled: value.operations_scaled(),
             feature_error_scaled: value.feature_error_scaled(),
             evm_local_resources: value.evm_local_resources().into(),
@@ -148,6 +156,7 @@ impl TryFrom<PricingBreakdown> for PricingBreakdownSnapshot {
     fn try_from(value: PricingBreakdown) -> Result<Self, Self::Error> {
         Ok(Self {
             fixed_scaled: value.fixed_scaled,
+            authorization_scaled: value.authorization_scaled,
             operations_scaled: value.operations_scaled,
             feature_error_scaled: value.feature_error_scaled,
             resources_scaled: value.resources_scaled,
@@ -186,6 +195,8 @@ pub struct ProveBlockWorkloadQuote {
     pub input_transaction_count: u64,
     pub consumed_candidate_count: u64,
     pub attempted_transaction_count: u64,
+    /// Raw authorization entries in begun EVM scopes; includes discarded outer attempts.
+    pub authorization_validations: u64,
     pub true_unattempted_transactions: u64,
     /// Independently observed signed payload in the canonical committed block contents.
     pub committed_payload: ProposalPayloadSelectors,
@@ -334,7 +345,7 @@ fn complete_block_pricing(
     committed_payload: ProposalPayloadSelectors,
     exact_resources: ResourceSelectors,
     mpt: MptSelectors,
-) -> Result<(NodePricingBreakdownSnapshot, PricingBreakdownSnapshot), RuntimeQuoteError> {
+) -> Result<(NodePricingBreakdownSnapshot, PricingBreakdownSnapshot, u64), RuntimeQuoteError> {
     let committed_known = match committed_report.status() {
         ZkGasShadowStatus::Incomplete { known, .. } => Some(known),
         ZkGasShadowStatus::Diagnostic(_) => None,
@@ -374,10 +385,14 @@ fn complete_block_pricing(
             block_index,
             source,
         })?;
-    attempted_known.ok_or(RuntimeQuoteError::Missing("attempted_shadow_breakdown"))?;
+    let attempted_known =
+        attempted_known.ok_or(RuntimeQuoteError::Missing("attempted_shadow_breakdown"))?;
     let total_scaled = checked_add_i128(
         checked_add_i128(
-            attempted_priced.fixed_scaled,
+            checked_add_i128(
+                attempted_priced.fixed_scaled,
+                attempted_priced.authorization_scaled,
+            )?,
             attempted_priced.operations_scaled,
         )?,
         checked_add_i128(
@@ -390,6 +405,7 @@ fn complete_block_pricing(
     )?;
     let prove = PricingBreakdownSnapshot {
         fixed_scaled: attempted_priced.fixed_scaled,
+        authorization_scaled: attempted_priced.authorization_scaled,
         operations_scaled: attempted_priced.operations_scaled,
         feature_error_scaled: attempted_priced.feature_error_scaled,
         resources_scaled: committed_priced.resources_scaled,
@@ -399,7 +415,11 @@ fn complete_block_pricing(
         total_pgu: ceil_scaled(total_scaled)?,
         ..Default::default()
     };
-    Ok((NodePricingBreakdownSnapshot::from(committed_known), prove))
+    Ok((
+        NodePricingBreakdownSnapshot::from(committed_known),
+        prove,
+        attempted_known.authorization_validations(),
+    ))
 }
 
 struct ReplayedBlock {
@@ -572,7 +592,7 @@ pub fn quote_shasta_proposal_with_execution_profile(
         {
             return Err(RuntimeQuoteError::Topology("block_identity"));
         }
-        let (node_pricing, prove_pricing) = complete_block_pricing(
+        let (node_pricing, prove_pricing, authorization_validations) = complete_block_pricing(
             position,
             &block.execution.committed_report,
             &block.execution.attempted_report,
@@ -619,6 +639,7 @@ pub fn quote_shasta_proposal_with_execution_profile(
                 input_transaction_count: block.input_transaction_count,
                 consumed_candidate_count: block.consumed_candidate_count,
                 attempted_transaction_count: block.attempted_transaction_count,
+                authorization_validations,
                 true_unattempted_transactions: block.true_unattempted_transactions,
                 committed_payload: block.committed_payload,
                 exact_resources: block.execution.exact_resources.into(),
@@ -749,6 +770,25 @@ mod tests {
         }
     }
 
+    #[test]
+    fn authorization_report_fields_are_required_without_zero_fallback() {
+        let encoded = serde_json::to_value(NodePricingBreakdownSnapshot::default()).unwrap();
+        for field in ["authorization_validations", "authorization_scaled"] {
+            let mut missing = encoded.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(
+                serde_json::from_value::<NodePricingBreakdownSnapshot>(missing).is_err(),
+                "node pricing must reject missing {field}"
+            );
+        }
+        let mut missing = serde_json::to_value(PricingBreakdownSnapshot::default()).unwrap();
+        missing
+            .as_object_mut()
+            .unwrap()
+            .remove("authorization_scaled");
+        assert!(serde_json::from_value::<PricingBreakdownSnapshot>(missing).is_err());
+    }
+
     fn assert_initial_json_schema(quote: &ProposalWorkloadQuote) {
         let encoded =
             serde_json::to_vec_pretty(quote).expect("serialize proposal workload quote JSON");
@@ -807,6 +847,7 @@ mod tests {
         assert_eq!(
             block.node.pricing.known_subtotal_scaled,
             block.node.pricing.fixed_scaled
+                + block.node.pricing.authorization_scaled
                 + block.node.pricing.operations_scaled
                 + block.node.pricing.evm_local_resources_scaled
                 + block.node.pricing.transaction_payload_scaled,
@@ -814,6 +855,7 @@ mod tests {
         assert_eq!(
             block.prove.pricing.total_scaled,
             block.prove.pricing.fixed_scaled
+                + block.prove.pricing.authorization_scaled
                 + block.prove.pricing.operations_scaled
                 + block.prove.pricing.resources_scaled
                 + block.prove.pricing.mpt_scaled
@@ -992,6 +1034,7 @@ mod tests {
             ..Default::default()
         };
         let committed = ZkGasBlockSnapshot {
+            authorization_validations: 4,
             operation_routes: vec![operation(10, 0)],
             resources: committed_resources,
             transaction_payload: TransactionPayloadSelectors {
@@ -1002,6 +1045,7 @@ mod tests {
         }
         .shadow_report();
         let attempted = ZkGasBlockSnapshot {
+            authorization_validations: 16,
             started_non_anchor_transactions: 1,
             operation_routes: vec![operation(50, 7)],
             resources: attempted_resources,
@@ -1013,7 +1057,7 @@ mod tests {
         }
         .shadow_report();
 
-        let (node, prove) = complete_block_pricing(
+        let (node, prove, authorization_validations) = complete_block_pricing(
             0,
             &committed,
             &attempted,
@@ -1027,6 +1071,10 @@ mod tests {
         )
         .expect("complete mixed-scope block pricing");
 
+        assert_eq!(node.authorization_validations, 4);
+        assert_eq!(authorization_validations, 16);
+        assert_eq!(node.authorization_scaled, 4 * 200_000 * FIXED_POINT_SCALE);
+        assert_eq!(prove.authorization_scaled, 16 * 200_000 * FIXED_POINT_SCALE);
         assert_eq!(node.operations_scaled, 10);
         assert_eq!(prove.operations_scaled, 57);
         assert_eq!(prove.feature_error_scaled, 7);
@@ -1049,6 +1097,7 @@ mod tests {
         assert_eq!(
             prove.total_scaled,
             prove.fixed_scaled
+                + prove.authorization_scaled
                 + prove.operations_scaled
                 + prove.resources_scaled
                 + prove.transaction_payload_scaled
@@ -1284,6 +1333,7 @@ mod tests {
             quote.prove.proposal_once,
             PricingBreakdownSnapshot {
                 fixed_scaled: 0,
+                authorization_scaled: 0,
                 operations_scaled: 0,
                 feature_error_scaled: 0,
                 resources_scaled: 0,

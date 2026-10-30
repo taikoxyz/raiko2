@@ -88,16 +88,16 @@ risc0-zkvm = { version = "=3.0.5", features = ["prove"] }
 sp1-sdk = { version = "=6.8.1", features = ["blocking", "network"] }
 
 # Alethia reth: reviewed commit from the maintained internal shadow-pricing branch (#260).
-alethia-reth-block = { git = "https://github.com/taikoxyz/alethia-reth", rev = "0f30f488c88635e38932843e67af2d918319f7e7", default-features = false, features = [
+alethia-reth-block = { git = "https://github.com/taikoxyz/alethia-reth", rev = "b7060a1ca1a94c22acb786c7d9a54d45d6351dbe", default-features = false, features = [
     "prover",
     "serde",
 ] }
-alethia-reth-chainspec = { git = "https://github.com/taikoxyz/alethia-reth", rev = "0f30f488c88635e38932843e67af2d918319f7e7", default-features = false }
-alethia-reth-consensus = { git = "https://github.com/taikoxyz/alethia-reth", rev = "0f30f488c88635e38932843e67af2d918319f7e7", default-features = false, features = [
+alethia-reth-chainspec = { git = "https://github.com/taikoxyz/alethia-reth", rev = "b7060a1ca1a94c22acb786c7d9a54d45d6351dbe", default-features = false }
+alethia-reth-consensus = { git = "https://github.com/taikoxyz/alethia-reth", rev = "b7060a1ca1a94c22acb786c7d9a54d45d6351dbe", default-features = false, features = [
     "full",
 ] }
-alethia-reth-evm = { git = "https://github.com/taikoxyz/alethia-reth", rev = "0f30f488c88635e38932843e67af2d918319f7e7", default-features = false }
-alethia-reth-primitives = { git = "https://github.com/taikoxyz/alethia-reth", rev = "0f30f488c88635e38932843e67af2d918319f7e7", default-features = false }
+alethia-reth-evm = { git = "https://github.com/taikoxyz/alethia-reth", rev = "b7060a1ca1a94c22acb786c7d9a54d45d6351dbe", default-features = false }
+alethia-reth-primitives = { git = "https://github.com/taikoxyz/alethia-reth", rev = "b7060a1ca1a94c22acb786c7d9a54d45d6351dbe", default-features = false }
 
 # Reth (aligned with alethia-reth's OP-reth v2.6 compatibility surface)
 reth-ethereum-primitives = { git = "https://github.com/ethereum-optimism/reth", rev = "d9bd9875fe88dcc0183d78b187ce2ceab0c93e93", default-features = false, features = [

@@ -47,6 +47,7 @@ fn executable() -> ExecutableIdentity {
 fn snapshot(pricing: PricingBreakdown) -> PricingBreakdownSnapshot {
     PricingBreakdownSnapshot {
         fixed_scaled: pricing.fixed_scaled,
+        authorization_scaled: pricing.authorization_scaled,
         operations_scaled: pricing.operations_scaled,
         feature_error_scaled: pricing.feature_error_scaled,
         resources_scaled: pricing.resources_scaled,
@@ -73,6 +74,8 @@ fn current_model_profiles() -> CompatibilityProfilesV1 {
 
 fn quote() -> CompleteQuoteV1 {
     let public_output = format!("0x{}", "00".repeat(32));
+    let node_pricing = json!({"authorization_scaled":"0","fixed_scaled":"0","operations_scaled":"0","feature_error_scaled":"0","evm_local_resources":{"unique_account_count":0,"unique_storage_slot_access_count":0,"unique_storage_slot_write_count":0,"unique_code_hash_count":0,"unique_code_bytes":0},"evm_local_resources_scaled":"0","transaction_payload":{"canonical_transaction_bytes":1,"nonempty_payload_transactions":0},"transaction_payload_scaled":"0","authorization_validations":0,"known_subtotal_scaled":"0","known_subtotal_pgu":"0"});
+    let prove_pricing = json!({"authorization_scaled":"0","fixed_scaled":"0","operations_scaled":"0","feature_error_scaled":"0","resources_scaled":"0","mpt_scaled":"0","startup_scaled":"0","transaction_payload_scaled":"0","blob_source_scaled":"0","parent_mpt_scaled":"0","total_scaled":"0","total_pgu":"0"});
     let mut quote: CompleteQuoteV1 = serde_json::from_value(json!({
         "schema_version":1,"key":{"corpus_id":"corpus","sample_id":"sample","guest_input_sha256":"input"},
         "executable":executable(),"input_source":{"kind":"single","descriptor_sha256":"descriptor"},"guest_input_byte_length":12,
@@ -80,12 +83,12 @@ fn quote() -> CompleteQuoteV1 {
         "prediction_unit":"sp1_pgu","prediction_surface":"prove","calibration_profile":RUNTIME_SPEC_SHA256,
         "quote":{"schema_version":1,"model_id":RUNTIME_SPEC_SHA256,"guest_input_sha256":"input","guest_input_bincode_length":12,"public_output":public_output,"blocks":[{
             "block_index":0,"block_number":2,
-            "node":{"unzen_zkgas":2,"pricing":{"fixed_scaled":"0","operations_scaled":"0","feature_error_scaled":"0","evm_local_resources":{"unique_account_count":0,"unique_storage_slot_access_count":0,"unique_storage_slot_write_count":0,"unique_code_hash_count":0,"unique_code_bytes":0},"evm_local_resources_scaled":"0","transaction_payload":{"canonical_transaction_bytes":1,"nonempty_payload_transactions":0},"transaction_payload_scaled":"0","known_subtotal_scaled":"0","known_subtotal_pgu":"0"}},
-            "prove":{"input_transaction_count":1,"consumed_candidate_count":1,"attempted_transaction_count":1,"true_unattempted_transactions":0,"committed_payload":{"total_transaction_count":1,"canonical_transaction_bytes":1,"nonempty_payload_transactions":0},"exact_resources":{"unique_account_count":0,"unique_storage_slot_access_count":0,"unique_storage_slot_write_count":0,"unique_code_hash_count":0,"unique_code_bytes":0},"mpt":{"path_node_visits":0,"materialization_work_units":0,"hydration_hash_blocks":0,"dirty_encoded_nodes":0,"dirty_hash_blocks":0,"structural_branch_extension_churn_nodes":0,"dropped_trie_nodes":0},"pricing":{"fixed_scaled":"0","operations_scaled":"0","feature_error_scaled":"0","resources_scaled":"0","mpt_scaled":"0","startup_scaled":"0","transaction_payload_scaled":"0","blob_source_scaled":"0","parent_mpt_scaled":"0","total_scaled":"0","total_pgu":"0"}}
+            "node":{"unzen_zkgas":2,"pricing":node_pricing},
+            "prove":{"input_transaction_count":1,"consumed_candidate_count":1,"attempted_transaction_count":1,"authorization_validations":0,"true_unattempted_transactions":0,"committed_payload":{"total_transaction_count":1,"canonical_transaction_bytes":1,"nonempty_payload_transactions":0},"exact_resources":{"unique_account_count":0,"unique_storage_slot_access_count":0,"unique_storage_slot_write_count":0,"unique_code_hash_count":0,"unique_code_bytes":0},"mpt":{"path_node_visits":0,"materialization_work_units":0,"hydration_hash_blocks":0,"dirty_encoded_nodes":0,"dirty_hash_blocks":0,"structural_branch_extension_churn_nodes":0,"dropped_trie_nodes":0},"pricing":prove_pricing}
         }],
             "node":{"unzen_zkgas_sum":"2","block_local_known_scaled":"0","block_local_known_pgu":"0","sum_of_block_known_pgu":"0"},
             "prove":{"selectors":{"payload":{"total_transaction_count":1,"canonical_transaction_bytes":1,"nonempty_payload_transactions":0},"true_unattempted_transactions":0,"blobs":{"source_blob_counts":[1],"proposal_blob_hash_count":1,"provider_blob_count":1,"provider_commitment_count":1,"provider_proof_count":1},"parent_mpt":{"path_node_visits":0,"materialization_work_units":0,"hydration_hash_blocks":0,"dirty_encoded_nodes":0,"dirty_hash_blocks":0,"structural_branch_extension_churn_nodes":0,"dropped_trie_nodes":0}},
-                "block_local_scaled":"0","block_local_pgu":"0","sum_of_block_local_pgu":"0","proposal_once":{"fixed_scaled":"10000000000000000000","operations_scaled":"0","feature_error_scaled":"0","resources_scaled":"0","mpt_scaled":"0","startup_scaled":"0","transaction_payload_scaled":"0","blob_source_scaled":"0","parent_mpt_scaled":"0","total_scaled":"10000000000000000000","total_pgu":"10"},"proposal_once_pgu":"10","total_scaled":"10000000000000000000","total_pgu":"10"}}
+                "block_local_scaled":"0","block_local_pgu":"0","sum_of_block_local_pgu":"0","proposal_once":{"authorization_scaled":"0","fixed_scaled":"10000000000000000000","operations_scaled":"0","feature_error_scaled":"0","resources_scaled":"0","mpt_scaled":"0","startup_scaled":"0","transaction_payload_scaled":"0","blob_source_scaled":"0","parent_mpt_scaled":"0","total_scaled":"10000000000000000000","total_pgu":"10"},"proposal_once_pgu":"10","total_scaled":"10000000000000000000","total_pgu":"10"}}
     })).unwrap();
     let selectors = &quote.quote.prove.selectors;
     let parent = selectors.parent_mpt;
@@ -1410,4 +1413,137 @@ fn unverified_failed_rows_cannot_alias_one_immutable_row_path() {
             .contains("duplicate comparison row ID")
     );
     assert!(!args.output.exists());
+}
+
+fn quote_with_authorization_counts(committed: u64, attempted: u64) -> CompleteQuoteV1 {
+    const SCALE: i128 = 1_000_000_000_000_000_000;
+    let mut q = quote();
+    let node_scaled = ZkGasModel
+        .price_authorization_validations(committed)
+        .unwrap();
+    let prove_scaled = ZkGasModel
+        .price_authorization_validations(attempted)
+        .unwrap();
+    let node = &mut q.quote.blocks[0].node.pricing;
+    node.authorization_validations = committed;
+    node.authorization_scaled = node_scaled;
+    node.known_subtotal_scaled += node_scaled;
+    node.known_subtotal_pgu += (node_scaled / SCALE) as u128;
+    q.quote.node.block_local_known_scaled += node_scaled;
+    q.quote.node.block_local_known_pgu += (node_scaled / SCALE) as u128;
+    q.quote.node.sum_of_block_known_pgu += (node_scaled / SCALE) as u128;
+    let block = &mut q.quote.blocks[0].prove;
+    block.authorization_validations = attempted;
+    block.pricing.authorization_scaled = prove_scaled;
+    block.pricing.total_scaled += prove_scaled;
+    block.pricing.total_pgu += (prove_scaled / SCALE) as u128;
+    q.quote.prove.block_local_scaled += prove_scaled;
+    q.quote.prove.block_local_pgu += (prove_scaled / SCALE) as u128;
+    q.quote.prove.sum_of_block_local_pgu += (prove_scaled / SCALE) as u128;
+    q.quote.prove.total_scaled += prove_scaled;
+    q.quote.prove.total_pgu += (prove_scaled / SCALE) as u128;
+    q
+}
+
+#[test]
+fn authorization_count_tariffs_close_on_node_attempted_prove_and_proposal_scopes() {
+    for (committed, attempted) in [(0, 0), (1, 1), (4, 16), (16, 16)] {
+        let dir = TestDir::new();
+        let q = quote_with_authorization_counts(committed, attempted);
+        let encoded = serde_json::to_value(&q).unwrap();
+        assert_eq!(
+            encoded["quote"]["blocks"][0]["node"]["pricing"]["authorization_validations"],
+            committed
+        );
+        assert!(
+            encoded["quote"]["blocks"][0]["node"]["pricing"]["authorization_scaled"].is_string()
+        );
+        assert_eq!(q.quote.prove.proposal_once.authorization_scaled, 0);
+        let args = write_inputs(
+            &dir,
+            &[QuoteRowV1::Complete(Box::new(q))],
+            &[complete_observation()],
+        );
+        let run = run_compare(&args, &executable()).unwrap();
+        assert_eq!(run.manifest.counts.get(&ComparisonKind::Joined), Some(&1));
+    }
+}
+
+#[test]
+fn authorization_reports_reject_count_price_forgery_and_proposal_double_charge() {
+    for mutation in [
+        "node-count",
+        "attempted-count",
+        "attempted-below-committed",
+        "proposal-charge",
+    ] {
+        let dir = TestDir::new();
+        let mut q = quote_with_authorization_counts(4, 16);
+        match mutation {
+            "node-count" => q.quote.blocks[0].node.pricing.authorization_validations = 5,
+            "attempted-count" => q.quote.blocks[0].prove.authorization_validations = 17,
+            "attempted-below-committed" => q.quote.blocks[0].prove.authorization_validations = 3,
+            "proposal-charge" => {
+                q.quote.prove.proposal_once.authorization_scaled = 1;
+                q.quote.prove.proposal_once.startup_scaled -= 1;
+            }
+            _ => unreachable!(),
+        }
+        let args = write_inputs(
+            &dir,
+            &[QuoteRowV1::Complete(Box::new(q))],
+            &[complete_observation()],
+        );
+        assert!(
+            run_compare(&args, &executable()).is_err(),
+            "must reject {mutation} with otherwise closed totals"
+        );
+    }
+    let q = quote_with_authorization_counts(4, 16);
+    for scope in [
+        "node-count",
+        "node-price",
+        "prove-count",
+        "prove-price",
+        "proposal-price",
+    ] {
+        let mut encoded = serde_json::to_value(&q).unwrap();
+        match scope {
+            "node-count" => {
+                encoded["quote"]["blocks"][0]["node"]["pricing"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("authorization_validations");
+            }
+            "node-price" => {
+                encoded["quote"]["blocks"][0]["node"]["pricing"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("authorization_scaled");
+            }
+            "prove-count" => {
+                encoded["quote"]["blocks"][0]["prove"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("authorization_validations");
+            }
+            "prove-price" => {
+                encoded["quote"]["blocks"][0]["prove"]["pricing"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("authorization_scaled");
+            }
+            "proposal-price" => {
+                encoded["quote"]["prove"]["proposal_once"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("authorization_scaled");
+            }
+            _ => unreachable!(),
+        }
+        assert!(
+            serde_json::from_value::<CompleteQuoteV1>(encoded).is_err(),
+            "required field {scope}"
+        );
+    }
 }

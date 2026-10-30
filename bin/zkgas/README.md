@@ -261,6 +261,21 @@ Incompatible strata expose series-shape diagnostics only: Pearson, average-tie S
 Kendall tau-b, and predeclared prediction-bucket actual-workload amplification. Insufficient or
 constant series carry explicit unavailability reasons. No cross-unit direct ratio is created.
 
+The reviewed Alethia authorization-validation tariff is part of both quote surfaces. Node block
+pricing records `authorization_validations` from the committed Shadow snapshot and the normalized
+`authorization_scaled` contribution. Each prove block separately records the attempted authorization
+count and prices that count once, alongside the existing attempted execution and committed-resource
+terms. Duplicate authorities, stale authorizations, failed signature recovery and included user
+REVERTs retain their raw entry counts. Proposal-once pricing adds no authorization term.
+
+These fields are required by the initial schema; missing counts or contributions are rejected rather
+than inferred as zero. The current-model comparator validates each count against the shared model and
+checks all block/proposal sum boundaries. Authorization recovery for outer input transactions filtered
+before an EVM scope begins remains outside these committed/attempted prefixes. Updating the reviewed
+source pin changes declared guest source fingerprints; host quote validation does not rebuild or
+establish alignment of existing production guest binaries. Frozen experiment ELF identities retain
+their original source manifests and must be verified against the corresponding frozen source tree.
+
 ## Contracts, units, and compatibility
 
 The authoritative types are in [`src/contracts.rs`](src/contracts.rs). All eight contracts have

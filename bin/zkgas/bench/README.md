@@ -402,6 +402,25 @@ and stable-report-field compatibility checks. Use the same reviewed guest and un
 with the existing guarded sampler. No access-list-specific tariff or pricing-deficit claim is
 introduced by this producer.
 
+After freezing a candidate tariff, generate a separate prospective validation cohort:
+
+```sh
+~/.venv/bin/python bin/zkgas/bench/cases/access_list_holdout.py \
+  --output-dir experiment/access-list-holdout
+```
+
+Its eleven measurements contain nine unfitted candidates and two explicitly labelled
+replays of the main cohort's empty one/three-block references. Candidates cover repeated
+addresses K=2/3; repeated address-plus-key items K=32/512/3072 and K=512 across three
+blocks; repeated keys K=3072; distinct addresses K=512; and reversed distinct keys K=256.
+All reuse the existing typed constructor and 15M transaction envelope. Each candidate
+uses its own equal-block-count empty reference. The catalog binds both producer sources
+and the shared artifact helpers, and marks previously observed references separately;
+it does not claim all eleven inputs are fresh holdouts. The finite selector rejects
+unlisted cases rather than labelling an already opened main case as unfitted. Set
+`NATIVE_FIXTURE_BIN` to qualify all eleven natively; SP1 measurement follows independent
+review and native qualification. Holdout actuals validate the frozen policy, not its fit.
+
 ```sh
 ~/.venv/bin/python bin/zkgas/bench/workload.py screen \
   --config experiment/config.json --catalog experiment/spawn-memory/catalog.json \

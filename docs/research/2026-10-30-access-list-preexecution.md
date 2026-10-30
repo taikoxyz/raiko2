@@ -165,7 +165,7 @@ same-block-count pair, each constraint is:
 
 ```text
 c >= (5 * delta_actual_PGU / 4 - delta_node_scaled / S) / delta_raw_items
-c >= 5 * max(actual_PGU - parent_full_PGU, 0) / (4 * raw_items)
+c >= 5 * max(actual_PGU - parent_full_scaled / S, 0) / (4 * raw_items)
 ```
 
 Consider the 40 baseline/adjacent/grouping/three-block comparison rows, retaining
@@ -182,5 +182,80 @@ holdouts use repeated addresses2/3; repeated items32/512/3072; repeated items512
 across three blocks; repeated keys3072; distinct addresses512; and reversed keys256.
 Two empty-list reference replays identify the one/three-block baselines and are
 explicitly known controls. Holdouts do not enter this 23-input tariff derivation.
-Actual successor native replay and historical compatibility checks are required
-before reporting the correction as verified.
+Actual SP1 execution completed all eleven reserved rows: nine prospective inputs
+and two known reference replays. The known controls have exactly the original
+canonical input, public output and measured PGU; they are not nine-plus-two new
+independent inputs. The combined cohorts contain **34 measurement rows and 32
+distinct canonical inputs**, representing 44 block /88 transaction occurrences.
+
+Two further parent complete-quote deficits occur at repeated address+key items512
+and3072. The latter measures 207,723,991 actual PGU versus 205,109,322 parent full
+PGU. The three-block items512 case has a covered parent full quote but an uncovered
+716,532-PGU increment against its own three-block empty reference. This remains
+visible rather than being hidden by startup headroom.
+
+## Actual successor native replay
+
+The frozen host quote binary uses reviewed Reth commit
+`cd85071904fe38de8bcad58d82082a37b0e4b7af`, model
+`3794f020f947fbaff4b26e8128996fcf9dcffb350b4360cc1d3d4114a809605e`.
+It repriced all 34 saved measurement rows; these are actual native quote executions
+against retained actual SP1 measurements, not arithmetic-only projections or SP1
+remeasurements. The experimental guest ELF remains unchanged.
+
+| Input | Actual SP1 PGU | Parent node /full PGU | New node /full PGU |
+| --- | ---: | ---: | ---: |
+| Repeated address+key items2048, one block | 191,970,262 | 35,487,428 /190,429,258 | 52,264,644 /207,206,474 |
+| Reserved items3072, one block | 207,723,991 | 50,167,492 /205,109,322 | 75,333,316 /230,275,146 |
+| Reserved items512, three blocks | 189,261,760 | 35,001,893 /190,895,620 | 47,584,805 /203,478,532 |
+
+All five parent full deficits become zero in this finite cohort. Every node and
+full increase is exactly 8,192 PGU times the corresponding raw item count. Old
+terms, authorization200k pricing, input/public output and raw Unzen scores remain
+unchanged; proposal-once access-list pricing is zero. Seventeen prior authorization
+inputs with no access list also retain their previous prices. Small zero-item
+ordering differences remain diagnostic; no universal distribution bound follows
+from these observations.
+
+The frozen quote has SHA-256
+`24c48bcd6be2652bc70bcce85eaaccc3216ac6059cfad17614ba566e10805e18`.
+Its modified-source build is recorded as dirty with null embedded revision, with
+all 481 inventoried source files checked before/after compilation. A subsequent
+commit association is supplemental and must not rewrite the original build claim.
+All 34 reports passed independent audit, including eight independently guarded
+fresh CLI quote replays. Independent checks decoded the signed access lists and
+verified all old terms, exact uplifts and required report fields. The source tree
+was subsequently associated with commit
+`118eeedbd06e74a3bdc57608633caff5970cd961`, with all 481 committed blobs matching
+the build inventory. A later documentation clarification does not change that
+record. No production ELF alignment, proof generation, GPU throughput or deployment
+is claimed by this host-only validation.
+
+## Retained Mainnet compatibility
+
+Actual successor native replay completed all 50 retained Mainnet proposals /
+9,600 blocks using their original SDK6.1 / ELF416f actual-work observations,
+separately from the controlled b76b /SDK6.3 cohort. Every block has zero committed
+and attempted raw access-list items. All prior terms, authorization contributions,
+node/full prices, public outputs and raw Unzen scores are unchanged.
+
+The node-known sum remains 78,776,601,035 PGU; complete quote sum remains
+145,920,113,551 against 69,980,978,094 retained actual PGU. Weighted full/actual is
+2.085139669739924, with no complete underquote. Thus this additive correction does
+not change the existing historical roughly2.09x conclusion; it does not establish
+zero access-list usage on Mainnet generally. Replay took79.11s and peak process-tree
+PSS122,157,056 bytes under the existing guard. No fresh SP1 execution was required.
+
+## Next measurements
+
+Continue top-level creation with empty/short/long initcode, unreachable tails,
+STOP/RETURN/REVERT/HALT and repeated creations inside the same block, distinguishing
+initcode analysis from executed opcodes, deployed code and MPT changes. This needs
+an explicit top-level creation/multiple-user-transaction constructor extension;
+current one-user-per-block experiments do not isolate that slope.
+
+Keep hash-distribution stress as an explicit remaining access-list boundary. Use
+the actual frozen guest's hasher behavior if developing concentrated distinct-key
+inputs; neither native Linux timings nor ordinary ascending/reversed keys close
+that question. Ordinary outer signature recovery and calldata-byte slopes follow.
+The deferred EVM-gas-only saturation experiment remains outside this round.

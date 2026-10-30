@@ -270,10 +270,11 @@ REVERTs retain their raw entry counts. Proposal-once pricing adds no authorizati
 
 The raw access-list address-item tariff follows the same ownership split. Node block pricing records
 `access_list_items` from the committed sealed snapshot and `access_list_scaled`. The prove block uses
-the attempted raw count and its contribution once; duplicate items, keys, ignored authorizations and
-receipt status do not change that count. Non-legacy Anchor items count when carried. Proposal-once
-pricing adds zero access-list contribution. The current-model comparator checks each count against
-the shared tariff, attempted counts/prices covering committed ones, and all total boundaries.
+the attempted raw count and its contribution once. Every raw address item counts, including duplicates;
+key multiplicity, ignored authorizations and receipt success do not reduce that count. Non-legacy
+Anchor items count when carried. Proposal-once pricing adds zero access-list contribution. The
+current-model comparator checks each count against the shared tariff, attempted counts/prices covering
+committed ones, and all total boundaries.
 
 These fields are required by the initial schema; missing counts or contributions are rejected rather
 than inferred as zero. The current-model comparator validates each count against the shared model and

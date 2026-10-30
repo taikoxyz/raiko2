@@ -83,6 +83,13 @@ authenticates a recent execution block hash using BLOCKHASH or EIP-2935. Section
 another way to authenticate older anchors; it does not claim that the current upstream ancestry
 policy or guest implementation already supports that path.
 
+Reference-window follow-up on 2026-10-30: the current
+[#22286 implementation](https://github.com/taikoxyz/taiko-mono/blob/405b5afba4bba604509a425fea159fca9fa63c9d/packages/protocol/contracts/layer1/etna/impl/EtnaInbox.sol#L783)
+retains that reader and lets the caller choose any queryable reference. Its
+[contract tests](https://github.com/taikoxyz/taiko-mono/blob/405b5afba4bba604509a425fea159fca9fa63c9d/packages/protocol/test/layer1/etna/EtnaInboxLand.t.sol#L427)
+cover ages 256, 257, 8191 and 8192. The PR remains open: this is source-level support, not a claim
+of merge or deployment. Guest historical-Merkle validation remains unimplemented.
+
 ## 3. Responsibility boundary
 
 | Layer | Responsibility |
@@ -170,27 +177,52 @@ old proposal-event decoder. Share execution primitives while keeping these proto
 ### 5.1.1 L1 ancestry: link nearby references, use a historical proof for long delays
 
 Let the distinct L1 anchor heights used by the range start at N and end at L. Let Q be the recent
-L1 execution reference authenticated by L1 when the proposal/landing is submitted at height P,
+L1 execution reference authenticated by L1 when the PoS landing is submitted at height P,
 with `N <= L <= Q < P`. Q is chosen before final proof generation; it need not equal P-1.
 Separate the range's own anchor span `L-N` from the submission-delay tail `Q-L`.
 
-The selected policy is:
+The selected initial policy for **Etna PoS landing** is:
 
-- **Nearby L:** preserve the existing parentHash linkage from N through L to Q. This is the
-  expected normal path; ordinary proposals should rarely need historical Merkle witnesses.
-- **Distant L:** preserve parentHash linkage from N through L, then authenticate only header L
-  against a recent Ethereum beacon root using `historical_summaries`. Do not attach an independent
-  historical proof to every anchor or fetch/hash every header in the delay tail L..Q.
+- **L stays queryable through the expected landing:** choose `Q=L`, provided no other L1 root
+  whose ancestry the guest must authenticate is newer than L. The guest preserves the existing
+  parentHash linkage from N through L; there is no delay tail after L to hash or prove.
+- **Q=L is ineligible or expected to expire:** choose a newer queryable Q covering all required
+  L1 roots. Preserve N..L linkage and authenticate only header L against Q's beacon root, using
+  `block_roots` for a recent beacon block or `historical_summaries` for a completed period. Do not attach one proof
+  per anchor or hash every header in the submission-delay tail.
+
+The contract already supplies the selected reference hash through this interface:
+
+| Age at actual landing `P-L`, when `Q=L` | L1 hash source | Extra guest bridge after L |
+| --- | --- | --- |
+| 1..256 execution blocks | BLOCKHASH | None |
+| 257..8191 execution blocks | EIP-2935 system contract | None |
+| 8192 or more | Q=L is no longer queryable | Select a newer Q and authenticate L to it |
+
+The EIP-2935 call is performed by L1. The normal guest path does not need an account/storage
+proof for that contract. At preparation head H, Q=L has `8191-(H-L)` future execution blocks of
+headroom. Budget final proving, queueing, retries and inclusion; a currently readable reference
+at age 8191 has no headroom for the next block. No fixed margin or product config is selected here.
 
 ```text
-near: N -- parentHash links --> L -- parentHash links --> Q
-far:  N -- parentHash links --> L -- historical Merkle proof --> recent beacon root
+normal: N -- parentHash links --> L = Q, whose hash L1 reads directly
+old:    N -- parentHash links --> L -- Merkle proof --> Q's beacon root
 ```
 
-The near/far threshold is a prover cost choice, based on header hashing versus witness collection
-and verification. This document fixes no number, config key or wire encoding. Either witness must
-establish the same canonical L1 ancestry. The host may choose the representation; the guest must
-verify it. Distance selects a proof path, never whether an otherwise valid block is accepted.
+8191 is a reference-query bound, not a measured zkVM performance crossover or an anchor-gap
+validity cap. The initial policy chooses a Merkle bridge when the direct reference cannot cover
+the expected landing. A short header tail to a newer Q remains an equivalent valid witness and
+can be selected as a cost optimization: at actual age 8192, Q=L+1 needs only one link, although
+that Q itself has no remaining headroom. Do not make Merkle exclusive above an age threshold.
+The host chooses the representation; the guest verifies the same canonical ancestry either way.
+
+This reference choice does **not** automatically apply to existing Shasta/proposal mode, whose
+origin number/hash is fixed by proposal metadata. Standalone anchor-less proposal mode must retain
+that source binding unless its protocol changes. Nor may Q=L omit a newer L1 root required by the
+guest's statement. Any additional root whose ancestry the guest must prove still needs its own
+authenticated witness under Q; choosing a sufficiently new Q alone does not authenticate that
+root. The one-bridge claim here covers the N..L anchor headers. Committee authority/applicability
+remains governed by sections 3 and 4.
 
 Keep the existing execution reference number/hash as the public authority. The proposed far-path
 witness authenticates header Q against that hash, then uses Q's **Ethereum L1**
@@ -210,8 +242,9 @@ authenticated beacon root -> BeaconBlock.state_root -> BeaconState.historical_su
 Bind the chain/fork interpretation, slot, historical-list index and length, and exact SSZ paths.
 Check the authenticated header's number, timestamp and state root as required by existing anchor
 rules; an unauthenticated host root or a successful RPC response is not ancestry evidence.
-For a recent beacon block not yet included in a completed period, the corresponding `block_roots`
-membership path exists; normal nearby references should continue using header links instead.
+For a recent beacon block not yet included in a completed period, use the corresponding
+`block_roots` membership path and its strict slot window. The vector covers 8192 **beacon slots**;
+EIP-2935 covers 8191 **execution blocks**. Missed slots mean those limits are not interchangeable.
 
 The far-path cost is proportional to `L-N` header checks plus a small historical proof, rather
 than all `Q-N` headers. Crossing an 8192-slot historical-period boundary within N..L does not
@@ -224,7 +257,8 @@ execution header 25,198,983 to a beacon root authenticated at execution height 2
 of 1,100,000 blocks / 153.37 days. It used 60 SHA-256 Merkle siblings: **1,920 bytes for the entire
 historical bridge**, plus headers and metadata, not 1,920 bytes per anchor. The roughly 339 MB
 state downloaded to construct the witness was host-side source data, not GuestInput. A second
-recent root reused the same lower 25 siblings. See the
+recent root reused the same lower 25 siblings. Follow-up tests also verified recent `block_roots`
+witnesses with 34 siblings / 1,088 bytes and the 256/257/8191/8192 reference boundaries. See the
 [experiment and committed proof fixture](../../research/2026-10-29-ethereum-historical-header-proof.md).
 
 Providers must supply and retain the historical branch material: ordinary beacon RPCs may expose
@@ -358,9 +392,9 @@ silently changing the meaning of the v4 proposal identifiers is not an acceptabl
   contradictory authenticated data as validation failures.
 - Blobs can reconstruct the landed EL chain but do not contain all consensus/proving history.
   Define an authenticated archive source and independently reproduce a real proof from it.
-- Follow section 5.1.1 for L1 ancestry: a distant latest anchor selects the historical witness
-  path. Missing/pruned historical material is a collection failure; never accept an unverified
-  anchor, reinterpret the reference hash, or introduce a new anchor-gap validity limit.
+- Follow section 5.1.1 for L1 reference and ancestry-path selection. Missing/pruned historical
+  material is a collection failure; never accept an unverified anchor, reinterpret the reference
+  hash, or introduce a new anchor-gap validity limit.
 - Do not silently rebind an in-flight job to a new generation, image, committee or reference block.
   Build a new final wrapper/job identity when its statement changes; reuse only compatible children.
 - Proving lag may be nonzero but must remain stable under sustained load. Measure execution,
@@ -400,7 +434,8 @@ Protocol/prover reviewers must resolve these before an implementation plan is ac
    freeze its complete continuation journal and content commitment before writing it.
 5. **L1 ancestry:** confirm the reference-header/beacon-root binding, historical-witness collection
    and retention, fork-correct SSZ paths, and alignment of the upstream linear ancestry budget
-   with section 5.1.1. Keep the near/far threshold a proving-cost choice.
+   with section 5.1.1. Use Q=L with sufficient landing headroom when eligible; keep the later
+   link-versus-Merkle optimization a proving-cost choice, not a validity rule.
 
 The implementing owner may choose crate factoring, compact witness storage and bounded collection
 concurrency, provided these do not change the approved statement or verification responsibilities.
@@ -425,6 +460,10 @@ The later implementation plan must include at least:
   short N..L span; ranges crossing historical-period boundaries; repeated anchors; SSZ list-length,
   index, fork, header and root tampering; unavailable archives and expired references. Replay the
   committed historical fixture, then measure the actual guest paths on supported backends.
+- Reference ages 256/257/8191/8192; Q=L with no post-L guest bridge; proof/inclusion headroom and
+  reference expiry during work; newer required L1 roots; fixed proposal-origin mode; equivalent
+  short-link and Merkle witnesses after the direct-reference window. If a guest-side EIP-2935
+  storage witness is ever added, enforce its height window before interpreting a wrapped slot.
 - FI inclusion, invalid encoding/nonce/balance, ordinary revert/OOG, over-limit rollback and the
   counterfactual trial witness. Real guest execution must independently reproduce each decision.
 - Valid overlapping landings with the identical proof/blob transaction, p/c/h boundary cases,

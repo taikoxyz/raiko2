@@ -693,3 +693,37 @@ The [measured checkpoint](../../../docs/research/2026-10-30-delegatecall-repetit
 records all 16 actual observations and separate native-only controls. Existing
 pricing covered all full quotes and all 20 matched repetition increments;
 REVERT/INVALID retain their deliberately conservative failure floors.
+
+## DELEGATECALL density profile
+
+The same producer accepts `--profile density` for eight STOP/RETURN(0,0) cases
+with 0, 64, 1024 or 32768 total calls. It retains a fixed 64-call body even at
+N0 and selects 0, 1, 16 or 512 batches using a fixed-width immediate. Each call
+forwards 64 gas with zero input/output lengths, then POPs its status. The real
+one-time CREATE and its address guard remain; per-call status and return-data
+guards are absent. This isolates a denser call/child workload from conservatively
+priced parent checks. It does not establish underpricing before measurement.
+
+```sh
+~/.venv/bin/python bin/zkgas/bench/cases/delegatecall_repetition.py \
+  --profile density --output-dir experiment/delegatecall-density
+NATIVE_FIXTURE_BIN=target/debug/zkgas-fixture \
+ZKGAS_QUOTE_BIN=target/debug/zkgas-quote ~/.venv/bin/python -m unittest discover \
+  -s bin/zkgas/bench/tests -p test_delegatecall_density.py
+```
+
+`make_case(..., profile='density')` and `prepare(..., profile='density')` expose
+the same construction. The default `checked` profile preserves all 16 original
+request bytes; tests bind their frozen request hashes and can also compare the
+original files when `CHECKED_DELEGATECALL_CASES` points at that catalog directory.
+Density uses distinct IDs, N0 baselines and N64 repetition references. Counts must
+be multiples of 64 in 0..32768, and failed child terminals are not density cases.
+
+A successful outer receipt alone is insufficient for this guardless profile.
+Qualification checks exact child terminals/call counts, zero exceptional
+instructions, the deployed child/runtime, factory nonce1 and the current quote.
+Short batches, an empty target, parent OOG and zero-forwarded-gas RETURN must be
+rejected by those gates; zero-gas STOP is valid. No additional child witness
+padding, Rust/guest build or pricing change is needed. Keep literal whole-proposal
+actual/node ratios, full quote closure and within-terminal N0/N64 increments
+separate; this finite density test does not measure saturation or proving speed.

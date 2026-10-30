@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate16 minimal-frame DELEGATECALL repetition observations under frozen pricing."""
+"""Generate checked or fixed-unroll DELEGATECALL observations under frozen pricing."""
 import argparse
 from collections import Counter
 import json
@@ -14,25 +14,39 @@ RUNTIMES={'stop':b'\x00','return0':bytes.fromhex('60006000f3'),
           'revert0':bytes.fromhex('60006000fd'),'invalid':b'\xfe'}
 
 
-def make_case(child_terminal='stop',repetitions=1):
+def _profile(value):
+    if type(value) is not str or value not in ('checked','density'):raise ValueError('profile must be checked or density')
+    return value
+
+
+def make_case(child_terminal='stop',repetitions=1,*,profile='checked'):
+    _profile(profile)
     if type(child_terminal) is not str or child_terminal not in RUNTIMES:raise ValueError('unknown child terminal')
     original.integer(repetitions,0,32768,'DELEGATECALL repetitions')
+    if profile=='density' and (child_terminal not in ('stop','return0') or repetitions%64):
+        raise ValueError('density requires STOP/RETURN0 and total calls divisible by64')
+    unroll=64 if profile=='density' else 1
+    batches=repetitions//unroll
     runtime=RUNTIMES[child_terminal];length=len(runtime);success=child_terminal in ('stop','return0')
     # The tiny initcode returns exactly the runtime embedded in its PUSH. The
-    # parent creates the child even at N0; child code/account is never preloaded.
+    # parent creates the child even at N0; no extra child-account/code witness
+    # entries are added (STOP may already serve a legitimate system account).
     initcode=bytes([0x5f+length])+runtime+bytes.fromhex('60005260')+bytes([length,0x60,32-length,0xf3])
     asm=_Factory();asm.push(int.from_bytes(initcode,'big'),len(initcode));asm.push(0,1);asm.op(0x52)
     asm.push(len(initcode),1);asm.push(32-len(initcode),1);asm.push(0,1);asm.op(0xf0)
     asm.op(0x80);asm.op(0x15);asm.target('failure');asm.op(0x57)
     # Stack is [child address,index]. Fixed PUSH3 makes N an immediate change,
     # not unrolled parent code. N0 exits before making any DELEGATECALL.
-    asm.push(0);asm.label('loop',repetitions+1);asm.op(0x80,repetitions+1)
-    asm.push(repetitions,times=repetitions+1);asm.op(0x14,repetitions+1);asm.target('done',repetitions+1);asm.op(0x57,repetitions+1)
-    for _ in range(4):asm.push(0,1,repetitions)  # out size/offset and in size/offset.
-    asm.op(0x85,repetitions);asm.push(64,1,repetitions);asm.op(0xf4,repetitions)
-    asm.push(int(success),1,repetitions);asm.op(0x14,repetitions);asm.op(0x15,repetitions);asm.target('failure',repetitions);asm.op(0x57,repetitions)
-    asm.op(0x3d,repetitions);asm.target('failure',repetitions);asm.op(0x57,repetitions)
-    asm.push(1,1,repetitions);asm.op(0x01,repetitions);asm.target('loop',repetitions);asm.op(0x56,repetitions)
+    asm.push(0);asm.label('loop',batches+1);asm.op(0x80,batches+1)
+    asm.push(batches,times=batches+1);asm.op(0x14,batches+1);asm.target('done',batches+1);asm.op(0x57,batches+1)
+    for _ in range(unroll):
+        for _ in range(4):asm.push(0,1,batches)  # out size/offset and in size/offset.
+        asm.op(0x85,batches);asm.push(64,1,batches);asm.op(0xf4,batches)
+        if profile=='checked':
+            asm.push(int(success),1,batches);asm.op(0x14,batches);asm.op(0x15,batches);asm.target('failure',batches);asm.op(0x57,batches)
+            asm.op(0x3d,batches);asm.target('failure',batches);asm.op(0x57,batches)
+        else:asm.op(0x50,batches)  # Discard status; native child-terminal gates prove completion.
+    asm.push(1,1,batches);asm.op(0x01,batches);asm.target('loop',batches);asm.op(0x56,batches)
     asm.label('done');asm.op(0x50);asm.op(0x50);asm.op(0x00)
     asm.label('failure',0);asm.op(0xfe,0)
     code=asm.finish();routes=Counter(asm.counts)
@@ -59,27 +73,46 @@ def make_case(child_terminal='stop',repetitions=1):
         'expected_code_preparation':{'nonempty_events':1,'total_bytes':length},'factory_runtime_bytes':len(code),'factory_runtime_sha256':digest(code),
         'transaction_kind':'call','count_per_block':1,'block_count':1,'transaction_gas_limit':15_000_000,'outer_calldata_bytes':0,
         'preload_created_accounts_or_code':False,'call_input_bytes':0,'call_output_bytes':0}
-    if repetitions>1:row['repetition_reference_sample_id']=f'delegatecall-repetition-{child_terminal}-n1'
+    if profile=='density':
+        row['request']['program']['expected_route_counts']['opcode:0x3d']=0
+        row.update(sample_id=f'delegatecall-density-{child_terminal}-n{repetitions}',family='minimal-delegatecall-density',
+            baseline_sample_id=f'delegatecall-density-{child_terminal}-n0',
+            completion_gate='one real child CREATE, exact completed child/parent opcodes, zero exceptional instructions, successful user receipt and factory nonce1; no per-call EVM status/return-data guard')
+        row['parameters'].update(producer_profile='density',unroll_factor=unroll,batch_count=batches,
+            per_call_status_guard=False,per_call_return_data_guard=False)
+    reference_count=64 if profile=='density' else 1
+    if repetitions>reference_count:
+        prefix='delegatecall-density' if profile=='density' else 'delegatecall-repetition'
+        row['repetition_reference_sample_id']=f'{prefix}-{child_terminal}-n{reference_count}'
     return row
 
 
-def prepare(output):
-    plans=[make_case(terminal,count) for terminal in RUNTIMES for count in (0,1,1024,32768)]
-    ids={r['sample_id'] for r in plans};assert len(plans)==len(ids)==16
+def prepare(output,*,profile='checked'):
+    _profile(profile)
+    terminals=('stop','return0') if profile=='density' else RUNTIMES
+    counts=(0,64,1024,32768) if profile=='density' else (0,1,1024,32768)
+    plans=[make_case(terminal,count,profile=profile) for terminal in terminals for count in counts]
+    ids={r['sample_id'] for r in plans};assert len(plans)==len(ids)==(8 if profile=='density' else 16)
     output.mkdir(parents=True,exist_ok=False);(output/'requests').mkdir();rows=[]
     for row in plans:
         assert row['baseline_sample_id'] in ids
         raw=encoded(row.pop('request'));path=f"requests/{row['sample_id']}.json";write(output/path,raw)
         rows.append(row|{'request_path':path,'request_sha256':digest(raw)})
-    write(output/'catalog.json',encoded({'schema_version':1,'frozen_model_id':MODEL,
+    catalog={'schema_version':1,'frozen_model_id':MODEL,
         'purpose':'High-count minimal DELEGATECALL with exactly one child deployment, fixed64forwarded gas and checked per-call status/empty return data',
         'generator_sha256':digest(Path(__file__).read_bytes()),'source_sha256':{name:digest(Path(__file__).with_name(name).read_bytes()) for name in
             ('initcode_preparation.py','top_level_create.py','spawn_memory.py')},
         'interpretation':'Only within-terminal repetition comparisons match child/runtime and setup. Expected failure status alone does not establish REVERT execution; exact completed terminal and attempted INVALID counts gate qualification.',
-        'cases':rows}))
+        'cases':rows}
+    if profile=='density':
+        catalog.update(producer_profile='density',unroll_factor=64,
+            purpose='Fixed64-call unroll density with one real child deployment evenN0, fixed64forwarded gas, no per-call status or return-data guard',
+            interpretation='Exact native child-terminal and exceptional maps prove every call completed; parent success alone is insufficient. Compare only within-terminal N0/N64 increments; no assumed startup subtraction or pricing conclusion.')
+    write(output/'catalog.json',encoded(catalog))
     return len(rows)
 
 
 if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--output-dir',type=Path,required=True)
-    print(json.dumps({'prepared':prepare(parser.parse_args().output_dir)}))
+    parser.add_argument('--profile',choices=('checked','density'),default='checked');args=parser.parse_args()
+    print(json.dumps({'prepared':prepare(args.output_dir,profile=args.profile)}))

@@ -1007,3 +1007,349 @@ fn omitted_access_list_preserves_frozen_input_bytes_and_stable_native_fields() {
         }
     }
 }
+
+fn transaction_request(
+    kind: &str,
+    count: usize,
+    gas: u64,
+    code: &str,
+    counts: Value,
+    runtime: Option<&str>,
+) -> Value {
+    let mut value = request(code, counts);
+    value["program"]["transactions"] = json!({"kind":kind,"count_per_block":count,"gas_limit":gas});
+    if let Some(runtime) = runtime {
+        value["program"]["transactions"]["expected_runtime_hex"] = runtime.into();
+    }
+    value
+}
+
+#[test]
+fn transaction_descriptor_repeated_calls_observe_all_users_and_sum_receipt_gas() {
+    let mut value = transaction_request(
+        "call",
+        3,
+        100_000,
+        "0x60006000f3",
+        json!({"opcode:0xf3":6}),
+        None,
+    );
+    value["program"]["block_count"] = 2.into();
+    let (output, dir) = export_with_profile(&value, "evm-gas-only");
+    success(&output);
+    let report = report(&dir);
+    let input = input(&dir);
+    assert_eq!(report["transaction_count"], 8);
+    assert_eq!(report["transactions"]["kind"], "call");
+    assert_eq!(report["transactions"]["count_per_block"], 3);
+    assert_eq!(report["observed_route_counts"]["opcode:0xf3"], 6);
+    let mut gas = 0;
+    for (block_index, witness) in input.witnesses.iter().enumerate() {
+        assert_eq!(witness.block.body.transactions.len(), 4);
+        let receipts = report["receipts_by_block"][block_index].as_array().unwrap();
+        let expected: u64 = receipts[1..]
+            .iter()
+            .map(|r| r["gas_used"].as_u64().unwrap())
+            .sum();
+        assert_eq!(
+            report["blocks"][block_index]["user_transaction_gas_used"],
+            expected
+        );
+        gas += expected;
+        for (index, tx) in witness.block.body.transactions[1..].iter().enumerate() {
+            assert_eq!(tx.nonce(), (block_index * 3 + index) as u64);
+            assert_eq!(tx.gas_limit(), 100_000);
+            assert_eq!(tx.to(), Some(alloy_primitives::Address::repeat_byte(0x66)));
+            assert_eq!(tx.max_fee_per_gas(), 1_000_000_000);
+            assert_eq!(
+                report["transactions"]["blocks"][block_index]["users"][index]["nonce"],
+                tx.nonce()
+            );
+            assert_eq!(
+                report["transactions"]["blocks"][block_index]["users"][index]["transaction_hash"],
+                serde_json::to_value(tx.hash()).unwrap()
+            );
+        }
+    }
+    assert_eq!(report["user_transaction_gas_used_total"], gas);
+}
+
+#[test]
+fn transaction_descriptor_create_deployment_has_honest_initial_and_rolling_code() {
+    // Return byte 0x42 as code, without embedding speculative runtime into the witness.
+    let initcode = "0x604260005360016000f3";
+    let mut value = transaction_request(
+        "create",
+        2,
+        100_000,
+        initcode,
+        json!({"opcode:0xf3":4}),
+        Some("0x42"),
+    );
+    value["program"]["block_count"] = 2.into();
+    let (output, dir) = export_with_profile(&value, "evm-gas-only");
+    success(&output);
+    let report = report(&dir);
+    let input = input(&dir);
+    assert_eq!(input.witnesses[0].witness.codes.len(), 2);
+    assert!(
+        !input.witnesses[0]
+            .witness
+            .codes
+            .iter()
+            .any(|c| c.as_ref() == hex::decode(&initcode[2..]).unwrap().as_slice())
+    );
+    assert!(
+        input.witnesses[1]
+            .witness
+            .codes
+            .iter()
+            .any(|c| c.as_ref() == [0x42])
+    );
+    for (block_index, witness) in input.witnesses.iter().enumerate() {
+        assert_eq!(witness.block.body.transactions.len(), 3);
+        let users = report["transactions"]["blocks"][block_index]["users"]
+            .as_array()
+            .unwrap();
+        for (index, tx) in witness.block.body.transactions[1..].iter().enumerate() {
+            let nonce = (block_index * 2 + index) as u64;
+            assert_eq!(tx.nonce(), nonce);
+            assert_eq!(tx.to(), None);
+            assert_eq!(tx.input().as_ref(), hex::decode(&initcode[2..]).unwrap());
+            assert_eq!(users[index]["to"], Value::Null);
+            assert_eq!(users[index]["poststate"]["nonce"], 1);
+            assert_eq!(
+                users[index]["poststate"]["code_hash"],
+                serde_json::to_value(alloy_primitives::keccak256([0x42])).unwrap()
+            );
+        }
+    }
+}
+
+#[test]
+fn transaction_descriptor_empty_create_and_empty_return_preserve_real_stops() {
+    for (code, opcode) in [
+        ("0x", "opcode:0x00"),
+        ("0x00", "opcode:0x00"),
+        ("0x60006000f3", "opcode:0xf3"),
+    ] {
+        let value =
+            transaction_request("create", 2, 100_000, code, json!({(opcode):2}), Some("0x"));
+        let (output, dir) = export_with_profile(&value, "evm-gas-only");
+        success(&output);
+        let report = report(&dir);
+        assert_eq!(report["observed_route_counts"][opcode], 2);
+        for user in report["transactions"]["blocks"][0]["users"]
+            .as_array()
+            .unwrap()
+        {
+            assert_eq!(user["poststate"]["nonce"], 1);
+            assert_eq!(
+                user["poststate"]["code_hash"],
+                serde_json::to_value(alloy_primitives::keccak256([])).unwrap()
+            );
+        }
+    }
+}
+
+#[test]
+fn transaction_descriptor_failed_create_and_same_tx_selfdestruct_report_absence() {
+    for (code, opcode, expected_success) in [
+        ("0x60006000fd", "opcode:0xfd", false),
+        ("0xfe", "opcode:0xfe", false),
+        ("0x5fff", "opcode:0xff", true),
+    ] {
+        let expected = if opcode == "opcode:0xfe" { 0 } else { 2 };
+        let mut value =
+            transaction_request("create", 2, 100_000, code, json!({(opcode):expected}), None);
+        value["expected_user_success"] = expected_success.into();
+        let (output, dir) = export_with_profile(&value, "evm-gas-only");
+        success(&output);
+        let report = report(&dir);
+        for user in report["transactions"]["blocks"][0]["users"]
+            .as_array()
+            .unwrap()
+        {
+            assert_eq!(user["poststate"], Value::Null);
+        }
+        if !expected_success {
+            assert_eq!(report["receipts_by_block"][0][1]["success"], false);
+        }
+        if opcode == "opcode:0xfe" {
+            assert_eq!(report["attempted_route_counts"][opcode], 2);
+        }
+    }
+}
+
+#[test]
+fn transaction_descriptor_malformed_bounds_and_unsupported_composition_are_rejected() {
+    let good = transaction_request(
+        "create",
+        1,
+        100_000,
+        "0x00",
+        json!({"opcode:0x00":1}),
+        Some("0x"),
+    );
+    for descriptor in [
+        json!({"kind":"unknown","count_per_block":1,"gas_limit":100_000}),
+        json!({"kind":"call","count_per_block":0,"gas_limit":100_000}),
+        json!({"kind":"create","count_per_block":2049,"gas_limit":100_000}),
+        json!({"kind":"create","count_per_block":1,"gas_limit":20999}),
+        json!({"kind":"create","count_per_block":1,"gas_limit":15000001}),
+        json!({"kind":"create","count_per_block":true,"gas_limit":100_000}),
+        json!({"kind":"call","count_per_block":1,"gas_limit":100_000,"expected_runtime_hex":"0x"}),
+        json!({"kind":"create","count_per_block":1,"gas_limit":100_000,"expected_runtime_hex":"00"}),
+    ] {
+        let mut value = good.clone();
+        value["program"]["transactions"] = descriptor;
+        assert!(zkgas::fixture::parse_request(&serde_json::to_vec(&value).unwrap()).is_err());
+    }
+    for (field, descriptor) in [
+        ("authorizations", json!({"pattern":"compact","count":1})),
+        ("access_list", json!({"pattern":"repeated_key","count":1})),
+        (
+            "storage_state",
+            json!({"initial_storage":{},"proof_slots":["0x0"],"insert_slots":[],"delete_slots":[]}),
+        ),
+    ] {
+        let mut value = good.clone();
+        value["program"][field] = descriptor;
+        assert!(zkgas::fixture::parse_request(&serde_json::to_vec(&value).unwrap()).is_err());
+    }
+    for (kind, code, input) in [
+        ("create", format!("0x{}", "00".repeat(49153)), "0x"),
+        ("create", "0x00".into(), "0x01"),
+        ("call", "0x".into(), "0x"),
+    ] {
+        let mut value =
+            transaction_request(kind, 1, 100_000, &code, json!({"opcode:0x00":0}), None);
+        value["program"]["input_hex"] = input.into();
+        assert!(zkgas::fixture::parse_request(&serde_json::to_vec(&value).unwrap()).is_err());
+    }
+}
+
+#[test]
+fn transaction_descriptor_wrong_runtime_or_account_presence_reject_without_publication() {
+    for expected in [None, Some("0x43")] {
+        let value = transaction_request(
+            "create",
+            1,
+            100_000,
+            "0x604260005360016000f3",
+            json!({"opcode:0xf3":1}),
+            expected,
+        );
+        let (output, dir) = export_with_profile(&value, "evm-gas-only");
+        assert!(!output.status.success());
+        absent_outputs(&dir);
+    }
+    let mut value = transaction_request(
+        "create",
+        1,
+        100_000,
+        "0x60006000fd",
+        json!({"opcode:0xfd":1}),
+        Some("0x"),
+    );
+    value["expected_user_success"] = false.into();
+    let (output, dir) = export_with_profile(&value, "evm-gas-only");
+    assert!(!output.status.success());
+    absent_outputs(&dir);
+}
+
+#[test]
+fn transaction_descriptor_partial_inclusion_and_intrinsic_failure_reject_all_outputs() {
+    // The first15M declared transaction fits, but the second cannot fit after consumed gas.
+    let value = transaction_request(
+        "call",
+        3,
+        15_000_000,
+        "0x5f621fffff5200",
+        json!({"opcode:0x52":3,"opcode:0x00":3}),
+        None,
+    );
+    let (output, dir) = export_with_profile(&value, "evm-gas-only");
+    assert!(!output.status.success());
+    absent_outputs(&dir);
+    let value = transaction_request(
+        "create",
+        1,
+        21_000,
+        "0x",
+        json!({"opcode:0x00":1}),
+        Some("0x"),
+    );
+    let (output, dir) = export_with_profile(&value, "evm-gas-only");
+    assert!(!output.status.success());
+    absent_outputs(&dir);
+}
+
+#[test]
+fn transaction_descriptor_fee_cap_and_funding_allow_dense_high_basefee_blocks() {
+    let mut value = transaction_request(
+        "call",
+        3,
+        9_000_000,
+        "0x5f621fffff5200",
+        json!({"opcode:0x52":96,"opcode:0x00":96}),
+        None,
+    );
+    value["program"]["block_count"] = 32.into();
+    let (output, dir) = export_with_profile(&value, "evm-gas-only");
+    success(&output);
+    let report = report(&dir);
+    assert!(
+        report["blocks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|b| b["block_base_fee_per_gas"].as_u64().unwrap() > 25_000_000)
+    );
+    assert_eq!(report["transaction_count"], 128);
+}
+
+#[test]
+fn transaction_descriptor_blob_overflow_is_explicit_transport_failure() {
+    let mut value = transaction_request(
+        "call",
+        1024,
+        50_000,
+        "0x00",
+        json!({"opcode:0x00":3072}),
+        None,
+    );
+    value["program"]["block_count"] = 3.into();
+    let (output, dir) = export_with_profile(&value, "evm-gas-only");
+    assert!(!output.status.success());
+    absent_outputs(&dir);
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("controlled manifest does not fit one Kona blob"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn transaction_descriptor_route_bounds_cover_block_instruction_budget() {
+    // JUMPDEST costs 1gas: 650 users execute 15,974,400 instructions while total
+    // user gas 650*(21000+24576)=29,624,400 still fits the 31M block envelope.
+    let mut value = transaction_request(
+        "call",
+        650,
+        50_000,
+        &format!("0x{}", "5b".repeat(24_576)),
+        json!({"opcode:0x5b":15_974_400,"opcode:0x00":650}),
+        None,
+    );
+    assert!(zkgas::fixture::parse_request(&serde_json::to_vec(&value).unwrap()).is_ok());
+    value["program"]["expected_route_counts"]["opcode:0x5b"] = 31_000_001u64.into();
+    assert!(zkgas::fixture::parse_request(&serde_json::to_vec(&value).unwrap()).is_err());
+    value["program"]
+        .as_object_mut()
+        .unwrap()
+        .remove("transactions");
+    value["program"]["expected_route_counts"]["opcode:0x5b"] = 15_974_400u64.into();
+    assert!(zkgas::fixture::parse_request(&serde_json::to_vec(&value).unwrap()).is_err());
+}

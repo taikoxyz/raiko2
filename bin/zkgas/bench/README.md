@@ -421,6 +421,42 @@ unlisted cases rather than labelling an already opened main case as unfitted. Se
 `NATIVE_FIXTURE_BIN` to qualify all eleven natively; SP1 measurement follows independent
 review and native qualification. Holdout actuals validate the frozen policy, not its fit.
 
+### Top-level creation and repeated transactions
+
+```sh
+~/.venv/bin/python bin/zkgas/bench/cases/top_level_create.py \
+  --output-dir experiment/top-level-create
+```
+
+The fixed44-request matrix uses the optional `program.transactions` descriptor and
+ordinary signed EIP-1559 calls/creations. Count controls use1/16/128/512 users inside
+one block, plus equal-block-count three-block references. Creation probes include
+empty initcode, explicit STOP, RETURN/REVERT/INVALID, unreachable zero/JUMPDEST/PUSH32
+tails through49152 bytes, returned zero-filled runtime0/32/256/24576 bytes and the
+included-failure24577-byte deployment boundary. The code hash identifies each case;
+initcode is signed transaction input and is not preloaded as witness runtime.
+
+Every candidate must be included in exact order with the expected receipt status
+and actual created-account/code result. Gas totals include every user receipt;
+Anchor remains excluded from user opcode counts. Empty initcode is expected to run
+one implicit STOP per creation, independently of having no signed code bytes. Opcode
+counts in reverted initcode and completed RETURN before code-size failure are kept.
+Set `NATIVE_FIXTURE_BIN` to run the full44-case native qualification test.
+
+The explicit descriptor chooses per-tx gas limits100k/3M/8M within the existing15M
+maximum, sufficient fee caps and fee-neutral funding; block/manifest budgets remain
+31M/30M. A smaller declared per-tx limit avoids artificial packing rejection. These
+are finite slope/boundary probes, not a claim to represent every legal envelope or
+an EVM-gas-saturated maximum. Compressed one-blob overflow is a construction/transport
+limit, distinguishable in the native log, not evidence of admission or pricing safety.
+
+Use the existing `screen`/`run`/`verify`/`report` commands below with this catalog, a
+frozen current host quote/model and a compatible fixed program manifest. The frozen
+guest must be checked against its original source snapshot, not the new constructor
+source. Rank actual proposal PGU /node-known zkGas literally; complete quotes and
+same-block-count increments remain separate diagnostics. Neither changed input shape
+nor new host tools requires a guest rebuild or establishes a pricing deficit.
+
 ```sh
 ~/.venv/bin/python bin/zkgas/bench/workload.py screen \
   --config experiment/config.json --catalog experiment/spawn-memory/catalog.json \

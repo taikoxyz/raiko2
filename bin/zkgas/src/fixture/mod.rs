@@ -4,10 +4,12 @@ mod authorization;
 mod constructor;
 mod observer;
 mod storage;
+mod transactions;
 pub use access_list::{AccessListPattern, ProgramAccessList};
 pub use authorization::{AuthorizationPattern, ProgramAuthorizations};
 pub use observer::OpcodeObservation;
 pub use storage::{ProgramStorageState, ProgramStorageStateReport};
+pub use transactions::{ProgramTransactions, TransactionKind};
 
 use crate::{
     identity::sha256_hex,
@@ -53,6 +55,8 @@ pub struct Program {
     pub authorizations: Option<ProgramAuthorizations>,
     #[serde(default)]
     pub access_list: Option<ProgramAccessList>,
+    #[serde(default)]
+    pub transactions: Option<ProgramTransactions>,
 }
 fn program_bytes(value: &str) -> Result<Vec<u8>> {
     hex::decode(
@@ -79,14 +83,32 @@ pub fn parse_request(bytes: &[u8]) -> Result<ProgramRequest> {
     );
     let code = program_bytes(&program.code_hex)?;
     let input = program_bytes(&program.input_hex)?;
-    ensure!(
-        !code.is_empty() && code.len() <= 24_576 && input.len() <= 1_048_576,
-        "local program must contain 1..=24576 code bytes and at most 1MiB calldata"
-    );
+    if let Some(transactions) = &program.transactions {
+        transactions.validate(
+            &code,
+            &input,
+            program.block_count,
+            program.storage_state.is_some(),
+            program.authorizations.is_some(),
+            program.access_list.is_some(),
+        )?;
+    } else {
+        ensure!(
+            !code.is_empty() && code.len() <= 24_576 && input.len() <= 1_048_576,
+            "local program must contain 1..=24576 code bytes and at most 1MiB calldata"
+        );
+    }
     ensure!(
         !program.expected_route_counts.is_empty() && program.expected_route_counts.len() <= 256,
         "program requires a bounded nonempty expected_route_counts map"
     );
+    // Explicit multiuser envelopes can execute more than the old one-user
+    // 15M instruction budget (for example 1gas JUMPDEST). Keep legacy bounds.
+    let route_count_limit = if program.transactions.is_some() {
+        31_000_000
+    } else {
+        15_000_000
+    };
     for (route, count) in &program.expected_route_counts {
         let opcode = route
             .strip_prefix("opcode:0x")
@@ -95,7 +117,7 @@ pub fn parse_request(bytes: &[u8]) -> Result<ProgramRequest> {
             .context("expected routes must be canonical opcode:0xNN keys")?;
         ensure!(
             route == &format!("opcode:0x{opcode:02x}")
-                && *count <= 15_000_000 * program.block_count as u64,
+                && *count <= route_count_limit * program.block_count as u64,
             "program expected route or count exceeds local bounds"
         );
     }
@@ -200,14 +222,25 @@ pub fn run(args: &FixtureArgs) -> Result<serde_json::Value> {
         request.program.storage_state.as_ref(),
         request.program.authorizations.as_ref(),
         request.program.access_list.as_ref(),
+        request.program.transactions.as_ref(),
         args.execution_profile,
     )?;
+    let user_count = request
+        .program
+        .transactions
+        .as_ref()
+        .map_or(1, |t| t.count_per_block);
     ensure!(
         built.receipts.len() == request.program.block_count
-            && built.receipts.iter().all(|receipts| receipts.len() == 2
-                && receipts[0].success
-                && receipts[1].success == request.expected_user_success),
-        "each native block must contain one successful Anchor and one user transaction matching expected_user_success"
+            && built
+                .receipts
+                .iter()
+                .all(|receipts| receipts.len() == user_count + 1
+                    && receipts[0].success
+                    && receipts[1..]
+                        .iter()
+                        .all(|r| r.success == request.expected_user_success)),
+        "each native block must contain one successful Anchor and all user transactions matching expected_user_success"
     );
     let mut observed = BTreeMap::<String, u64>::new();
     let mut attempted = BTreeMap::<String, u64>::new();
@@ -246,7 +279,7 @@ pub fn run(args: &FixtureArgs) -> Result<serde_json::Value> {
     let blocks=built.input.witnesses.iter().enumerate().map(|(index,witness)|serde_json::json!({
         "block_index":index,"block_number":witness.block.header.number,"block_timestamp":witness.block.header.timestamp,
         "block_gas_used":witness.block.header.gas_used,"block_base_fee_per_gas":witness.block.header.base_fee_per_gas,
-        "transaction_count":built.receipts[index].len(),"user_transaction_gas_used":built.receipts[index][1].gas_used,
+        "transaction_count":built.receipts[index].len(),"user_transaction_gas_used":built.receipts[index][1..].iter().map(|r|r.gas_used).sum::<u64>(),
         "parent_hash":witness.block.header.parent_hash,"state_root":witness.block.header.state_root,
     })).collect::<Vec<_>>();
     let mut report = serde_json::json!({
@@ -255,11 +288,11 @@ pub fn run(args: &FixtureArgs) -> Result<serde_json::Value> {
         "chain_id":built.input.taiko.chain_spec.chain_id,"fork_profile":"controlled_mainnet_post_unzen",
         "anchor_artifact_sha256":sha256_hex(include_bytes!("../../../../scripts/regression/shasta/Anchor.json")),
         "block_count":request.program.block_count,"blocks":blocks,"proposal_id":built.input.taiko.proposal_id,
-        "transaction_count":request.program.block_count*2,"expected_user_success":request.expected_user_success,
+        "transaction_count":request.program.block_count*(user_count+1),"expected_user_success":request.expected_user_success,
         "expected_route_counts":request.program.expected_route_counts,"observed_route_counts":observed,
         "attempted_route_counts":attempted,"terminal_counts":terminals,"observations_by_block":built.observations,
         "receipts_by_block":built.receipts,"storage_state":built.storage,
-        "user_transaction_gas_used_total":built.receipts.iter().map(|block|block[1].gas_used).sum::<u64>(),
+        "user_transaction_gas_used_total":built.receipts.iter().flat_map(|block| &block[1..]).map(|r|r.gas_used).sum::<u64>(),
         "gas_source":"native execution receipt cumulative_gas_used deltas (charged gas including intrinsic/floor/refund effects)",
         "opcode_count_policy":"completed step_end instructions including REVERT and reverted child work; exceptional instructions reported separately",
     });
@@ -271,6 +304,9 @@ pub fn run(args: &FixtureArgs) -> Result<serde_json::Value> {
     }
     if let Some(access_list) = &built.access_list {
         report["access_list"] = serde_json::to_value(access_list)?;
+    }
+    if let Some(transactions) = &built.transactions {
+        report["transactions"] = serde_json::to_value(transactions)?;
     }
     let mut outputs = vec![stage_json(&args.output, &built.input)?];
     if let Some(path) = &args.output_bincode {

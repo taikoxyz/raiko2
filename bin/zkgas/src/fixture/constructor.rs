@@ -4,6 +4,7 @@ use super::{
     authorization::{AuthorizationReport, ProgramAuthorizations},
     observer::{FixtureExecutor, OpcodeObservation},
     storage::{ProgramStorageState, ProgramStorageStateReport},
+    transactions::{ProgramTransactions, TransactionKind, TransactionsReport},
 };
 use alethia_reth_block::config::{TaikoEvmConfig, TaikoNextBlockEnvAttributes};
 use alloy_consensus::{
@@ -68,6 +69,7 @@ pub(super) struct BuiltProgram {
     pub storage: Option<ProgramStorageStateReport>,
     pub authorizations: Option<AuthorizationReport>,
     pub access_list: Option<AccessListReport>,
+    pub transactions: Option<TransactionsReport>,
 }
 /// Native execution receipt data; gas is the charged cumulative-receipt delta.
 #[derive(Clone, Debug, Serialize)]
@@ -93,6 +95,7 @@ pub(super) trait ControlledMptFixture {
 }
 const CONTROLLED_CANDIDATE_FINAL_BALANCE: U256 =
     U256::from_limbs([10_000_000_000_000_000, 0, 0, 0]);
+const EXPLICIT_CANDIDATE_BALANCE: U256 = U256::from_limbs([1_000_000_000_000_000_000, 0, 0, 0]);
 fn sample_l1_header(number: u64, state_root: B256) -> alloy_consensus::Header {
     alloy_consensus::Header {
         number,
@@ -145,6 +148,7 @@ fn candidate_transactions(
     count: usize,
     authorizations: Option<&ProgramAuthorizations>,
     access_list: Option<&ProgramAccessList>,
+    transactions: Option<&ProgramTransactions>,
 ) -> Result<Vec<TransactionSigned>> {
     let signer = controlled_candidate_signer()?;
     let access_list = access_list
@@ -174,10 +178,16 @@ fn candidate_transactions(
             let tx = TxEip1559 {
                 chain_id: OVERHEAD_CHAIN_ID,
                 nonce: u64::try_from(nonce)?,
-                gas_limit: 15_000_000,
-                max_fee_per_gas: 25_000_000,
+                gas_limit: transactions.map_or(15_000_000, |t| t.gas_limit),
+                max_fee_per_gas: transactions.map_or(25_000_000, |_| {
+                    u128::from(alethia_reth_consensus::eip4396::MAX_BASE_FEE)
+                }),
                 max_priority_fee_per_gas: 0,
-                to: TxKind::Call(Address::repeat_byte(0x66)),
+                to: if transactions.is_some_and(|t| t.kind == TransactionKind::Create) {
+                    TxKind::Create
+                } else {
+                    TxKind::Call(Address::repeat_byte(0x66))
+                },
                 value: U256::ZERO,
                 access_list: access_list.clone(),
                 input: code_input.clone(),
@@ -344,6 +354,7 @@ fn overhead_prestate(
     chain_spec: &raiko2_primitives::ChainSpec,
     candidates: &[TransactionSigned],
     code: &Bytes,
+    transactions: Option<&ProgramTransactions>,
 ) -> Result<(ControlledTrieState, Vec<Bytes>)> {
     let anchor_address = chain_spec
         .l2_contract
@@ -361,9 +372,22 @@ fn overhead_prestate(
     let signer = candidates[0]
         .recover_signer()
         .map_err(|_| anyhow::anyhow!("unrecoverable user signature"))?;
-    state.insert_account(signer, CONTROLLED_CANDIDATE_FINAL_BALANCE, 0, KECCAK_EMPTY);
-    state.insert_account(Address::repeat_byte(0x66), U256::ZERO, 0, keccak256(code));
-    Ok((state, vec![anchor_code, checkpoint_code, code.clone()]))
+    state.insert_account(
+        signer,
+        if transactions.is_some() {
+            EXPLICIT_CANDIDATE_BALANCE
+        } else {
+            CONTROLLED_CANDIDATE_FINAL_BALANCE
+        },
+        0,
+        KECCAK_EMPTY,
+    );
+    let mut codes = vec![anchor_code, checkpoint_code];
+    if !transactions.is_some_and(|t| t.kind == TransactionKind::Create) {
+        state.insert_account(Address::repeat_byte(0x66), U256::ZERO, 0, keccak256(code));
+        codes.push(code.clone());
+    }
+    Ok((state, codes))
 }
 #[derive(Debug)]
 struct ControlledKonaPayloadOverflow;
@@ -448,9 +472,19 @@ pub(super) fn build_program(
     storage_state: Option<&ProgramStorageState>,
     authorizations: Option<&ProgramAuthorizations>,
     access_list: Option<&ProgramAccessList>,
+    transactions: Option<&ProgramTransactions>,
     execution_profile: raiko2_stateless::workload_lab::ExecutionProfile,
 ) -> Result<BuiltProgram> {
-    if code.is_empty()
+    if let Some(t) = transactions {
+        t.validate(
+            code,
+            input,
+            block_count,
+            storage_state.is_some(),
+            authorizations.is_some(),
+            access_list.is_some(),
+        )?;
+    } else if code.is_empty()
         || code.len() > 24_576
         || input.len() > 1_048_576
         || !(1..=32).contains(&block_count)
@@ -476,17 +510,31 @@ pub(super) fn build_program(
         };
     let runtime_chain_spec = builtin_taiko_chain_spec(OVERHEAD_CHAIN_ID)?;
     let evm_config = TaikoEvmConfig::new(runtime_chain_spec.clone());
+    let users_per_block = transactions.map_or(1, |t| t.count_per_block);
     let candidates = candidate_transactions(
-        &Bytes::copy_from_slice(input),
-        block_count,
+        &Bytes::copy_from_slice(
+            if transactions.is_some_and(|t| t.kind == TransactionKind::Create) {
+                code
+            } else {
+                input
+            },
+        ),
+        block_count
+            .checked_mul(users_per_block)
+            .ok_or_else(|| anyhow::anyhow!("candidate count overflow"))?,
         authorizations,
         access_list,
+        transactions,
     )?;
     let controlled_signer = controlled_candidate_signer()?;
     let base_fee_per_gas = 10_000_000;
     let timestamp_delta = 1;
-    let (mut controlled_state, mut codes) =
-        overhead_prestate(&chain_spec, &candidates, &Bytes::copy_from_slice(code))?;
+    let (mut controlled_state, mut codes) = overhead_prestate(
+        &chain_spec,
+        &candidates,
+        &Bytes::copy_from_slice(code),
+        transactions,
+    )?;
     if let Some(state) = storage_state {
         state.apply_fixture(&mut controlled_state, &candidates)?;
     }
@@ -559,6 +607,7 @@ pub(super) fn build_program(
     let mut observations = Vec::with_capacity(block_count);
     let mut authorization_blocks = Vec::with_capacity(block_count);
     let mut access_list_blocks = Vec::with_capacity(block_count);
+    let mut transaction_blocks = Vec::with_capacity(block_count);
 
     for index in 0..block_count {
         let block_number = OVERHEAD_BLOCK_NUMBER + u64::try_from(index)?;
@@ -583,7 +632,15 @@ pub(super) fn build_program(
             min_base_fee_for_chain(OVERHEAD_CHAIN_ID),
         )
         .ok_or_else(|| anyhow::anyhow!("controlled parent base fee is missing"))?;
-        let transactions = candidates[index..index + 1].to_vec();
+        let user_transactions =
+            candidates[index * users_per_block..(index + 1) * users_per_block].to_vec();
+        if let Some(t) = transactions {
+            t.before_block(
+                index,
+                controlled_signer.address(),
+                &controlled_state.accounts,
+            )?;
+        }
         let witness = ExecutionWitness {
             state: state_nodes.clone(),
             codes: codes.clone(),
@@ -608,14 +665,18 @@ pub(super) fn build_program(
             .map(|a| a.before_block(index, &controlled_state.accounts))
             .transpose()?;
         let mut executor = FixtureExecutor {
+            user_transaction_count: Some(users_per_block),
             execution_profile,
             ..Default::default()
         };
+        let expected_transactions = std::iter::once(anchor.clone())
+            .chain(user_transactions.iter().cloned())
+            .collect::<Vec<_>>();
         let outcome = reconstruct_block_from_transactions_with_executor_and_witness_resources(
             anchor
                 .try_into_recovered()
                 .map_err(|_| anyhow::anyhow!("controlled anchor signature is unrecoverable"))?,
-            transactions.clone(),
+            user_transactions.clone(),
             block_env,
             &witness,
             &ancestor_headers,
@@ -624,6 +685,10 @@ pub(super) fn build_program(
             &evm_config,
             &mut executor,
         )?;
+        anyhow::ensure!(
+            outcome.filtered_block.body().transactions == expected_transactions,
+            "fixture committed transactions differ from exact signed candidate order"
+        );
         observations.push(executor.observation);
         let mut previous_cumulative_gas = 0;
         native_receipts.push(
@@ -667,6 +732,14 @@ pub(super) fn build_program(
             )?);
         }
         controlled_state.apply(&outcome);
+        if let Some(t) = transactions {
+            transaction_blocks.push(t.after_block(
+                index,
+                controlled_signer.address(),
+                &outcome.filtered_block.body().transactions[1..],
+                &controlled_state.accounts,
+            )?);
+        }
         if let Some(authorizations) = authorizations {
             let committed = outcome
                 .filtered_block
@@ -690,8 +763,10 @@ pub(super) fn build_program(
                     &controlled_state.accounts,
                 )?,
             );
-            // Only actual executed code is eligible for later block witnesses. The
-            // first block proves absent authorities without speculative marker bytes.
+        }
+        // Explicit envelopes and the existing authorization path carry only code
+        // produced by actual committed execution. Preserve omitted-envelope bytes.
+        if transactions.is_some() || authorizations.is_some() {
             for generated in executor.generated_codes {
                 if !codes.contains(&generated) {
                     codes.push(generated);
@@ -728,7 +803,7 @@ pub(super) fn build_program(
             coinbase: fee_recipient,
             anchor_block_number: OVERHEAD_PARENT_ANCHOR_BLOCK_NUMBER,
             gas_limit: 30_000_000,
-            transactions: transactions
+            transactions: user_transactions
                 .iter()
                 .map(|tx| alloy_rlp::decode_exact(alloy_rlp::encode(tx)))
                 .collect::<std::result::Result<Vec<_>, _>>()?,
@@ -813,12 +888,23 @@ pub(super) fn build_program(
     guest_input.proof_carry_data.transition_input.proposal_hash =
         hash_proposal(&guest_input.taiko.proposal_event.proposal);
     if controlled_state.account_balance(controlled_signer.address())
-        != Some(CONTROLLED_CANDIDATE_FINAL_BALANCE)
+        != Some(if transactions.is_some() {
+            EXPLICIT_CANDIDATE_BALANCE
+        } else {
+            CONTROLLED_CANDIDATE_FINAL_BALANCE
+        })
     {
         bail!("fee-neutral fixture sender did not finish at expected balance");
     }
     Ok(BuiltProgram {
         input: guest_input,
+        transactions: transactions.map(|t| TransactionsReport {
+            kind: t.kind,
+            count_per_block: t.count_per_block,
+            gas_limit: t.gas_limit,
+            expected_runtime_hex: t.expected_runtime_hex.clone(),
+            blocks: transaction_blocks,
+        }),
         receipts: native_receipts,
         observations,
         authorizations: authorizations.map(|a| AuthorizationReport {

@@ -106,6 +106,7 @@ impl<DB: Database> Inspector<TaikoEvmContext<DB>, EthInterpreter> for FixtureIns
 #[derive(Default)]
 pub(super) struct FixtureExecutor {
     pub observation: OpcodeObservation,
+    pub user_transaction_count: Option<usize>,
     /// Actual code produced by committed native execution, for later block witnesses.
     pub generated_codes: Vec<alloy_primitives::Bytes>,
     pub execution_profile: raiko2_stateless::workload_lab::ExecutionProfile,
@@ -167,20 +168,24 @@ impl raiko2_stateless::DerivedBlockExecutor for FixtureExecutor {
         let transactions = std::iter::from_fn(|| {
             let transaction = inner.next();
             ledger.lock().expect("fixture observer poisoned").active =
-                transaction.is_some() && consumed == 1;
+                transaction.is_some() && consumed >= 1;
             if transaction.is_some() {
                 consumed += 1;
             }
             transaction
         });
         let execution = executor.execute_block_with_committed_transactions(transactions)?;
-        if consumed != 2
-            || execution.committed_transactions.len() != 2
-            || execution.attempted_transaction_count != 2
+        let expected_count = self.user_transaction_count.unwrap_or(1) + 1;
+        if consumed != expected_count
+            || execution.committed_transactions.len() != expected_count
+            || execution.attempted_transaction_count
+                != u64::try_from(expected_count).map_err(BlockExecutionError::other)?
         {
-            return Err(BlockExecutionError::msg(
-                "fixture must execute exactly one Anchor and one user transaction",
-            ));
+            return Err(BlockExecutionError::msg(if expected_count == 2 {
+                "fixture must execute exactly one Anchor and one user transaction"
+            } else {
+                "fixture must execute exactly one Anchor and all expected user transactions"
+            }));
         }
         self.observation = ledger
             .lock()

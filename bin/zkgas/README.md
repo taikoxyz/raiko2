@@ -35,6 +35,37 @@ rejects mismatched stage reports. SP1 measurement needs the matching
 [dedicated workload program](../../guests/workload-sp1/README.md), a manifest bound to
 its ELF, and a fresh campaign with controls measured against that same program.
 
+## Explicit offline transaction envelopes
+
+The optional `program.transactions` descriptor extends ProgramRequest with repeated calls or
+ordinary top-level creations. For example:
+
+```json
+{"kind":"create","count_per_block":2,"gas_limit":100000,"expected_runtime_hex":"0x"}
+```
+
+For `create`, `code_hex` is initcode (0..49152 bytes), `input_hex` must be empty, and no
+future account or runtime is inserted into the initial witness. `expected_runtime_hex` requires
+a block-final created account with nonce 1 and that code hash; `"0x"` explicitly expects a
+present account with empty runtime. Omitting the expectation requires the created address to be
+absent, including after failed creation or SELFDESTRUCT in the same transaction. Calls require
+1..24576 runtime bytes and cannot specify a runtime expectation. This descriptor cannot yet be
+combined with storage-state, authorization or access-list descriptors.
+
+`count_per_block` is 1..2048 and `gas_limit` is 21000..15000000. All users share a signer with
+contiguous nonces across blocks. Explicit envelopes use the protocol maximum base fee as their
+fee cap and a fee-neutral 10^18 wei sender balance. Omission retains the original one-call/15M
+transaction, fee cap, balance, canonical bytes and report shape. The 31M block and 30M manifest
+gas budgets remain enforced. Every signed candidate must be included in order; filtering,
+receipt/status mismatches and a compressed manifest exceeding one Kona blob fail before output
+publication. These are tool envelope/transport bounds, not measured proving-capacity limits.
+
+The optional `transactions` report records each actual included transaction's hash, nonce, gas
+limit, destination/create address and **block-final** account state. Each block and proposal gas
+total sums every user receipt, excluding Anchor. Opcode observations include every user and
+exclude Anchor, including exceptional/reverted execution and implicit STOP when REVM executes
+one. Actual committed generated code is carried into subsequent explicit-envelope witnesses.
+
 ## Build and command workflows
 
 From the repository root:

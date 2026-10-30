@@ -284,6 +284,33 @@ minimum 500 gas per call, and does not raise the producer's transaction gas budg
 These are finite unsaturated value-axis probes, not a global workload maximum or a tariff
 change. Set `SOLC_BIN` and `NATIVE_FIXTURE_BIN` to run the real compiler/native tests.
 
+For a finite BLS G1 MSM scalar/batch boundary probe, generate a separate catalog:
+
+```sh
+~/.venv/bin/python bin/zkgas/bench/cases/bls_msm_values.py \
+  --solc /path/to/solc --output-dir experiment/bls-msm-values
+```
+
+The 18 cases share one runtime calling precompile `0x0c`. Each input uses `K=1/4/16`
+distinct points `P_i=i*G` with one shared scalar: one, `(7 << 252)-1`, alternating
+`0x55` bytes, or a fixed SHA256-derived scalar. Twelve single calls cover this matrix;
+three shared-random zero-call controls, K=1 dense/random four-call repetitions and one
+K=16 mixed-random single call complete it. Mixed scalars use
+`(SHA256("bls-g1-msm-scalar-i") & (2^255-1)) mod r` for one-based point index `i`.
+Expected outputs use aggregate-scalar multiplication, checked independently against
+pointwise MSM and real native execution. Curve, subgroup and fixed-width encoding tests
+retain the full point/scalar boundary. Every call clears all four output words, requires
+success and exactly 128 returned bytes, and compares every word. Input is copied once;
+separate output memory is preallocated even for zero-call controls. Counts, K and payload
+length are checked before the first call. The source-derived 12000/38256/129984 per-call
+gas values include batch discounts; they are not measured transaction gas or whole-node
+quotes. Retain controls and failures using the same explicit `evm-gas-only` profile and
+reviewed program manifest. The 2048-call bound exceeds Osaka's legal transaction count
+at the minimum 12000 gas per call; it does not raise the producer's transaction budget.
+Dense binary scalars can become cheap under batch recoding, so these finite unsaturated
+probes establish neither a worst-case bound nor underpricing before SP1 measurement.
+Set `SOLC_BIN` and `NATIVE_FIXTURE_BIN` for the compiler/native qualification tests.
+
 ```sh
 ~/.venv/bin/python bin/zkgas/bench/workload.py screen \
   --config experiment/config.json --catalog experiment/spawn-memory/catalog.json \

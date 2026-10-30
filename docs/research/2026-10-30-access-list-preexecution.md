@@ -118,3 +118,69 @@ analysis runs on each creation, including unreachable tail bytes. Existing
 transaction, payload and resource terms may cover it; this requires measurements.
 Ordinary outer signature recovery and calldata scans already have fixed and byte
 tariffs, so their empirical slope controls follow those higher-priority surfaces.
+
+## Completed parent-model observations
+
+All 23 plans completed actual execution on the same b76baf2e ELF / SDK6.3, without
+a guest rebuild or changed tariff. Independent qualification decoded the real Kona
+blob and signed RLP, recovered signatures, checked declared vectors and 41 trie
+states, and confirmed that witnesses do not preload declared addresses/storage.
+The final raw audit checked all 23 input/public-output/normalization/tool joins and
+all 47 comparisons. Peak process-tree PSS was 1,677,324,288 bytes; all 92 exact
+owned resources were absent in the host namespace afterward.
+
+There are three complete-quote deficits under parent model4c0306:
+
+| Shape | Raw items | Actual proposal PGU | Node-known PGU | Complete quote PGU | Full deficit PGU |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Repeated address, one block | 4,096 | 185,274,324 | 30,235,396 | 185,177,226 | 97,098 |
+| Repeated address+key items, one block | 256 | 164,878,063 | 9,796,804 | 164,738,634 | 139,429 |
+| Repeated address+key items, one block | 2,048 | 191,970,262 | 35,487,428 | 190,429,258 | 1,541,004 |
+
+The strongest isolation is grouping the same 2,048 copies of one storage key as
+2,048 separate address items instead of one item. Unique resources and key count
+stay fixed. The 2,047 extra raw address items add 17,391,154 actual PGU, while node
+and complete quotes add only 12,051,200: 5,339,954 PGU of increment is uncovered.
+All three grouping comparisons have the same direction. Signed-byte pricing
+already covers much of the work; it does not fully cover the per-item wrapper.
+
+The three-block empty-list reference measures 166,495,372 actual /168,845,764
+complete PGU. Repeated addresses4096 measure 238,385,892 /241,201,348; repeated
+keys4096 measure 246,872,119 /272,708,356. Both increments are covered against
+their own three-block reference. Forward/reversed unique4096 keys differ by only
+1,502 actual PGU with identical prices and covered complete quotes; retain this
+variation without inventing an order selector. Literal actual/node rankings and
+all old underquotes remain archived, independently of these diagnostics.
+
+## Additive correction selected from these data
+
+Add one normalized charge per **raw access-list address item**, including repeated
+items. Keep key pricing, signed-byte prices, unique-resource costs, authorization
+validation and the global discount unchanged. Collection can read this count from
+the transaction before warming; no future proposal knowledge is required.
+
+The initial policy requires 25% headroom on positive measured workload increments
+when the raw item count increases. With fixed-point scale S and delta denoting a
+same-block-count pair, each constraint is:
+
+```text
+c >= (5 * delta_actual_PGU / 4 - delta_node_scaled / S) / delta_raw_items
+c >= 5 * max(actual_PGU - parent_full_PGU, 0) / (4 * raw_items)
+```
+
+Consider the 40 baseline/adjacent/grouping/three-block comparison rows, retaining
+those with positive raw-item and actual-work deltas, plus full-deficit constraints
+with nonzero raw item counts. The maximum
+is exactly `19375485/4094` PGU/item, approximately 4,732.653884. Integer ceiling gives
+4,733; conservative upward power-of-two rounding selects **8,192 PGU/item**.
+Zero-item deltas, including the small ordering difference, are diagnostics rather
+than constraints that an item tariff could distinguish. This is finite empirical
+policy, not a universal bound over hash distributions.
+
+The tariff and rule were fixed before prospective holdout execution. Nine new
+holdouts use repeated addresses2/3; repeated items32/512/3072; repeated items512
+across three blocks; repeated keys3072; distinct addresses512; and reversed keys256.
+Two empty-list reference replays identify the one/three-block baselines and are
+explicitly known controls. Holdouts do not enter this 23-input tariff derivation.
+Actual successor native replay and historical compatibility checks are required
+before reporting the correction as verified.

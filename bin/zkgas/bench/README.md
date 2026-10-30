@@ -365,6 +365,43 @@ Rust byte/report compatibility checks of the original three patterns, and
 `NATIVE_FIXTURE_BIN` for this holdout's Python native tests. Keep the same reviewed guest
 program and resource guards for measurement; pricing adequacy requires actual results.
 
+For access-list warming before opcode execution, generate the separate 23-case catalog:
+
+```sh
+~/.venv/bin/python bin/zkgas/bench/cases/access_list_values.py \
+  --output-dir experiment/access-list-values
+```
+
+Optional `program.access_list` takes `{"pattern":"repeated_key","count":4096}`. The six
+patterns are `repeated_address`, `distinct_addresses`, `repeated_key`, `distinct_keys`,
+`repeated_items` and `reversed_distinct_keys`. Counts are typed integers in 1..8192; omission
+represents the empty list. Address index zero is PROGRAM; further addresses use a deterministic
+initially absent fixture prefix. Storage keys are the 32-byte integers 1..K. Raw duplicates,
+item grouping and key order remain intact in the signed transaction and proposal blobs. The
+option also composes with existing EIP-7702 authorizations; this catalog uses EIP-1559 only.
+
+The catalog uses empty-list references, shared one-address and one-key baselines, repeated and
+unique address/key counts 16/256/4096, repeated address-plus-key items 16/256/2048, repeated
+keys 2048, a reversed 4096-key control, and three-block empty/repeated-address/repeated-key
+controls. Pair each three-block plan with its three-block reference. Count-one equivalent
+vectors share a baseline; extra block/Anchor work is not access-list-only work.
+
+The optional native `access_list` report contains `pattern`, `count_per_block` and one record
+per block with `transaction_type`, `raw_address_items`, `raw_storage_keys`, `unique_addresses`
+and `unique_storage_pairs`. These counts come from the actual included signed transaction
+through canonical EIP-2718 decoding, with signer/nonce, exact-list and inclusion gates. No
+accounts or storage values are preloaded for warming. Witness shape and old canonical bytes
+remain unchanged when the descriptor is omitted; pricing observations must still name their
+actual model and quote executable rather than claiming cross-model price identity.
+
+The descriptor bound does not increase the existing 15M transaction gas limit. An 8192-key
+request is accepted as a typed descriptor but rejected by real intrinsic-gas validation; retain
+that rejection rather than raising the budget. Set `NATIVE_FIXTURE_BIN` to run all 23 Python
+native qualifications and `FROZEN_ACCESS_LIST_NATIVE_FIXTURE_BIN` for omitted-option Rust byte
+and stable-report-field compatibility checks. Use the same reviewed guest and unchanged quote
+with the existing guarded sampler. No access-list-specific tariff or pricing-deficit claim is
+introduced by this producer.
+
 ```sh
 ~/.venv/bin/python bin/zkgas/bench/workload.py screen \
   --config experiment/config.json --catalog experiment/spawn-memory/catalog.json \

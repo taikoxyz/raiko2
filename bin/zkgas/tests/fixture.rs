@@ -744,3 +744,266 @@ fn original_authorization_patterns_match_frozen_native_inputs_and_reports() {
         }
     }
 }
+
+#[test]
+fn access_lists_preserve_raw_duplicates_and_report_included_signed_entries() {
+    let mut value = request("0x60006000f3", json!({"opcode:0xf3":1}));
+    value["program"]["access_list"] = json!({"pattern":"repeated_address","count":4});
+    let (output, dir) = export_with_profile(&value, "evm-gas-only");
+    success(&output);
+    let actual = input(&dir);
+    let list = actual.witnesses[0].block.body.transactions[1]
+        .access_list()
+        .unwrap();
+    assert_eq!(list.0.len(), 4);
+    assert!(list.0.windows(2).all(|pair| pair[0] == pair[1]));
+    let report = report(&dir);
+    let block = &report["access_list"]["blocks"][0];
+    assert_eq!(block["raw_address_items"], 4);
+    assert_eq!(block["raw_storage_keys"], 0);
+    assert_eq!(block["unique_addresses"], 1);
+    assert_eq!(block["unique_storage_pairs"], 0);
+}
+
+#[test]
+fn access_list_descriptors_are_typed_and_do_not_raise_intrinsic_gas_limits() {
+    for descriptor in [
+        json!([]),
+        json!({}),
+        json!({"pattern":"unknown","count":1}),
+        json!({"pattern":"repeated_key","count":0}),
+        json!({"pattern":"repeated_key","count":8193}),
+        json!({"pattern":"repeated_key","count":true}),
+        json!({"pattern":"repeated_key","count":"1"}),
+        json!({"pattern":"repeated_key","count":1,"extra":0}),
+    ] {
+        let mut value = request("0x60006000f3", json!({"opcode:0xf3":1}));
+        value["program"]["access_list"] = descriptor;
+        let (output, dir) = export(&value);
+        assert!(!output.status.success());
+        absent_outputs(&dir);
+    }
+    let mut value = request("0x60006000f3", json!({"opcode:0xf3":1}));
+    value["program"]["access_list"] = json!({"pattern":"repeated_key","count":8192});
+    assert!(zkgas::fixture::parse_request(&serde_json::to_vec(&value).unwrap()).is_ok());
+    let intrinsic = reth_revm::context_interface::cfg::GasParams::new_spec(
+        reth_revm::primitives::hardfork::SpecId::OSAKA,
+    )
+    .initial_tx_gas(&[], false, 1, 8192, 0, None);
+    assert!(intrinsic.initial_regular_gas > 15_000_000);
+    let (output, dir) = export_with_profile(&value, "evm-gas-only");
+    assert!(
+        !output.status.success(),
+        "8192 keys exceed the real 15M intrinsic budget"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("fixture must execute exactly one Anchor and one user transaction"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    absent_outputs(&dir);
+}
+
+#[test]
+fn access_list_patterns_preserve_order_grouping_and_authorization_composition() {
+    use alloy_eips::{Decodable2718, Encodable2718};
+    use alloy_primitives::{Address, B256, U256};
+    use std::collections::BTreeSet;
+    for (pattern, raw_addresses, raw_keys, addresses, pairs) in [
+        ("repeated_address", 4, 0, 1, 0),
+        ("distinct_addresses", 4, 0, 4, 0),
+        ("repeated_key", 1, 4, 1, 1),
+        ("distinct_keys", 1, 4, 1, 4),
+        ("repeated_items", 4, 4, 1, 1),
+        ("reversed_distinct_keys", 1, 4, 1, 4),
+    ] {
+        for authorizations in [false, true] {
+            let mut value = request("0x60006000f3", json!({"opcode:0xf3":3}));
+            value["program"]["block_count"] = 3.into();
+            value["program"]["access_list"] = json!({"pattern":pattern,"count":4});
+            if authorizations {
+                value["program"]["authorizations"] = json!({"pattern":"compact","count":4});
+            }
+            let (output, dir) = export_with_profile(&value, "evm-gas-only");
+            success(&output);
+            let input = input(&dir);
+            let report = report(&dir);
+            assert_eq!(report["access_list"]["pattern"], pattern);
+            assert_eq!(report["access_list"]["count_per_block"], 4);
+            for (index, witness) in input.witnesses.iter().enumerate() {
+                let tx = &witness.block.body.transactions[1];
+                assert_eq!(tx.gas_limit(), 15_000_000);
+                assert_eq!(tx.nonce(), index as u64);
+                assert_eq!(tx.as_eip7702().is_some(), authorizations);
+                let encoded = tx.encoded_2718();
+                let mut bytes = encoded.as_slice();
+                let decoded =
+                    reth_ethereum_primitives::TransactionSigned::decode_2718(&mut bytes).unwrap();
+                assert_eq!(&decoded, tx);
+                assert!(bytes.is_empty());
+                let list = decoded.access_list().unwrap();
+                assert_eq!(list.0.len(), raw_addresses);
+                assert_eq!(
+                    list.0.iter().map(|a| a.storage_keys.len()).sum::<usize>(),
+                    raw_keys
+                );
+                assert_eq!(
+                    list.0
+                        .iter()
+                        .map(|a| a.address)
+                        .collect::<BTreeSet<_>>()
+                        .len(),
+                    addresses
+                );
+                assert_eq!(
+                    list.0
+                        .iter()
+                        .flat_map(|a| a.storage_keys.iter().map(move |key| (a.address, *key)))
+                        .collect::<BTreeSet<_>>()
+                        .len(),
+                    pairs
+                );
+                assert_eq!(list.0[0].address, Address::repeat_byte(0x66));
+                if pattern == "reversed_distinct_keys" {
+                    assert_eq!(
+                        list.0[0].storage_keys[0],
+                        B256::from(U256::from(4).to_be_bytes::<32>())
+                    );
+                }
+                if pattern == "distinct_keys" {
+                    assert_eq!(
+                        list.0[0].storage_keys[0],
+                        B256::from(U256::from(1).to_be_bytes::<32>())
+                    );
+                }
+                let block = &report["access_list"]["blocks"][index];
+                assert_eq!(block["block_index"], index);
+                assert_eq!(
+                    block["transaction_type"],
+                    if authorizations { 4 } else { 2 }
+                );
+                assert_eq!(block["raw_address_items"], raw_addresses);
+                assert_eq!(block["raw_storage_keys"], raw_keys);
+                assert_eq!(block["unique_addresses"], addresses);
+                assert_eq!(block["unique_storage_pairs"], pairs);
+                assert_eq!(report["receipts_by_block"][index][1]["success"], true);
+            }
+        }
+    }
+}
+
+#[test]
+fn access_list_count_one_shapes_share_bytes_and_do_not_preload_state() {
+    let mut reference_nodes = None;
+    for patterns in [
+        vec!["repeated_address", "distinct_addresses"],
+        vec![
+            "repeated_key",
+            "distinct_keys",
+            "repeated_items",
+            "reversed_distinct_keys",
+        ],
+    ] {
+        let mut canonical = None;
+        for pattern in patterns {
+            let mut value = request("0x60006000f3", json!({"opcode:0xf3":1}));
+            value["program"]["access_list"] = json!({"pattern":pattern,"count":1});
+            let (output, dir) = export_with_profile(&value, "evm-gas-only");
+            success(&output);
+            let input = input(&dir);
+            let bytes = fs::read(dir.path().join("input.bin")).unwrap();
+            if let Some(previous) = &canonical {
+                assert_eq!(&bytes, previous);
+            } else {
+                canonical = Some(bytes);
+            }
+            if let Some(nodes) = &reference_nodes {
+                assert_eq!(
+                    &(
+                        input.proposal_state_nodes.clone(),
+                        input.witnesses[0].witness.clone()
+                    ),
+                    nodes
+                );
+            } else {
+                assert!(
+                    !input.proposal_state_nodes.is_empty()
+                        || !input.witnesses[0].witness.state.is_empty()
+                );
+                reference_nodes = Some((
+                    input.proposal_state_nodes.clone(),
+                    input.witnesses[0].witness.clone(),
+                ));
+            }
+        }
+    }
+    let value = request("0x60006000f3", json!({"opcode:0xf3":1}));
+    let (output, dir) = export_with_profile(&value, "evm-gas-only");
+    success(&output);
+    assert_eq!(
+        Some((
+            input(&dir).proposal_state_nodes.clone(),
+            input(&dir).witnesses[0].witness.clone()
+        )),
+        reference_nodes
+    );
+}
+
+#[test]
+fn omitted_access_list_preserves_frozen_input_bytes_and_stable_native_fields() {
+    let Ok(frozen) = std::env::var("FROZEN_ACCESS_LIST_NATIVE_FIXTURE_BIN") else {
+        return;
+    };
+    for authorizations in [false, true] {
+        let mut value = request("0x60006000f3", json!({"opcode:0xf3":2}));
+        value["program"]["block_count"] = 2.into();
+        if authorizations {
+            value["program"]["authorizations"] = json!({"pattern":"compact","count":4});
+        }
+        let (output, dir) = export_with_profile(&value, "evm-gas-only");
+        success(&output);
+        let old = tempfile::tempdir().unwrap();
+        fs::write(
+            old.path().join("request.json"),
+            serde_json::to_vec(&value).unwrap(),
+        )
+        .unwrap();
+        let output = Command::new(&frozen)
+            .args(["--execution-profile", "evm-gas-only"])
+            .arg("--input")
+            .arg(old.path().join("request.json"))
+            .arg("--output")
+            .arg(old.path().join("input.json"))
+            .arg("--output-bincode")
+            .arg(old.path().join("input.bin"))
+            .arg("--report")
+            .arg(old.path().join("report.json"))
+            .output()
+            .unwrap();
+        success(&output);
+        for name in ["input.bin", "input.json"] {
+            assert_eq!(
+                fs::read(dir.path().join(name)).unwrap(),
+                fs::read(old.path().join(name)).unwrap()
+            );
+        }
+        let current = report(&dir);
+        let previous = report(&old);
+        assert!(current.get("access_list").is_none());
+        for key in [
+            "guest_input_sha256",
+            "guest_input_bincode_length",
+            "public_output",
+            "observed_route_counts",
+            "receipts_by_block",
+            "authorizations",
+        ] {
+            assert_eq!(
+                current.get(key),
+                previous.get(key),
+                "stable native field {key}"
+            );
+        }
+    }
+}

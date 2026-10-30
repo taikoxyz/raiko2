@@ -1,5 +1,6 @@
 //! Minimal synthetic proposal construction using production stateless validation.
 use super::{
+    access_list::{AccessListReport, ProgramAccessList},
     authorization::{AuthorizationReport, ProgramAuthorizations},
     observer::{FixtureExecutor, OpcodeObservation},
     storage::{ProgramStorageState, ProgramStorageStateReport},
@@ -66,6 +67,7 @@ pub(super) struct BuiltProgram {
     pub observations: Vec<OpcodeObservation>,
     pub storage: Option<ProgramStorageStateReport>,
     pub authorizations: Option<AuthorizationReport>,
+    pub access_list: Option<AccessListReport>,
 }
 /// Native execution receipt data; gas is the charged cumulative-receipt delta.
 #[derive(Clone, Debug, Serialize)]
@@ -142,8 +144,13 @@ fn candidate_transactions(
     code_input: &Bytes,
     count: usize,
     authorizations: Option<&ProgramAuthorizations>,
+    access_list: Option<&ProgramAccessList>,
 ) -> Result<Vec<TransactionSigned>> {
     let signer = controlled_candidate_signer()?;
+    let access_list = access_list
+        .map(ProgramAccessList::canonical_list)
+        .transpose()?
+        .unwrap_or_default();
     (0..count)
         .map(|nonce| {
             if let Some(authorizations) = authorizations {
@@ -155,7 +162,7 @@ fn candidate_transactions(
                     max_priority_fee_per_gas: 0,
                     to: Address::repeat_byte(0x66),
                     value: U256::ZERO,
-                    access_list: Default::default(),
+                    access_list: access_list.clone(),
                     input: code_input.clone(),
                     authorization_list: authorizations.signed_list(nonce)?,
                 };
@@ -172,7 +179,7 @@ fn candidate_transactions(
                 max_priority_fee_per_gas: 0,
                 to: TxKind::Call(Address::repeat_byte(0x66)),
                 value: U256::ZERO,
-                access_list: Default::default(),
+                access_list: access_list.clone(),
                 input: code_input.clone(),
             };
             let signature = signer.sign_hash_sync(&tx.signature_hash())?;
@@ -433,12 +440,14 @@ fn kona_blob(payload: &[u8]) -> Result<Vec<u8>> {
     }
     Ok(blob)
 }
+#[allow(clippy::too_many_arguments)] // One optional descriptor per independent fixture dimension.
 pub(super) fn build_program(
     code: &[u8],
     input: &[u8],
     block_count: usize,
     storage_state: Option<&ProgramStorageState>,
     authorizations: Option<&ProgramAuthorizations>,
+    access_list: Option<&ProgramAccessList>,
     execution_profile: raiko2_stateless::workload_lab::ExecutionProfile,
 ) -> Result<BuiltProgram> {
     if code.is_empty()
@@ -467,8 +476,12 @@ pub(super) fn build_program(
         };
     let runtime_chain_spec = builtin_taiko_chain_spec(OVERHEAD_CHAIN_ID)?;
     let evm_config = TaikoEvmConfig::new(runtime_chain_spec.clone());
-    let candidates =
-        candidate_transactions(&Bytes::copy_from_slice(input), block_count, authorizations)?;
+    let candidates = candidate_transactions(
+        &Bytes::copy_from_slice(input),
+        block_count,
+        authorizations,
+        access_list,
+    )?;
     let controlled_signer = controlled_candidate_signer()?;
     let base_fee_per_gas = 10_000_000;
     let timestamp_delta = 1;
@@ -476,6 +489,17 @@ pub(super) fn build_program(
         overhead_prestate(&chain_spec, &candidates, &Bytes::copy_from_slice(code))?;
     if let Some(state) = storage_state {
         state.apply_fixture(&mut controlled_state, &candidates)?;
+    }
+    if let Some(access_list) = access_list {
+        for item in access_list.canonical_list()?.0 {
+            anyhow::ensure!(
+                item.address == Address::repeat_byte(0x66)
+                    || !controlled_state
+                        .accounts
+                        .contains_key(&keccak256(item.address)),
+                "extra access-list address must be absent from the initial prestate"
+            );
+        }
     }
     let (mut prestate_root, full_state_nodes) = controlled_state.witness();
     let full_witness_node_count = full_state_nodes.len();
@@ -534,6 +558,7 @@ pub(super) fn build_program(
     let mut native_receipts = Vec::with_capacity(block_count);
     let mut observations = Vec::with_capacity(block_count);
     let mut authorization_blocks = Vec::with_capacity(block_count);
+    let mut access_list_blocks = Vec::with_capacity(block_count);
 
     for index in 0..block_count {
         let block_number = OVERHEAD_BLOCK_NUMBER + u64::try_from(index)?;
@@ -624,6 +649,23 @@ pub(super) fn build_program(
                 })
                 .collect::<Result<Vec<_>>>()?,
         );
+        if let Some(access_list) = access_list {
+            let committed = outcome
+                .filtered_block
+                .body()
+                .transactions
+                .get(1)
+                .ok_or_else(|| anyhow::anyhow!("access-list user transaction was not included"))?;
+            anyhow::ensure!(
+                committed == &candidates[index],
+                "committed access-list transaction differs"
+            );
+            access_list_blocks.push(access_list.validate_transaction(
+                committed,
+                controlled_signer.address(),
+                index,
+            )?);
+        }
         controlled_state.apply(&outcome);
         if let Some(authorizations) = authorizations {
             let committed = outcome
@@ -783,6 +825,11 @@ pub(super) fn build_program(
             pattern: a.pattern,
             entries_per_block: a.count,
             blocks: authorization_blocks,
+        }),
+        access_list: access_list.map(|a| AccessListReport {
+            pattern: a.pattern,
+            count_per_block: a.count,
+            blocks: access_list_blocks,
         }),
         storage: storage_state
             .map(|state| state.report(full_witness_node_count, minimized_witness_node_count)),

@@ -1,8 +1,10 @@
 //! Feature-gated, offline ProgramRequest producer for native workload experiments.
+mod access_list;
 mod authorization;
 mod constructor;
 mod observer;
 mod storage;
+pub use access_list::{AccessListPattern, ProgramAccessList};
 pub use authorization::{AuthorizationPattern, ProgramAuthorizations};
 pub use observer::OpcodeObservation;
 pub use storage::{ProgramStorageState, ProgramStorageStateReport};
@@ -49,6 +51,8 @@ pub struct Program {
     pub storage_state: Option<ProgramStorageState>,
     #[serde(default)]
     pub authorizations: Option<ProgramAuthorizations>,
+    #[serde(default)]
+    pub access_list: Option<ProgramAccessList>,
 }
 fn program_bytes(value: &str) -> Result<Vec<u8>> {
     hex::decode(
@@ -100,6 +104,9 @@ pub fn parse_request(bytes: &[u8]) -> Result<ProgramRequest> {
     }
     if let Some(authorizations) = &program.authorizations {
         authorizations.validate()?;
+    }
+    if let Some(access_list) = &program.access_list {
+        access_list.validate()?;
     }
     Ok(request)
 }
@@ -192,6 +199,7 @@ pub fn run(args: &FixtureArgs) -> Result<serde_json::Value> {
         request.program.block_count,
         request.program.storage_state.as_ref(),
         request.program.authorizations.as_ref(),
+        request.program.access_list.as_ref(),
         args.execution_profile,
     )?;
     ensure!(
@@ -260,6 +268,9 @@ pub fn run(args: &FixtureArgs) -> Result<serde_json::Value> {
     }
     if let Some(authorizations) = &built.authorizations {
         report["authorizations"] = serde_json::to_value(authorizations)?;
+    }
+    if let Some(access_list) = &built.access_list {
+        report["access_list"] = serde_json::to_value(access_list)?;
     }
     let mut outputs = vec![stage_json(&args.output, &built.input)?];
     if let Some(path) = &args.output_bincode {

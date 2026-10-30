@@ -71,3 +71,81 @@ sampler. Freeze new host binaries and their complete source inventories, clearly
 separate from the old guest source. Independently verify canonical signed inputs,
 counts, receipts, trie states, raw results and source bindings. Reusable tools and
 usage stay in Raiko; immutable observations go to Atlas after independent audit.
+
+
+## First completed observations
+
+The44 selected cases all completed actual execution on the unchanged b76baf2e /
+SDK6.3 program, producing44 distinct canonical inputs,56 block occurrences and
+2814 transaction occurrences (2758 users). Complete source review and independent
+native qualification passed before measurement; the native creator is
+`f216a2843234f812b92c8c8e721143db20192ed1`. Its484-file compiled-source closure
+retains the original modified458ebc1b/null build identity and a separate later
+commit association. The unchanged quote retains its own481-file/source118eeedb
+identity; the guest retains its original67-file/source4580 identity.
+
+All44 raw observations passed independent evidence-integrity review; all176 owned
+SP1 resource objects were absent afterward. Peak process-tree PSS was1,844,956,160
+bytes. There are no measurement failures. Pricing accuracy is a separate result:
+one complete quote underestimates its actual, as shown below.
+
+| Controlled case | Actual PGU | Node-known PGU | Complete quote PGU |
+| --- | ---: | ---: | ---: |
+| One ordinary STOP call | 160,983,458 | 6,109,740 | 161,051,571 |
+| 512 ordinary STOP calls | 247,377,051 | 108,649,741 | 263,591,572 |
+| One empty-initcode creation | 160,968,292 | 6,104,620 | 161,034,451 |
+| 512 empty-initcode creations | 259,798,925 | 112,243,339 | 374,956,234 |
+| Return/deploy0 runtime bytes | 160,975,808 | 6,129,673 | 161,059,504 |
+| Return/deploy24576 runtime bytes | 161,530,410 | 6,243,393 | 161,173,224 |
+| Return24577 bytes; included failed deployment | 160,976,696 | 6,191,350 | 161,106,669 |
+
+The successful24576-byte deployment has a357,186-PGU complete deficit. Relative to
+its same-envelope zero-runtime control, actual growth is554,602 PGU while exact
+fixed-point quotation grows113,719.544968474130133552 PGU. Runtime coverage is not
+missing: both node and exact resources include all24576 additional unique code
+bytes and one hash, priced52,123 PGU; RETURN/operation growth contributes another
+61,596.544968474130133552 PGU. Distinguish an inadequately priced processing path
+from an absent resource counter.
+
+Same-length code-content variation remains visible too. At49152-byte initcode,
+JUMPDEST tails add205,860 actual PGU versus zero tails with identical quotes. The
+4096-byte counterpart adds16,438 PGU at unchanged price. Their complete quotes
+remain covered, and overall length growth is covered by existing byte pricing.
+Do not claim every matched marginal difference is covered or infer that each such
+variation requires its own selector.
+
+## Source-supported followup
+
+The frozen program's manifest-bound lock selects REVM43.0.3. On successful create
+completion, `return_create` first validates result, code length/prefix and deposit
+gas, then creates a fresh legacy Bytecode, analyzes it, hashes its original bytes
+and stores it. Size-limit failure at24577 returns before that preparation. Each
+new Bytecode has a fresh hash cache; code-hash resource sets deduplicate equal
+outputs after this work. Source inspection supports a per-occurrence hypothesis,
+not an attribution of every observed PGU to a single hash operation.
+
+RETURN pricing already handles dispatch, returned length and memory expansion;
+it cannot distinguish CALL return from accepted deployment. Top-level creation
+has no preceding CREATE opcode, while internal CREATE/CREATE2 have confirmed-spawn
+fixed charges. Do not broadly increase RETURN or unique-code-byte prices from one
+boundary sample.
+
+A separate38-row development followup tests intermediate sizes, repeated identical
+runtime, matched ordinary CALL-return controls and cheaply generated runtime bytes
+(0x00/0x5b/0x7f via equal-opcode MCOPY expansion). It includes35 new inputs and three
+explicit known reference replays; it is not a post-fit holdout. New measurements
+must precede selecting a correction. Keep one prospective validation set unopened
+until a candidate policy is fixed. If needed, a processing selector must count
+actual accepted create-frame processing per occurrence, retain work later reverted
+by an ancestor, and cover both plain/inspected paths exactly once. Final committed
+state or unique hashes cannot establish that event count by themselves.
+
+
+Multiblock runtime comparisons additionally include the constructor's carried code
+in later witnesses. Those codes preserve execution continuity but need not all be
+read in a fresh-address creation workload; witness initialization eagerly prepares
+provided code. Keep these as explicit constructed-witness/state-continuity
+diagnostics, rather than attributing the entire difference to deployment or using
+them as strictly minimal-input calibration. Within-block N1/N2/N4 comparisons do
+not have that carry-forward confound. Check ordinary loaded code separately before
+choosing a narrow deployment-only correction.

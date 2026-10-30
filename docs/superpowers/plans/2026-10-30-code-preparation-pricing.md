@@ -30,7 +30,7 @@
 - [x] Reth: add failing tests for raw event/byte accounting, both execution paths, duplicate hashes, nested/outer revert, failed/empty creation, collector reset/discard and bounds. Implement the shared hook/helper and deterministic successor generator; run focused EVM/block/generator/no-std/Clippy checks and independent review/verification before commit/push.
 - [x] Raiko: pin the reviewed Reth commit without guest rebuild; add required node/prove selectors and contribution once, proposal-once zero; validate consistency and missing-field/forgery rejection. Run package/workspace checks and independent actual native replays.
 - [x] Generate/qualify the frozen16-row prospective set, execute the unchanged program, audit independently, and reprice all92 original rows plus50 historical inputs. Report actual results and limits before publishing the corrected-model conclusion.
-- [ ] Preserve all original defects and actual successor quotes in a reviewed data-only Atlas fixture; keep reusable tools/usage in Raiko and leave production artifact alignment as a separate Draft merge gate.
+- [x] Preserve all original defects and actual successor quotes in a reviewed data-only Atlas fixture; keep reusable tools/usage in Raiko and leave production artifact alignment as a separate Draft merge gate.
 
 
 ## Verified upstream checkpoint
@@ -46,3 +46,9 @@ no-default compilation and deterministic generator/174-route checks passed.
 This checkpoint does not claim Raiko actual successor workload closure. Original
 SP1 measurements, prospective separation and historical program identities remain
 unchanged; downstream checks and actual repricing are the next gates.
+
+
+Atlas fixture publication is complete in [PR17](https://github.com/taikoxyz/raiko2-atlas/pull/17),
+stacked on its prior fixture PR16. The immutable asset was published and actually downloaded
+through the existing integrity-workflow logic before PR creation. Full compressed/decoded/member
+checks passed. Source PRs remain Draft/do-not-merge; no merge or deployment occurred.

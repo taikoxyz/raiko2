@@ -225,3 +225,12 @@ price closure; this does not claim a second independent per-frame trace of every
 historical transaction. Original actuals and allfour raw campaign audits remain
 unchanged. The data-only record is preserved under Atlas fixture
 `unzen-code-preparation-v1`; consuming regression chooses execution strategy.
+
+
+The data-only [Atlas PR17](https://github.com/taikoxyz/raiko2-atlas/pull/17) and
+[immutable Release](https://github.com/taikoxyz/raiko2-atlas/releases/tag/fixture-unzen-code-preparation-v1)
+retain this fixture. The published archive is7,823,528 bytes /1902 members, SHA256
+`70b0543418685a83c136a183c3bf3e10b260921ef2b783f678d89dd4e38195d3`.
+Independent archive review and actual remote-download integrity checks passed;
+GitHub CI status remains a separate live check. No tool/source/ELF binary or pricing
+implementation is copied into Atlas.

@@ -415,7 +415,7 @@ fn directory_and_symlink_requests_are_rejected() {
 
 #[test]
 fn authorization_request_schema_accepts_bounded_patterns_and_rejects_malformed_lists() {
-    for pattern in ["sequential", "repeated", "distinct"] {
+    for pattern in ["sequential", "repeated", "distinct", "compact"] {
         for count in [1, 1024] {
             let mut value = request("0x60006000f3", json!({"opcode:0xf3":1}));
             value["program"]["authorizations"] = json!({"pattern":pattern,"count":count});
@@ -622,4 +622,125 @@ fn authorization_delegations_survive_a_user_program_revert() {
         report["authorizations"]["blocks"][0]["authorities"][0]["nonce"],
         1
     );
+}
+
+#[test]
+fn compact_authorizations_have_short_canonical_rlp_and_stale_three_block_state() {
+    use alloy_eips::eip2718::{Decodable2718, Encodable2718};
+    use alloy_primitives::{Address, U256, keccak256};
+    let mut value = request("0x60006000f3", json!({"opcode:0xf3":3,"opcode:0xfa":0}));
+    value["program"]["block_count"] = 3.into();
+    value["program"]["authorizations"] = json!({"pattern":"compact","count":16});
+    let (output, dir) = export_with_profile(&value, "evm-gas-only");
+    success(&output);
+    let input = input(&dir);
+    let report = report(&dir);
+    let delegation = [vec![0xef, 0x01, 0x00], vec![0x66; 20]].concat();
+    let expected_rlp = hex::decode(format!("dd83028c5894{}80800101", "66".repeat(20))).unwrap();
+    let mut authority = None;
+    let mut signed_entries = 0;
+    for (index, witness) in input.witnesses.iter().enumerate() {
+        let transaction = &witness.block.body.transactions[1];
+        let bytes = transaction.encoded_2718();
+        assert_eq!(bytes[0], 4);
+        let mut slice = bytes.as_slice();
+        assert_eq!(
+            reth_ethereum_primitives::TransactionSigned::decode_2718(&mut slice).unwrap(),
+            *transaction
+        );
+        assert!(slice.is_empty());
+        let tx = transaction.as_eip7702().unwrap().tx();
+        assert_eq!(tx.authorization_list.len(), 16);
+        for auth in &tx.authorization_list {
+            assert_eq!(auth.inner().chain_id, U256::from(167_000));
+            assert_eq!(auth.inner().address, Address::repeat_byte(0x66));
+            assert_eq!(auth.inner().nonce, 0);
+            assert_eq!(auth.r(), U256::from(1));
+            assert_eq!(auth.s(), U256::from(1));
+            assert_eq!(auth.y_parity(), 0);
+            assert_eq!(alloy_rlp::encode(auth), expected_rlp);
+            let recovered = auth.recover_authority().unwrap();
+            if let Some(expected) = authority {
+                assert_eq!(recovered, expected);
+            }
+            authority = Some(recovered);
+        }
+        signed_entries += tx.authorization_list.len();
+        let block = &report["authorizations"]["blocks"][index];
+        assert_eq!(block["signed_entries"], 16);
+        assert_eq!(block["applied_delegations"], if index == 0 { 1 } else { 0 });
+        assert_eq!(block["authorities"].as_array().unwrap().len(), 1);
+        assert_eq!(block["authorities"][0]["nonce"], 1);
+        assert_eq!(
+            block["authorities"][0]["previous_nonce"],
+            if index == 0 { 0 } else { 1 }
+        );
+        assert_eq!(
+            block["authorities"][0]["address"],
+            serde_json::to_value(authority.unwrap()).unwrap()
+        );
+        assert_eq!(
+            block["authorities"][0]["code_hash"],
+            serde_json::to_value(keccak256(&delegation)).unwrap()
+        );
+        assert_eq!(
+            witness.witness.codes.contains(&delegation.clone().into()),
+            index != 0
+        );
+        let mut expected_codes = input.witnesses[0].witness.codes.clone();
+        if index != 0 {
+            // The existing producer retains both actual bundle contracts: the
+            // empty code and delegation marker. No other code is added or cloned.
+            expected_codes.push(alloy_primitives::Bytes::new());
+            expected_codes.push(delegation.clone().into());
+        }
+        assert_eq!(witness.witness.codes, expected_codes);
+        assert!(
+            report["receipts_by_block"][index][1]["success"]
+                .as_bool()
+                .unwrap()
+        );
+    }
+    assert_eq!(signed_entries, 48);
+    assert_eq!(expected_rlp.len(), 30);
+}
+
+#[test]
+fn original_authorization_patterns_match_frozen_native_inputs_and_reports() {
+    let Ok(frozen) = std::env::var("FROZEN_AUTHORIZATION_NATIVE_FIXTURE_BIN") else {
+        return;
+    };
+    for pattern in ["sequential", "repeated", "distinct"] {
+        let mut value = request("0x60006000f3", json!({"opcode:0xf3":2}));
+        value["program"]["block_count"] = 2.into();
+        value["program"]["authorizations"] = json!({"pattern":pattern,"count":4});
+        let (output, current_dir) = export_with_profile(&value, "evm-gas-only");
+        success(&output);
+        let frozen_dir = tempfile::tempdir().unwrap();
+        fs::write(
+            frozen_dir.path().join("request.json"),
+            serde_json::to_vec(&value).unwrap(),
+        )
+        .unwrap();
+        let output = Command::new(&frozen)
+            .arg("--input")
+            .arg(frozen_dir.path().join("request.json"))
+            .arg("--output")
+            .arg(frozen_dir.path().join("input.json"))
+            .arg("--output-bincode")
+            .arg(frozen_dir.path().join("input.bin"))
+            .arg("--report")
+            .arg(frozen_dir.path().join("report.json"))
+            .args(["--execution-profile", "evm-gas-only"])
+            .output()
+            .unwrap();
+        success(&output);
+        for name in ["input.bin", "input.json", "report.json"] {
+            assert_eq!(
+                fs::read(current_dir.path().join(name)).unwrap(),
+                fs::read(frozen_dir.path().join(name)).unwrap(),
+                "{pattern} changed {name}"
+            );
+        }
+    }
 }

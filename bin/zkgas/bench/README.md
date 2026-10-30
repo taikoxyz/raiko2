@@ -339,6 +339,32 @@ measurement, and the count bound does not increase the existing 15M transaction 
 Set `NATIVE_FIXTURE_BIN` for Python native qualification and `FROZEN_NATIVE_FIXTURE_BIN` for the
 Rust regression that compares default canonical bytes/reports with the prior executable.
 
+A separate compact-signature holdout leaves that twelve-case cohort unchanged:
+
+```sh
+~/.venv/bin/python bin/zkgas/bench/cases/authorization_holdout.py \
+  --output-dir experiment/authorization-holdout
+```
+
+Its five inputs use `program.authorizations.pattern="compact"`: K=1/16/128/512 in
+one block, plus K=16 in three blocks. Every entry is the same canonical authorization
+with chain 167000, delegation target `0x6666666666666666666666666666666666666666`,
+nonce zero and signature `(r=1,s=1,y_parity=0)`. The authority is derived by canonical
+signature recovery; this pattern uses no private fixture key. The entry occupies only
+30 RLP bytes. Its first entry applies once in block zero; later entries and all lists
+in following blocks are stale while the authority nonce remains one. The report retains
+all signed entries separately from applied delegations and unique authorities. The
+three-block holdout therefore contains 48 signed entries, one applied delegation and
+one authority. Pricing validation must count entries, including stale/repeated entries,
+rather than payload bytes or applied/unique counts. These controls have their own
+baseline and identities; the main cohort's count-one baseline is not substituted.
+Native qualification checks exact type-4/RLP encoding, recovery, state progression and
+minimal witness/code retention. The existing transaction gas limit still applies; a
+requested count does not increase it. Set `FROZEN_AUTHORIZATION_NATIVE_FIXTURE_BIN` for
+Rust byte/report compatibility checks of the original three patterns, and
+`NATIVE_FIXTURE_BIN` for this holdout's Python native tests. Keep the same reviewed guest
+program and resource guards for measurement; pricing adequacy requires actual results.
+
 ```sh
 ~/.venv/bin/python bin/zkgas/bench/workload.py screen \
   --config experiment/config.json --catalog experiment/spawn-memory/catalog.json \

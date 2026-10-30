@@ -1,7 +1,7 @@
 //! Public deterministic offline EIP-7702 identities and execution-result gates.
 use alloy_consensus::TrieAccount;
 use alloy_eips::eip7702::{Authorization, SignedAuthorization};
-use alloy_primitives::{Address, B256, U256, keccak256};
+use alloy_primitives::{Address, B256, Signature, U256, keccak256};
 use alloy_signer::SignerSync;
 use alloy_signer_local_fixture::PrivateKeySigner;
 use anyhow::{Result, ensure};
@@ -18,6 +18,7 @@ pub enum AuthorizationPattern {
     Sequential,
     Repeated,
     Distinct,
+    Compact,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -50,6 +51,17 @@ pub struct AuthorityPostState {
     pub code_hash: B256,
 }
 
+fn compact_entry() -> SignedAuthorization {
+    // Canonical compact signature. Its authority is determined by recovery for
+    // this authorization hash; no private fixture key is used for this pattern.
+    Authorization {
+        chain_id: U256::from(CHAIN_ID),
+        address: DELEGATE,
+        nonce: 0,
+    }
+    .into_signed(Signature::new(U256::from(1), U256::from(1), false))
+}
+
 fn signer(index: usize) -> Result<PrivateKeySigner> {
     // Public fixture keys are the integers 1..=1024, distinct from the outer
     // sender's repeated-0x11 key. These are not credentials; never load a wallet.
@@ -68,13 +80,11 @@ impl ProgramAuthorizations {
     }
 
     fn entry_nonce(&self, block_index: usize, index: usize) -> Result<u64> {
-        Ok(u64::try_from(
-            if self.pattern == AuthorizationPattern::Sequential {
-                block_index * self.count + index
-            } else {
-                block_index
-            },
-        )?)
+        Ok(u64::try_from(match self.pattern {
+            AuthorizationPattern::Compact => 0,
+            AuthorizationPattern::Sequential => block_index * self.count + index,
+            _ => block_index,
+        })?)
     }
 
     fn entry_authority(&self, index: usize) -> Result<PrivateKeySigner> {
@@ -85,8 +95,42 @@ impl ProgramAuthorizations {
         })
     }
 
+    fn authority_address(&self, index: usize) -> Result<Address> {
+        if self.pattern == AuthorizationPattern::Compact {
+            return Ok(compact_entry().recover_authority()?);
+        }
+        Ok(self.entry_authority(index)?.address())
+    }
+
+    fn expected_before_nonce(&self, block_index: usize) -> Result<u64> {
+        if self.pattern == AuthorizationPattern::Compact {
+            return Ok(u64::from(block_index != 0));
+        }
+        self.entry_nonce(block_index, 0)
+    }
+
+    fn expected_after_nonce(&self, block_index: usize) -> Result<u64> {
+        if self.pattern == AuthorizationPattern::Compact {
+            return Ok(1);
+        }
+        self.entry_nonce(block_index + 1, 0)
+    }
+
+    fn expected_applied(&self, block_index: usize) -> Result<u64> {
+        match self.pattern {
+            AuthorizationPattern::Compact => Ok(u64::from(block_index == 0)),
+            AuthorizationPattern::Repeated => Ok(1),
+            _ => Ok(u64::try_from(self.count)?),
+        }
+    }
+
     pub(super) fn signed_list(&self, block_index: usize) -> Result<Vec<SignedAuthorization>> {
         self.validate()?;
+        if self.pattern == AuthorizationPattern::Compact {
+            let entry = compact_entry();
+            entry.recover_authority()?;
+            return Ok(vec![entry; self.count]);
+        }
         let sign = |index| -> Result<SignedAuthorization> {
             let signer = self.entry_authority(index)?;
             let auth = Authorization {
@@ -127,11 +171,20 @@ impl ProgramAuthorizations {
                 "canonical authorization entry differs"
             );
             ensure!(
-                auth.recover_authority()? == self.entry_authority(index)?.address(),
+                auth.recover_authority()? == self.authority_address(index)?,
                 "canonical authorization signature differs"
             );
         }
-        if self.pattern == AuthorizationPattern::Repeated {
+        if self.pattern == AuthorizationPattern::Compact {
+            ensure!(
+                transaction.authorization_list[0] == compact_entry(),
+                "compact authorization must use canonical r=1,s=1,parity=0"
+            );
+        }
+        if matches!(
+            self.pattern,
+            AuthorizationPattern::Repeated | AuthorizationPattern::Compact
+        ) {
             ensure!(
                 transaction
                     .authorization_list
@@ -156,14 +209,14 @@ impl ProgramAuthorizations {
         };
         (0..count)
             .map(|index| {
-                let address = self.entry_authority(index)?.address();
+                let address = self.authority_address(index)?;
                 let account = accounts.get(&keccak256(address));
                 ensure!(
                     block_index != 0 || account.is_none(),
                     "authorization authority must be absent from the initial prestate"
                 );
                 let nonce = account.map_or(0, |a| a.nonce);
-                let expected = self.entry_nonce(block_index, 0)?;
+                let expected = self.expected_before_nonce(block_index)?;
                 ensure!(
                     nonce == expected,
                     "authorization prestate nonce differs from the required progression"
@@ -190,7 +243,7 @@ impl ProgramAuthorizations {
                 let account = accounts.get(&keccak256(address)).ok_or_else(|| {
                     anyhow::anyhow!("authorization authority missing after execution")
                 })?;
-                let expected = self.entry_nonce(block_index + 1, 0)?;
+                let expected = self.expected_after_nonce(block_index)?;
                 ensure!(
                     account.nonce == expected && account.code_hash == delegation_code_hash(),
                     "actual authority nonce/delegation differs from required post-state"
@@ -207,11 +260,7 @@ impl ProgramAuthorizations {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
-        let expected = if self.pattern == AuthorizationPattern::Repeated {
-            1
-        } else {
-            u64::try_from(self.count)?
-        };
+        let expected = self.expected_applied(block_index)?;
         ensure!(
             applied_delegations == expected,
             "actual applied delegation count differs"
@@ -232,6 +281,44 @@ fn delegation_code_hash() -> B256 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compact_poststate_preserves_nonce_one_when_every_later_entry_is_stale() {
+        let config = ProgramAuthorizations {
+            pattern: AuthorizationPattern::Compact,
+            count: 16,
+        };
+        let mut accounts = BTreeMap::new();
+        let address = compact_entry().recover_authority().unwrap();
+        for block in 0..3 {
+            let before = config.before_block(block, &accounts).unwrap();
+            if block == 0 {
+                accounts.insert(
+                    keccak256(address),
+                    TrieAccount {
+                        nonce: 1,
+                        code_hash: delegation_code_hash(),
+                        ..Default::default()
+                    },
+                );
+            }
+            let report = config.after_block(block, &before, &accounts).unwrap();
+            assert_eq!(report.signed_entries, 16);
+            assert_eq!(report.applied_delegations, u64::from(block == 0));
+            assert_eq!(report.authorities[0].nonce, 1);
+            assert!(
+                config
+                    .signed_list(block)
+                    .unwrap()
+                    .iter()
+                    .all(|entry| entry == &compact_entry())
+            );
+        }
+        let before = config.before_block(3, &accounts).unwrap();
+        accounts.get_mut(&keccak256(address)).unwrap().nonce = 2;
+        assert!(config.after_block(3, &before, &accounts).is_err());
+        assert!(config.before_block(3, &accounts).is_err());
+    }
 
     #[test]
     fn authority_poststate_gate_rejects_missing_nonce_and_code_mismatches() {

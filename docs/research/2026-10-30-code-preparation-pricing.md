@@ -105,3 +105,123 @@ REVERT. Do not refit from these prospective results. Reprice all92 original rows
 and50 historical proposals using the actual new quote executable. Keep any failure,
 underquote, content sensitivity and overquote visible. No guest rebuild, real proof,
 hardware-throughput certification, production activation or automatic merge follows.
+
+
+## Actual successor replay result
+
+The frozen policy above was not changed after the prospective run. The implemented
+successor is model
+`a2988920125e304121acb629b9b96fd1ad85ee707c89978240408c81e2a42f3e`,
+Reth correction `8da28fd02e44d81d2c84725fbd082f73cd48428e`, consumed by Raiko
+`e3ab03454efeb2b0f7462a237e03ddcaffc76fac`. All108 saved canonical inputs were
+actually natively repriced; SP1 was not rerun for repricing.
+
+| Cohort | Measurements | Prior full-quote deficits | Successor full-quote deficits |
+| --- | ---: | ---: | ---: |
+| Initial creation | 44 | 1 | 0 |
+| Development followups | 38 | 11 | 0 |
+| Existing-code loading | 10 | 6 | 0 |
+| Prospective validation | 16 | 9 | 0 |
+| Total | 108 | 27 | 0 |
+
+There are102 distinct canonical inputs, six known reference replays,128 block
+occurrences and3342 transaction occurrences. The16 prospective measurements
+contain14 fresh inputs excluded from fitting and two known reference replays.
+The27 prior deficit rows represent26 distinct inputs; neither duplicates nor
+controls are filtered away. The smallest successor full-quote margin is478,893
+PGU, on the one-empty-create control.
+
+Examples in PGU (whole one-block proposal actuals; node excludes shared startup):
+
+| Case | Actual SP1 | Prior node | New node | Prior full | New full |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Load24K JUMPDEST-tail code, user gas21000 | 162,336,784 | 6,161,863 | 8,098,309 | 161,103,694 | 163,040,140 |
+| Deploy the same24K code four times | 163,788,369 | 7,116,559 | 12,231,873 | 162,494,230 | 167,609,544 |
+
+The ranking metric remains literal **actual SP1 PGU / new node-known zkGas**.
+The largest ratio in this finite set is24.698411656 on the one-empty-create
+control: actual160,968,292 divided by node6,517,354. A shared proposal-startup
+charge is absent from that denominator. Full-quote coverage and matched increments
+are separate diagnostics; zero full-quote deficits does not prove a universal
+node-admission bound or replace that ranking metric.
+
+Positive actual differences at identical selectors/prices remain explicit:
+JUMPDEST initcode tails at4096/49152 bytes add16,438/205,860 PGU; MCOPY-filled
+JUMPDEST runtime at4096/24576 adds21,714/102,474 versus equal-length zero controls.
+The new conservative byte terms cover these measured full proposals, but do not
+make every positive content increment itself priced. Future composition tests
+should amplify repeated initcode preparation, including empty deployed output,
+internal CREATE/CREATE2, ancestor rollback and mixed code/state work. The existing
+B3 carried-code caveat still applies; it was not used to fit deployment units.
+
+## Actual historical replay
+
+The same new quote executable repriced50 retained Mainnet proposals /9600 blocks.
+These retain SDK6.1 /ELF416f actuals and are deliberately separate from the108
+SDK6.3 /ELFb76 observations.
+
+- Actual sum:69,980,978,094 PGU.
+- Prior full-quote sum:145,920,113,551 PGU (**2.085139670× actual**).
+- New full-quote sum:150,234,443,229 PGU (**2.146789704× actual**).
+- Full-quote deficits:0/50 both before and after.
+- Node-known sum:78,776,601,035 →83,090,930,713 PGU.
+- Unchanged exact/node unique-code bytes:69,583,225 in total.
+- New attempted preparations:two events /4792 bytes; their contribution is169,728
+  PGU. Resource uplift is exactly69,583,225×62 =4,314,159,950 PGU.
+
+Every old block/proposal component except the declared resource uplift and new
+preparation term remains unchanged, including public outputs, selectors, Unzen
+values, operation curves, MPT, payload and startup. The result confirms the earlier
+resource-only projection with the observed preparation term added; it preserves
+rather than overturns the roughly2× historical conclusion. It is native replay
+against retained actuals, not fresh proving or hardware-throughput certification.
+
+## Validation and retained identities
+
+The frozen new quote SHA256 is
+`0ead8567bab74b7277ed729010c9eb8b149dc50f822bcd039e105983f0100380`.
+Its complete490-file source inventory is
+`cdf7306c6311dc7133896b676b3d8ce43509a85a3140ec8be5d881b57490129f`.
+It was built at a modified e42eda5d tree with null embedded revision; a later
+association verifies every inventory entry against committed e3ab0345 blobs.
+This records source association without rewriting the original build identity.
+The frozen native constructor still has its484-file inventory, old quote481,
+and experimental program67; those distinct identities are not merged.
+
+Independent Reth source review and behavioral verification passed:167 author EVM
+tests,26 Python checks and separate public-API probes covering95 real EVM
+transactions, real block receipts/state/bundle, collector migration/discard and
+selector failure atomicity. Plain and inspected execution agree; old Unzen
+behavior remains unchanged. Narrow no-default and strict targeted Clippy checks
+passed; no full default-net Reth validation is claimed.
+
+Raiko checks passed:
+
+```text
+cargo test --locked --offline -p zkgas --test compare code_preparation_
+cargo test --locked --offline -p zkgas -p raiko2-zkgas-trace --lib --tests
+cargo test --locked --offline -p zkgas --features fixture --test fixture --lib
+cargo test --locked --offline -p zkgas -p raiko2-zkgas-trace --features zkgas/fixture --lib
+cargo clippy --workspace --locked --offline -- -D warnings
+cargo fmt --all -- --check
+```
+
+These cover6 focused comparator tests,107 zkGas tests,25 trace tests and37 fixture
+integration tests. Missing/forged selectors and costs, negative/overflow values,
+attempted-prefix coverage, foreign-model domain validation and proposal double
+charges are rejected. Three guest lockfiles also passed locked/offline metadata
+parsing. Test source was independently reviewed. No guest was rebuilt, no admission
+mode was enabled and no merge/deployment followed; production artifact/source
+alignment remains a separate Draft PR gate.
+
+
+The final independent consumer audit is content-bound by SHA256
+`b412b63049e283d283879c780edcade7c51235af70bc4c051c9b0bd3b4b412bf`.
+It verifies all108 controlled quote rows against independent native semantics,
+the50 historical input payloads and quote deltas, every490-file source/archive/Git
+blob association, literal ranking and all83 matched diagnostics. Historical create
+counts are the native observations reconciled against domain/ownership and full
+price closure; this does not claim a second independent per-frame trace of every
+historical transaction. Original actuals and allfour raw campaign audits remain
+unchanged. The data-only record is preserved under Atlas fixture
+`unzen-code-preparation-v1`; consuming regression chooses execution strategy.

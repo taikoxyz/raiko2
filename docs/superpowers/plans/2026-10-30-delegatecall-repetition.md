@@ -22,5 +22,8 @@ Progress: producer committed as `40a6e6ae` after independent source review,
 probes. All 16 actual SP1 observations completed; full quotes and all 20 matched
 increments are covered under unchanged prices. Final independent actual audit
 passed, including 64 owned objects absent in the host namespace and exact raw
-identity/output joins. Immutable Atlas retention is in progress. No build or
-tariff change.
+identity/output joins. Immutable data are retained in Atlas PR19 and Release
+`fixture-unzen-delegatecall-repetition-v1`; independent review verified all 335
+archive members and 16 metadata files. An actual remote download passed the
+existing integrity workflow before PR creation. Tools remain in Raiko; no
+build, tariff change, merge or deployment was performed.

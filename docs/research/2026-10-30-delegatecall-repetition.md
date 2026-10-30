@@ -125,6 +125,37 @@ host namespace. The frozen audit SHA256 is
 
 These are finite program-specific model-development observations, not a proof
 of a global maximum, a gas-saturated block result or production guest artifact
-qualification. No fresh Mainnet replay is claimed. The next numerical targets
-are high-density BLOCKHASH and warmed storage reads; constant-time source
-lookups alone do not establish that their prices are conservative.
+qualification. No fresh Mainnet replay is claimed. The next DELEGATECALL check
+should reduce parent loop and per-call guard work, using bounded unrolling and
+native exact child-terminal counts to establish completion. Conservative prices
+for harness instructions could otherwise mask a lower-priced frame wrapper;
+the present observations do not isolate that wrapper's marginal price.
+High-density BLOCKHASH and warmed storage reads remain later numerical targets;
+constant-time source lookups alone do not establish conservative pricing.
+
+The proposed next finite matrix is STOP/empty RETURN with a fixed 64-call body
+and total calls 0, 64, 1024 and 32768 (0, 1, 16 and 512 batches). Keep the same
+unused body and one deployment at N0. Each call uses zero input/output,
+DELEGATECALL and POP, with only the batch-loop check amortized across 64 calls.
+Exact native child STOP/RETURN counts, successful outer receipt, empty return
+shape and gas headroom must establish completion without per-call EVM guards.
+This eight-case follow-up is planned, not part of the measured 16 observations.
+Qualification must reject short batches, a wrong/empty target, parent OOG and
+zero-forwarded-gas RETURN. Zero-forwarded-gas STOP legitimately succeeds and is
+not a rejection control. Require zero exceptional instructions and correct
+deployed runtime/nonce alongside exact call counts; parent success alone is
+insufficient.
+
+## Retained data
+
+Fixed data and provenance are retained in [Atlas PR19](https://github.com/taikoxyz/raiko2-atlas/pull/19)
+and its [immutable fixture Release](https://github.com/taikoxyz/raiko2-atlas/releases/tag/fixture-unzen-delegatecall-repetition-v1).
+The 1,197,203-byte archive contains 335 regular data members; its SHA256 is
+`9286057fb25ee8cb7ac04149204d7d9187b9403728ccd465bd0b72bde896682e`.
+Independent archive/integration review verified all raw joins and explicit
+projections, including removal of local PID/UID fields while binding original
+receipt hashes. The published asset was actually re-downloaded through the
+existing integrity-workflow code; compressed/decoded identities and all member
+checksums passed. Reusable generators, tests and execution policy remain in
+Raiko. Earlier Atlas fixtures and Releases were preserved; no merge or
+deployment was performed.

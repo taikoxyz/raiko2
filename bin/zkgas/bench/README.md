@@ -563,3 +563,28 @@ request uses the existing ProgramRequest constructor, with successful receipt, a
 opcode, nonce and actual created-state checks. No guest, native or tariff change is needed.
 Measure whole-proposal PGU with the existing frozen-profile workflow; report literal
 actual/node ratios, complete quotes and matched increments separately.
+
+## Existing runtime loading controls
+
+`code_loading.py` produces ten ordinary CALL cases: a one-byte STOP reference, plus 32,
+4096 and 24576 bytes of initial account runtime with zero, JUMPDEST or PUSH32-pattern
+suffixes. Every runtime starts with STOP, so all suffix bytes remain unexecuted. Code is
+stored in the initial account/witness; transaction calldata stays empty. The catalog
+links each candidate to the one-byte reference and each nonzero pattern to its same-length
+zero reference, retaining both positive and negative content differences.
+
+```sh
+~/.venv/bin/python bin/zkgas/bench/cases/code_loading.py \
+  --output-dir experiment/code-loading
+NATIVE_FIXTURE_BIN=target/debug/zkgas-fixture \
+ZKGAS_QUOTE_BIN=target/debug/zkgas-quote ~/.venv/bin/python -m unittest discover \
+  -s bin/zkgas/bench/tests -p test_code_loading.py
+```
+
+Qualification checks actual code-byte/code-hash counters in the frozen quote, separately
+from canonical transaction payload counters. The one-byte reference shares its STOP code
+hash with the existing checkpoint account; larger runtimes add a distinct hash, so unique
+code-byte deltas include their full length. This accounting detail is retained rather than
+assuming a length-minus-one delta. These are model-development workload observations,
+including one known reference replay, with whole-proposal actual PGU measured separately;
+they do not establish deployment-only costs or proving capacity.

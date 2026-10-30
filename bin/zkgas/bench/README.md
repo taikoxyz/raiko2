@@ -588,3 +588,29 @@ code-byte deltas include their full length. This accounting detail is retained r
 assuming a length-minus-one delta. These are model-development workload observations,
 including one known reference replay, with whole-proposal actual PGU measured separately;
 they do not establish deployment-only costs or proving capacity.
+
+
+## Prospective code-preparation validation
+
+```sh
+~/.venv/bin/python bin/zkgas/bench/cases/code_preparation_holdout.py \
+  --output-dir experiment/code-preparation-holdout
+```
+
+This16-row set was selected after freezing the64 unique-byte and8192/nonempty-event
+plus32/prepared-byte candidate policy. Fourteen inputs are prospective and two are
+explicit known reference replays. It covers fresh loaded-code lengths/content,
+deployment size/repetition, MCOPY-generated code and an internal CREATE factory
+whose outer transaction either STOPs or REVERTs. The factory checks CREATE success
+before taking that terminal path. Successful child preparation must still be
+counted when the ancestor reverts.
+
+Each catalog row declares its expected `code_preparation` event/byte selectors.
+A self baseline explicitly means an absolute validation point without a matched
+gas/count control; do not manufacture isolated marginal claims. Ordinary code
+loading contributes no deployment-preparation events. Use the same canonical
+constructor and frozen program; native qualification can use the unchanged creator.
+SP1 actuals may be collected independently from pricing, but candidate precision
+requires actual new-model native quotes on those same canonical inputs. Do not
+refit from prospective results. These finite observations make no universal bound,
+real-proof, GPU-throughput or activation claim.

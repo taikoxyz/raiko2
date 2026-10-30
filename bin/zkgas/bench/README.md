@@ -650,3 +650,41 @@ prices remain active: these model-development cases do not presuppose underprici
 Measure whole-proposal actual PGU/node-known zkGas, full quote closure and matched
 increments separately with the existing bounded harness. No Rust, guest or tariff
 change is needed; this finite set is not a gas-saturated capacity measurement.
+
+## Minimal DELEGATECALL repetition
+
+`delegatecall_repetition.py` produces 16 fixed cases: child STOP, RETURN(0,0),
+REVERT(0,0) or INVALID, each repeated 0, 1, 1024 or 32768 times. A small parent
+creates one tiny child even at N0, keeps its address and loops with fixed-width
+counter immediates. Every DELEGATECALL forwards exactly 64 gas with zero input and
+output lengths. The parent requires the expected per-call status and zero return
+data, then ends in STOP. The child account is created during execution; no extra
+child code or account is added to prestate. An identical code byte string may
+already serve an existing system account, so code-hash uniqueness is not assumed.
+
+```sh
+~/.venv/bin/python bin/zkgas/bench/cases/delegatecall_repetition.py \
+  --output-dir experiment/delegatecall-repetition
+NATIVE_FIXTURE_BIN=target/debug/zkgas-fixture \
+ZKGAS_QUOTE_BIN=target/debug/zkgas-quote ~/.venv/bin/python -m unittest discover \
+  -s bin/zkgas/bench/tests -p test_delegatecall_repetition.py
+```
+
+All requests retain the existing one-block, one-CALL, empty-calldata, 15M envelope
+and explicit `evm-gas-only` profile. Completed opcode maps include the once-only
+child initcode RETURN and the repeated child terminals. INVALID is exceptional
+and attempted, never a completed opcode. Native qualification checks both maps,
+exceptional counts, real user receipt, factory nonce1 and actual preparation
+selectors. A failed status cannot substitute OOG for the expected completed
+REVERT terminal. Wrong status or nonempty return data takes an unreachable failure
+path instead of silently shortening the loop.
+
+STOP/RETURN are the minimal confirmed-wrapper candidates. REVERT/INVALID variants
+are explicitly labeled high-price failure controls: existing normal-fallback or
+feature-error pricing already applies a 5M/event floor. Only within-terminal
+repetition comparisons match runtime/setup; each series retains its N0 reference
+and a separate N1 repetition reference. Use frozen model `a2988920…` and the
+existing native, quote and bounded SP1 workflow. Literal whole-proposal actual/node
+ranking, full quote closure and matched increments remain separate. No Rust,
+guest or tariff change is involved, and no actual-cost conclusion follows from
+the opcode's wrapper price alone.

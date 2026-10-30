@@ -688,3 +688,8 @@ existing native, quote and bounded SP1 workflow. Literal whole-proposal actual/n
 ranking, full quote closure and matched increments remain separate. No Rust,
 guest or tariff change is involved, and no actual-cost conclusion follows from
 the opcode's wrapper price alone.
+
+The [measured checkpoint](../../../docs/research/2026-10-30-delegatecall-repetition.md)
+records all 16 actual observations and separate native-only controls. Existing
+pricing covered all full quotes and all 20 matched repetition increments;
+REVERT/INVALID retain their deliberately conservative failure floors.

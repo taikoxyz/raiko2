@@ -17,4 +17,10 @@ native verification workflow. Specification:
    Retain reusable code and measured results; publish immutable data in Atlas
    only after independent verification. No merge, deployment or guest build.
 
-Progress: source triage complete; implementation and actual measurements pending.
+Progress: producer committed as `40a6e6ae` after independent source review,
+16 native/quote qualifications, four state probes and five rejected negative
+probes. All 16 actual SP1 observations completed; full quotes and all 20 matched
+increments are covered under unchanged prices. Final independent actual audit
+passed, including 64 owned objects absent in the host namespace and exact raw
+identity/output joins. Immutable Atlas retention is in progress. No build or
+tariff change.

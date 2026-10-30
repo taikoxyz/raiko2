@@ -14838,6 +14838,7 @@ dependencies = [
  "alethia-reth-chainspec 1.4.1 (git+https://github.com/taikoxyz/alethia-reth?rev=0f30f488c88635e38932843e67af2d918319f7e7)",
  "alethia-reth-evm",
  "alloy-consensus 2.4.2",
+ "alloy-eips 2.5.0",
  "alloy-evm 0.39.0",
  "alloy-primitives",
  "alloy-rlp",

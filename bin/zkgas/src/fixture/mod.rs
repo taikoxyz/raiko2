@@ -1,7 +1,9 @@
 //! Feature-gated, offline ProgramRequest producer for native workload experiments.
+mod authorization;
 mod constructor;
 mod observer;
 mod storage;
+pub use authorization::{AuthorizationPattern, ProgramAuthorizations};
 pub use observer::OpcodeObservation;
 pub use storage::{ProgramStorageState, ProgramStorageStateReport};
 
@@ -45,6 +47,8 @@ pub struct Program {
     pub block_count: usize,
     #[serde(default)]
     pub storage_state: Option<ProgramStorageState>,
+    #[serde(default)]
+    pub authorizations: Option<ProgramAuthorizations>,
 }
 fn program_bytes(value: &str) -> Result<Vec<u8>> {
     hex::decode(
@@ -93,6 +97,9 @@ pub fn parse_request(bytes: &[u8]) -> Result<ProgramRequest> {
     }
     if let Some(storage) = &program.storage_state {
         storage.validate(program.block_count)?;
+    }
+    if let Some(authorizations) = &program.authorizations {
+        authorizations.validate()?;
     }
     Ok(request)
 }
@@ -184,6 +191,7 @@ pub fn run(args: &FixtureArgs) -> Result<serde_json::Value> {
         &program_bytes(&request.program.input_hex)?,
         request.program.block_count,
         request.program.storage_state.as_ref(),
+        request.program.authorizations.as_ref(),
         args.execution_profile,
     )?;
     ensure!(
@@ -249,6 +257,9 @@ pub fn run(args: &FixtureArgs) -> Result<serde_json::Value> {
     });
     if args.execution_profile != raiko2_zkgas_trace::ExecutionProfile::LegacyUnzen {
         report["execution_profile"] = serde_json::to_value(args.execution_profile)?;
+    }
+    if let Some(authorizations) = &built.authorizations {
+        report["authorizations"] = serde_json::to_value(authorizations)?;
     }
     let mut outputs = vec![stage_json(&args.output, &built.input)?];
     if let Some(path) = &args.output_bincode {

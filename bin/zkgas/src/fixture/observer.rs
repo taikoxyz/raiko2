@@ -106,6 +106,8 @@ impl<DB: Database> Inspector<TaikoEvmContext<DB>, EthInterpreter> for FixtureIns
 #[derive(Default)]
 pub(super) struct FixtureExecutor {
     pub observation: OpcodeObservation,
+    /// Actual code produced by committed native execution, for later block witnesses.
+    pub generated_codes: Vec<alloy_primitives::Bytes>,
     pub execution_profile: raiko2_stateless::workload_lab::ExecutionProfile,
 }
 impl raiko2_stateless::DerivedBlockExecutor for FixtureExecutor {
@@ -187,6 +189,13 @@ impl raiko2_stateless::DerivedBlockExecutor for FixtureExecutor {
             .clone();
         state.merge_transitions(BundleRetention::Reverts);
         let bundle = state.take_bundle();
+        self.generated_codes = bundle
+            .contracts
+            .values()
+            .map(|code| code.original_bytes())
+            .collect();
+        self.generated_codes.sort();
+        self.generated_codes.dedup();
         Ok(DerivedBlockExecutionOutcome {
             committed_transactions: execution.committed_transactions,
             execution_result: execution.execution_result,

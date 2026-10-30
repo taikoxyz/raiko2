@@ -1,12 +1,13 @@
 //! Minimal synthetic proposal construction using production stateless validation.
 use super::{
+    authorization::{AuthorizationReport, ProgramAuthorizations},
     observer::{FixtureExecutor, OpcodeObservation},
     storage::{ProgramStorageState, ProgramStorageStateReport},
 };
 use alethia_reth_block::config::{TaikoEvmConfig, TaikoNextBlockEnvAttributes};
 use alloy_consensus::{
-    SignableTransaction, TrieAccount, TxEip1559, TxReceipt as _, constants::KECCAK_EMPTY,
-    transaction::SignerRecoverable,
+    SignableTransaction, TrieAccount, TxEip1559, TxEip7702, TxReceipt as _,
+    constants::KECCAK_EMPTY, transaction::SignerRecoverable,
 };
 use alloy_primitives::{Address, B256, Bytes, Signature, TxKind, U256, keccak256};
 use alloy_signer::SignerSync;
@@ -64,6 +65,7 @@ pub(super) struct BuiltProgram {
     pub receipts: Vec<Vec<ControlledNativeReceipt>>,
     pub observations: Vec<OpcodeObservation>,
     pub storage: Option<ProgramStorageStateReport>,
+    pub authorizations: Option<AuthorizationReport>,
 }
 /// Native execution receipt data; gas is the charged cumulative-receipt delta.
 #[derive(Clone, Debug, Serialize)]
@@ -136,10 +138,32 @@ fn controlled_candidate_signer() -> Result<PrivateKeySigner> {
     // Public, fixed offline test identity. Never read a wallet or credential source.
     Ok(PrivateKeySigner::from_bytes(&B256::repeat_byte(0x11))?)
 }
-fn candidate_transactions(code_input: &Bytes, count: usize) -> Result<Vec<TransactionSigned>> {
+fn candidate_transactions(
+    code_input: &Bytes,
+    count: usize,
+    authorizations: Option<&ProgramAuthorizations>,
+) -> Result<Vec<TransactionSigned>> {
     let signer = controlled_candidate_signer()?;
     (0..count)
         .map(|nonce| {
+            if let Some(authorizations) = authorizations {
+                let tx = TxEip7702 {
+                    chain_id: OVERHEAD_CHAIN_ID,
+                    nonce: u64::try_from(nonce)?,
+                    gas_limit: 15_000_000,
+                    max_fee_per_gas: 25_000_000,
+                    max_priority_fee_per_gas: 0,
+                    to: Address::repeat_byte(0x66),
+                    value: U256::ZERO,
+                    access_list: Default::default(),
+                    input: code_input.clone(),
+                    authorization_list: authorizations.signed_list(nonce)?,
+                };
+                let signature = signer.sign_hash_sync(&tx.signature_hash())?;
+                let signed = tx.into_signed(signature).into();
+                authorizations.validate_transaction(&signed, nonce)?;
+                return Ok(signed);
+            }
             let tx = TxEip1559 {
                 chain_id: OVERHEAD_CHAIN_ID,
                 nonce: u64::try_from(nonce)?,
@@ -414,6 +438,7 @@ pub(super) fn build_program(
     input: &[u8],
     block_count: usize,
     storage_state: Option<&ProgramStorageState>,
+    authorizations: Option<&ProgramAuthorizations>,
     execution_profile: raiko2_stateless::workload_lab::ExecutionProfile,
 ) -> Result<BuiltProgram> {
     if code.is_empty()
@@ -425,6 +450,9 @@ pub(super) fn build_program(
     }
     if let Some(state) = storage_state {
         state.validate(block_count)?;
+    }
+    if let Some(authorizations) = authorizations {
+        authorizations.validate()?;
     }
     let chain_spec = SupportedChainSpecs::default()
         .get_chain_spec_with_chain_id(OVERHEAD_CHAIN_ID)
@@ -439,11 +467,12 @@ pub(super) fn build_program(
         };
     let runtime_chain_spec = builtin_taiko_chain_spec(OVERHEAD_CHAIN_ID)?;
     let evm_config = TaikoEvmConfig::new(runtime_chain_spec.clone());
-    let candidates = candidate_transactions(&Bytes::copy_from_slice(input), block_count)?;
+    let candidates =
+        candidate_transactions(&Bytes::copy_from_slice(input), block_count, authorizations)?;
     let controlled_signer = controlled_candidate_signer()?;
     let base_fee_per_gas = 10_000_000;
     let timestamp_delta = 1;
-    let (mut controlled_state, codes) =
+    let (mut controlled_state, mut codes) =
         overhead_prestate(&chain_spec, &candidates, &Bytes::copy_from_slice(code))?;
     if let Some(state) = storage_state {
         state.apply_fixture(&mut controlled_state, &candidates)?;
@@ -504,6 +533,7 @@ pub(super) fn build_program(
     let mut manifest_blocks = Vec::with_capacity(block_count);
     let mut native_receipts = Vec::with_capacity(block_count);
     let mut observations = Vec::with_capacity(block_count);
+    let mut authorization_blocks = Vec::with_capacity(block_count);
 
     for index in 0..block_count {
         let block_number = OVERHEAD_BLOCK_NUMBER + u64::try_from(index)?;
@@ -549,6 +579,9 @@ pub(super) fn build_program(
         };
         let anchor_nonce = u64::try_from(index)?;
         let anchor = anchor_tx(&checkpoint, anchor_address, anchor_nonce, base_fee_per_gas)?;
+        let authorization_before = authorizations
+            .map(|a| a.before_block(index, &controlled_state.accounts))
+            .transpose()?;
         let mut executor = FixtureExecutor {
             execution_profile,
             ..Default::default()
@@ -592,6 +625,37 @@ pub(super) fn build_program(
                 .collect::<Result<Vec<_>>>()?,
         );
         controlled_state.apply(&outcome);
+        if let Some(authorizations) = authorizations {
+            let committed = outcome
+                .filtered_block
+                .body()
+                .transactions
+                .get(1)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("authorization user transaction was not included")
+                })?;
+            anyhow::ensure!(
+                committed == &candidates[index],
+                "committed authorization transaction differs"
+            );
+            authorizations.validate_transaction(committed, index)?;
+            authorization_blocks.push(
+                authorizations.after_block(
+                    index,
+                    authorization_before
+                        .as_ref()
+                        .expect("authorization prestate captured"),
+                    &controlled_state.accounts,
+                )?,
+            );
+            // Only actual executed code is eligible for later block witnesses. The
+            // first block proves absent authorities without speculative marker bytes.
+            for generated in executor.generated_codes {
+                if !codes.contains(&generated) {
+                    codes.push(generated);
+                }
+            }
+        }
         let (post_state_root, post_state_nodes) = controlled_state.witness();
         let golden_touch_hash = keccak256(Address::from([
             0x00, 0x00, 0x77, 0x77, 0x35, 0x36, 0x7b, 0x36, 0xbc, 0x9b, 0x61, 0xc5, 0x00, 0x22,
@@ -715,6 +779,11 @@ pub(super) fn build_program(
         input: guest_input,
         receipts: native_receipts,
         observations,
+        authorizations: authorizations.map(|a| AuthorizationReport {
+            pattern: a.pattern,
+            entries_per_block: a.count,
+            blocks: authorization_blocks,
+        }),
         storage: storage_state
             .map(|state| state.report(full_witness_node_count, minimized_witness_node_count)),
     })

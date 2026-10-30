@@ -311,6 +311,34 @@ Dense binary scalars can become cheap under batch recoding, so these finite unsa
 probes establish neither a worst-case bound nor underpricing before SP1 measurement.
 Set `SOLC_BIN` and `NATIVE_FIXTURE_BIN` for the compiler/native qualification tests.
 
+For authorization-list validation work before opcode collection, generate an offline catalog:
+
+```sh
+~/.venv/bin/python bin/zkgas/bench/cases/authorization_values.py \
+  --output-dir experiment/authorization-values
+```
+
+The twelve cases use minimal RETURN code and empty calldata: one explicit EIP-1559 reference,
+one shared single-entry EIP-7702 baseline, sequential/repeated lists of 4/16/64/256 entries,
+and distinct-authority lists of 4/16 entries. The count-one baseline is reused across pattern
+comparisons because their signed envelopes are identical. Optional ProgramRequest
+`program.authorizations` takes `{"pattern":"sequential","count":4}`; patterns are
+`sequential`, `repeated` and `distinct`, with counts 1..1024. Omission retains the original
+EIP-1559 construction. All authority keys are public deterministic offline fixture identities,
+separate from the transaction sender; no wallets, credentials or live calls are used.
+For block index `b`, sequential entries use one authority with nonces `b*K+i`, repeated lists
+clone one signed entry with nonce `b`, and distinct lists use K authorities with nonce `b`.
+The optional native `authorizations` report separates signed-entry counts from delegations
+actually applied, verified from pre/post authority nonces and delegation code hashes. Authorities
+are absent initially; subsequent witnesses include only bytecode retained from actual execution.
+Canonical type-4/signature/inclusion checks and two-block nonce-progression tests gate the path.
+An empty authorization list is never used as a type-4 control. Use `evm-gas-only` and the same
+reviewed program/guards for comparisons; retain rejected cases and separate native receipt gas,
+whole-node quotes and actual SP1 PGU. This finite cohort does not establish underpricing before
+measurement, and the count bound does not increase the existing 15M transaction gas budget.
+Set `NATIVE_FIXTURE_BIN` for Python native qualification and `FROZEN_NATIVE_FIXTURE_BIN` for the
+Rust regression that compares default canonical bytes/reports with the prior executable.
+
 ```sh
 ~/.venv/bin/python bin/zkgas/bench/workload.py screen \
   --config experiment/config.json --catalog experiment/spawn-memory/catalog.json \

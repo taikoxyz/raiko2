@@ -28,6 +28,6 @@
 ## Tasks
 
 - [x] Producer: test first in `bin/zkgas/bench/tests/test_initcode_preparation.py`; implement `bin/zkgas/bench/cases/initcode_preparation.py` with `make_case(...)` and `prepare(output: Path) -> int`, the exact24 matrix, expected counts, reference links and catalog identities. Update bench README usage; run focused/Python suite and real frozen-native gates. Independent source review before commit.
-- [ ] Qualification: independently verify real native memory/work/receipt/nonce gates; freeze committed producer/catalog/config. Screen all24 using the existing current quote, retain exclusions. No SP1 until those gates pass.
-- [ ] Measurement: sequentially execute all qualified inputs using the frozen ELF; independently audit original reports, identity/output joins and owned-resource cleanup. Report literal ranking, full quote closure and matched increments without refitting.
+- [x] Qualification: independently verify real native memory/work/receipt/nonce gates; freeze committed producer/catalog/config. Screen all24 using the existing current quote, retain exclusions. No SP1 until those gates pass.
+- [x] Measurement: sequentially execute all qualified inputs using the frozen ELF; independently audit original reports, identity/output joins and owned-resource cleanup. Report literal ranking, full quote closure and matched increments without refitting.
 - [ ] Retention: commit reusable framework/tests/docs in Raiko; preserve fixed inputs and audited data in a new immutable Atlas fixture. Update maintained Draft source PR records, leaving guest artifact alignment separate.

@@ -202,3 +202,23 @@ focus on work that can repeat without an existing large per-event wrapper, while
 keeping repeated initcode, rollback, content and nonempty output cases available for
 future pricing changes. Gas-saturated capacity and production guest alignment remain
 separate tasks.
+
+
+## Fixed data
+
+[Atlas PR18](https://github.com/taikoxyz/raiko2-atlas/pull/18) and its
+[immutable Release](https://github.com/taikoxyz/raiko2-atlas/releases/tag/fixture-unzen-initcode-preparation-v1)
+retain the24 measured inputs, actuals/current quotes, and separately labeled three
+native-only state probes plus three negative controls. There are27 qualified canonical
+inputs in the archive; only24 have SP1 measurements. Nothing from the native-only
+controls is inserted into the actual-PGU denominator.
+
+Archive SHA256:
+`43ca9dffea366174151f7ea013b5943c9478e1237506a7216609f88c60443508`
+(1,635,126 bytes,462 regular members). Independent archive audit SHA256:
+`a31a0caae4be9252e1b6f9ef7de99e995499a9155d6b4143fd3d373398fb56ca`.
+Independent actual Atlas integration review SHA256:
+`78f8c4aecf232bf705d1bf1acc693e85b7b063c375360590fa4b2977a1e74b82`.
+Actual remote asset download and full compressed/decoded/member checks passed;
+GitHub CI status is a separate live check. No source/tool implementation, ELF or
+executable is copied into Atlas.

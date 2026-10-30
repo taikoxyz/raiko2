@@ -101,6 +101,7 @@ fn validate_pricing_breakdown(
         [
             pricing.fixed_scaled,
             pricing.authorization_scaled,
+            pricing.access_list_scaled,
             pricing.operations_scaled,
             pricing.feature_error_scaled,
             pricing.resources_scaled,
@@ -125,6 +126,7 @@ fn validate_pricing_breakdown(
             == checked_sum([
                 pricing.fixed_scaled,
                 pricing.authorization_scaled,
+                pricing.access_list_scaled,
                 pricing.operations_scaled,
                 pricing.resources_scaled,
                 pricing.mpt_scaled,
@@ -180,6 +182,7 @@ fn snapshot_matches_pricing(
 ) -> bool {
     snapshot.fixed_scaled == pricing.fixed_scaled
         && snapshot.authorization_scaled == pricing.authorization_scaled
+        && snapshot.access_list_scaled == pricing.access_list_scaled
         && snapshot.operations_scaled == pricing.operations_scaled
         && snapshot.feature_error_scaled == pricing.feature_error_scaled
         && snapshot.resources_scaled == pricing.resources_scaled
@@ -293,6 +296,7 @@ fn validate_complete_quote(complete: &CompleteQuoteV1) -> Result<()> {
             [
                 node.fixed_scaled,
                 node.authorization_scaled,
+                node.access_list_scaled,
                 node.operations_scaled,
                 node.feature_error_scaled,
                 node.evm_local_resources_scaled,
@@ -312,6 +316,7 @@ fn validate_complete_quote(complete: &CompleteQuoteV1) -> Result<()> {
                 == checked_sum([
                     node.fixed_scaled,
                     node.authorization_scaled,
+                    node.access_list_scaled,
                     node.operations_scaled,
                     node.evm_local_resources_scaled,
                     node.transaction_payload_scaled,
@@ -330,6 +335,14 @@ fn validate_complete_quote(complete: &CompleteQuoteV1) -> Result<()> {
         ensure!(
             prove.authorization_scaled >= node.authorization_scaled,
             "attempted authorization price does not cover committed price"
+        );
+        ensure!(
+            block.prove.access_list_items >= node.access_list_items,
+            "attempted access-list count does not cover committed count"
+        );
+        ensure!(
+            prove.access_list_scaled >= node.access_list_scaled,
+            "attempted access-list price does not cover committed price"
         );
         validate_pricing_breakdown(prove)?;
         let committed = block.prove.committed_payload;
@@ -368,6 +381,7 @@ fn validate_complete_quote(complete: &CompleteQuoteV1) -> Result<()> {
                     started_non_anchor_transactions: 0,
                     native_value_transfers: 0,
                     authorization_validations: node.authorization_validations,
+                    access_list_items: node.access_list_items,
                     operation_routes: &[],
                     resources: resource_selectors(node.evm_local_resources),
                     transaction_payload: Default::default(),
@@ -383,6 +397,7 @@ fn validate_complete_quote(complete: &CompleteQuoteV1) -> Result<()> {
                     started_non_anchor_transactions: 0,
                     native_value_transfers: 0,
                     authorization_validations: block.prove.authorization_validations,
+                    access_list_items: block.prove.access_list_items,
                     operation_routes: &[],
                     resources: resource_selectors(block.prove.exact_resources),
                     transaction_payload: Default::default(),
@@ -401,6 +416,14 @@ fn validate_complete_quote(complete: &CompleteQuoteV1) -> Result<()> {
             ensure!(
                 prove.authorization_scaled == exact_pricing.authorization_scaled,
                 "attempted authorization validation price mismatch"
+            );
+            ensure!(
+                node.access_list_scaled == local_pricing.access_list_scaled,
+                "committed access-list item price mismatch"
+            );
+            ensure!(
+                prove.access_list_scaled == exact_pricing.access_list_scaled,
+                "attempted access-list item price mismatch"
             );
             let payload_pricing = ZkGasModel
                 .price_transaction_payload(node.transaction_payload.into())
@@ -491,6 +514,10 @@ fn validate_complete_quote(complete: &CompleteQuoteV1) -> Result<()> {
     ensure!(
         quote.prove.proposal_once.authorization_scaled == 0,
         "proposal-only pricing contains authorization validations"
+    );
+    ensure!(
+        quote.prove.proposal_once.access_list_scaled == 0,
+        "proposal-only pricing contains access-list items"
     );
     let block_scaled = checked_sum(quote.blocks.iter().map(|b| b.prove.pricing.total_scaled))?;
     ensure!(

@@ -129,7 +129,12 @@ passed the unchanged Atlas integrity CI body: 1,742 archive files, including can
 raw reports and explicitly labelled local-metadata projections. The reference ELF and host
 executables are excluded; consumers record their own rebuilt program and repeat its controls.
 
-## Next: workload at the EVM gas boundary
+## Follow-up: workload at the EVM gas boundary
+
+The [deferred single-block capacity TODO](2026-10-30-ecmul-capacity-pilot.md#deferred-todo-single-block-workload-without-zkgas-admission)
+sets the order: first fix pricing and validate low-zkGas, high-workload cases, then run the
+gas-saturation experiment without zkGas admission caps. The ECMUL pilot supplies initial
+unsaturated measurements; it does not complete that TODO.
 
 Retain the original `actual PGU / new node-known zkGas` objective and add a separate capacity
 experiment: maximize actual SP1 workload subject only to the legal EVM gas envelope. First

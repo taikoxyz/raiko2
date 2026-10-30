@@ -90,10 +90,22 @@ at 9,461,713,189 PGU. These figures do not establish a saturated-gas maximum.
 Retain zkGas admission as a separate question from EVM validity. No production limit changes
 or pricing coefficient changes follow from this pilot.
 
-Broader point/value axes, other precompiles, opcode/state/payload combinations, refund-aware
-gas saturation and complete multi-block proposal measurements remain follow-ups. See the
+Broader point/value axes, other precompiles and opcode/state/payload combinations remain the
+pricing-validation priority. Complete multi-block proposal measurements remain follow-ups. See the
 [execution-profile checkpoint](2026-10-29-execution-profile-admission.md) for the independent
 protocol-envelope inspection and prior RETURN/copy cohort.
+
+## Deferred TODO: single-block workload without zkGas admission
+
+- [ ] After pricing fixes and targeted tests establish confidence against low-zkGas,
+  high-workload cases, remove both legacy and new zkGas admission caps in the experiment
+  and measure the largest actual SP1 workload achievable in one EVM-valid block.
+  Fill the legal block gas envelope, using multiple transactions where necessary rather
+  than stopping at a transaction limit. Record charged gas, spent gas/refunds where relevant,
+  and same-program control increments alongside the whole one-block proposal PGU.
+  Keep new-model quotes as observations, retain canonical fixtures in Atlas, and distinguish
+  the largest measured workload from a proven maximum. This saturation run is queued after
+  pricing validation; the eleven-case pilot above is its initial unsaturated evidence.
 
 ## Retained evidence and validation
 

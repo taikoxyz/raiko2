@@ -4,6 +4,12 @@ The objective remains actual SP1 PGU / new node-known zkGas. This cohort measure
 input-value-dependent work invisible to the MODEXP route's native-gas-only price.
 Source inspection alone does not establish a pricing deficit.
 
+We use **proving-cost underpricing** for this search. Underpricing describes a
+resource price that fails to track actual work; [EIP-7667](https://eips.ethereum.org/EIPS/eip-7667)
+uses this term for the mismatch between CPU-oriented gas and ZK proving costs.
+Here the denominator is the new node quote, with complete quotes and same-program
+increments retained as separate diagnostics.
+
 ## Frozen design
 
 Reuse the canonical ProgramRequest constructor, explicit `evm-gas-only` profile,
@@ -49,3 +55,49 @@ Freeze a fresh corpus using the existing reviewed program and resource guards.
 Retain controls, failures, literal rankings, full quotes and matched increments.
 Change tariffs only if measured evidence warrants it. Tools stay in Raiko and
 fixed data stays in Atlas. EVM-gas saturation remains deferred.
+
+## Completed observations
+
+All 32 planned inputs completed actual SP1 execution with the same program.
+There are no failures, pending inputs or complete-quote deficits. All nine
+single-call value variants at each width have identical observed opcode maps
+and operation prices. This equality is checked directly in the quote; charged
+transaction gas is not substituted for native precompile gas.
+
+At width 512 and exponent three, odd/power-of-two/CRT moduli measure respectively
+162,787,461 / 161,684,139 / 165,125,946 actual PGU. All three node quotes are
+118,129,176 PGU and complete quotes are 273,071,263 PGU. The hidden algorithm
+branch changes actual work, but this finite cohort does not show underpricing.
+
+The width-512 CRT/exponent-three repetition ramp is:
+
+| Calls | Actual proposal PGU | Node-known PGU | Complete quote PGU | Charged user EVM gas |
+| --- | ---: | ---: | ---: | ---: |
+| 0 | 161,260,947 | 6,587,016 | 161,528,847 | 68,870 |
+| 1 | 165,125,946 | 118,129,176 | 273,071,263 | 68,900 |
+| 4 | 176,696,613 | 452,719,170 | 607,661,257 | 88,111 |
+| 16 | 222,983,212 | 1,791,079,147 | 1,946,021,233 | 229,363 |
+
+All three repetition increments are covered. The largest actual/node increment
+is 0.0346505662: the first call adds 3,864,999 actual PGU versus approximately
+111,542,160 node-known PGU. The current conservative tariff covers this measured
+surface without an additional value selector. No pricing coefficient changes
+are supported by these observations.
+
+The literal actual/node maximum remains the width-128 zero-call control:
+161,095,735 / 6,290,258 = 25.610354138. Its numerator includes proposal startup,
+which is absent from the node subtotal. Retain that result alongside the full
+quotes and matched increments rather than relabelling it as precompile work.
+
+The six focused tests, independent 25-case native/16-quote check, all 32 harness
+verification joins and independent raw-data audit passed. The latter checks
+normalization, canonical inputs/public outputs, program/profile/source identities,
+literal rational rankings, all nine value pairs and repetition increments.
+Peak process-tree PSS was 1,471,420,416 bytes; all 128 exact owned resources were
+confirmed absent in the host namespace. These are finite execute-only observations,
+not proofs, GPU throughput measurements, or coverage of every MODEXP value/length.
+
+The immutable data-only cohort is in [Atlas #13](https://github.com/taikoxyz/raiko2-atlas/pull/13).
+Both local integrity checks and the unchanged workflow against its published Release
+verified all 554 archived files. The archive preserves raw observations, exact portable
+projections and canonical inputs; the tools and program source remain in Raiko.

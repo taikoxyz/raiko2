@@ -614,3 +614,39 @@ SP1 actuals may be collected independently from pricing, but candidate precision
 requires actual new-model native quotes on those same canonical inputs. Do not
 refit from prospective results. These finite observations make no universal bound,
 real-proof, GPU-throughput or activation claim.
+
+## Repeated initcode preparation
+
+`initcode_preparation.py` generates 24 fixed cases against frozen code-preparation
+model `a2988920…`. A small factory builds its child initcode in memory using MCOPY,
+then loops over successful CREATE or CREATE2 frames. The parent runtime does not
+expand with repetition count. Every child address is checked; CREATE2 uses distinct
+consecutive salts. Children STOP or return one zero byte, followed by unreachable
+zero, JUMPDEST or PUSH32-pattern tails. All requests use one block, one ordinary CALL,
+empty calldata and the existing 15M user gas envelope.
+
+```sh
+~/.venv/bin/python bin/zkgas/bench/cases/initcode_preparation.py \
+  --output-dir experiment/initcode-preparation
+NATIVE_FIXTURE_BIN=target/debug/zkgas-fixture \
+ZKGAS_QUOTE_BIN=target/debug/zkgas-quote ~/.venv/bin/python -m unittest discover \
+  -s bin/zkgas/bench/tests -p test_initcode_preparation.py
+```
+
+The core matrix combines CREATE/CREATE2, 4096/49152-byte initcode and 1/16/128
+repetitions. Controls retain zero repetitions, tail content, ancestor REVERT,
+one-byte output and empty initcode. Native qualification checks completed child
+and parent opcode counts, real receipt status, factory nonce and preparation
+events/bytes. Included ancestor REVERT rolls back accounts and factory nonce while
+retaining spent preparation work. Empty-output cases have no nonempty-output
+preparation events; one-byte cases have one event and one byte per child.
+
+References distinguish repetitions, length, content, rollback and output changes.
+Only the 49152-byte JUMPDEST cases have a matching zero-repetition image control;
+short cases use their same-length N1 reference. Long/short differences-in-differences
+use each length's own repetition reference. Content/output changes can also alter
+parent memory work and CREATE2 trie addresses. Existing CREATE/CREATE2 wrapper
+prices remain active: these model-development cases do not presuppose underpricing.
+Measure whole-proposal actual PGU/node-known zkGas, full quote closure and matched
+increments separately with the existing bounded harness. No Rust, guest or tariff
+change is needed; this finite set is not a gas-saturated capacity measurement.

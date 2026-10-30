@@ -276,6 +276,56 @@ The upstream linear ancestry budget must be reconciled with this policy before i
 historical path can authenticate it. This does not silently remove other recovery rules or
 freeze a new landing interface. Committee authority/applicability remains a separate dependency.
 
+### 5.1.2 Request metadata and L1 header collection
+
+The node's Etna proof request must explicitly supply the latest L1 anchor height L for the exact
+requested L2 range. Raiko2 needs this value to plan reference selection, remaining landing headroom
+and historical-witness collection. It is request metadata, not an independent source of authority:
+preflight must decode the anchors from the actual L2 headers, enforce their progression rules,
+derive N and L, and reject a declared L that disagrees. The guest verifies those same anchors and
+their authenticated L1 headers. In anchor-less mode, use the anchor number in L2 `extraData` and
+the execution state root in L2 `parentBeaconBlockRoot`, not an `anchorV4` transaction.
+
+Do not reuse the existing v4 proposal field `last_anchor_block_number` to mean L. That field is
+the anchor height **before** the proposal range, as documented in the [current API](../../API.md).
+The Etna request must distinguish that preceding context from the latest anchor inside the range.
+These are required semantics for the future API review, not newly implemented fields or a frozen
+JSON schema. The node need not upload the complete L1 header chain in the public proof request;
+Raiko2 preflight collects the required headers and historical witnesses through its providers.
+
+Raiko2 must record the selected reference Q's execution height and hash before generating the
+final wrapper. The final-wrapper job identity and the proof result returned to the node must expose
+and bind that same pair. The node submits Q's number; L1 looks up the corresponding hash when
+constructing the statement. The node cannot wait until landing height P and substitute P-1 or
+another reference in calldata. If Q expires, create a newly bound wrapper/job as described in
+sections 5.1.1 and 8; compatible execution children may be reused.
+Q here is the reference called R in the node/API discussion, not another intermediate block.
+
+**Current Shasta collection baseline, not an implemented Etna path:** at the Raiko2 source snapshot
+in section 2, the normal path works as follows:
+
+1. [Preflight](../../../crates/pipeline/src/forks/shasta/spec.rs) decodes each L2 block's `anchorV4`
+   checkpoint and derives the checkpoints requiring L1 header linkage. The contiguous fetch starts
+   at `max(min(required anchor heights), last_anchor_block_number)` and ends at the proposal's
+   fixed `originBlockNumber`, inclusive. Every intervening L1 height is requested, including heights
+   that no L2 block directly anchors.
+2. The [network provider](../../../crates/provider/src/network/headers.rs) fetches each height via
+   `eth_getBlockByNumber` on the configured L1 execution RPC, with at most 16 concurrent requests
+   and ordered results. Despite the `batch_l1_headers` interface name, this is not one JSON-RPC
+   batch. It does not use beacon RPC for this execution-header chain.
+3. Preflight checks the requested heights, parent-hash links, checkpoint hashes/state roots and
+   proposal-origin hash, then puts the collected chain in `taiko.l1_ancestor_headers` in GuestInput.
+   The [guest](../../../crates/guest-common/src/lib.rs) independently checks the chain and anchors.
+   Existing inherited-parent-checkpoint and stalled-anchor paths can omit linkage already covered
+   by their authenticated parent context; the contiguous-fetch description is the normal path.
+
+For example, with required anchors at 100, 100, 103 and 105 and proposal origin 110, the normal
+path fetches headers 100..110, not only 100, 103, 105 and 110. In Etna PoS mode with eligible Q=L=105,
+the chain ends at 105. With a distant L, retain the range's N..L chain and collect the single bridge
+from L to Q described above. A sparse list of anchored headers cannot replace the intermediate
+parent-hash links. Collection and hash-checking work therefore follows the height span, not merely
+the number of distinct anchors. Preserve existing fixed-origin Shasta behavior.
+
 ### 5.2 BFT certificate verification
 
 For every CometBFT block in the proved range:
@@ -428,8 +478,9 @@ Protocol/prover reviewers must resolve these before an implementation plan is ac
 2. **Shared statement:** canonical committee/schedule encoding, the updated L1 statement/domain,
    height-scoped guest-image acceptance and one cross-language vector covering a handover.
 3. **Input/API contract:** the authentic source for original consensus history, an explicit Etna
-   range request and the external prover-provider format. Specify standalone anchor-less support
-   versus full PoS support and the Unzen transition boundary.
+   range request carrying L, and the external prover-provider format. Follow section 5.1.2 for
+   header-derived validation and exposing the bound Q number/hash to the submitting node. Specify
+   standalone anchor-less support versus full PoS support and the Unzen transition boundary.
 4. **Delivery scope:** first support fixed-range aggregation. If recursive extension is included,
    freeze its complete continuation journal and content commitment before writing it.
 5. **L1 ancestry:** confirm the reference-header/beacon-root binding, historical-witness collection
@@ -464,6 +515,11 @@ The later implementation plan must include at least:
   reference expiry during work; newer required L1 roots; fixed proposal-origin mode; equivalent
   short-link and Merkle witnesses after the direct-reference window. If a guest-side EIP-2935
   storage witness is ever added, enforce its height window before interpreting a wrapped slot.
+- Etna request L matching the header-derived latest anchor; missing or contradictory L; distinction
+  from the preceding range's anchor; returned Q number matching landing calldata and Q hash matching
+  the L1-derived proof statement; replacement of an expired Q requiring a new wrapper identity.
+  Exercise nonconsecutive and repeated anchors, complete intermediate header collection, and missing
+  or reordered headers.
 - FI inclusion, invalid encoding/nonce/balance, ordinary revert/OOG, over-limit rollback and the
   counterfactual trial witness. Real guest execution must independently reproduce each decision.
 - Valid overlapping landings with the identical proof/blob transaction, p/c/h boundary cases,

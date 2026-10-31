@@ -55,6 +55,28 @@ Natural-corpus rates and correlations include a declared confidence or resamplin
 sample supports one. Controlled and adversarial maxima are exact observed bounds, not confidence
 claims.
 
+### Controlled-workload semantic evidence
+
+Numerical replay and source hashes do not establish that a controlled program executes its
+declared workload. For operand-, branch-, size- or terminal-sensitive families, the proposed
+evidence contract also records:
+
+- the intended operands, branch and expected result or terminal condition;
+- independently decoded actual operands, including order, width and signedness;
+- focused native confirmation of the relevant result, success/failure and completed counts;
+- fitting and validation partitions bound to the qualified program/input identities; and
+- explicit limits for zero-only, symmetric, early-return and intentional failure controls.
+
+A successful receipt, a zero result, matching opcode totals or small fit residuals can all coexist
+with the wrong operands. Fit and holdout rows produced by the same defective generator do not
+independently validate its semantics. Use an independent operand/result oracle appropriate to the
+claimed family; this need not require a full proof or a full execution trace for every row.
+Preserve rejected or mislabeled evidence and identify which claims it cannot support. Deliberate
+conservative tariffs remain distinguishable from measured normal-path costs.
+
+The [BLOCKHASH calibration erratum](research/2026-10-31-calibration-semantics.md) supplies a concrete
+case. This addition remains part of the draft standard, not an adopted production gate.
+
 ### Observation surfaces
 
 Every score, metric, predicate, and limit binds the exact observation surface and execution stage

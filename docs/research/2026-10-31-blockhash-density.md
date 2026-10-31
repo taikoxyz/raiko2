@@ -1,5 +1,10 @@
 # BLOCKHASH density
 
+The followup [calibration semantic audit](2026-10-31-calibration-semantics.md)
+recovers the old 32.12-PGU derivation and identifies a reversed-SUB defect in
+its ancestor-hit fixture. Numerical replay is separate from semantic validity.
+The 700-PGU replacement below is based on independently qualified new inputs.
+
 ## Question and frozen scope
 
 BLOCKHASH has a fixed price of about 32.118 PGU/event in model2fb. Source

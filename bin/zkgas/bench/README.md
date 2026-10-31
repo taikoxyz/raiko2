@@ -754,8 +754,9 @@ not be used to choose the candidate's tariff or mixed with its fitting cohort.
 Generate twelve programs querying the nearest valid ancestor (`B-1`), farthest
 valid ancestor (`B-256`) or expired height (`B-257`). Each performs one semantic
 warmup query, then 0, 64, 4096 or 262144 bulk queries using a fixed 64-site
-`DUP2 / BLOCKHASH / POP` body. **Total BLOCKHASH events are bulk count plus one**,
-including N0, which retains the same unused body. The target and batch-count
+`DUP2 / BLOCKHASH / POP` body. **Total user-program BLOCKHASH events are bulk count plus one**,
+including N0, which retains the same unused body. The full-block quote also
+includes Anchor events; this user-program count excludes them. The target and batch-count
 immediates have fixed widths. There is one user CALL, empty calldata and a 15M
 EVM gas budget; no child deployment or extra witness padding is needed.
 

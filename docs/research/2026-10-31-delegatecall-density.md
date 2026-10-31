@@ -43,3 +43,33 @@ change is part of the initial measurement. A measured deficit requires analysis
 before a separate pricing correction; historical impact must be evaluated if
 prices change. Controls are finite model-development observations, not a global
 node-admission bound, maximum block capacity or proving-throughput result.
+
+## Initial measurement and frozen correction policy
+
+All eight observations completed under parent model a298. STOP/N32768 measures
+311,589,746 actual PGU, 142,182,252 node-known zkGas and 297,150,618 complete
+quoted PGU: a 14,439,128 integer-PGU deficit. All five STOP N0/N64 matched
+increments are underpriced; all five RETURN increments are covered. This is
+evidence about the composite call/child/remaining-loop workload, not an isolated
+frame coefficient. Independent evidence audit verified original input/output,
+SDK PGU, source identities and cleanup of all 32 owned shared-memory objects.
+
+Freeze the confirmed-DELEGATECALL fixed price at 6000 PGU/event before opening
+new actual observations. The deterministic rule takes the maximum over the ten
+same-terminal matched increments of
+
+```text
+old_wrapper + (5/4 * actual_increment - old_node_increment) / extra_calls
+```
+
+and rounds upward to a 1000-PGU quantum. The measured requirement is about
+5541.90; rounding gives 6000. Keep every other route, memory coefficient, floor,
+selector and global discount unchanged. Coverage projected from this formula
+requires confirmation by real successor native quotes. The preserved parent
+quotes must continue to show the original deficit.
+
+Prospective validation uses six fresh PUSH0-argument inputs: STOP/empty RETURN
+at N0/N4096/N65536. Preserve all earlier 24 requests byte-for-byte. Native
+qualification precedes actual sampling; candidate tariff selection uses none
+of these prospective actuals. Evaluate retained historical Mainnet proposals
+with the new quote binary to quantify impact before describing a final result.

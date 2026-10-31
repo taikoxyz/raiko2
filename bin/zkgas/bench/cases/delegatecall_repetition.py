@@ -4,6 +4,7 @@ import argparse
 from collections import Counter
 import json
 from pathlib import Path
+import re
 
 from initcode_preparation import _Factory
 import top_level_create as original
@@ -19,10 +20,14 @@ def _profile(value):
     return value
 
 
-def make_case(child_terminal='stop',repetitions=1,*,profile='checked'):
+def make_case(child_terminal='stop',repetitions=1,*,profile='checked',zero_arguments='push1'):
     _profile(profile)
+    if type(zero_arguments) is not str or zero_arguments not in ('push1','push0'):
+        raise ValueError('zero_arguments must be push1 or push0')
+    if profile=='checked' and zero_arguments!='push1':
+        raise ValueError('PUSH0 arguments require density profile')
     if type(child_terminal) is not str or child_terminal not in RUNTIMES:raise ValueError('unknown child terminal')
-    original.integer(repetitions,0,32768,'DELEGATECALL repetitions')
+    original.integer(repetitions,0,65536 if profile=='density' else 32768,'DELEGATECALL repetitions')
     if profile=='density' and (child_terminal not in ('stop','return0') or repetitions%64):
         raise ValueError('density requires STOP/RETURN0 and total calls divisible by64')
     unroll=64 if profile=='density' else 1
@@ -40,7 +45,9 @@ def make_case(child_terminal='stop',repetitions=1,*,profile='checked'):
     asm.push(0);asm.label('loop',batches+1);asm.op(0x80,batches+1)
     asm.push(batches,times=batches+1);asm.op(0x14,batches+1);asm.target('done',batches+1);asm.op(0x57,batches+1)
     for _ in range(unroll):
-        for _ in range(4):asm.push(0,1,batches)  # out size/offset and in size/offset.
+        for _ in range(4):  # out size/offset and in size/offset.
+            if zero_arguments=='push0':asm.op(0x5f,batches)
+            else:asm.push(0,1,batches)
         asm.op(0x85,batches);asm.push(64,1,batches);asm.op(0xf4,batches)
         if profile=='checked':
             asm.push(int(success),1,batches);asm.op(0x14,batches);asm.op(0x15,batches);asm.target('failure',batches);asm.op(0x57,batches)
@@ -80,25 +87,34 @@ def make_case(child_terminal='stop',repetitions=1,*,profile='checked'):
             completion_gate='one real child CREATE, exact completed child/parent opcodes, zero exceptional instructions, successful user receipt and factory nonce1; no per-call EVM status/return-data guard')
         row['parameters'].update(producer_profile='density',unroll_factor=unroll,batch_count=batches,
             per_call_status_guard=False,per_call_return_data_guard=False)
-    reference_count=64 if profile=='density' else 1
+    if zero_arguments=='push0':
+        row.update(sample_id=f'delegatecall-density-push0-{child_terminal}-n{repetitions}',
+            baseline_sample_id=f'delegatecall-density-push0-{child_terminal}-n0',
+            data_role='prospective_frozen_policy_validation',holdout_only=True)
+        row['parameters']['argument_zero_opcode']='PUSH0'
+    reference_count=4096 if zero_arguments=='push0' else 64 if profile=='density' else 1
     if repetitions>reference_count:
-        prefix='delegatecall-density' if profile=='density' else 'delegatecall-repetition'
+        prefix='delegatecall-density-push0' if zero_arguments=='push0' else 'delegatecall-density' if profile=='density' else 'delegatecall-repetition'
         row['repetition_reference_sample_id']=f'{prefix}-{child_terminal}-n{reference_count}'
     return row
 
 
-def prepare(output,*,profile='checked'):
+def prepare(output,*,profile='checked',zero_arguments='push1',model_id=MODEL):
     _profile(profile)
+    if type(model_id) is not str or re.fullmatch('[0-9a-f]{64}',model_id) is None:
+        raise ValueError('model_id must be a lowercase SHA256')
+    # Validate options before creating any directory, including an empty catalog.
+    make_case('stop',0,profile=profile,zero_arguments=zero_arguments)
     terminals=('stop','return0') if profile=='density' else RUNTIMES
-    counts=(0,64,1024,32768) if profile=='density' else (0,1,1024,32768)
-    plans=[make_case(terminal,count,profile=profile) for terminal in terminals for count in counts]
-    ids={r['sample_id'] for r in plans};assert len(plans)==len(ids)==(8 if profile=='density' else 16)
+    counts=(0,4096,65536) if zero_arguments=='push0' else (0,64,1024,32768) if profile=='density' else (0,1,1024,32768)
+    plans=[make_case(terminal,count,profile=profile,zero_arguments=zero_arguments) for terminal in terminals for count in counts]
+    ids={r['sample_id'] for r in plans};assert len(plans)==len(ids)==(6 if zero_arguments=='push0' else 8 if profile=='density' else 16)
     output.mkdir(parents=True,exist_ok=False);(output/'requests').mkdir();rows=[]
     for row in plans:
         assert row['baseline_sample_id'] in ids
         raw=encoded(row.pop('request'));path=f"requests/{row['sample_id']}.json";write(output/path,raw)
         rows.append(row|{'request_path':path,'request_sha256':digest(raw)})
-    catalog={'schema_version':1,'frozen_model_id':MODEL,
+    catalog={'schema_version':1,'frozen_model_id':model_id,
         'purpose':'High-count minimal DELEGATECALL with exactly one child deployment, fixed64forwarded gas and checked per-call status/empty return data',
         'generator_sha256':digest(Path(__file__).read_bytes()),'source_sha256':{name:digest(Path(__file__).with_name(name).read_bytes()) for name in
             ('initcode_preparation.py','top_level_create.py','spawn_memory.py')},
@@ -108,11 +124,16 @@ def prepare(output,*,profile='checked'):
         catalog.update(producer_profile='density',unroll_factor=64,
             purpose='Fixed64-call unroll density with one real child deployment evenN0, fixed64forwarded gas, no per-call status or return-data guard',
             interpretation='Exact native child-terminal and exceptional maps prove every call completed; parent success alone is insufficient. Compare only within-terminal N0/N64 increments; no assumed startup subtraction or pricing conclusion.')
+    if zero_arguments=='push0':
+        catalog.update(zero_arguments='push0',prospective_frozen_policy_validation=True,
+            interpretation='Fresh PUSH0 argument programs at N0/4096/65536 validate the specified frozen model. No actual holdout observation is used to select its tariff. Exact native terminal/exception counts establish completion; compare within-terminal N0/N4096 increments separately from full closure.')
     write(output/'catalog.json',encoded(catalog))
     return len(rows)
 
 
 if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--output-dir',type=Path,required=True)
-    parser.add_argument('--profile',choices=('checked','density'),default='checked');args=parser.parse_args()
-    print(json.dumps({'prepared':prepare(args.output_dir,profile=args.profile)}))
+    parser.add_argument('--profile',choices=('checked','density'),default='checked')
+    parser.add_argument('--zero-arguments',choices=('push1','push0'),default='push1')
+    parser.add_argument('--model-id',default=MODEL);args=parser.parse_args()
+    print(json.dumps({'prepared':prepare(args.output_dir,profile=args.profile,zero_arguments=args.zero_arguments,model_id=args.model_id)}))

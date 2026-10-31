@@ -716,8 +716,9 @@ ZKGAS_QUOTE_BIN=target/debug/zkgas-quote ~/.venv/bin/python -m unittest discover
 the same construction. The default `checked` profile preserves all 16 original
 request bytes; tests bind their frozen request hashes and can also compare the
 original files when `CHECKED_DELEGATECALL_CASES` points at that catalog directory.
-Density uses distinct IDs, N0 baselines and N64 repetition references. Counts must
-be multiples of 64 in 0..32768, and failed child terminals are not density cases.
+Density uses distinct IDs, N0 baselines and N64 repetition references. Its default
+catalog uses 0/64/1024/32768 calls; the API accepts multiples of 64 through 65536.
+Failed child terminals are not density cases.
 
 A successful outer receipt alone is insufficient for this guardless profile.
 Qualification checks exact child terminals/call counts, zero exceptional
@@ -727,3 +728,23 @@ rejected by those gates; zero-gas STOP is valid. No additional child witness
 padding, Rust/guest build or pricing change is needed. Keep literal whole-proposal
 actual/node ratios, full quote closure and within-terminal N0/N64 increments
 separate; this finite density test does not measure saturation or proving speed.
+
+`--profile density --zero-arguments push0` generates six prospective validation
+programs: STOP/empty RETURN at 0, 4096 or 65536 calls. Only the four call-argument
+zeros change to PUSH0; the 64-call body, real deployment, gas forwarding and
+native completion gates remain. Density accepts up to 65536 calls; checked
+keeps its original 32768 bound. Default checked and PUSH1 density requests
+remain byte-identical to the retained 16- and 8-case cohorts.
+
+```sh
+~/.venv/bin/python bin/zkgas/bench/cases/delegatecall_repetition.py \
+  --profile density --zero-arguments push0 --model-id "$ZKGAS_MODEL_ID" \
+  --output-dir experiment/delegatecall-push0
+```
+
+Set `ZKGAS_MODEL_ID` to the content address of the frozen candidate before
+opening these actual-workload observations. `--model-id` records dataset
+metadata; prices come from the selected quote executable, and GuestInput
+construction does not depend on this value. Record native inclusion, exact
+child terminals and gas headroom before sampling. These prospective rows must
+not be used to choose the candidate's tariff or mixed with its fitting cohort.

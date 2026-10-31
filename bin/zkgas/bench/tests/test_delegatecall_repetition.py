@@ -25,7 +25,8 @@ def execute(code,override_status=None,override_return_size=None):
             op=body[pc] if pc<len(body) else 0;pc+=1;key=f'opcode:0x{op:02x}';attempted[key]+=1
             if op==0xfe:exceptional+=1;return False,b''
             completed[key]+=1
-            if 0x60<=op<=0x7f:
+            if op==0x5f:stack.append(0)
+            elif 0x60<=op<=0x7f:
                 width=op-0x5f;assert pc+width<=len(body);stack.append(int.from_bytes(body[pc:pc+width],'big'));pc+=width
             elif 0x80<=op<=0x8f:stack.append(stack[-(op-0x7f)])
             elif op==0x01:stack.append((stack.pop()+stack.pop())%2**256)

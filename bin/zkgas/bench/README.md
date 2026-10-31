@@ -748,3 +748,38 @@ metadata; prices come from the selected quote executable, and GuestInput
 construction does not depend on this value. Record native inclusion, exact
 child terminals and gas headroom before sampling. These prospective rows must
 not be used to choose the candidate's tariff or mixed with its fitting cohort.
+
+## BLOCKHASH density
+
+Generate twelve programs querying the nearest valid ancestor (`B-1`), farthest
+valid ancestor (`B-256`) or expired height (`B-257`). Each performs one semantic
+warmup query, then 0, 64, 4096 or 262144 bulk queries using a fixed 64-site
+`DUP2 / BLOCKHASH / POP` body. **Total BLOCKHASH events are bulk count plus one**,
+including N0, which retains the same unused body. The target and batch-count
+immediates have fixed widths. There is one user CALL, empty calldata and a 15M
+EVM gas budget; no child deployment or extra witness padding is needed.
+
+```sh
+~/.venv/bin/python bin/zkgas/bench/cases/blockhash_density.py \
+  --output-dir experiment/blockhash-density
+NATIVE_FIXTURE_BIN=target/debug/zkgas-fixture \
+ZKGAS_QUOTE_BIN=target/debug/zkgas-quote ~/.venv/bin/python -m unittest discover \
+  -s bin/zkgas/bench/tests -p test_blockhash_density.py
+```
+
+`make_case(mode, bulk_queries)` also exposes `current` (`B`) and `future`
+(`B+1`) as native-only boundary controls, outside the twelve-case catalog.
+Counts must be multiples of 64 through 262144. Native qualification checks the
+contiguous ancestor headers, semantic warmup, exact completed opcode counts,
+zero exceptional instructions and successful user receipt. Short execution,
+an incorrect semantic target and parent OOG must fail qualification.
+
+The default catalog records frozen model `2fb4bb71…`. Optional `--model-id`
+changes catalog metadata only; the selected quote executable supplies prices.
+Use its actual model identity when selecting another frozen quote executable.
+Within each mode, N0 and N64 references separate absolute workload from
+repetition. Cross-mode differences include semantic guards and target arithmetic,
+so they are not isolated lookup costs. Retain literal whole-proposal actual
+SP1 PGU/node-known zkGas, complete quote closure and matched increments as
+separate diagnostics. No pricing, capacity or throughput conclusion precedes
+actual measurements. RISC0 CI is outside this experiment's scope.

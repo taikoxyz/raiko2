@@ -153,3 +153,18 @@ build metadata is preserved. Committed dependency pins and guest artifacts were
 not changed. Native, quote and sampler interfaces continue to consume the same
 legal GuestInput. Reusable producer profiles, regression tests and usage remain
 in Raiko; fixed data and reports belong in Atlas.
+
+## Immutable retention
+
+The data-only [Atlas PR20](https://github.com/taikoxyz/raiko2-atlas/pull/20)
+and [fixture Release](https://github.com/taikoxyz/raiko2-atlas/releases/tag/fixture-unzen-delegatecall-density-v1)
+retain all 14 new observations, parent/candidate prices and 20 canonical inputs
+including native-only controls. The 16 checked references depend explicitly on
+their prior immutable fixture; historical reports do not include GuestInputs.
+The 2,202,285-byte asset contains 531 regular members with SHA256
+`8b867afe6c3c74e1beec244455e1dcfba6740ef5e6858055f0999a0440e483f8`.
+Independent archive review verified raw joins, all 19 metadata files and all
+92 exact original-minus-declared-field projections, including a corrected
+command omission-list defect. Original numeric data did not change. The
+published asset was actually re-downloaded through the existing integrity
+workflow code; compressed/decoded identities and all inner checksums passed.

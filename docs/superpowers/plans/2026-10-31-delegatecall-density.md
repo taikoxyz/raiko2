@@ -31,7 +31,7 @@ Reuse the frozen constructor, quote, sampler, program and bounded harness.
 - [x] Execute each qualified canonical input once through frozen SP1. Audit
   original identities/public outputs, actual PGU, full closure, matched deltas
   and owned resources. Investigate any deficit without redefining the metric.
-- [ ] Retain reusable tools/usage/results in Raiko and immutable data in Atlas,
+- [x] Retain reusable tools/usage/results in Raiko and immutable data in Atlas,
   with independent archive verification. Keep source PR Draft/do-not-merge;
   no merge, deployment or unrequested guest build.
 
@@ -47,11 +47,18 @@ Reviewed upstream correction is local commit 75737a81 / model 2fb4bb71.
   24 requests. Root observed missing-API RED, then pure GREEN; independent source
   review and six parent-quote native checks passed. The old parent qualification
   catalog is distinct from the eventual candidate-model catalog.
-- [ ] Build a comparison-only candidate quote from frozen CLI sources and an
+- [x] Build a comparison-only candidate quote from frozen CLI sources and an
   explicit reviewed Reth override, leaving committed dependency pins unchanged.
-- [ ] Requote all prior 24 inputs, then sample six fresh actuals against the
+- [x] Requote all prior 24 inputs, then sample six fresh actuals against the
   frozen candidate. Independently audit actual native repricing and holdouts.
-- [ ] Requote the retained 50 Mainnet proposals to quantify historical impact;
+- [x] Requote the retained 50 Mainnet proposals to quantify historical impact;
   retain their original distinct SP1 program/SDK identities and actual PGUs.
-- [ ] Publish the complete parent/candidate data and update guarded PR records
+- [x] Publish the complete parent/candidate data and update guarded PR records
   after independent archive verification. No guest build or production switch.
+
+Completed data retention is Atlas PR20 / Release
+`fixture-unzen-delegatecall-density-v1`. Independent archive audit verified all
+531 members and 19 metadata files; its command omission-list finding was fixed
+and rechecked before publication. Actual remote download/hash checks passed.
+Source PR260 and PR296 remain Draft/do-not-merge. Remote PR CI is a separate
+asynchronous check, not an additional actual-workload observation.

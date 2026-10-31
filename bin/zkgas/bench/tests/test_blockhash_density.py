@@ -20,6 +20,17 @@ def instructions(code):
     return rows
 
 
+def reverse_number_offset_prefix(code):
+    """Reproduce the historical NUMBER/PUSH-offset/SUB bug in a test-only copy."""
+    decoded=instructions(code)
+    assert [op for _,op,_ in decoded[:3]]==[0x62,0x43,0x03]
+    # Both instruction orders occupy the same six bytes, preserving all jump
+    # destinations, route multiplicities and the untouched bulk-loop body.
+    swapped=code[4:5]+code[:4]+code[5:]
+    assert len(swapped)==len(code) and [op for _,op,_ in instructions(swapped)[:3]]==[0x43,0x62,0x03]
+    return swapped
+
+
 def execute(code, number=600):
     """Small independent EVM, with distinct nonzero hashes only for last256 ancestors."""
     stack=[];pc=0;counts=Counter();queries=[]
@@ -97,6 +108,28 @@ class BlockhashDensityTests(unittest.TestCase):
         code=bytearray.fromhex(m.make_case('nearest',64)['request']['program']['code_hex'][2:]);code[1:4]=(257).to_bytes(3,'big')
         self.assertEqual(execute(code)[0],0xfe)
 
+    def test_historical_operand_order_cannot_pass_actual_target_oracle(self):
+        m=self.load();number=1_166_000
+        for mode,distance in (('nearest',1),('farthest',256),('expired',257),('current',0)):
+            with self.subTest(mode=mode):
+                row=m.make_case(mode,64);code=bytes.fromhex(row['request']['program']['code_hex'][2:])
+                terminal,counts,targets,stack=execute(code,number)
+                self.assertEqual((terminal,stack),(0,[]));self.assertEqual(targets,[number-distance]*65)
+                expected={k:v for k,v in row['request']['program']['expected_route_counts'].items() if v}
+                self.assertEqual(counts,expected)
+                legacy=reverse_number_offset_prefix(code)
+                terminal,counts,targets,stack=execute(legacy,number)
+                self.assertEqual(targets,[(distance-number)%2**256]*(1 if mode in ('nearest','farthest') else 65))
+                self.assertNotEqual(targets[0],number-distance,'actual operand oracle must reject a zero-result false positive')
+                self.assertGreater(targets[0],number,'reversed SUB requests a huge future height')
+                if mode in ('nearest','farthest'):
+                    self.assertEqual(terminal,0xfe,'valid-ancestor semantic guard must fail before bulk queries')
+                    self.assertEqual(counts['opcode:0x40'],1);self.assertNotIn('opcode:0x00',counts)
+                else:
+                    # Both the intended and wrong query return zero: receipt,
+                    # zero predicate and opcode totals alone cannot identify it.
+                    self.assertEqual((terminal,stack),(0,[]));self.assertEqual(counts,expected)
+
     def test_typed_bounds_and_invalid_metadata(self):
         m=self.load()
         for mode,n in [(True,0),(None,0),('unknown',0),('nearest',True),('nearest',None),('nearest',-64),('nearest',1),('nearest',63),('nearest',262145),('nearest',262208)]:
@@ -153,6 +186,22 @@ class BlockhashDensityTests(unittest.TestCase):
                 self.assertEqual(quoted.returncode,0,quoted.stderr.decode());quote=json.loads((folder/'quote.jsonl').read_text())['quote']
                 self.assertEqual(quote['model_id'],model);self.assertEqual(quote['guest_input_sha256'],native['guest_input_sha256']);self.assertEqual(quote['public_output'],native['public_output'])
                 self.assertEqual(quote['blocks'][0]['node']['pricing']['code_preparation'],{'nonempty_events':0,'total_bytes':0})
+            for mode in ('nearest','farthest','expired','current'):
+                row=m.make_case(mode,64);request=row['request']
+                code=reverse_number_offset_prefix(bytes.fromhex(request['program']['code_hex'][2:]))
+                request['program']['code_hex']='0x'+code.hex();result,folder=run(request,'historical-reversed-'+mode)
+                if mode in ('nearest','farthest'):
+                    self.assertNotEqual(result.returncode,0)
+                    self.assertIn('all user transactions matching expected_user_success',result.stderr.decode())
+                    self.assertFalse((folder/'input.bin').exists());self.assertFalse((folder/'input.json').exists());self.assertFalse((folder/'native.json').exists())
+                else:
+                    self.assertEqual(result.returncode,0,result.stderr.decode())
+                    native=json.loads((folder/'native.json').read_text());self.assertTrue(native['receipts_by_block'][0][1]['success'])
+                    guest=json.loads((folder/'input.json').read_text());number=guest['witnesses'][0]['block']['header']['number']
+                    terminal,counts,targets,stack=execute(code,number)
+                    self.assertEqual((terminal,stack),(0,[]));self.assertEqual(targets,[((row['parameters']['target_distance']-number)%2**256)]*65)
+                    self.assertNotEqual(targets[0],number-row['parameters']['target_distance'])
+                    self.assertEqual({k:v for k,v in native['observed_route_counts'].items() if v},counts)
             for mutation in ('short-execution','wrong-semantic-target','parent-oog'):
                 row=m.make_case('nearest',64);request=row['request'];code=bytearray.fromhex(request['program']['code_hex'][2:])
                 if mutation=='short-execution':

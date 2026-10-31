@@ -782,4 +782,13 @@ repetition. Cross-mode differences include semantic guards and target arithmetic
 so they are not isolated lookup costs. Retain literal whole-proposal actual
 SP1 PGU/node-known zkGas, complete quote closure and matched increments as
 separate diagnostics. No pricing, capacity or throughput conclusion precedes
-actual measurements. RISC0 CI is outside this experiment's scope.
+actual measurements.
+
+For a separately frozen tariff validation, `--profile prospective` emits six
+new inputs: farthest/expired heights with 0, 8192 and 196608 bulk queries.
+Each runtime executes an additional `PUSH0 / POP` prelude, including N0;
+all jump destinations and expected counts are regenerated. These inputs use
+distinct `-push0` IDs and are marked as prospective validation. The caller
+must freeze its candidate price before measuring them; the label alone does
+not establish that chronology. Pass `--model-id` for the candidate executable.
+The within-mode repetition reference is N8192 in this profile.

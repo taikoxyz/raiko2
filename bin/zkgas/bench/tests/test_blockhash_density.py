@@ -27,6 +27,7 @@ def execute(code, number=600):
         op=code[pc];pc+=1;counts[op]+=1
         if 0x60<=op<=0x7f:
             width=op-0x5f;stack.append(int.from_bytes(code[pc:pc+width],'big'));pc+=width
+        elif op==0x5f:stack.append(0)
         elif op==0x43:stack.append(number)
         elif op in (0x01,0x03):
             a,b=stack.pop(),stack.pop();stack.append((a+b if op==0x01 else a-b)%2**256)
@@ -100,10 +101,31 @@ class BlockhashDensityTests(unittest.TestCase):
         m=self.load()
         for mode,n in [(True,0),(None,0),('unknown',0),('nearest',True),('nearest',None),('nearest',-64),('nearest',1),('nearest',63),('nearest',262145),('nearest',262208)]:
             with self.subTest(mode=mode,n=n),self.assertRaises(ValueError):m.make_case(mode,n)
+        for invalid in (None,1,'push0'):
+            with self.subTest(prelude=invalid),self.assertRaises(ValueError):m.make_case(push0_prelude=invalid)
         with tempfile.TemporaryDirectory() as temporary:
             for model in (None,True,'','A'*64,'g'*64):
                 with self.subTest(model=model),self.assertRaises(ValueError):m.prepare(Path(temporary)/'invalid',model_id=model)
             self.assertFalse((Path(temporary)/'invalid').exists())
+
+    def test_prospective_profile_has_new_inputs_and_exact_prelude_counts(self):
+        m=self.load()
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary)/'cases';self.assertEqual(m.prepare(root,profile='prospective'),6)
+            catalog=json.loads((root/'catalog.json').read_text());rows=catalog['cases'];by={r['sample_id']:r for r in rows}
+            self.assertEqual({(r['parameters']['mode'],r['parameters']['bulk_queries']) for r in rows},{(mode,n) for mode in ('farthest','expired') for n in (0,8192,196608)})
+            for row in rows:
+                p=row['parameters'];request=json.loads((root/row['request_path']).read_text());original=m.make_case(p['mode'],p['bulk_queries'])
+                self.assertTrue(row['holdout_only']);self.assertEqual(row['data_role'],'prospective_validation_probe')
+                self.assertEqual(p['stack_prelude'],'push0-pop');self.assertNotEqual(request['program']['code_hex'],original['request']['program']['code_hex'])
+                code=bytes.fromhex(request['program']['code_hex'][2:]);self.assertEqual(code[:2],bytes.fromhex('5f50'))
+                terminal,counts,targets,stack=execute(code)
+                self.assertEqual((terminal,stack),(0,[]));self.assertEqual(targets,[600-p['target_distance']]*(p['bulk_queries']+1))
+                self.assertEqual({k:v for k,v in request['program']['expected_route_counts'].items() if v},counts)
+                self.assertEqual(counts['opcode:0x5f'],1);self.assertEqual(counts['opcode:0x50'],original['request']['program']['expected_route_counts']['opcode:0x50']+1)
+                self.assertIn(row['baseline_sample_id'],by)
+                if p['bulk_queries']>8192:self.assertEqual(by[row['repetition_reference_sample_id']]['parameters']['bulk_queries'],8192)
+            with self.assertRaises(ValueError):m.prepare(Path(temporary)/'bad',profile='unknown')
 
     @unittest.skipUnless(os.environ.get('NATIVE_FIXTURE_BIN') and os.environ.get('ZKGAS_QUOTE_BIN'),'set frozen native and quote for BLOCKHASH qualification')
     def test_actual_twelve_native_quote_ancestor_and_rejection_gates(self):

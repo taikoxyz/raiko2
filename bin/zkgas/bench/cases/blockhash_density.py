@@ -13,12 +13,14 @@ MODEL='2fb4bb71092f11cca2217e69b25e94217342ffb46a540a961e7a77a483cb5601'
 DISTANCES={'nearest':1,'farthest':256,'expired':257,'current':0,'future':-1}
 
 
-def make_case(mode='nearest',bulk_queries=64):
+def make_case(mode='nearest',bulk_queries=64,*,push0_prelude=False):
     if type(mode) is not str or mode not in DISTANCES:raise ValueError('unknown BLOCKHASH target mode')
+    if type(push0_prelude) is not bool:raise ValueError('push0_prelude must be boolean')
     original.integer(bulk_queries,0,262144,'bulk queries')
     if bulk_queries%64:raise ValueError('bulk queries must be divisible by64')
     distance=DISTANCES[mode];nonzero=mode in ('nearest','farthest');batches=bulk_queries//64
     asm=_Factory()
+    if push0_prelude:asm.op(0x5f);asm.op(0x50)
     # EVM SUB consumes the top operand first: NUMBER minus distance. All target
     # offsets and batch counts have fixed PUSH3 width, including N0.
     asm.push(abs(distance));asm.op(0x43);asm.op(0x01 if distance<0 else 0x03)
@@ -48,27 +50,35 @@ def make_case(mode='nearest',bulk_queries=64):
         'transaction_gas_limit':15_000_000,'outer_calldata_bytes':0,'code_location':'prestate runtime','runtime_bytes':len(code),'runtime_sha256':digest(code),
         'preload_created_accounts_or_code':False}
     if bulk_queries>64:row['repetition_reference_sample_id']=f'blockhash-density-{mode}-n64'
+    if push0_prelude:
+        row['sample_id']+='-push0';row['baseline_sample_id']+='-push0'
+        row.update(data_role='prospective_validation_probe',holdout_only=True)
+        row['parameters']['stack_prelude']='push0-pop'
+        row.pop('repetition_reference_sample_id',None)
+        if bulk_queries>8192:row['repetition_reference_sample_id']=f'blockhash-density-{mode}-n8192-push0'
     return row
 
 
-def prepare(output,*,model_id=MODEL):
+def prepare(output,*,model_id=MODEL,profile='density'):
     if type(model_id) is not str or re.fullmatch('[0-9a-f]{64}',model_id) is None:raise ValueError('model_id must be a lowercase SHA256')
-    plans=[make_case(mode,n) for mode in ('nearest','farthest','expired') for n in (0,64,4096,262144)]
-    ids={r['sample_id'] for r in plans};assert len(ids)==len(plans)==12
+    if profile not in ('density','prospective'):raise ValueError('unknown BLOCKHASH profile')
+    modes,counts=(('nearest','farthest','expired'),(0,64,4096,262144)) if profile=='density' else (('farthest','expired'),(0,8192,196608))
+    plans=[make_case(mode,n,push0_prelude=profile=='prospective') for mode in modes for n in counts]
+    ids={r['sample_id'] for r in plans};assert len(ids)==len(plans)==len(modes)*len(counts)
     output.mkdir(parents=True,exist_ok=False);(output/'requests').mkdir();rows=[]
     for row in plans:
         assert row['baseline_sample_id'] in ids
         raw=encoded(row.pop('request'));path=f"requests/{row['sample_id']}.json";write(output/path,raw)
         rows.append(row|{'request_path':path,'request_sha256':digest(raw)})
     write(output/'catalog.json',encoded({'schema_version':1,'frozen_model_id':model_id,'unroll_factor':64,
-        'purpose':'Twelve BLOCKHASH density probes: nearest/farthest valid ancestor and expired height, one semantic warmup plus fixed64-query bulk batches',
+        'purpose':('Twelve BLOCKHASH density probes: nearest/farthest valid ancestor and expired height' if profile=='density' else 'Six prospective BLOCKHASH validation probes with a PUSH0/POP prelude')+', one semantic warmup plus fixed64-query bulk batches',
         'generator_sha256':digest(Path(__file__).read_bytes()),'source_sha256':{name:digest(Path(__file__).with_name(name).read_bytes()) for name in
             ('initcode_preparation.py','top_level_create.py','spawn_memory.py')},
-        'interpretation':'Total BLOCKHASH events are bulk_queries+1 including N0. Within-mode N0/N64 references isolate repetition; cross-mode differences also include semantic checks and target arithmetic. Current/future modes are native-only controls outside this catalog. Model ID is metadata, not a pricing override.',
+        'interpretation':'Total BLOCKHASH events are bulk_queries+1 including N0. Within-mode '+('N0/N64' if profile=='density' else 'N0/N8192')+' references isolate repetition; cross-mode differences also include semantic checks and target arithmetic. Current/future modes are native-only controls outside this catalog. Model ID is metadata, not a pricing override.',
         'cases':rows}))
     return len(rows)
 
 
 if __name__=='__main__':
-    parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--output-dir',type=Path,required=True);parser.add_argument('--model-id',default=MODEL);args=parser.parse_args()
-    print(json.dumps({'prepared':prepare(args.output_dir,model_id=args.model_id)}))
+    parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--output-dir',type=Path,required=True);parser.add_argument('--model-id',default=MODEL);parser.add_argument('--profile',choices=('density','prospective'),default='density');args=parser.parse_args()
+    print(json.dumps({'prepared':prepare(args.output_dir,model_id=args.model_id,profile=args.profile)}))

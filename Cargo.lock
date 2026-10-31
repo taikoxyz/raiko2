@@ -251,11 +251,11 @@ dependencies = [
 [[package]]
 name = "alethia-reth-block"
 version = "1.4.1"
-source = "git+https://github.com/taikoxyz/alethia-reth?rev=0f30f488c88635e38932843e67af2d918319f7e7#0f30f488c88635e38932843e67af2d918319f7e7"
+source = "git+https://github.com/taikoxyz/alethia-reth?rev=8da28fd02e44d81d2c84725fbd082f73cd48428e#8da28fd02e44d81d2c84725fbd082f73cd48428e"
 dependencies = [
- "alethia-reth-chainspec 1.4.1 (git+https://github.com/taikoxyz/alethia-reth?rev=0f30f488c88635e38932843e67af2d918319f7e7)",
+ "alethia-reth-chainspec 1.4.1 (git+https://github.com/taikoxyz/alethia-reth?rev=8da28fd02e44d81d2c84725fbd082f73cd48428e)",
  "alethia-reth-evm",
- "alethia-reth-primitives 1.4.1 (git+https://github.com/taikoxyz/alethia-reth?rev=0f30f488c88635e38932843e67af2d918319f7e7)",
+ "alethia-reth-primitives 1.4.1 (git+https://github.com/taikoxyz/alethia-reth?rev=8da28fd02e44d81d2c84725fbd082f73cd48428e)",
  "alloy-consensus 2.4.2",
  "alloy-eips 2.5.0",
  "alloy-evm 0.39.0",
@@ -283,7 +283,7 @@ dependencies = [
 [[package]]
 name = "alethia-reth-chainspec"
 version = "1.4.1"
-source = "git+https://github.com/taikoxyz/alethia-reth?rev=0f30f488c88635e38932843e67af2d918319f7e7#0f30f488c88635e38932843e67af2d918319f7e7"
+source = "git+https://github.com/taikoxyz/alethia-reth?rev=8da28fd02e44d81d2c84725fbd082f73cd48428e#8da28fd02e44d81d2c84725fbd082f73cd48428e"
 dependencies = [
  "alloy-chains",
  "alloy-consensus 2.4.2",
@@ -327,11 +327,11 @@ dependencies = [
 [[package]]
 name = "alethia-reth-consensus"
 version = "1.4.1"
-source = "git+https://github.com/taikoxyz/alethia-reth?rev=0f30f488c88635e38932843e67af2d918319f7e7#0f30f488c88635e38932843e67af2d918319f7e7"
+source = "git+https://github.com/taikoxyz/alethia-reth?rev=8da28fd02e44d81d2c84725fbd082f73cd48428e#8da28fd02e44d81d2c84725fbd082f73cd48428e"
 dependencies = [
- "alethia-reth-chainspec 1.4.1 (git+https://github.com/taikoxyz/alethia-reth?rev=0f30f488c88635e38932843e67af2d918319f7e7)",
+ "alethia-reth-chainspec 1.4.1 (git+https://github.com/taikoxyz/alethia-reth?rev=8da28fd02e44d81d2c84725fbd082f73cd48428e)",
  "alethia-reth-evm",
- "alethia-reth-primitives 1.4.1 (git+https://github.com/taikoxyz/alethia-reth?rev=0f30f488c88635e38932843e67af2d918319f7e7)",
+ "alethia-reth-primitives 1.4.1 (git+https://github.com/taikoxyz/alethia-reth?rev=8da28fd02e44d81d2c84725fbd082f73cd48428e)",
  "alloy-consensus 2.4.2",
  "alloy-hardforks 0.4.8",
  "alloy-primitives",
@@ -360,10 +360,10 @@ dependencies = [
 [[package]]
 name = "alethia-reth-evm"
 version = "1.4.1"
-source = "git+https://github.com/taikoxyz/alethia-reth?rev=0f30f488c88635e38932843e67af2d918319f7e7#0f30f488c88635e38932843e67af2d918319f7e7"
+source = "git+https://github.com/taikoxyz/alethia-reth?rev=8da28fd02e44d81d2c84725fbd082f73cd48428e#8da28fd02e44d81d2c84725fbd082f73cd48428e"
 dependencies = [
- "alethia-reth-chainspec 1.4.1 (git+https://github.com/taikoxyz/alethia-reth?rev=0f30f488c88635e38932843e67af2d918319f7e7)",
- "alethia-reth-primitives 1.4.1 (git+https://github.com/taikoxyz/alethia-reth?rev=0f30f488c88635e38932843e67af2d918319f7e7)",
+ "alethia-reth-chainspec 1.4.1 (git+https://github.com/taikoxyz/alethia-reth?rev=8da28fd02e44d81d2c84725fbd082f73cd48428e)",
+ "alethia-reth-primitives 1.4.1 (git+https://github.com/taikoxyz/alethia-reth?rev=8da28fd02e44d81d2c84725fbd082f73cd48428e)",
  "alloy-evm 0.39.0",
  "alloy-primitives",
  "reth-evm 2.6.0",
@@ -375,7 +375,7 @@ dependencies = [
 [[package]]
 name = "alethia-reth-primitives"
 version = "1.4.1"
-source = "git+https://github.com/taikoxyz/alethia-reth?rev=0f30f488c88635e38932843e67af2d918319f7e7#0f30f488c88635e38932843e67af2d918319f7e7"
+source = "git+https://github.com/taikoxyz/alethia-reth?rev=8da28fd02e44d81d2c84725fbd082f73cd48428e#8da28fd02e44d81d2c84725fbd082f73cd48428e"
 dependencies = [
  "alloy-consensus 2.4.2",
  "alloy-primitives",
@@ -8573,9 +8573,9 @@ name = "raiko2-guest-common"
 version = "0.1.0"
 dependencies = [
  "alethia-reth-block",
- "alethia-reth-chainspec 1.4.1 (git+https://github.com/taikoxyz/alethia-reth?rev=0f30f488c88635e38932843e67af2d918319f7e7)",
- "alethia-reth-consensus 1.4.1 (git+https://github.com/taikoxyz/alethia-reth?rev=0f30f488c88635e38932843e67af2d918319f7e7)",
- "alethia-reth-primitives 1.4.1 (git+https://github.com/taikoxyz/alethia-reth?rev=0f30f488c88635e38932843e67af2d918319f7e7)",
+ "alethia-reth-chainspec 1.4.1 (git+https://github.com/taikoxyz/alethia-reth?rev=8da28fd02e44d81d2c84725fbd082f73cd48428e)",
+ "alethia-reth-consensus 1.4.1 (git+https://github.com/taikoxyz/alethia-reth?rev=8da28fd02e44d81d2c84725fbd082f73cd48428e)",
+ "alethia-reth-primitives 1.4.1 (git+https://github.com/taikoxyz/alethia-reth?rev=8da28fd02e44d81d2c84725fbd082f73cd48428e)",
  "alloy-consensus 2.4.2",
  "alloy-hardforks 0.4.8",
  "alloy-primitives",
@@ -8603,9 +8603,9 @@ name = "raiko2-pipeline"
 version = "0.1.0"
 dependencies = [
  "alethia-reth-block",
- "alethia-reth-chainspec 1.4.1 (git+https://github.com/taikoxyz/alethia-reth?rev=0f30f488c88635e38932843e67af2d918319f7e7)",
- "alethia-reth-consensus 1.4.1 (git+https://github.com/taikoxyz/alethia-reth?rev=0f30f488c88635e38932843e67af2d918319f7e7)",
- "alethia-reth-primitives 1.4.1 (git+https://github.com/taikoxyz/alethia-reth?rev=0f30f488c88635e38932843e67af2d918319f7e7)",
+ "alethia-reth-chainspec 1.4.1 (git+https://github.com/taikoxyz/alethia-reth?rev=8da28fd02e44d81d2c84725fbd082f73cd48428e)",
+ "alethia-reth-consensus 1.4.1 (git+https://github.com/taikoxyz/alethia-reth?rev=8da28fd02e44d81d2c84725fbd082f73cd48428e)",
+ "alethia-reth-primitives 1.4.1 (git+https://github.com/taikoxyz/alethia-reth?rev=8da28fd02e44d81d2c84725fbd082f73cd48428e)",
  "alloy-consensus 2.4.2",
  "alloy-eips 2.5.0",
  "alloy-hardforks 0.4.8",
@@ -8641,7 +8641,7 @@ dependencies = [
 name = "raiko2-primitives"
 version = "0.1.0"
 dependencies = [
- "alethia-reth-chainspec 1.4.1 (git+https://github.com/taikoxyz/alethia-reth?rev=0f30f488c88635e38932843e67af2d918319f7e7)",
+ "alethia-reth-chainspec 1.4.1 (git+https://github.com/taikoxyz/alethia-reth?rev=8da28fd02e44d81d2c84725fbd082f73cd48428e)",
  "alloy-consensus 2.4.2",
  "alloy-eips 2.5.0",
  "alloy-hardforks 0.4.8",
@@ -8696,7 +8696,7 @@ dependencies = [
 name = "raiko2-protocol-shasta"
 version = "0.1.0"
 dependencies = [
- "alethia-reth-consensus 1.4.1 (git+https://github.com/taikoxyz/alethia-reth?rev=0f30f488c88635e38932843e67af2d918319f7e7)",
+ "alethia-reth-consensus 1.4.1 (git+https://github.com/taikoxyz/alethia-reth?rev=8da28fd02e44d81d2c84725fbd082f73cd48428e)",
  "alloy-eips 2.5.0",
  "alloy-primitives",
  "alloy-rlp",
@@ -8756,8 +8756,8 @@ name = "raiko2-provider"
 version = "0.1.0"
 dependencies = [
  "alethia-reth-block",
- "alethia-reth-chainspec 1.4.1 (git+https://github.com/taikoxyz/alethia-reth?rev=0f30f488c88635e38932843e67af2d918319f7e7)",
- "alethia-reth-primitives 1.4.1 (git+https://github.com/taikoxyz/alethia-reth?rev=0f30f488c88635e38932843e67af2d918319f7e7)",
+ "alethia-reth-chainspec 1.4.1 (git+https://github.com/taikoxyz/alethia-reth?rev=8da28fd02e44d81d2c84725fbd082f73cd48428e)",
+ "alethia-reth-primitives 1.4.1 (git+https://github.com/taikoxyz/alethia-reth?rev=8da28fd02e44d81d2c84725fbd082f73cd48428e)",
  "alloy 2.0.1",
  "alloy-chains",
  "alloy-json-rpc 2.0.1",
@@ -8879,8 +8879,9 @@ name = "raiko2-stateless"
 version = "0.1.0"
 dependencies = [
  "alethia-reth-block",
- "alethia-reth-chainspec 1.4.1 (git+https://github.com/taikoxyz/alethia-reth?rev=0f30f488c88635e38932843e67af2d918319f7e7)",
- "alethia-reth-consensus 1.4.1 (git+https://github.com/taikoxyz/alethia-reth?rev=0f30f488c88635e38932843e67af2d918319f7e7)",
+ "alethia-reth-chainspec 1.4.1 (git+https://github.com/taikoxyz/alethia-reth?rev=8da28fd02e44d81d2c84725fbd082f73cd48428e)",
+ "alethia-reth-consensus 1.4.1 (git+https://github.com/taikoxyz/alethia-reth?rev=8da28fd02e44d81d2c84725fbd082f73cd48428e)",
+ "alethia-reth-evm",
  "alloy-consensus 2.4.2",
  "alloy-primitives",
  "alloy-rlp",
@@ -14546,7 +14547,7 @@ name = "witness-check"
 version = "0.1.0"
 dependencies = [
  "alethia-reth-block",
- "alethia-reth-chainspec 1.4.1 (git+https://github.com/taikoxyz/alethia-reth?rev=0f30f488c88635e38932843e67af2d918319f7e7)",
+ "alethia-reth-chainspec 1.4.1 (git+https://github.com/taikoxyz/alethia-reth?rev=8da28fd02e44d81d2c84725fbd082f73cd48428e)",
  "alloy 2.0.1",
  "alloy-primitives",
  "anyhow",
@@ -14833,8 +14834,19 @@ dependencies = [
 name = "zkgas"
 version = "0.1.0"
 dependencies = [
- "alethia-reth-chainspec 1.4.1 (git+https://github.com/taikoxyz/alethia-reth?rev=0f30f488c88635e38932843e67af2d918319f7e7)",
+ "alethia-reth-block",
+ "alethia-reth-chainspec 1.4.1 (git+https://github.com/taikoxyz/alethia-reth?rev=8da28fd02e44d81d2c84725fbd082f73cd48428e)",
+ "alethia-reth-consensus 1.4.1 (git+https://github.com/taikoxyz/alethia-reth?rev=8da28fd02e44d81d2c84725fbd082f73cd48428e)",
  "alethia-reth-evm",
+ "alloy-consensus 2.4.2",
+ "alloy-eips 2.5.0",
+ "alloy-evm 0.39.0",
+ "alloy-primitives",
+ "alloy-rlp",
+ "alloy-signer 2.0.1",
+ "alloy-signer-local 2.0.1",
+ "alloy-sol-types",
+ "alloy-trie 0.9.8",
  "anyhow",
  "bincode",
  "clap",
@@ -14842,14 +14854,24 @@ dependencies = [
  "num-bigint 0.4.6",
  "num-rational",
  "num-traits",
+ "protocol",
  "raiko2-primitives",
  "raiko2-primitives-shasta",
+ "raiko2-protocol",
  "raiko2-protocol-shasta",
+ "raiko2-stateless",
  "raiko2-zkgas-trace",
+ "reth-ethereum-primitives 2.6.0",
+ "reth-evm 2.6.0",
+ "reth-primitives-traits 0.7.1",
+ "reth-revm 2.6.0",
+ "reth-trie-common 2.6.0",
+ "risc0-ethereum-trie",
  "rustix 1.1.4",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "tempfile",
  "toml 0.8.23",
  "tracing",
  "tracing-subscriber 0.3.23",

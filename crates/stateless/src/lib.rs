@@ -15,6 +15,8 @@ mod sparse;
 mod trie;
 mod validation;
 mod witness_db;
+#[cfg(feature = "workload-lab")]
+pub mod workload_lab;
 
 pub use crate::analysis::{WitnessMaterializationStats, analyze_block_with_witness_resources};
 #[cfg(feature = "mpt-metrics")]

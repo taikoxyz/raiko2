@@ -1,0 +1,35 @@
+[package]
+name = "raiko2-workload-sp1"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "sp1-workload-proposal"
+path = "src/main.rs"
+
+[workspace]
+
+[dependencies]
+raiko2-guest-common = { path = "../../crates/guest-common", default-features = false }
+raiko2-primitives-shasta = { path = "../../crates/primitives-shasta" }
+raiko2-stateless = { path = "../../crates/stateless", default-features = false, features = ["workload-lab"] }
+sp1-zkvm = { version = "=6.3.0", features = ["verify"] }
+# Keep the standalone experiment on one SDK generation despite semver-compatible
+# newer guest dependencies already present in the production lockfile.
+sp1-lib = { version = "=6.3.0", default-features = false }
+sp1-primitives = { version = "=6.3.0", default-features = false }
+alloy-primitives = { version = "=1.6.1", default-features = false }
+revm-precompile = { version = "=43.0.3", default-features = false, features = ["bn"] }
+num-bigint = { version = "=0.4.6", default-features = false }
+sha2 = { git = "https://github.com/sp1-patches/RustCrypto-hashes", package = "sha2", tag = "patch-sha2-0.10.8-sp1-6.0.0" }
+k256 = { git = "https://github.com/sp1-patches/elliptic-curves", tag = "patch-k256-13.4-sp1-6.0.0" }
+
+[patch.crates-io]
+sha2-v0-10-8 = { git = "https://github.com/sp1-patches/RustCrypto-hashes", package = "sha2", tag = "patch-sha2-0.10.8-sp1-6.0.0" }
+sha2-v0-10-9 = { git = "https://github.com/sp1-patches/RustCrypto-hashes", package = "sha2", tag = "patch-sha2-0.10.9-sp1-6.0.0" }
+sha3-v0-11-0 = { git = "https://github.com/sp1-patches/RustCrypto-hashes", package = "sha3", tag = "patch-sha3-0.11.0-sp1-6.0.0" }
+crypto-bigint = { git = "https://github.com/sp1-patches/RustCrypto-bigint", tag = "patch-0.5.5-sp1-6.0.0" }
+k256 = { git = "https://github.com/sp1-patches/elliptic-curves", tag = "patch-k256-13.4-sp1-6.0.0" }
+p256 = { git = "https://github.com/sp1-patches/elliptic-curves", tag = "patch-p256-13.2-sp1-6.0.0" }
+substrate-bn = { git = "https://github.com/sp1-patches/bn", package = "substrate-bn", tag = "patch-0.6.0-sp1-6.0.0-substrate-bn" }

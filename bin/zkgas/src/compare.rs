@@ -100,6 +100,9 @@ fn validate_pricing_breakdown(
     ensure!(
         [
             pricing.fixed_scaled,
+            pricing.authorization_scaled,
+            pricing.access_list_scaled,
+            pricing.code_preparation_scaled,
             pricing.operations_scaled,
             pricing.feature_error_scaled,
             pricing.resources_scaled,
@@ -123,6 +126,9 @@ fn validate_pricing_breakdown(
         pricing.total_scaled
             == checked_sum([
                 pricing.fixed_scaled,
+                pricing.authorization_scaled,
+                pricing.access_list_scaled,
+                pricing.code_preparation_scaled,
                 pricing.operations_scaled,
                 pricing.resources_scaled,
                 pricing.mpt_scaled,
@@ -177,6 +183,9 @@ fn snapshot_matches_pricing(
     pricing: &PricingBreakdown,
 ) -> bool {
     snapshot.fixed_scaled == pricing.fixed_scaled
+        && snapshot.authorization_scaled == pricing.authorization_scaled
+        && snapshot.access_list_scaled == pricing.access_list_scaled
+        && snapshot.code_preparation_scaled == pricing.code_preparation_scaled
         && snapshot.operations_scaled == pricing.operations_scaled
         && snapshot.feature_error_scaled == pricing.feature_error_scaled
         && snapshot.resources_scaled == pricing.resources_scaled
@@ -289,6 +298,9 @@ fn validate_complete_quote(complete: &CompleteQuoteV1) -> Result<()> {
         ensure!(
             [
                 node.fixed_scaled,
+                node.authorization_scaled,
+                node.access_list_scaled,
+                node.code_preparation_scaled,
                 node.operations_scaled,
                 node.feature_error_scaled,
                 node.evm_local_resources_scaled,
@@ -307,6 +319,9 @@ fn validate_complete_quote(complete: &CompleteQuoteV1) -> Result<()> {
             node.known_subtotal_scaled
                 == checked_sum([
                     node.fixed_scaled,
+                    node.authorization_scaled,
+                    node.access_list_scaled,
+                    node.code_preparation_scaled,
                     node.operations_scaled,
                     node.evm_local_resources_scaled,
                     node.transaction_payload_scaled,
@@ -318,6 +333,36 @@ fn validate_complete_quote(complete: &CompleteQuoteV1) -> Result<()> {
             "node pricing pgu mismatch"
         );
         let prove = &block.prove.pricing;
+        ensure!(
+            block.prove.authorization_validations >= node.authorization_validations,
+            "attempted authorization count does not cover committed count"
+        );
+        ensure!(
+            prove.authorization_scaled >= node.authorization_scaled,
+            "attempted authorization price does not cover committed price"
+        );
+        ensure!(
+            block.prove.access_list_items >= node.access_list_items,
+            "attempted access-list count does not cover committed count"
+        );
+        ensure!(
+            prove.access_list_scaled >= node.access_list_scaled,
+            "attempted access-list price does not cover committed price"
+        );
+        ensure!(
+            block.prove.code_preparation.nonempty_events >= node.code_preparation.nonempty_events
+                && block.prove.code_preparation.total_bytes >= node.code_preparation.total_bytes
+                && prove.code_preparation_scaled >= node.code_preparation_scaled,
+            "attempted code preparation does not cover committed selectors or price"
+        );
+        // Validate the typed domain even for diagnostic comparisons with another model identity.
+        // Only the current model's prices are reconciled below.
+        let node_preparation = ZkGasModel
+            .price_code_preparation(node.code_preparation.into())
+            .context("committed code preparation selector domain is invalid")?;
+        let prove_preparation = ZkGasModel
+            .price_code_preparation(block.prove.code_preparation.into())
+            .context("attempted code preparation selector domain is invalid")?;
         validate_pricing_breakdown(prove)?;
         let committed = block.prove.committed_payload;
         committed
@@ -350,10 +395,18 @@ fn validate_complete_quote(complete: &CompleteQuoteV1) -> Result<()> {
             "exact resources do not cover EVM-local resources"
         );
         if current_model {
+            ensure!(
+                node.code_preparation_scaled == node_preparation
+                    && prove.code_preparation_scaled == prove_preparation,
+                "code preparation price mismatch"
+            );
             let local_pricing = ZkGasModel
                 .price_block(&BlockPricingInput {
                     started_non_anchor_transactions: 0,
                     native_value_transfers: 0,
+                    authorization_validations: node.authorization_validations,
+                    access_list_items: node.access_list_items,
+                    code_preparation: node.code_preparation.into(),
                     operation_routes: &[],
                     resources: resource_selectors(node.evm_local_resources),
                     transaction_payload: Default::default(),
@@ -368,6 +421,9 @@ fn validate_complete_quote(complete: &CompleteQuoteV1) -> Result<()> {
                 .price_block(&BlockPricingInput {
                     started_non_anchor_transactions: 0,
                     native_value_transfers: 0,
+                    authorization_validations: block.prove.authorization_validations,
+                    access_list_items: block.prove.access_list_items,
+                    code_preparation: block.prove.code_preparation.into(),
                     operation_routes: &[],
                     resources: resource_selectors(block.prove.exact_resources),
                     transaction_payload: Default::default(),
@@ -378,6 +434,22 @@ fn validate_complete_quote(complete: &CompleteQuoteV1) -> Result<()> {
                 prove.resources_scaled == exact_pricing.resources_scaled
                     && prove.mpt_scaled == exact_pricing.mpt_scaled,
                 "exact block resource or MPT price mismatch"
+            );
+            ensure!(
+                node.authorization_scaled == local_pricing.authorization_scaled,
+                "committed authorization validation price mismatch"
+            );
+            ensure!(
+                prove.authorization_scaled == exact_pricing.authorization_scaled,
+                "attempted authorization validation price mismatch"
+            );
+            ensure!(
+                node.access_list_scaled == local_pricing.access_list_scaled,
+                "committed access-list item price mismatch"
+            );
+            ensure!(
+                prove.access_list_scaled == exact_pricing.access_list_scaled,
+                "attempted access-list item price mismatch"
             );
             let payload_pricing = ZkGasModel
                 .price_transaction_payload(node.transaction_payload.into())
@@ -423,6 +495,10 @@ fn validate_complete_quote(complete: &CompleteQuoteV1) -> Result<()> {
         !quote.model_id.is_empty() && complete.calibration_profile == quote.model_id,
         "prediction model identity mismatch"
     );
+    ensure!(
+        complete.execution_profile == quote.execution_profile,
+        "quote execution profile mismatch"
+    );
     let unzen_sum = quote
         .blocks
         .iter()
@@ -461,6 +537,18 @@ fn validate_complete_quote(complete: &CompleteQuoteV1) -> Result<()> {
     );
 
     validate_pricing_breakdown(&quote.prove.proposal_once)?;
+    ensure!(
+        quote.prove.proposal_once.authorization_scaled == 0,
+        "proposal-only pricing contains authorization validations"
+    );
+    ensure!(
+        quote.prove.proposal_once.access_list_scaled == 0,
+        "proposal-only pricing contains access-list items"
+    );
+    ensure!(
+        quote.prove.proposal_once.code_preparation_scaled == 0,
+        "proposal-only pricing contains code preparation"
+    );
     let block_scaled = checked_sum(quote.blocks.iter().map(|b| b.prove.pricing.total_scaled))?;
     ensure!(
         quote.prove.block_local_scaled == block_scaled,

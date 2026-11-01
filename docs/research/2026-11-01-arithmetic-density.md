@@ -20,7 +20,8 @@ padding. The [producer usage](../../bin/zkgas/bench/README.md#arithmetic-density
 Reused artifacts are native `b0497f45…`, quote `8624f630…`, model `bbce9be0…`, sampler `1998fb85…`,
 SDK6.3.0, ELF `b76baf2e…` and manifest `8d5b4a48…`. This is execute-only normalized PGU evidence
 under that frozen experimental program, not a generated proof, production-ELF parity or GPU
-throughput measurement. No guest, dependency pin, price, discount or admission limit changed.
+throughput measurement. The initial observations use the parent tariff. The candidate below changes only the normal
+dispatch reserve; the actual-workload program, global discount and admission limits stay frozen.
 
 ## First24 actual observations
 
@@ -101,9 +102,133 @@ remain possibilities; this bounded audit does not identify their individual cont
 recover/replay every original raw input and ELF binding. Independent provenance audit SHA256:
 `d7a54cbe5db06f1b3811c69f1751f41bb504cd47cdc0234806f22aa920bb1473`.
 
-The next finite experiment separates PUSH0/POP, DUP depths1/3/8/16 and paired SWAP depths1/8/16.
-Its counter stays in memory, keeping the actual 17-word stack unchanged at every body boundary.
-New source/inputs and actual measurements remain separate from these frozen 36 observations.
+## Balanced stack-density observations
+
+A separate24-case catalog (`39b6844a…`) tests PUSH0/POP, DUP depths1/3/8/16 with POP,
+and paired SWAP depths1/8/16 at0/4096/262144 bulk pairs. A memory-word counter preserves
+17 fixed, distinct full-width seed words at every body boundary, and all final seeds are checked.
+The fixed64-site body and input identities remain separate from the preceding36 observations.
+
+The parent has24/24 node deficits and8/24 complete deficits. At262144 pairs, DUP16 has
+196,500,938 actual PGU against26,087,760 node and181,029,590 complete PGU; SWAP16 has
+261,583,465 actual against98,301,133 node and253,242,964 complete PGU. This strengthens
+the shared cheap-operation/composition diagnosis; it does not identify a physical isolated
+DUP, SWAP, dispatch or Taiko-meter cost. The independent actual audit hash is
+`9d3e95cebcc3755bbcae299a37b8f924ab522f962f6931058d2c0cef22f73383`.
+
+## Empirical normal-dispatch reserve
+
+The development panel now has60 actual inputs and60 same-pattern matched increments.
+Freeze immutable parent `bbce9be0…`; for each increment compute the additional normalized
+PGU per extra completed user opcode needed to give the increment25% headroom:
+
+```text
+required_extra = max(0,
+    (5/4 * actual_proposal_delta - parent_node_delta_scaled/scale)
+    / extra_completed_user_opcodes)
+reserve = ceil_to_multiple_of_8(max(required_extra)) = 64 PGU/event
+```
+
+The maximum exact-rational requirement is about58.3843496621 at SWAP16, from4096 to262144.
+The60 qualified count deltas exclude Anchor; real candidate replay confirms they equal the
+full normal-dispatch count deltas. The selected64 is an **empirical composite conservative
+reserve**, rather than an isolated overhead measurement or universal upper bound.
+No prospective observation selects it. The original tariff coefficients remain intact.
+
+[Reth candidate `e01c43f`](https://github.com/taikoxyz/alethia-reth/commit/e01c43ff2e79ef75ac9089bb8692093e9c5cbda3)
+adds it once for a normally priced dispatched Opcode or ConfirmedSpawn, after route maxima,
+so an existing structural floor cannot absorb it. Normal Anchor/child opcodes count too.
+Precompile-body events, feature-error pricing and selected-but-undispatched diagnostics do not.
+Committed and attempted/discarded prefixes retain their separate accounting.
+`normal_dispatch_scaled` is an exposed subterm already inside `operations_scaled`;
+it must not be added again by a consumer. The content-addressed candidate is
+`c8936124c1b074b57abf36873e1c37e01f9bc49fa6c9bb161a92542f1e6551ef`.
+The [implementation plan](../superpowers/plans/2026-11-01-normal-dispatch-reserve.md)
+records generation, policy and finite validation gates.
+
+## Same-input repricing and prospective validation
+
+All60 original canonical inputs were actually replayed with the candidate quote binary.
+The inputs, public outputs, unrelated selectors/prices and raw Unzen results match the parent;
+node/full uplift is exactly64 times the independently observed normal count, with existing
+scaled arithmetic and boundary rounding. Original actuals are reused without an SP1 rerun.
+
+A further24 untouched validation inputs (`12f81559…`) use fixed128-site bodies and counts
+0/8192/196608. Patterns are DUP16/POP, paired SWAP16, full-width XOR, SHL255, SAR255,
+CALLVALUE/POP, TIMESTAMP/POP and NUMBER/POP. Their signed shift results, actual header/value,
+17 seed words, counts and receipts were independently qualified. Their actuals were opened only
+after freezing64. These are new shapes/opcodes/counts, not the fitting cohort or universal coverage.
+
+| Cohort | Actual observations | Parent node deficits | Candidate node deficits | Parent full deficits | Candidate full deficits |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Arithmetic |24|24|24|8|0|
+| Paired DUP/POP controls |12|12|12|4|0|
+| Balanced stack |24|24|24|8|0|
+| Prospective validation |24|24|24|10|0|
+
+Candidate full/actual ranges are1.00905..1.17734x on the development60 and
+1.00931..1.61555x on the untouched24. All60 development increments and24 validation
+increments have at least25% node/full headroom; minima are1.28271x and1.28986x.
+Those increment comparisons explain repeatable growth; **they do not erase absolute node
+underpricing**. Every N0 control remains in the literal ranking.
+
+Examples of all three quantities under the candidate (each input has one block):
+
+| Case | Node estimate PGU | Complete proposal estimate PGU | Actual proposal SP1 PGU |
+| --- | ---: | ---: | ---: |
+| ADD full carry,262144 |111,679,768|266,621,598|226,685,516|
+| SWAP16,262144 |136,586,253|291,528,084|261,583,465|
+| Prospective CALLVALUE,196608 |44,878,559|199,820,390|184,807,541|
+| Prospective SWAP16,196608 |100,065,244|255,007,075|232,731,765|
+
+**The node surface remains under actual proposal workload84/84.** Full minus node is about
+154.94183M PGU in these controlled single-block inputs, from retained proving-only composition;
+that difference is not itself a measurement of actual startup. It has not been allocated to mining.
+A roughly21.42x N0 actual/node case remains. Therefore this correction closes the observed
+repeatable-operation deficit in the tested increments and the full quotes; it does not close
+node admission or justify a universal workload cap. Proposal-aware allocation remains undecided.
+
+The new24 measurements reuse SDK6.3, source-bound ELFb76 and all other frozen artifacts above.
+They are execute-only normalized SP1 PGU (`ExecutionReport.gas * 10 // 191`), not generated proofs.
+Peak sampled PSS was2,174,916,608bytes under the6GiB guard. Independent cleanup checks found all
+96 measurement-owned shared-memory objects absent. The independent actual audit hash is
+`eb49f692574803afd5885e799f7237480df9ded864193a533e33f219cb5153a7`;
+the original60 real-requote audit is
+`198a4cb4a92944d333a9500f8ef7a54b1139a1cff9f8bb106606e903a1334b80`.
+
+## Retained Mainnet sensitivity
+
+The same50 retained Mainnet proposals /9,600 blocks were natively repriced using the matched
+`legacy-unzen` execution profile. Summing proposal `node.block_local_known_pgu` values
+(one ceiling after each proposal's scaled block sum) gives84,759,814,532 parent and
+92,349,395,460 candidate PGU, a rise of8.95422%. The literal sum of individually rounded
+block values (`sum_of_block_known_pgu`) is84,759,816,672 and92,349,397,600 respectively;
+both conventions are retained. Full sum rises4.99632%,
+with maximum proposal full uplift7.31455%. Workload-weighted full/retained-actual changes
+2.17064x to2.27909x; complete deficits remain0/50. Against those retained actuals, literal node deficits change34/50 to21/50. The largest
+remaining actual/node ratio is proposal45209:1,069,360,738 /891,258,762, about1.19983x,
+with a178,101,976-PGU shortfall; the node sum covers the population only in aggregate, not
+proposal by proposal. These ratios retain the historical-program caveat below.
+Other prices, inputs, outputs and Unzen scores match. The initial `evm-gas-only` diagnostic is retained separately, rather than mixed
+into this matched-profile comparison.
+
+The retained historical actuals still bind SDK6.1 / ELF416f5a47; no historical SP1 rerun occurred.
+These numbers measure price sensitivity and a cross-program workload diagnostic, **not** strict
+current-ELFb76 accuracy certification or node closure. The roughly2x historical conclusion is
+not overturned, although the measured5% additional overestimate remains an explicit tradeoff.
+This cohort's inputs are separate from the synthetic84-case fixture.
+
+## Current boundary and next research
+
+The reproducible generators, qualification checks and usage remain in Raiko; immutable inputs,
+raw observations and source identities belong in Atlas. No production limit, activation mode,
+header difficulty, global discount or future fork policy is changed. All three source PRs remain
+pending/do-not-merge; no guest artifact is rebuilt or relabeled as current.
+
+Next, use equivalent-input controls to test growth with block count and composition/failure
+boundaries. Distinguish the genuine proposal-once remainder from any remaining per-block or
+per-operation growth before considering proposal-aware allocation. In particular, keep literal
+actual/node ratios and both deficit flags even when the full estimate covers the input.
 
 ## Verification and limits
 
@@ -120,5 +245,4 @@ sampled PSS was1,704,820,736bytes, below the6GiB guard. Its report SHA256 is
 `9bf388edd49dd17008916b040f76279f7d2ec76a2cefc8356d3ad146f084a0ec`.
 
 This cohort does not establish a global maximum, a per-block actual workload, production capacity,
-or closure of the node's proposal-once observability gap. No pricing correction has been chosen,
-and historical sensitivity has not been rerun for a nonexistent candidate tariff.
+or closure of the node's proposal-once observability gap. The candidate and finite sensitivity/validation results above do not establish those stronger claims.

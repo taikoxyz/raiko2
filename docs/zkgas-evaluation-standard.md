@@ -87,12 +87,19 @@ they share a model identity.
 
 For the current SP1 workload campaign, retain three quantities for each identical proposal input:
 the complete proposal estimate `Q_proposal`, the node-observable mining estimate for each block
-`Q_node,b` and its proposal sum `Q_node = sum(Q_node,b)`, and actual proposal SP1 PGU `A` under the
+`Q_node,b` and its proposal aggregate `Q_node`, and actual proposal SP1 PGU `A` under the
 named frozen program. When both estimates have the declared PGU semantics, report `A / Q_proposal`
 and `A / Q_node`, their independent underpricing flags (`A > Q`), and absolute shortfalls. Keep
 small-input and zero-repetition controls in both comparisons. A full proposal quote covering `A`
 does not mean the mining estimate covers it. Comparing a node sum with proposal actual is an
 aggregate observability diagnostic; it does not assign actual PGU to any individual block.
+
+Preserve the producer's aggregation and rounding. The current quote API exposes
+`block_local_known_pgu = ceil(sum(block_known_scaled) / scale)` alongside
+`sum_of_block_known_pgu = sum(ceil(block_known_scaled / scale))`. Retain the individual block
+estimates and both totals for multi-block proposals; name the denominator actually used. The
+current controlled single-block cases have equal totals. Rounding does not allocate actual
+proposal PGU to blocks.
 
 The current priority is finding gaps in the block-mining-aware model. Matched increments help
 distinguish fixed costs from repeatable scaling deficits, but do not replace either full ratio or

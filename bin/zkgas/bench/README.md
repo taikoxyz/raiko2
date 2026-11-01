@@ -958,3 +958,48 @@ loop are composite observations and cannot uniquely identify isolated POP, DUP
 or SWAP tariffs. This finite matrix makes no maximum-workload, throughput,
 universal-bound or production-admission claim. Actual measurements use the
 existing guarded workload tools after independent native qualification.
+
+## Prospective normal-dispatch reserve validation
+
+`normal_dispatch_holdout.py` creates 24 holdout-only cases after the 64-PGU reserve
+was frozen in model `c8936124…`: `dup16-pop`, `swap16-swap16`, `xor`, `shl255`,
+`sar255`, `callvalue-pop`, `timestamp-pop` and `number-pop`, each at
+0/8192/196608 balanced body operations. A fixed 128-site body remains present at
+N0. Batch-count pushes have fixed widths; the counter stays in memory word0,
+leaving the same 17 full-width seed words on the body stack. All 17 ending words
+are checked. No earlier development producer or input is changed.
+
+```sh
+~/.venv/bin/python bin/zkgas/bench/cases/normal_dispatch_holdout.py \
+  --output-dir experiment/normal-dispatch-holdout
+~/.venv/bin/python -m unittest discover \
+  -s bin/zkgas/bench/tests -p test_normal_dispatch_holdout.py
+NATIVE_FIXTURE_BIN="$FROZEN_NATIVE" ZKGAS_QUOTE_BIN="$CANDIDATE_QUOTE" \
+ZKGAS_EXPECTED_MODEL_ID="$ZKGAS_MODEL_ID" ~/.venv/bin/python -m unittest discover \
+  -s bin/zkgas/bench/tests -p test_normal_dispatch_holdout.py
+```
+
+`make_case(pattern, bulk_operations)` accepts multiples of 128 through 196608.
+XOR copies seed15 then seed16, so its actual top-first ordered operands are
+seed16 and seed15. SHL/SAR copy negative seed16 and shift by 255; SHL yields
+bit255 and signed SAR yields all ones. Arithmetic, shift and contextual cases
+execute one checked semantic warmup in addition to their bulk target events.
+DUP16 and double-SWAP16 have no extra warmup. Native qualification independently
+checks access depths, operand order, signed results, the final counter, complete
+opcode maps and successful receipts. Wrong balanced copies can preserve the
+ending seeds, so receipt success alone is insufficient.
+
+Context warmups compare exact declared values: CALLVALUE=0, NUMBER=1166000 and
+TIMESTAMP=1786021201 for the frozen one-block constructor. Qualification must
+independently match these with the canonical signed transaction and actual
+witness header; metadata alone is not an oracle. Inputs are one CALL, empty
+calldata and 15M gas under `evm-gas-only`, with no CREATE or code preparation.
+`--model-id` labels metadata only and does not select compiled prices.
+
+Retain three primary quantities per sample: complete proposal estimate,
+node-observable estimate for each block plus their sum, and actual SP1 PGU for
+that same proposal. Report underpricing of each estimate independently,
+including every N0 control. Same-pattern N0/N8192 increments explain scalable
+gaps; they do not replace literal comparisons or identify isolated opcode
+costs. These holdouts must not silently refit the frozen reserve. No price,
+guest, capacity or proposal-to-mining allocation change is made here.

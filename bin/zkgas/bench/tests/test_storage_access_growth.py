@@ -10,14 +10,10 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from Crypto.Hash import keccak
+from ethereum_hash import keccak256
 
 CASES = Path(__file__).resolve().parents[1]/'cases'
 MASK = (1 << 256)-1
-
-
-def ethereum_keccak(data):
-    return keccak.new(digest_bits=256, data=data).digest()
 
 
 def rlp_encode(value):
@@ -55,7 +51,7 @@ def nibbles(raw):
 @lru_cache(maxsize=2)
 def independent_storage_root(size):
     """Build an Ethereum MPT independently from raw integer preimages and value1."""
-    leaves = [(nibbles(ethereum_keccak(key.to_bytes(32, 'big'))), b'\x01') for key in range(size)]
+    leaves = [(nibbles(keccak256(key.to_bytes(32, 'big'))), b'\x01') for key in range(size)]
     def compact(path, leaf):
         fields = ((2*leaf+1,)+path) if len(path)%2 else ((2*leaf, 0)+path)
         return bytes((fields[i] << 4)|fields[i+1] for i in range(0, len(fields), 2))
@@ -64,7 +60,7 @@ def independent_storage_root(size):
         paths = [path for path, _ in items]; prefix = 0
         while prefix < min(map(len, paths)) and len({path[prefix] for path in paths}) == 1: prefix += 1
         def reference(child):
-            raw = rlp_encode(child); return child if len(raw) < 32 else ethereum_keccak(raw)
+            raw = rlp_encode(child); return child if len(raw) < 32 else keccak256(raw)
         if prefix: return [compact(paths[0][:prefix], False), reference(node([(path[prefix:], value) for path, value in items]))]
         branches = [[] for _ in range(16)]; result = [b'']*17
         for path, value in items:
@@ -73,7 +69,7 @@ def independent_storage_root(size):
         for index, children in enumerate(branches):
             if children: result[index] = reference(node(children))
         return result
-    return ethereum_keccak(rlp_encode(node(leaves)))
+    return keccak256(rlp_encode(node(leaves)))
 
 
 def trie_value(root, key, nodes):
@@ -149,10 +145,11 @@ class StorageAccessGrowthTests(unittest.TestCase):
         module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module); return module
 
     def test_independent_ethereum_mpt_oracle_primitives(self):
-        self.assertEqual(ethereum_keccak(rlp_encode(b'')).hex(), '56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421')
-        self.assertEqual(ethereum_keccak(bytes(32)).hex(), '290decd9548b62a8d60345a988386fc84ba6bc95484008f6362f93160ef3e563')
+        self.assertEqual(keccak256(rlp_encode(b'')).hex(), '56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421')
+        self.assertEqual(keccak256(bytes(32)).hex(), '290decd9548b62a8d60345a988386fc84ba6bc95484008f6362f93160ef3e563')
         for value in (b'', b'a', bytes(100), [b'one', [bytes(70), b'two']]): self.assertEqual(rlp_decode(rlp_encode(value)), value)
-        self.assertNotEqual(independent_storage_root(8192), independent_storage_root(16384))
+        self.assertEqual(independent_storage_root(8192).hex(), '43eaf2855d59283c61cca65195451e0ee6900dc356bf9170221bb2d03c74c4c1')
+        self.assertEqual(independent_storage_root(16384).hex(), '96709f08191abe793e35e20f54302be1962e307a094a835550b9a27ff2526bb7')
 
     def test_matrix_baselines_hash_bindings_and_no_overwrite(self):
         m = self.load()
@@ -242,13 +239,13 @@ class StorageAccessGrowthTests(unittest.TestCase):
                 self.assertEqual(local['unique_storage_slot_access_count'], 5+(0 if mode == 'warm' else 64))
                 self.assertEqual(local['unique_storage_slot_write_count'], 4)  # Ordinary Anchor only.
                 guest = json.loads((out/'input.json').read_text()); raw_nodes = [bytes.fromhex(node[2:]) for node in guest['proposal_state_nodes']]
-                nodes = {ethereum_keccak(node): node for node in raw_nodes}
+                nodes = {keccak256(node): node for node in raw_nodes}
                 parent = bytes.fromhex(guest['proposal_ancestor_headers'][-1]['header']['stateRoot'][2:])
-                account = rlp_decode(trie_value(parent, ethereum_keccak(bytes([0x66])*20), nodes))
+                account = rlp_decode(trie_value(parent, keccak256(bytes([0x66])*20), nodes))
                 self.assertEqual(account[2], independent_storage_root(8192))
                 expected = [0]+(list(range(1, 65)) if mode == 'present' else list(range(1048577, 1048641)) if mode == 'absent' else [])
                 for key in expected:
-                    value = trie_value(account[2], ethereum_keccak(key.to_bytes(32, 'big')), nodes)
+                    value = trie_value(account[2], keccak256(key.to_bytes(32, 'big')), nodes)
                     self.assertEqual(value, b'' if mode == 'absent' and key else b'\x01')
             row = m.make_case('present', 8192, 64); request = row['request']; original = bytes.fromhex(request['program']['code_hex'][2:]); code = bytearray(original); decoded = decode(original)
             for i, (pc, op, data) in enumerate(decoded):

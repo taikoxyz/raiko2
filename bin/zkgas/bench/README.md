@@ -1034,3 +1034,111 @@ actual proposal PGU into invented block actuals or allocate the proving-only quo
 to mining. Retain guard failures/native rejects rather than silently lowering the
 requested block count. The bounded sampler's existing6GiB guard still applies;
 this panel studies fixed versus repeatable gaps, not saturation or proving speed.
+
+## Storage/hash composition and caught rollback
+
+`storage_hash_composition.py` emits 45 new validation requests under frozen model
+`c8936124…`, using one ordinary program account with initially empty storage.
+There is no custom `storage_state`, padding or precreated child. Each user checks
+slot2=0, seeds5, runs a guarded kernel5→7, and finally restores5 then clears0.
+The three fixed64-site kernels perform dirty writes11→7, hash32 zero bytes, or
+combine11→hash→7. Bulk writes stay nonoriginal and nonzero; they do not repeatedly
+restore the transaction's original zero. A once-only Ethereum Keccak guard also
+runs for dirty/N0. SHA3-256 is a different function and is not substituted.
+
+Layouts are `direct`, one self-DELEGATECALL returning32 bytes, and one caught
+self-DELEGATECALL REVERT with the same32-byte marker. All outer users succeed.
+The marker is derived from the completed loop counter, not just the declared N.
+Parent checks child status, exact return length/data, slot2 restored to5 and then cleared
+to0. Parent's initial SLOAD already warms slot2, and the self target is warm:
+this panel covers warm dirty journal work and rollback, not cold-first-access
+warm-set rollback. The latter remains a separate test dimension.
+
+```sh
+~/.venv/bin/python bin/zkgas/bench/cases/storage_hash_composition.py \
+  --output-dir experiment/storage-hash-composition
+~/.venv/bin/python -m unittest discover \
+  -s bin/zkgas/bench/tests -p test_storage_hash_composition.py
+NATIVE_FIXTURE_BIN="$FROZEN_NATIVE" ZKGAS_QUOTE_BIN="$FROZEN_QUOTE" \
+  ~/.venv/bin/python -m unittest discover \
+  -s bin/zkgas/bench/tests -p test_storage_hash_composition.py
+```
+
+`make_case(kernel, layout, rounds, transactions, blocks)` accepts rounds0..32768
+in multiples of64, transactions1..16 and blocks1..4. It preserves15M per-user gas,
+31M constructor blocks and12M child forwarding; it never adjusts gas or silently
+prunes combinations. A domain-valid combination can still fail native admission
+or resource guards and must retain that failure without a PGU value.
+
+The matrix contains27 one-user/one-block inputs (three kernels × three layouts ×
+N0/2048/32768), twelve mixed-kernel packing inputs (four users × N0/8192 or sixteen
+users × N0/2048, across all layouts), and six mixed four-block inputs (one user ×
+N0/32768). High packing cases preserve32768 total rounds per block. Exact opcode
+counts aggregate every user and block; kernel/guard metadata states its per-user
+scope. Counter memory64, marker128, parent input tag256 and hash memory0..31 are
+disjoint; child memory is separate. Code retains the same unused body at N0.
+
+Independent concrete tests inspect actual storage keys/values/originals, hashed
+bytes, all counters/markers, child input/output, rollback and every completed
+opcode. The optional native lane runs three small positives plus focused
+negatives, not all45 qualifications. It deliberately shows that a wrong slot in
+a reverting child can pass native receipt/count gates while failing the operand
+oracle; native counts alone are insufficient. Complete45 native qualification
+and actual SP1 sampling are separate evidence gates.
+
+Keep node estimates per block plus their literal sum and aggregate ceiling,
+complete proposal estimate, and actual SP1 PGU for the identical proposal. Retain
+both underpricing flags, shortfalls, controls and failures. Own-N0 references
+match layout, user count and block count; cross-kernel/frame comparisons remain
+composition diagnostics because code sizes differ. No per-block actual,
+isolated opcode cost, price refit, capacity or proposal-budget allocation is
+claimed. `--model-id` changes metadata only; no old producer, Rust, guest, SDK or
+pricing source is modified.
+
+## Minimal-multiproof storage-access growth
+
+`storage_access_growth.py` creates 26 new validation inputs under frozen model
+`c8936124c1b074b57abf36873e1c37e01f9bc49fa6c9bb161a92542f1e6551ef`:
+warm/present/absent access × 8192/16384 initialized slots × 0/64/1024/4096 bulk reads,
+plus warm 65536 for each state size. Each input uses one block, one default EIP-1559
+user CALL with the constructor's 15M EVM gas limit, empty calldata and explicit
+`evm-gas-only` execution at screening/measurement. The producer omits `transactions`
+because the existing canonical builder prohibits combining it with `storage_state`.
+
+```bash
+~/.venv/bin/python bin/zkgas/bench/cases/storage_access_growth.py \
+  --output-dir /tmp/storage-access-growth-cases
+~/.venv/bin/python -m unittest discover \
+  -s bin/zkgas/bench/tests -p test_storage_access_growth.py
+# Optional: select already frozen native and quote binaries, without rebuilding.
+NATIVE_FIXTURE_BIN="$NATIVE_BIN" ZKGAS_QUOTE_BIN="$QUOTE_BIN" \
+  ~/.venv/bin/python -m unittest discover \
+  -s bin/zkgas/bench/tests -p test_storage_access_growth.py
+```
+
+All raw logical slots 0 through `state_size-1` contain 1. Warmup reads slot 0
+and checks 1 without adding it to the checksum. The fixed 64-site loop reads
+`base + stride*i`: warm repeats 0, present visits 1 through N, absent visits
+1048577 through 1048576+N. Counter and checksum occupy separate memory words;
+final guards require i=N and checksum=N for warm/present or 0 for absent. No
+storage writes occur. `proof_slots` is exactly the deduplicated union of warmup
+and actual bulk keys; insert/delete targets are empty. The canonical builder
+constructs only the target multiproof from real background state, without witness
+padding or arbitrary hashed-key injection.
+
+The tests independently execute every concrete operand, value and cold/warm
+access in all 26 programs and check their exact proof targets and opcode maps.
+Checksum-preserving wrong-base and wrong-stride programs fail the operand oracle.
+Optional native probes authenticate the storage root and each proof target using
+an independent Ethereum Keccak/RLP/MPT oracle, check node observed unique storage
+resources and reject missing proof targets and wrong warmup values. A deliberately
+wrong-base probe can pass native receipts, checksum and opcode counts while the
+operand oracle still rejects it.
+
+Retain all six own-N0 controls, every failure, complete proposal estimates, node
+per-block estimates and their literal sum, actual identical-proposal SP1 PGU and
+both deficit flags. Compare growth within each mode/state-size series and matched
+state-size references. The witness trie is reconstructed once; these inputs do
+not imply repeated materialization, a universal depth/workload bound, per-block
+actual attribution, refitted prices or capacity evidence. Existing output
+directories are rejected; model ID is catalog metadata and does not alter requests.

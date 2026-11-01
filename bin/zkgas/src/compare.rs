@@ -104,6 +104,7 @@ fn validate_pricing_breakdown(
             pricing.access_list_scaled,
             pricing.code_preparation_scaled,
             pricing.operations_scaled,
+            pricing.normal_dispatch_scaled,
             pricing.feature_error_scaled,
             pricing.resources_scaled,
             pricing.mpt_scaled,
@@ -121,6 +122,11 @@ fn validate_pricing_breakdown(
         pricing.feature_error_scaled >= 0
             && pricing.feature_error_scaled <= pricing.operations_scaled,
         "feature_error attribution exceeds operations"
+    );
+    ensure!(
+        checked_sum([pricing.normal_dispatch_scaled, pricing.feature_error_scaled])?
+            <= pricing.operations_scaled,
+        "normal dispatch and feature-error attribution exceeds operations"
     );
     ensure!(
         pricing.total_scaled
@@ -302,6 +308,7 @@ fn validate_complete_quote(complete: &CompleteQuoteV1) -> Result<()> {
                 node.access_list_scaled,
                 node.code_preparation_scaled,
                 node.operations_scaled,
+                node.normal_dispatch_scaled,
                 node.feature_error_scaled,
                 node.evm_local_resources_scaled,
                 node.transaction_payload_scaled,
@@ -333,6 +340,36 @@ fn validate_complete_quote(complete: &CompleteQuoteV1) -> Result<()> {
             "node pricing pgu mismatch"
         );
         let prove = &block.prove.pricing;
+        ensure!(
+            prove.normal_dispatch_count >= node.normal_dispatch_count
+                && prove.normal_dispatch_scaled >= node.normal_dispatch_scaled,
+            "attempted normal dispatches do not cover committed occurrences or price"
+        );
+        for (count, dispatch, operations, feature_errors) in [
+            (
+                node.normal_dispatch_count,
+                node.normal_dispatch_scaled,
+                node.operations_scaled,
+                node.feature_error_scaled,
+            ),
+            (
+                prove.normal_dispatch_count,
+                prove.normal_dispatch_scaled,
+                prove.operations_scaled,
+                prove.feature_error_scaled,
+            ),
+        ] {
+            let expected = ZkGasModel
+                .price_normal_dispatches(count)
+                .context("normal dispatch selector domain is invalid")?;
+            ensure!(
+                dispatch >= 0 && checked_sum([dispatch, feature_errors])? <= operations,
+                "normal dispatch attribution exceeds operations"
+            );
+            if current_model {
+                ensure!(dispatch == expected, "normal dispatch price mismatch");
+            }
+        }
         ensure!(
             block.prove.authorization_validations >= node.authorization_validations,
             "attempted authorization count does not cover committed count"
@@ -537,6 +574,11 @@ fn validate_complete_quote(complete: &CompleteQuoteV1) -> Result<()> {
     );
 
     validate_pricing_breakdown(&quote.prove.proposal_once)?;
+    ensure!(
+        quote.prove.proposal_once.normal_dispatch_count == 0
+            && quote.prove.proposal_once.normal_dispatch_scaled == 0,
+        "proposal-only pricing contains opcode dispatches"
+    );
     ensure!(
         quote.prove.proposal_once.authorization_scaled == 0,
         "proposal-only pricing contains authorization validations"

@@ -873,3 +873,41 @@ a future question and is not implemented here. This finite matrix does not
 claim a maximum workload, throughput, universal bound or production activation.
 Use the existing guarded workload tools to retain raw results and failures; no
 Rust/guest build, new SP1 sampling or pricing change is part of these unit tests.
+
+### Paired DUP/POP controls
+
+Use `--profile dup-pop` to generate twelve diagnostic controls: ADD/MUL warmup
+families, zero/mixed256 operand pairs and 0/4096/262144 bulk sites. The only
+bulk bytecode substitution is `DUP3/DUP3/op/POP` → `DUP3/DUP3/POP/POP`.
+The four-byte site, original operand copies, loop, immediate widths, initial
+arithmetic-result guard and outer STOP remain. Every control still performs
+one real arithmetic operation in its guard; counter ADDs remain N/64. It has
+N bulk pair-copy events, zero bulk arithmetic events and 2N bulk POPs. Tests
+record the actual copied values by PC: the first POP consumes `a`, the second
+consumes `b`; both retained operands survive unchanged.
+
+```sh
+~/.venv/bin/python bin/zkgas/bench/cases/arithmetic_density.py \
+  --profile dup-pop --output-dir experiment/arithmetic-dup-pop
+~/.venv/bin/python -m unittest discover \
+  -s bin/zkgas/bench/tests -p test_arithmetic_density.py
+```
+
+`make_case(..., profile='dup-pop')` accepts only the zero/mixed256 classes;
+the default `arithmetic` profile preserves all 24 original request bytes and
+case records. The catalog's generator SHA changes when its source changes;
+the frozen original catalog and its source revision are retained as explicit
+pair identities, alongside each original arithmetic request SHA. No old
+catalog, run or raw observation is rewritten.
+
+Each control has its own N0 and N4096 references. Its unused body differs from
+the arithmetic program even at N0, so identical executed opcode totals do not
+justify reusing the original canonical input or actual PGU. Compare each
+profile's increment from its own baseline before comparing the two increments.
+This separates a composite arithmetic-versus-POP contribution from much of the
+shared copying and loop work; POP has a real cost, and changed code content can
+affect setup. It does not isolate the actual cost of ADD or MUL. Zero/mixed
+controls can also reveal operand-dependent copying behavior. Preserve the same
+three quantities and both absolute underestimation judgments above; explanatory
+matched increments must not erase controls or node-sum deficits. No tariff is
+changed by constructing these paired inputs.

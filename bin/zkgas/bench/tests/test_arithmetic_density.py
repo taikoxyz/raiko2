@@ -1,6 +1,7 @@
 """Independently decode arithmetic operands, modulo results and completed operation maps."""
 from collections import Counter
 import importlib.util
+import inspect
 import json
 import os
 from pathlib import Path
@@ -17,6 +18,8 @@ PAIRS={'add':{'zero':(0,0),'small':(7,11),'carry':(MASK,1),'mixed256':(A,B)},
        'mul':{'zero':(0,0),'small':(7,11),'wide':(MASK,MASK-2),'mixed256':(A,B)}}
 
 
+FROZEN_ARITHMETIC_REQUESTS={'arithmetic-density-add-zero-n0': '171e0875856004c21ec6004b637c64a57d41cc0bdeca399cbe0d7ce06ad4cd64', 'arithmetic-density-add-zero-n4096': '3d425da86c73d633cbb8343c8796f7971f35b830a0ccc257f4a77c861c1f7821', 'arithmetic-density-add-zero-n262144': 'ddf5fe130f7dce47e9d0e4b2c960f0f627c8c9a6cd5fef9479f554910537249c', 'arithmetic-density-add-small-n0': '6d6662b144894ea5d3d8e13e24afc5033254b76ad5ab660416f77678003976a3', 'arithmetic-density-add-small-n4096': 'd64790837bb60318c4955d6125a606488ab6c695646c0b01f5b515e078f64531', 'arithmetic-density-add-small-n262144': '595303874704a7bd598414a7ffa153e4fcfcc7c3b8517d82b24aa0ac21fa771e', 'arithmetic-density-add-carry-n0': '29e2735b18f01e317754f176bb0d6988c8d083498bfd078d759a707a1ec69394', 'arithmetic-density-add-carry-n4096': '79ae9236542040de915816dc6ce448eac4c4d145b3442bc871abdb3f596f6273', 'arithmetic-density-add-carry-n262144': '19a97cd4aa74ae82b863c9a23a2c09344978f450db7c0e9e60f5e1cae0238239', 'arithmetic-density-add-mixed256-n0': '08d14adc56f9561c272c1da43918fe0fea5b211574ceed2a5a666ddaa78ff122', 'arithmetic-density-add-mixed256-n4096': 'cf597f83c889bcf4d0f3a2a57298c9c343090faa8935e3ac3e258a4f84657ee1', 'arithmetic-density-add-mixed256-n262144': '7fdd68d5367b94b8224368a711311a193348ebcbaa0d405acaf72ae79b09489d', 'arithmetic-density-mul-zero-n0': 'ee8623555d2933ebd284686a34d8fb0b5c1eda406d1e650ad8924ddcaea2bc9a', 'arithmetic-density-mul-zero-n4096': 'ce5fbc9820f82704a1be74f6a22e71e1491f234f4989082b69f75c9d9e5b0f25', 'arithmetic-density-mul-zero-n262144': '97e5c81b14b564b78f3c5f7ab5640aebb2e4cee58482a0561f25d344d3fed82e', 'arithmetic-density-mul-small-n0': 'fc6c801995b1c81d81560fa6a04d68bdf079ae07ea4b5ab38adcfaf19f334e47', 'arithmetic-density-mul-small-n4096': '00668c03fced98592f12cc82ab3d0b08960e4f419832034241a961ff1f79e1ea', 'arithmetic-density-mul-small-n262144': '0f4b8cc7ad723a609fd3e166354b57916f961f52c9be4f87ad79899f0273ccaa', 'arithmetic-density-mul-wide-n0': '3d20ff1faa5fea84a3f56ef9b4ca192ec4d317acd24a68367de6a3b0a1a933cb', 'arithmetic-density-mul-wide-n4096': 'c0af2b19306ae1048fa26f0918f2d43564a0917b82a6800f28dacde92e3fd554', 'arithmetic-density-mul-wide-n262144': '6b7608ca53b7b26de41bc09c1b1651f0a852afe44a949f343c0339f6652fce33', 'arithmetic-density-mul-mixed256-n0': 'dbf7fbbc8bd4826ca2149f1fd6413400eb8e48923ccb5a108746948028b3c8ed', 'arithmetic-density-mul-mixed256-n4096': '9195e7809ed114d60023b1570cd455d3c6383698123127354796305c85c8a85a', 'arithmetic-density-mul-mixed256-n262144': '8081d220fca76306e2aac7062ec4fa9f6cf9570eed3e152b7f8314f5724770c7'}
+
 def instructions(code):
     pc=0;rows=[]
     while pc<len(code):
@@ -25,7 +28,7 @@ def instructions(code):
     return rows
 
 
-def execute(code):
+def execute(code,*,popped=None):
     """Concrete stack oracle records actual ordered top-first pairs at every ADD/MUL PC."""
     stack=[];pc=0;counts=Counter();events=Counter()
     for _ in range(4_000_000):
@@ -38,7 +41,9 @@ def execute(code):
             events[at,op,a,b,result]+=1;stack.append(result)
         elif op==0x14:stack.append(int(stack.pop()==stack.pop()))
         elif op==0x15:stack.append(int(stack.pop()==0))
-        elif op==0x50:stack.pop()
+        elif op==0x50:
+            value=stack.pop()
+            if popped is not None:popped[at,value]+=1
         elif op in (0x56,0x57):
             target=stack.pop();take=op==0x56 or stack.pop()!=0
             if take:assert code[target]==0x5b;pc=target
@@ -140,6 +145,77 @@ class ArithmeticDensityTests(unittest.TestCase):
             for model in (None,True,'','A'*64,'g'*64):
                 with self.assertRaises(ValueError):m.prepare(Path(temporary)/'bad',model_id=model)
             self.assertFalse((Path(temporary)/'bad').exists())
+
+    def control_module(self):
+        m=self.load();self.assertIn('profile',inspect.signature(m.make_case).parameters,'paired dup-pop profile is missing');return m
+
+    def test_dup_pop_matrix_pairs_and_default_requests_frozen(self):
+        m=self.control_module()
+        for operation,pairs in PAIRS.items():
+            for cls in pairs:
+                for n in (0,4096,262144):
+                    row=m.make_case(operation,cls,n)
+                    self.assertEqual(m.digest(m.encoded(row['request'])),FROZEN_ARITHMETIC_REQUESTS[row['sample_id']])
+                    self.assertEqual(row,m.make_case(operation,cls,n,profile='arithmetic'))
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary)/'controls';self.assertEqual(m.prepare(root,profile='dup-pop'),12)
+            catalog=json.loads((root/'catalog.json').read_text());rows=catalog['cases'];by={r['sample_id']:r for r in rows}
+            self.assertEqual(catalog['producer_profile'],'dup-pop');self.assertEqual(catalog['paired_arithmetic_source_revision'],'f54230e583aa0bd3f6971811d204cbe9ebdfe72e')
+            self.assertEqual(catalog['paired_arithmetic_catalog_sha256'],'91e53311de50535f59b751dfc44c1740752a26b42b69fe6e1b75a380e893ec5b')
+            self.assertEqual({(r['parameters']['operation'],r['parameters']['operand_class'],r['parameters']['bulk_operations']) for r in rows},{(op,cls,n) for op in PAIRS for cls in ('zero','mixed256') for n in (0,4096,262144)})
+            for row in rows:
+                p=row['parameters'];request=json.loads((root/row['request_path']).read_text());reference=m.make_case(p['operation'],p['operand_class'],p['bulk_operations'])
+                self.assertEqual(row['paired_arithmetic_sample_id'],reference['sample_id']);self.assertEqual(row['paired_arithmetic_request_sha256'],FROZEN_ARITHMETIC_REQUESTS[reference['sample_id']])
+                self.assertEqual(row['request_sha256'],m.digest(m.encoded(request)));self.assertNotIn(row['sample_id'],FROZEN_ARITHMETIC_REQUESTS)
+                self.assertEqual(p['target_pair_events'],1);self.assertEqual(p['bulk_pair_copy_events'],p['bulk_operations']);self.assertEqual(p['bulk_arithmetic_operations'],0)
+                self.assertEqual(p['completed_target_opcode_events'],1+(p['batch_count'] if p['operation']=='add' else 0))
+                self.assertEqual(by[row['baseline_sample_id']]['parameters']['bulk_operations'],0);self.assertEqual(by[row['baseline_sample_id']]['parameters']['operand_class'],p['operand_class'])
+            before={p.relative_to(root):p.read_bytes() for p in root.rglob('*') if p.is_file()}
+            with self.assertRaises(FileExistsError):m.prepare(root,profile='dup-pop')
+            self.assertEqual(before,{p.relative_to(root):p.read_bytes() for p in root.rglob('*') if p.is_file()})
+        for kwargs in ({'profile':None},{'profile':True},{'profile':'unknown'},{'profile':'dup-pop','operand_class':'small'}):
+            args={'operation':'add','operand_class':'zero','bulk_operations':64};args.update(kwargs)
+            with self.assertRaises(ValueError):m.make_case(**args)
+
+    def test_dup_pop_concrete_values_same_shape_and_only_bulk_substitution(self):
+        m=self.control_module()
+        for operation in PAIRS:
+            opcode=1 if operation=='add' else 2
+            for cls in ('zero','mixed256'):
+                a,b=PAIRS[operation][cls]
+                for n in (0,4096,262144):
+                    original=m.make_case(operation,cls,n);control=m.make_case(operation,cls,n,profile='dup-pop')
+                    oldcode=bytes.fromhex(original['request']['program']['code_hex'][2:]);code=bytes.fromhex(control['request']['program']['code_hex'][2:]);warm,sites=target_sites(oldcode,opcode)
+                    expected=bytearray(oldcode)
+                    for pc in sites:expected[pc]=0x50
+                    self.assertEqual(code,bytes(expected));self.assertEqual(len(code),len(oldcode))
+                    altered=dict(original['request']['program']['expected_route_counts']);altered[f'opcode:0x{opcode:02x}']-=n;altered['opcode:0x50']+=n
+                    self.assertEqual(control['request']['program']['expected_route_counts'],altered)
+                    popped=Counter();terminal,stack,counts,events=execute(code,popped=popped);self.assertEqual((terminal,stack),(0,[]))
+                    result=(a+b if operation=='add' else a*b)&MASK
+                    self.assertEqual({key:value for key,value in events.items() if key[0]==warm},{(warm,opcode,a,b,result):1})
+                    self.assertEqual(sum(events.values()),1+n//64)
+                    for pc in sites:
+                        for offset,value in ((0,a),(1,b)):
+                            self.assertEqual(popped.get((pc+offset,value),0),n//64)
+                    self.assertEqual(counts,{k:v for k,v in altered.items() if v})
+                    # Code bytes differ even at N0; do not reuse its canonical
+                    # input just because the unused body did not execute.
+                    self.assertNotEqual(m.encoded(control['request']),m.encoded(original['request']))
+
+    @unittest.skipUnless(os.environ.get('NATIVE_FIXTURE_BIN') and os.environ.get('ZKGAS_QUOTE_BIN'),'set frozen native/quote for paired control qualification')
+    def test_actual_dup_pop_twelve_native_and_quotes(self):
+        m=self.control_module();model=os.environ.get('ZKGAS_EXPECTED_MODEL_ID',m.MODEL)
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);m.prepare(root/'cases',profile='dup-pop',model_id=model)
+            for row in json.loads((root/'cases/catalog.json').read_text())['cases']:
+                folder=root/row['sample_id'];folder.mkdir();request=root/'cases'/row['request_path']
+                result=subprocess.run([os.environ['NATIVE_FIXTURE_BIN'],'--input',str(request),'--output',str(folder/'input.json'),'--output-bincode',str(folder/'input.bin'),'--report',str(folder/'native.json'),'--execution-profile','evm-gas-only'],capture_output=True,timeout=180)
+                self.assertEqual(result.returncode,0,result.stderr.decode());native=json.loads((folder/'native.json').read_text());expected=json.loads(request.read_text())['program']['expected_route_counts']
+                self.assertEqual({k:v for k,v in native['observed_route_counts'].items() if v},{k:v for k,v in expected.items() if v})
+                self.assertTrue(all(r['success'] for r in native['receipts_by_block'][0]));self.assertEqual(native['observations_by_block'][0]['exceptional_instructions'],0);self.assertLess(native['user_transaction_gas_used_total'],15_000_000)
+                result=subprocess.run([os.environ['ZKGAS_QUOTE_BIN'],'--input-bincode',str(folder/'input.bin'),'--output',str(folder/'quote.jsonl'),'--execution-profile','evm-gas-only','--corpus-id','arithmetic-dup-pop-qualification','--sample-id',row['sample_id']],capture_output=True,timeout=180)
+                self.assertEqual(result.returncode,0,result.stderr.decode());quote=json.loads((folder/'quote.jsonl').read_text())['quote'];self.assertEqual(quote['model_id'],model);self.assertEqual(quote['public_output'],native['public_output']);self.assertEqual(quote['guest_input_sha256'],native['guest_input_sha256'])
 
     @unittest.skipUnless(os.environ.get('NATIVE_FIXTURE_BIN') and os.environ.get('ZKGAS_QUOTE_BIN'),'set frozen native/quote for arithmetic qualification')
     def test_actual_24_native_quotes_and_mutation_controls(self):

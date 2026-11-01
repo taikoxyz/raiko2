@@ -85,6 +85,21 @@ block-local score and the prover host's full-replay score enriched with proposal
 block-end resource, MPT, payload, and blob observations. These are distinct measurements even when
 they share a model identity.
 
+For the current SP1 workload campaign, retain three quantities for each identical proposal input:
+the complete proposal estimate `Q_proposal`, the node-observable mining estimate for each block
+`Q_node,b` and its proposal sum `Q_node = sum(Q_node,b)`, and actual proposal SP1 PGU `A` under the
+named frozen program. When both estimates have the declared PGU semantics, report `A / Q_proposal`
+and `A / Q_node`, their independent underpricing flags (`A > Q`), and absolute shortfalls. Keep
+small-input and zero-repetition controls in both comparisons. A full proposal quote covering `A`
+does not mean the mining estimate covers it. Comparing a node sum with proposal actual is an
+aggregate observability diagnostic; it does not assign actual PGU to any individual block.
+
+The current priority is finding gaps in the block-mining-aware model. Matched increments help
+distinguish fixed costs from repeatable scaling deficits, but do not replace either full ratio or
+erase controls with large actual/node ratios. Adding a proposal-aware estimate and allocating its
+cost back to mining remains an unresolved design option, not an assumed bridge or a correction
+applied to these observations.
+
 Prove-only offline completion cannot establish the safety of node admission. A node admission claim
 must use the candidate-prefix score computable from node-observable inputs, or a separately
 specified and enforced conservative bridge from the node surface to the prove surface whose

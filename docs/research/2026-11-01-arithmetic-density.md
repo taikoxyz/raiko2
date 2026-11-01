@@ -48,8 +48,62 @@ undercovered by node and complete estimates. Thus fixed startup alone does not e
 Operand values change high-count actual PGU by fewer than100PGU in either family. Within this
 finite matrix, large operands are not the main source. These observations price a composite
 stack/arithmetic/loop workload, not isolated ADD or MUL. Do not raise either arithmetic coefficient
-solely on this attribution. A separate paired DUP/POP control cohort is being prepared to locate
-the repeatable deficit before any tariff decision.
+solely on this attribution. The paired controls below locate a shared stack/loop deficit before
+any tariff decision.
+
+## Twelve paired duplicate/discard controls
+
+Producer `5e1a2b239c45e3f6694fe4b3860e7ee0fc3b564b` adds a separate `dup-pop` profile. It changes
+only the 64 bulk arithmetic sites to POP, yielding `DUP3; DUP3; POP; POP`; the arithmetic warmup,
+operands and loop remain. ADD/MUL zero and mixed256 references each use 0/4096/262144 bulk pairs.
+The original 24 requests and case metadata remain byte-identical. New control N0 inputs are
+distinct because their unused code differs; each control retains its own N0 and original-request
+hash. The default catalog's generator hash updates truthfully with the new producer source.
+
+All 12 actual measurements completed: **node underpricing 12/12, complete-proposal underpricing
+4/12**. For 262144 bulk pairs, ADD-zero control estimates 34,418,543 node PGU and 189,360,374
+proposal PGU against 220,737,060 actual PGU. The other three high-count controls have actuals in
+220,737,096..220,737,251 PGU, with correspondingly retained node/proposal estimates.
+
+To explain the shared deficit, compute differences of matched increments:
+
+```text
+actual_relative = (arithmetic_actual_N - arithmetic_actual_ref)
+                - (control_actual_N - control_actual_ref)
+node_relative   = (arithmetic_node_N - arithmetic_node_ref)
+                - (control_node_N - control_node_ref)
+```
+
+All 12 N0/N4096 reference comparisons have `node_relative >= actual_relative`. For zero operands
+and N0 to262144, ADD's relative actual increment is 5,948,418 PGU versus a 6,738,281 node increment;
+MUL's is 14,863,959 versus 16,836,391 PGU. Thus the arithmetic-versus-POP difference is covered in
+this matrix, while the duplicated/discarded stack-and-loop work remains underpriced. This is a
+composite difference, not an identifiable isolated arithmetic, DUP or POP cost. It changes neither
+primary full-ratio judgment: the combined 36 cases retain 36 node deficits and 12 complete deficits.
+
+Independent raw verification recomputed all joins, normalization, comparisons and resource cleanup.
+All 48 control-owned shared-memory objects were absent in the host namespace. Its report SHA256 is
+`933615e2941a078a853822acb241f7e8298178ee975d75aad5c3ad045c52ad64`.
+
+## What the original calibration did
+
+The inherited registry `f3fbef69…` uses the core relation
+`body_scale * lab_body + common_dispatch`, with body scale about1.1326743533 and common dispatch
+about12.9748846915 PGU. Transfer anchors include POP, PUSH0, DUP1 and SWAP1. The bound source
+revision `09cced01be43cbeaead3267f3a4788d03dd490e1` uses a plain Ethereum REVM lab for body
+measurements and real controlled blocks for the transfer fit. Its controlled-block builder
+enforces post-Unzen timestamps; its pinned Reth `c096dd3…` already installs and runs per-opcode
+Unzen metering. The bound calibration manifest hash matches its retained Git blob.
+
+Therefore the available evidence does **not** support saying the original prices completely
+omitted Taiko metering. Dense-workload extrapolation, transfer fitting or program/SDK differences
+remain possibilities; this bounded audit does not identify their individual contributions or
+recover/replay every original raw input and ELF binding. Independent provenance audit SHA256:
+`d7a54cbe5db06f1b3811c69f1751f41bb504cd47cdc0234806f22aa920bb1473`.
+
+The next finite experiment separates PUSH0/POP, DUP depths1/3/8/16 and paired SWAP depths1/8/16.
+Its counter stays in memory, keeping the actual 17-word stack unchanged at every body boundary.
+New source/inputs and actual measurements remain separate from these frozen 36 observations.
 
 ## Verification and limits
 

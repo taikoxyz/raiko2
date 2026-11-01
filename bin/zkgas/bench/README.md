@@ -911,3 +911,50 @@ controls can also reveal operand-dependent copying behavior. Preserve the same
 three quantities and both absolute underestimation judgments above; explanatory
 matched increments must not erase controls or node-sum deficits. No tariff is
 changed by constructing these paired inputs.
+
+## Balanced stack density
+
+`stack_density.py` emits 24 cases: `push0-pop`, `dup1-pop`, `dup3-pop`, `dup8-pop`,
+`dup16-pop`, `swap1-swap1`, `swap8-swap8` and `swap16-swap16`, each with
+0/4096/262144 executed pairs. A fixed 64-pair body remains in the runtime even
+at N0, with fixed-width batch-count immediates. Every pair is two bytes and
+returns to the same 17-word stack. The words are distinct deterministic full-width
+values: SHA256 of `zkgas-stack-seed-v1-{i}` with bit255 set, for i0..16 in
+bottom-to-top order. The catalog records their exact hex values.
+
+```sh
+~/.venv/bin/python bin/zkgas/bench/cases/stack_density.py \
+  --output-dir experiment/stack-density
+~/.venv/bin/python -m unittest discover \
+  -s bin/zkgas/bench/tests -p test_stack_density.py
+NATIVE_FIXTURE_BIN="$FROZEN_NATIVE" ZKGAS_QUOTE_BIN="$FROZEN_QUOTE" \
+ZKGAS_EXPECTED_MODEL_ID="$ZKGAS_MODEL_ID" ~/.venv/bin/python -m unittest discover \
+  -s bin/zkgas/bench/tests -p test_stack_density.py
+```
+
+`make_case(pattern, bulk_pairs)` accepts multiples of 64 through 262144. The
+counter occupies memory word0 and leaves the stack before each body executes:
+DUP1 sees seed16, DUP16 sees seed1, and SWAP16 exchanges seed16 with seed0 before
+its second SWAP restores them. There is no changing counter on top of the seed
+stack. For B=N/64 batches, counter work includes B ADDs, 2B+1 MLOADs and B+1
+MSTOREs; only 32 bytes of memory are used. At the end, 17 explicit PUSH32/EQ
+semantic guards check and consume every original word. Independent tests decode
+actual stack values, accessed depths, ordered swaps, byte-addressed memory,
+final counter and complete opcode counts. A wrong-depth balanced DUP may pass
+ending guards; its accessed-value oracle must still detect the mismatch.
+
+These are one-block, one-CALL, empty-calldata inputs with 15M gas and the explicit
+`evm-gas-only` profile. The frozen quote model is `bbce9be0…`; `--model-id` records
+metadata only. Wrong ending values, short execution, a broken SWAP pair and
+parent OOG have separate negative coverage. Existing arithmetic and DUP/POP
+cohorts remain unchanged; no guest, binary, dependency or price is updated.
+
+Retain the complete proposal estimate, each node-observable block estimate and
+their sum, and actual SP1 PGU for the same proposal. Report proposal and node-sum
+underestimation independently, including N0 in literal actual/node ranking.
+Same-pattern N0/N4096 increments help explain fixed versus scalable gaps; they
+cannot replace those absolute judgments. Balanced pairs and their memory-counter
+loop are composite observations and cannot uniquely identify isolated POP, DUP
+or SWAP tariffs. This finite matrix makes no maximum-workload, throughput,
+universal-bound or production-admission claim. Actual measurements use the
+existing guarded workload tools after independent native qualification.

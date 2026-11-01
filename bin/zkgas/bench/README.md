@@ -820,3 +820,56 @@ Set the three variables to the retained native constructor, quote executable and
 its compiled model identity. The tests require no guest build, Cargo build or
 new SP1 measurement. The original twelve density and six prospective canonical
 requests remain unchanged.
+
+## Arithmetic density
+
+`arithmetic_density.py` emits 24 ordinary ADD/MUL cases: four operand classes per
+operation, each with 0, 4096 or 262144 bulk operations. ADD uses zero `(0,0)`,
+small `(7,11)`, all-limb carry `(2^256-1,1)` and deterministic asymmetric full-width
+mixed operands. MUL uses the same zero/small/mixed pairs and the overflowing wide
+pair `(2^256-1,2^256-3)`, whose uint256 result is 3. Mixed values come from SHA256
+of `zkgas-arithmetic-operand-a-v1` and `zkgas-arithmetic-operand-b-v1`, with bit255
+set; the catalog records both exact operands and the modulo-2^256 expected result.
+
+```sh
+~/.venv/bin/python bin/zkgas/bench/cases/arithmetic_density.py \
+  --output-dir experiment/arithmetic-density
+~/.venv/bin/python -m unittest discover \
+  -s bin/zkgas/bench/tests -p test_arithmetic_density.py
+NATIVE_FIXTURE_BIN="$FROZEN_NATIVE" ZKGAS_QUOTE_BIN="$FROZEN_QUOTE" \
+ZKGAS_EXPECTED_MODEL_ID="$ZKGAS_MODEL_ID" ~/.venv/bin/python -m unittest discover \
+  -s bin/zkgas/bench/tests -p test_arithmetic_density.py
+```
+
+The default frozen model is `bbce9be0…`; optional `--model-id` changes catalog
+metadata only. `make_case(operation, operand_class, bulk_operations)` accepts ADD
+classes `zero/small/carry/mixed256` and MUL classes `zero/small/wide/mixed256`.
+Counts must be multiples of 64 through 262144. Every operand and expected-result
+immediate uses PUSH32, and the counter uses fixed PUSH widths. N0 retains the
+same unused 64-site body. There is one user CALL, empty calldata, one block and
+15M user gas, with the explicit `evm-gas-only` execution profile.
+
+The initial semantic operation and every bulk operation consume the same ordered
+top-first pair `(a,b)`. The retained stack is `[b,a,index]`; `DUP3/DUP3/op/POP`
+leaves both original operands unchanged. The target pair executes **N+1 times**,
+including the semantic guard. The loop also executes **N/64 counter ADDs** with
+a different pair `(1,index)`, so ADD's completed opcode total is `N+1+N/64`;
+MUL's completed opcode total is `N+1`. Independent tests decode actual consumed
+pairs at every target PC and distinguish the counter. Swapping asymmetric
+operands can preserve all results, guards and opcode totals; ordered-pair
+qualification must still detect it. Wrong-result guards, short execution,
+corrupted DUP indexing and parent OOG have separate regression coverage.
+
+For each accepted case, retain three quantities: the complete proposal estimate,
+the node-observable estimate for **each block and their sum**, and actual SP1 PGU
+for that same proposal. Report proposal underestimation and node-sum
+underestimation independently, including N0 and small controls in literal
+actual/node ranking. Complete quote coverage cannot establish mining admission
+coverage. Same-operation, same-operand N0/N4096 increments help separate fixed
+from scalable gaps; they do not replace either underestimation judgment or assign
+actual PGU to individual opcodes. Each case currently has one block, so its node
+sum equals that block's estimate. Proposal-aware allocation into mining remains
+a future question and is not implemented here. This finite matrix does not
+claim a maximum workload, throughput, universal bound or production activation.
+Use the existing guarded workload tools to retain raw results and failures; no
+Rust/guest build, new SP1 sampling or pricing change is part of these unit tests.

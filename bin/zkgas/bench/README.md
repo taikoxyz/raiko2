@@ -1003,3 +1003,34 @@ including every N0 control. Same-pattern N0/N8192 increments explain scalable
 gaps; they do not replace literal comparisons or identify isolated opcode
 costs. These holdouts must not silently refit the frozen reserve. No price,
 guest, capacity or proposal-to-mining allocation change is made here.
+
+## Proposal size controls for ordinary opcode composition
+
+`block_scaling.py` keeps the prospective DUP16/POP and paired SWAP16 runtime bytes
+unchanged while placing one identical user CALL in each of 1, 4, 16 or 32 blocks.
+Each pattern has N0 and N196608, yielding16 inputs. The four b1 inputs are exact
+known references from the normal-dispatch validation panel; reuse their retained
+actuals, rather than describing them as new holdouts. The twelve multi-block inputs
+need independent native qualification and separate actual measurements.
+
+```sh
+~/.venv/bin/python bin/zkgas/bench/cases/block_scaling.py \
+  --output-dir experiment/block-scaling --model-id "$ZKGAS_MODEL_ID"
+NATIVE_FIXTURE_BIN="$FROZEN_NATIVE" ~/.venv/bin/python -m unittest discover \
+  -s bin/zkgas/bench/tests -p test_block_scaling.py
+```
+
+Set the model metadata to the frozen candidate64's content address; prices still
+come from the selected executable. ProgramRequest already supports these block
+counts. The producer multiplies the declared aggregate opcode counts, preserves
+per-transaction EVM gas and code, and validates block bounds. Context-sensitive
+NUMBER/TIMESTAMP guard programs are deliberately excluded because their expected
+values would change across blocks. No new native or guest build is required.
+
+Keep the complete proposal estimate, each block's node estimate and literal sum,
+aggregate-ceil diagnostic, and actual identical-proposal PGU. Compare N0/high work
+at the same block count and compare block-count growth separately. Do not divide
+actual proposal PGU into invented block actuals or allocate the proving-only quote
+to mining. Retain guard failures/native rejects rather than silently lowering the
+requested block count. The bounded sampler's existing6GiB guard still applies;
+this panel studies fixed versus repeatable gaps, not saturation or proving speed.

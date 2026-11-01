@@ -355,3 +355,54 @@ invokes the actual three binaries. Its SP1/RISC0 observations are explicitly syn
 It checks public-output parity, immutable hashes, compatibility/metric eligibility, homogeneous
 strata, complete/partial exits, filtered accounting, and deterministic reuse. It performs no guest
 execution; a real packaged-SP1 measurement is a separate external-producer validation step.
+
+## Observed operation pricing components
+
+The quote consumer follows the reviewed maintained Alethia shadow-pricing branch.
+Its current explicit dependency revision is
+`e01c43ff2e79ef75ac9089bb8692093e9c5cbda3`, exporting model
+`c8936124c1b074b57abf36873e1c37e01f9bc49fa6c9bb161a92542f1e6551ef`.
+The authoritative formulas, coefficients and empirical limits remain in
+[Alethia's pricing documentation](https://github.com/taikoxyz/alethia-reth/blob/e01c43ff2e79ef75ac9089bb8692093e9c5cbda3/docs/zk-gas-pricing-model.md).
+This source synchronization does not activate the model for consensus admission
+or replace Unzen difficulty.
+
+Both quote surfaces preserve these selectors and contributions:
+
+- `authorization_validations` and `authorization_scaled`: raw authorization-list
+  entries, including duplicates, stale entries and unsuccessful recovery. The
+  prove block counts attempted entries; the node block counts committed entries.
+- `access_list_items` and `access_list_scaled`: raw address items, preserving
+  grouping and duplicates instead of counting only unique accounts or keys.
+- `code_preparation.{nonempty_events,total_bytes}` and
+  `code_preparation_scaled`: actual accepted nonempty create-frame outputs,
+  counted per occurrence even when the same code repeats or an ancestor reverts.
+- `normal_dispatch_count` and `normal_dispatch_scaled`: normally priced opcode
+  and confirmed-spawn events, including Anchor and child execution. Precompile
+  bodies, feature-error pricing and selected-but-undispatched wrappers do not
+  add this reserve. Its contribution is already included in `operations_scaled`
+  and must never be added a second time.
+
+The node report contains the committed prefix. Prove blocks retain attempted
+execution but use authoritative committed exact resources and MPT work.
+Comparison validates attempted coverage of committed selectors and contributions,
+nonnegative attribution, checked totals, and current-model tariff consistency.
+Proposal-once pricing contains none of these block-execution terms. New report
+fields are mandatory; missing observations are not silently replaced with zero.
+Keep older immutable reports with their original tool/model identities.
+
+The existing `quote_shasta_proposal` entrypoint and CLI retain the normal Unzen
+execution policy. Experimental execution profiles and workload constructors are
+maintained separately; they are not introduced by this consumer synchronization.
+
+## Source and guest-artifact boundary
+
+The exact Reth revision is synchronized across workspace, guest-common, host
+utilities and both production guest lockfiles. This changes declared guest build
+inputs even though these adapter changes are host-only and GuestInput encoding
+is unchanged. Existing ELF/VK files and provenance are intentionally retained;
+this is not a newly built guest release or proof of production-program parity.
+The normal guest-artifact refresh and
+`cargo run -p xtask-build-guest --bin xtask-build-guest -- all --check` gate must
+complete before treating source and production artifacts as aligned. Do not
+rewrite provenance fingerprints to label retained binaries as rebuilt.

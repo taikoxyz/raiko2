@@ -200,8 +200,20 @@ impl CandidateResourceLedger {
     }
 }
 
+#[cfg(test)]
+std::thread_local! {
+    static FIXTURE_OPCODE_COUNTS: std::cell::RefCell<(u64, u64, u64)> = const { std::cell::RefCell::new((0, 0, 0)) };
+}
+
+#[cfg(test)]
+pub(crate) fn take_fixture_opcode_counts() -> (u64, u64, u64) {
+    FIXTURE_OPCODE_COUNTS.with(|counts| std::mem::take(&mut *counts.borrow_mut()))
+}
+
 #[derive(Clone, Copy, Debug)]
 struct PendingStep {
+    #[cfg(test)]
+    opcode: u8,
     resource_account: Option<Address>,
     materialized_code_account: Option<Address>,
     storage: Option<(Address, U256, bool)>,
@@ -279,6 +291,8 @@ impl<DB: Database> Inspector<TaikoEvmContext<DB>, EthInterpreter> for ResourceIn
         self.pending.insert(
             context.journal().depth(),
             PendingStep {
+                #[cfg(test)]
+                opcode,
                 resource_account,
                 materialized_code_account: matches!(opcode, 0x3b | 0x3c)
                     .then_some(resource_account)
@@ -315,6 +329,21 @@ impl<DB: Database> Inspector<TaikoEvmContext<DB>, EthInterpreter> for ResourceIn
         let Some(ledger) = resources.observed() else {
             return;
         };
+        #[cfg(test)]
+        if instruction_succeeded {
+            FIXTURE_OPCODE_COUNTS.with(|counts| {
+                let mut counts = counts.borrow_mut();
+                counts.0 += 1;
+                counts.1 += u64::from(step.opcode == 0x40);
+                counts.2 += u64::from(
+                    step.opcode == 0xf4
+                        && matches!(
+                            interpreter.bytecode.action(),
+                            Some(reth_revm::interpreter::InterpreterAction::NewFrame(_))
+                        ),
+                );
+            });
+        }
         record_pending_step(ledger, step, instruction_succeeded);
         if let Some((hash, bytes)) = materialized_code {
             ledger.code(hash, bytes);
@@ -577,6 +606,7 @@ mod tests {
         record_pending_step(
             &mut ledger,
             PendingStep {
+                opcode: 0,
                 resource_account: Some(resource_account),
                 materialized_code_account: None,
                 storage: Some((storage_target, slot, true)),

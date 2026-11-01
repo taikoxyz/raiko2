@@ -1142,3 +1142,25 @@ state-size references. The witness trie is reconstructed once; these inputs do
 not imply repeated materialization, a universal depth/workload bound, per-block
 actual attribution, refitted prices or capacity evidence. Existing output
 directories are rejected; model ID is catalog metadata and does not alter requests.
+
+## Literal block sums in workload ranking
+
+The workload harness ranks `actual_sp1_pgu / node_known_pgu` using the **literal sum
+of each block's rounded node estimate** (`sum_of_block_known_pgu`). It validates
+each `known_subtotal_pgu` against its scaled subtotal, verifies the sum of scaled
+block subtotals, and checks both the literal sum and aggregate ceiling from the
+quote. Missing block or literal-sum evidence rejects a new run before SP1.
+
+Metrics also retain `node_aggregate_ceil_pgu` (one ceiling after summing scaled
+subtotals) and ordered `node_per_block_pgu`. These differ legitimately: two blocks
+priced at1.1PGU each have per-block ceilings `[2, 2]`, literal sum4 and aggregate
+ceiling3. The actual remains a whole-proposal measurement, with no per-block actual
+attribution.
+
+Previously retained attempts with the exact original six-field metric shape remain
+readable after their stored aggregate-ceiling values and all raw evidence validate.
+Reports recompute canonical literal-sum metrics from the validated quote and actual,
+and expose the original values as `stored_metrics` with
+`stored_metrics_shape: legacy_aggregate_ceil`. Reporting never rewrites retained
+status, quote or SP1 files. Compatibility applies only to reading old stored
+metrics; it does not permit missing canonical quote fields in new runs.

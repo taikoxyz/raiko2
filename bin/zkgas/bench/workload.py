@@ -177,6 +177,30 @@ def validate_native(native, input_identity, source, contract=None):
                 'native construction request mismatch')
 
 
+def node_prices(quote):
+    """Validate both ceiling surfaces; the mining denominator is the literal block sum."""
+    scale = 10**18
+    body = quote['quote']; blocks = body['blocks']; node = body['node']
+    require(isinstance(blocks, list) and blocks, 'missing/empty node pricing blocks')
+    per_block, total_scaled = [], 0
+    for index, block in enumerate(blocks):
+        require(type(block['block_index']) is int and block['block_index'] == index,
+                'node pricing block index mismatch')
+        pricing = block['node']['pricing']; scaled = number(pricing['known_subtotal_scaled'])
+        ceiling = number(pricing['known_subtotal_pgu'])
+        require(ceiling == (scaled+scale-1)//scale, 'node per-block ceiling mismatch')
+        per_block.append(ceiling); total_scaled += scaled
+    literal = number(node['sum_of_block_known_pgu'])
+    aggregate = number(node['block_local_known_pgu'])
+    require(number(node['block_local_known_scaled']) == total_scaled,
+            'node aggregate scaled total mismatch')
+    require(literal == sum(per_block), 'node literal block sum mismatch')
+    require(aggregate == (total_scaled+scale-1)//scale, 'node aggregate ceiling mismatch')
+    require(literal > 0 and aggregate > 0, 'zero pricing denominator')
+    return {'node_known_pgu': literal, 'node_aggregate_ceil_pgu': aggregate,
+            'node_per_block_pgu': per_block}
+
+
 def validate_quote(quote, native, input_identity, sid, contract):
     require(quote['status'] == 'complete', 'quote rejected input')
     require(quote['schema_version'] == 1, 'unsupported quote schema')
@@ -190,8 +214,8 @@ def validate_quote(quote, native, input_identity, sid, contract):
             'quote model mismatch')
     require(public_bytes(quote['proposal']['public_output']) == public_bytes(native['public_output']),
             'native/quote output mismatch')
-    require(number(quote['quote']['node']['block_local_known_pgu']) > 0 and
-            number(quote['quote']['prove']['total_pgu']) > 0, 'zero pricing denominator')
+    node_prices(quote)
+    require(number(quote['quote']['prove']['total_pgu']) > 0, 'zero pricing denominator')
 
 
 def validate_sp1(report, native, input_identity, contract):
@@ -225,12 +249,12 @@ def validate_sp1(report, native, input_identity, contract):
 
 def metrics(quote, report):
     actual = number(report['prover_gas'])
-    node = number(quote['quote']['node']['block_local_known_pgu'])
+    prices = node_prices(quote); node = prices['node_known_pgu']
     full = number(quote['quote']['prove']['total_pgu'])
-    return {'actual_sp1_pgu': actual, 'node_known_pgu': node, 'prove_total_pgu': full,
+    return {'actual_sp1_pgu': actual, **prices, 'prove_total_pgu': full,
             'actual_over_node': {'numerator': actual, 'denominator': node},
             'actual_over_full': {'numerator': actual, 'denominator': full},
-            'scope': 'proposal actual PGU / sum of node block-local known PGU; not per-block actual'}
+            'scope': 'proposal actual PGU / literal sum of per-block node known-PGU ceilings; not per-block actual'}
 
 
 def read_attempt(folder):
@@ -259,7 +283,20 @@ def read_attempt(folder):
         if status['status'] == 'complete':
             report = read_json(folder / 'sp1.json')
             validate_sp1(report, native, input_identity, status['contract'])
-            require(status['metrics'] == metrics(quote, report), 'stored metrics mismatch')
+            canonical = metrics(quote, report); stored = status['metrics']
+            require(isinstance(stored, dict), 'invalid stored metrics')
+            # Read-only compatibility for the exact original six-field aggregate-ceil shape.
+            # New runs always write the canonical shape and require complete quote evidence.
+            legacy_keys = {'actual_sp1_pgu', 'node_known_pgu', 'prove_total_pgu',
+                           'actual_over_node', 'actual_over_full', 'scope'}
+            expected = canonical
+            if set(stored) == legacy_keys:
+                expected = {key: canonical[key] for key in legacy_keys}
+                expected['node_known_pgu'] = canonical['node_aggregate_ceil_pgu']
+                expected['actual_over_node'] = {'numerator': canonical['actual_sp1_pgu'],
+                                                'denominator': canonical['node_aggregate_ceil_pgu']}
+                expected['scope'] = 'proposal actual PGU / sum of node block-local known PGU; not per-block actual'
+            require(stored == expected, 'stored metrics mismatch')
             require(read_json(folder / 'observation.json') == observation(status, quote, report),
                     'stored observation mismatch')
     elif (folder / 'failure-observation.json').exists():
@@ -483,8 +520,12 @@ def summary(root):
         if status['status'] == 'complete':
             sid = status['sample_id']
             require(sid not in completed, 'duplicate complete sample')
-            completed[sid] = status['metrics']
-            row['metrics'] = status['metrics']
+            canonical = metrics(read_json(folder / 'quote.jsonl'), read_json(folder / 'sp1.json'))
+            completed[sid] = canonical
+            row['metrics'] = canonical
+            if status['metrics'] != canonical:
+                row['stored_metrics'] = status['metrics']
+                row['stored_metrics_shape'] = 'legacy_aggregate_ceil'
         if 'failure' in status:
             row['failure'] = status['failure']
         rows.append(row)

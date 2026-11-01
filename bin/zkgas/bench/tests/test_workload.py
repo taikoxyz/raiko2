@@ -46,13 +46,25 @@ else:
     case = json.loads(raw)
     sha = hashlib.sha256(raw).hexdigest()
     if '--corpus-id' in args:
+        scale = 10**18
+        scaled = case.get('node_blocks_scaled', [case.get('node', 3)*scale])
+        blocks = [{'block_index': i, 'node': {'pricing': {
+            'known_subtotal_scaled': str(value), 'known_subtotal_pgu': str((value+scale-1)//scale)}}}
+            for i, value in enumerate(scaled)]
+        node = {'block_local_known_scaled': str(sum(scaled)),
+                'block_local_known_pgu': str((sum(scaled)+scale-1)//scale),
+                'sum_of_block_known_pgu': str(sum((value+scale-1)//scale for value in scaled))}
+        if case.get('quote_bad_sum'): node['sum_of_block_known_pgu'] = str(int(node['sum_of_block_known_pgu'])+1)
+        if case.get('quote_bad_per_block'): blocks[0]['node']['pricing']['known_subtotal_pgu'] = '999'
+        if case.get('quote_omit_literal'): node.pop('sum_of_block_known_pgu')
         quote = {'schema_version': 1, 'status': 'complete',
             'key': {'corpus_id': args['--corpus-id'], 'sample_id': args['--sample-id'],
                     'guest_input_sha256': sha}, 'guest_input_byte_length': len(raw),
             'executable': {'sha256': digest(sys.argv[0])}, 'calibration_profile': 'model-v1',
             'proposal': {'public_output': '0x'+bytes(output).hex()},
-            'quote': {'model_id': 'model-v1', 'node': {'block_local_known_pgu': str(case.get('node', 3))},
+            'quote': {'model_id': 'model-v1', 'node': node, 'blocks': blocks,
                       'prove': {'total_pgu': '100'}}}
+        if case.get('quote_omit_blocks'): quote['quote'].pop('blocks')
         if '--execution-profile' in args:
             quote['execution_profile'] = case.get('quote_profile', args['--execution-profile'])
             quote['quote']['execution_profile'] = case.get('nested_quote_profile', args['--execution-profile'])
@@ -285,6 +297,60 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(workload.read_attempt(folder)['contract']['execution_profile'], 'legacy-unzen')
         self.assertNotIn('execution_profile', artifacts.read_json(folder / 'sp1.json'))
 
+    def test_literal_block_sum_changes_ranking_and_keeps_aggregate_diagnostic(self):
+        scale = 10**18
+        catalog = self.catalog([('rounded', {'actual': 10, 'node_blocks_scaled': [11*scale//10]*2}),
+                                ('single', {'actual': 3, 'node': 1})])
+        self.assertEqual(self.invoke('run', catalog), 0)
+        result = workload.summary(self.runroot)
+        # Old aggregate-ceil semantics ranked10/3 above3/1; literal sums reverse it.
+        self.assertEqual(result['ranked_sample_ids'], ['single', 'rounded'])
+        row = next(row for row in result['attempts'] if row['sample_id'] == 'rounded')
+        self.assertEqual(row['metrics']['node_known_pgu'], 4)
+        self.assertEqual(row['metrics']['node_aggregate_ceil_pgu'], 3)
+        self.assertEqual(row['metrics']['node_per_block_pgu'], [2, 2])
+        self.assertEqual(row['metrics']['actual_over_node'], {'numerator': 10, 'denominator': 4})
+        self.assertEqual(workload.read_attempt(self.attempts('rounded')[0])['metrics'], row['metrics'])
+
+    def test_new_quotes_reject_bad_sum_bad_block_and_missing_canonical_fields(self):
+        flags = ('quote_bad_sum', 'quote_bad_per_block', 'quote_omit_literal', 'quote_omit_blocks')
+        catalog = self.catalog([(flag, {flag: True}) for flag in flags])
+        self.assertEqual(self.invoke('run', catalog, ['--continue-after-failure']), 1)
+        for flag in flags:
+            with self.subTest(flag=flag):
+                folder = self.attempts(flag)[0]; status = workload.read_attempt(folder)
+                self.assertEqual(status['status'], 'validation_failed')
+                self.assertNotIn('metrics', status); self.assertFalse((folder/'sp1-command.json').exists())
+
+    def test_exact_legacy_metric_shape_is_read_only_and_report_recomputes_literal(self):
+        scale = 10**18
+        catalog = self.catalog([('legacy', {'actual': 10, 'node_blocks_scaled': [11*scale//10]*2})])
+        self.assertEqual(self.invoke('run', catalog), 0); folder = self.attempts('legacy')[0]
+        status_path = folder/'status.json'; status = artifacts.read_json(status_path)
+        legacy = {'actual_sp1_pgu': 10, 'node_known_pgu': 3, 'prove_total_pgu': 100,
+                  'actual_over_node': {'numerator': 10, 'denominator': 3},
+                  'actual_over_full': {'numerator': 10, 'denominator': 100},
+                  'scope': 'proposal actual PGU / sum of node block-local known PGU; not per-block actual'}
+        status['metrics'] = legacy; status_path.write_text(json.dumps(status))
+        before = {path.name: path.read_bytes() for path in folder.iterdir() if path.is_file()}
+        self.assertEqual(workload.read_attempt(folder)['metrics'], legacy)
+        row = workload.summary(self.runroot)['attempts'][0]
+        self.assertEqual(row['metrics']['node_known_pgu'], 4)
+        self.assertEqual(row['metrics']['node_aggregate_ceil_pgu'], 3)
+        self.assertEqual(row['metrics']['node_per_block_pgu'], [2, 2])
+        self.assertEqual(row['stored_metrics'], legacy)
+        self.assertEqual(row['stored_metrics_shape'], 'legacy_aggregate_ceil')
+        self.assertEqual(self.invoke('verify'), 0)
+        self.assertEqual(before, {path.name: path.read_bytes() for path in folder.iterdir() if path.is_file()})
+        # Compatibility is exact: extra/missing keys, wrong values and partial new shapes reject.
+        invalid = [dict(legacy, unexpected=True), {k:v for k,v in legacy.items() if k != 'scope'},
+                   dict(legacy, node_known_pgu=4), dict(legacy, node_aggregate_ceil_pgu=3),
+                   dict(legacy, node_per_block_pgu=[2, 2])]
+        for metric in invalid:
+            with self.subTest(metric=metric):
+                status['metrics'] = metric; status_path.write_text(json.dumps(status))
+                with self.assertRaises(ValueError): workload.read_attempt(folder)
+
     def test_full_pipeline_exact_ranking_and_validated_resume(self):
         # Values chosen so converting to float would lose the ordering.
         large = 2**60
@@ -500,6 +566,37 @@ class ArtifactTests(unittest.TestCase):
             archive.write_bytes(b'bad')
             with self.assertRaisesRegex(ValueError, 'archive identity'):
                 artifacts.restore(archive, root / 'new.bin', record)
+
+
+class NodeMetricsTests(unittest.TestCase):
+    def quote(self):
+        scale = 10**18
+        return {'quote': {'node': {'block_local_known_scaled': str(22*scale//10),
+                'block_local_known_pgu': '3', 'sum_of_block_known_pgu': '4'},
+                'blocks': [{'block_index': i, 'node': {'pricing': {
+                    'known_subtotal_scaled': str(11*scale//10), 'known_subtotal_pgu': '2'}}} for i in range(2)],
+                'prove': {'total_pgu': '100'}}}
+
+    def test_two_block_literal_sum_preserves_aggregate_rounding(self):
+        result = workload.metrics(self.quote(), {'prover_gas': 10})
+        self.assertEqual(result['node_known_pgu'], 4)
+        self.assertEqual(result['actual_over_node'], {'numerator': 10, 'denominator': 4})
+        self.assertEqual(result['node_aggregate_ceil_pgu'], 3)
+        self.assertEqual(result['node_per_block_pgu'], [2, 2])
+
+    def test_tampered_per_block_ceil_sum_aggregate_and_scaled_total_reject(self):
+        for mutation in ('block_ceil', 'literal_sum', 'aggregate_ceil', 'aggregate_scaled', 'block_index', 'empty_blocks', 'missing_literal', 'missing_blocks'):
+            quote = self.quote(); q = quote['quote']
+            if mutation == 'block_ceil': q['blocks'][0]['node']['pricing']['known_subtotal_pgu'] = '1'
+            elif mutation == 'literal_sum': q['node']['sum_of_block_known_pgu'] = '3'
+            elif mutation == 'aggregate_ceil': q['node']['block_local_known_pgu'] = '4'
+            elif mutation == 'aggregate_scaled': q['node']['block_local_known_scaled'] = str(3*10**18)
+            elif mutation == 'block_index': q['blocks'][1]['block_index'] = 0
+            elif mutation == 'empty_blocks': q['blocks'] = []
+            elif mutation == 'missing_literal': q['node'].pop('sum_of_block_known_pgu')
+            elif mutation == 'missing_blocks': q.pop('blocks')
+            with self.subTest(mutation=mutation), self.assertRaises((ValueError, KeyError)):
+                workload.metrics(quote, {'prover_gas': 10})
 
 
 class SharedMemoryTests(unittest.TestCase):

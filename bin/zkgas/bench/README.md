@@ -1525,3 +1525,71 @@ can remain TODOs. Content changes also change authenticated state, so contrasts
 are whole-input observations. These probes establish no global bytecode bound,
 price refit, generated proof or GPU throughput result. Preserve the prior72-case
 campaign and publish any qualified new fixture under a separate immutable identity.
+
+### Committed storage mutation
+
+`storage_mutation.py` creates 24 inputs: update, delete, insert and mixed
+insertion/deletion, each with 8192 or 16384 initialized storage entries and
+zero, 64 or maximal-full mutations per user. Eight sequential signed ordinary
+CALL users share a short runtime and empty calldata. Every mode/state pair has
+its own N0 control, identical initialized background and full-selected gas
+envelope. Output directories must be new.
+
+```sh
+~/.venv/bin/python -S bin/zkgas/bench/cases/storage_mutation.py \
+  --output-dir "$STORAGE_CASES_DIR"
+~/.venv/bin/python -S -m unittest discover -s bin/zkgas/bench/tests \
+  -p test_storage_mutation.py -v
+STORAGE_MUTATION_NATIVE_BIN="$NATIVE_BIN" \
+  ~/.venv/bin/python -S -m unittest discover -s bin/zkgas/bench/tests \
+  -p test_storage_mutation.py -k frozen_native -v
+```
+
+The optional smoke runs only insert/8192/N64 with the supplied frozen executable;
+it performs no build or download. It checks nine successful receipts, exact
+charged gas and the explicit-storage final-root/count diagnostic contract.
+Mandatory tests use only the Python standard library, independently execute the
+actual runtime for all 24 cases through all eight users, and check ordered raw
+keys, values, cold/warm accesses, per-transaction originals, writes, concrete
+final maps, loop counters, checksums, phase transitions, opcode counts and exact
+gross/refund/charged gas. Successful equal-value wrong-range programs are
+retained semantic negatives. A successful receipt alone does not qualify a case.
+The smoke's root shape check is not independent root authentication; qualify
+initial and final roots separately against the full raw-slot map before actuals.
+
+Initially exactly raw slots 0 through S-1 contain 1. Slot 0 stores the next range
+start, initially 1. User j processes keys `1+j*N+i` in ascending order and commits
+`1+(j+1)*N` to slot 0. Update writes 2, delete writes 0, insert writes 2 to absent
+counterparts at `1048576+1+j*N+i`, and mixed deletes each present key then inserts
+its counterpart. Every operation guards the old value and reads the actual new
+value into the checksum; final counter, checksum and phase checks precede STOP.
+Phase reads/writes count toward gas, routes and proof targets even for N0.
+
+Full N is the largest feasible integer under the 30M charged whole-block budget,
+including the 167355-gas Anchor, the 8192 proof-target limit, valid present-key
+ranges, the existing 15M per-user cap, and every remaining-header prefix. Each
+candidate uses its own gross-user-gas plus 1000 envelope; the selected full
+envelope is reused at all three levels. Header gas remains 31M. Tests also
+execute a concrete N+1 bytecode candidate to establish that a real constraint
+fails. The catalog separates gross gas, deletion refund counter, per-transaction
+20% refund cap, charged gas and the envelope; SLOAD/SSTORE are priced once with
+EIP-2200/2929/3529 rules. Full occupancy is a prediction until receipts establish
+it; this does not show admission under a 30M header.
+
+Use a host fixture supporting explicit storage-state CALL users and its optional
+`storage_state.final_storage_root` / `final_storage_entry_count` report fields.
+These report the actual common recipient's committed storage and are separate
+from GuestInput. Generation uses roughly 9MiB for the complete source catalog.
+Before actuals, qualify every canonical input, ordered signed transaction,
+receipt, quote, opcode route and authenticated initial/final root, then freeze
+source/host/input hashes alongside unchanged quote, SDK6.3, workload ELF and
+model c893. Leave the existing 320MiB bounded-retention reserve plus room for
+canonical inputs and results before guarded sequential SP1 execution.
+
+Retain all eight controls and every failure. Compare actual same-proposal SP1
+PGU, each node block estimate and its literal sum, and complete-proposal estimate
+separately, preserving both deficit flags. More than 2B positive actual-minus-node
+PGU within 30M charged block gas is high priority. These ordinary batch-storage
+patterns are finite evidence; they imply no global MPT bound, fitted price,
+per-user actual allocation, generated proof or GPU throughput result. Existing
+producers, pricing, protocol limits, dependencies, guest and ELF remain unchanged.

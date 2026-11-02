@@ -1164,3 +1164,131 @@ and expose the original values as `stored_metrics` with
 `stored_metrics_shape: legacy_aggregate_ceil`. Reporting never rewrites retained
 status, quote or SP1 files. Compatibility applies only to reading old stored
 metrics; it does not permit missing canonical quote fields in new runs.
+
+## Blocks near30M charged gas
+
+### Near30M charged-gas density composition
+
+`gas_budget_density.py` generates20 fresh one-block requests under frozen model
+`c8936124c1b074b57abf36873e1c37e01f9bc49fa6c9bb161a92542f1e6551ef`:
+JUMPDEST, PUSH0/POP, DUP16/POP, paired SWAP16 and mixed JUMPDEST/DUP16/POP;
+4or16 CALL users; each packing/pattern keeps its ownN0/full pair.
+
+```bash
+~/.venv/bin/python -S bin/zkgas/bench/cases/gas_budget_density.py \
+  --output-dir experiment/gas-budget-density-cases
+~/.venv/bin/python -S -m unittest discover \
+  -s bin/zkgas/bench/tests -p test_gas_budget_density.py -v
+NATIVE_FIXTURE_BIN=/path/to/frozen/native \
+ZKGAS_QUOTE_BIN=/path/to/frozen/quote \
+~/.venv/bin/python -S -m unittest discover \
+  -s bin/zkgas/bench/tests -p test_gas_budget_density.py -v
+```
+
+The2048-site body is unchanged betweenN0/full. Its memory counter is separate
+from17 distinct full-width stack seeds. Runtime guards check the exact ending
+counter and every seed. Mandatory stdlib tests decode the entire fixed body,
+check exact opcode maps and closed-form gas, and concretely verify bounded
+iterations with actual ordered operand oracles and count-preserving negatives.
+Full loops are qualified using successful native receipts and exact opcode
+counts; unit tests do not interpret tens of millions of instructions in Python.
+The opt-in native smoke checks three representative cases and one semantic
+rejection; independent qualification must still cover all20 canonical inputs.
+
+Charged gas is `21000 + 489 + 3 + batches*(55 + 2048*body_site_gas)` per user:
+empty-calldata intrinsic, fixed instruction gas, one-word memory expansion,
+then loop plus body. No refund applies. The full batch count is the largest
+integer at or below29,990,000 whole-block gas including the frozen constructor's
+167355-gas Anchor. This Anchor value is fixture-specific and qualification
+compares the actual first receipt. Full predictions are29,831,387..29,989,743;
+actual qualification requires29,700,000..30,000,000. Per-user limits use the
+full-selected gross requirement plus100000gas, and are identical in eachN0/full
+pair. They fit15M per-user and the final user's remaining31M native-header gas.
+
+Keep complete proposal quote, every block's node-observable quote and literal
+sum, and actual identical-proposal SP1PGU. An actual-minus-node gap above2B PGU
+within30M charged block gas is high priority. OwnN0 and both absolute deficits
+remain visible; these prospective actuals never fit coefficients. SDK6.3,
+ELFb76, pricing and earlier producer bytes remain unchanged. These finite
+composition cases do not establish isolated opcode prices or a global bound.
+
+### Gas-budget journal composition
+
+`gas_budget_journal.py` creates12 unfitted inputs: dirty/direct,
+dirty/caught-REVERT and dirty+hash/caught-REVERT, each at4/16 successful user CALLs
+with matched zero/full controls. Each full input selects the largest integer
+number of64-round batches below29,990,000 charged block gas, including the
+fixture's167355-gas Anchor. The full qualification range is29.7M..30M charged gas.
+
+```bash
+~/.venv/bin/python -S bin/zkgas/bench/cases/gas_budget_journal.py \
+  --output-dir experiment/gas-budget-journal-cases
+~/.venv/bin/python -S -m unittest discover \
+  -s bin/zkgas/bench/tests -p test_gas_budget_journal.py -v
+NATIVE_FIXTURE_BIN="$NATIVE_BIN" ZKGAS_QUOTE_BIN="$QUOTE_BIN" \
+  ~/.venv/bin/python -S -m unittest discover \
+  -s bin/zkgas/bench/tests -p test_gas_budget_journal.py -v
+```
+
+All users share a prestate runtime and empty calldata. Each original slot2 starts
+at0, the parent checks0 and seeds5, the kernel checks5 then writes7, every bulk
+round writes11 then7 and mixed additionally hashes the zero memory word between
+those writes, and cleanup restores5 then0. A caught child REVERT returns32 bytes
+containing the completed loop-derived marker; the parent requires status0,
+returndata length32, the exact marker and final storage0. The once-only hash
+guard and counter/tag/marker memory words remain disjoint. This prewarmed journal
+panel does not cover child cold-first-access rollback.
+
+The gas model separately declares intrinsic, static opcodes, memory expansion,
+storage reads/writes, gross execution, original-zero restore refund19900 and the
+`min(gross//5, 19900)` refund cap. User gas limits additionally preserve2301gas
+above gross for the SSTORE sentry. Child layouts select
+`ceil((full_gross + 2301)*64/63)` for EIP-150 headroom; controls use that same full
+limit. These limits fit every transaction's remaining native31M-header gas.
+Thirty million is the **charged benchmark budget**, not a claim that these gas
+limits are admitted under a30M header. Native/quote execution remains explicitly
+`evm-gas-only` under frozen modelc893, with no new node pricing limit.
+
+Mandatory tests use bounded concrete executions plus decoded fixed-body/count
+invariants for full inputs. Ordered reads, exact write transitions, actual hash
+bytes, frame rollback, counter and marker checks catch read-key, write-key and
+write-value mutations that can preserve successful receipts and opcode totals.
+Optional frozen native probes check full occupancy, all receipts/counts, N0
+refunds, caught-marker rejection, and the formerly insufficient gross+1024
+SSTORE envelope as a retained diagnostic failure.
+
+Keep all six ownN0 controls and every failure. Compare identical-proposal actual
+SP1 PGU, complete proposal quote, and node per-block quotes/literal sum separately;
+retain aggregate rounding diagnostics and both deficit flags. More than2B missing
+PGU within the charged budget is an observed priority rule, not a projected result
+or deadline. No prices, guest, SDK or prior producers change.
+
+### Read-only gas-budget priority report
+
+The maintained report command consumes an existing validated workload output root;
+it runs no native execution, SP1 or network query:
+
+```sh
+~/.venv/bin/python -S bin/zkgas/bench/gas_budget_report.py \
+  --output-root experiment/actual --output experiment/gas-budget-report.json
+# Optional candidate node limit, in the new model profile's PGU units:
+~/.venv/bin/python -S bin/zkgas/bench/gas_budget_report.py \
+  --output-root experiment/actual --node-limit "$NODE_PGU_LIMIT" \
+  --output experiment/gas-budget-with-node-limit.json
+```
+
+It verifies charged receipt/cumulative gas against native per-block/user totals,
+uses canonical literal node sums from the validated quote, and retains full
+proposal pricing and actual whole-proposal PGU. The default budget is30M and
+high priority means strictly more than2B actual-minus-node PGU. It reports99%
+occupancy separately; an underfilled block exceeding2B still counts. Sampled
+maxima are not upper bounds. No eligible rows gives a null maximum.
+
+Failed/incomplete measurements retain their failure and null actual/priority;
+multi-block proposal observations remain whole and get no fabricated single-block
+priority or block-limit admission result. Without `--node-limit`, admissibility
+is unknown rather than silently applying the old Unzen limit. With it, the
+single-block node-limit comparison remains separate from gas-only priority.
+Output files are exclusive and original evidence is never rewritten. Independent
+operand/input qualification remains required; a report cannot establish the
+semantics of a wrongly constructed program.

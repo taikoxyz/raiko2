@@ -39,6 +39,11 @@ pub struct ProgramStorageStateReport {
     pub full_witness_node_count: usize,
     pub minimized_witness_node_count: usize,
     pub witness_policy: &'static str,
+    /// Committed poststate diagnostics for explicit storage transaction envelopes only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub final_storage_root: Option<B256>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub final_storage_entry_count: Option<usize>,
 }
 
 impl ProgramStorageState {
@@ -80,6 +85,8 @@ impl ProgramStorageState {
             full_witness_node_count: full,
             minimized_witness_node_count: minimized,
             witness_policy: "target_storage_multiproof_with_complete_system_storage",
+            final_storage_root: None,
+            final_storage_entry_count: None,
         }
     }
 }

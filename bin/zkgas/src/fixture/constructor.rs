@@ -998,7 +998,26 @@ pub(super) fn build_program(
             count_per_block: a.count,
             blocks: access_list_blocks,
         }),
-        storage: storage_state
-            .map(|state| state.report(full_witness_node_count, minimized_witness_node_count)),
+        storage: storage_state.map(|state| {
+            let mut report = state.report(full_witness_node_count, minimized_witness_node_count);
+            if transactions.is_some() {
+                let recipient = keccak256(Address::repeat_byte(0x66));
+                // witness() already rebuilt this root from the committed storage map for
+                // the final block header. Never infer final state from requested targets.
+                report.final_storage_root = Some(
+                    controlled_state
+                        .accounts
+                        .get(&recipient)
+                        .map_or(EMPTY_ROOT_HASH, |account| account.storage_root),
+                );
+                report.final_storage_entry_count = Some(
+                    controlled_state
+                        .storages
+                        .get(&recipient)
+                        .map_or(0, BTreeMap::len),
+                );
+            }
+            report
+        }),
     })
 }

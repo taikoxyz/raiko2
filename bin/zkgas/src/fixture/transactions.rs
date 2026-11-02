@@ -79,8 +79,15 @@ impl ProgramTransactions {
             "transactions block count exceeds bounds"
         );
         ensure!(
-            !storage && !authorizations && !access_list,
-            "transactions cannot be combined with storage_state, authorizations or access_list"
+            !authorizations && !access_list,
+            "transactions cannot be combined with authorizations or access_list"
+        );
+        ensure!(
+            !storage
+                || (self.kind == TransactionKind::Call
+                    && block_count == 1
+                    && self.count_per_block <= 8),
+            "storage_state transactions require CALL, one block and 1..=8 users"
         );
         match self.kind {
             TransactionKind::Call => {

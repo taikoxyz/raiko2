@@ -279,6 +279,12 @@ fn raw_storage_preimages_produce_valid_mutation_multiproof() {
     assert_eq!(report["storage_state"]["initial_storage_entry_count"], 2);
     assert_eq!(report["storage_state"]["insert_slot_count"], 1);
     assert_eq!(report["storage_state"]["delete_slot_count"], 1);
+    assert!(report["storage_state"].get("final_storage_root").is_none());
+    assert!(
+        report["storage_state"]
+            .get("final_storage_entry_count")
+            .is_none()
+    );
     let input = input(&dir);
     let quote = raiko2_zkgas_trace::quote_shasta_proposal(&input).unwrap();
     assert_eq!(
@@ -1072,6 +1078,107 @@ fn transaction_descriptor_repeated_calls_observe_all_users_and_sum_receipt_gas()
         }
     }
     assert_eq!(report["user_transaction_gas_used_total"], gas);
+}
+
+fn storage_transaction_request(count: usize) -> Value {
+    // Increment the shared, initialized phase slot once per user, retaining background slot9.
+    let mut value = transaction_request(
+        "call",
+        count,
+        100_000,
+        "0x5f546001015f5500",
+        json!({"opcode:0x54":count,"opcode:0x55":count,"opcode:0x00":count}),
+        None,
+    );
+    value["program"]["storage_state"] = json!({
+        "initial_storage":{"0x0":"0x1","0x9":"0xb"},
+        "proof_slots":["0x0"]
+    });
+    value
+}
+
+#[test]
+fn storage_transaction_descriptor_calls_share_initialized_state_for_one_two_and_eight_users() {
+    for count in [1, 2, 8] {
+        let value = storage_transaction_request(count);
+        let (output, dir) = export_with_profile(&value, "evm-gas-only");
+        success(&output);
+        let report = report(&dir);
+        let input = input(&dir);
+        assert_eq!(input.witnesses.len(), 1);
+        assert_eq!(input.witnesses[0].block.body.transactions.len(), count + 1);
+        assert_eq!(report["storage_state"]["initial_storage_entry_count"], 2);
+        assert_eq!(report["storage_state"]["proof_slot_count"], 1);
+        // Rebuild the expected full storage independently of the fixture's mutable trie.
+        let expected_root = alloy_trie::root::storage_root_unhashed([
+            (
+                alloy_primitives::B256::ZERO,
+                alloy_primitives::U256::from(count + 1),
+            ),
+            (
+                alloy_primitives::B256::from(alloy_primitives::U256::from(9).to_be_bytes::<32>()),
+                alloy_primitives::U256::from(11),
+            ),
+        ]);
+        assert_eq!(report["storage_state"]["final_storage_entry_count"], 2);
+        assert_eq!(
+            report["storage_state"]["final_storage_root"],
+            serde_json::to_value(expected_root).unwrap()
+        );
+        assert_eq!(report["observed_route_counts"]["opcode:0x54"], count);
+        assert_eq!(report["observed_route_counts"]["opcode:0x55"], count);
+        for (index, tx) in input.witnesses[0].block.body.transactions[1..]
+            .iter()
+            .enumerate()
+        {
+            assert_eq!(tx.nonce(), index as u64);
+            assert_eq!(tx.to(), Some(alloy_primitives::Address::repeat_byte(0x66)));
+            assert_eq!(report["receipts_by_block"][0][index + 1]["success"], true);
+        }
+        let quote = raiko2_zkgas_trace::quote_shasta_proposal(&input).unwrap();
+        assert_eq!(
+            serde_json::to_value(quote.public_output).unwrap(),
+            report["public_output"]
+        );
+    }
+}
+
+#[test]
+fn storage_transaction_descriptor_preserves_gas_bounds_and_composition_exclusions() {
+    let good = storage_transaction_request(8);
+    for gas in [21_000, 15_000_000] {
+        let mut value = good.clone();
+        value["program"]["transactions"]["gas_limit"] = gas.into();
+        assert!(zkgas::fixture::parse_request(&serde_json::to_vec(&value).unwrap()).is_ok());
+    }
+    for (field, invalid) in [
+        ("count_per_block", json!(0)),
+        ("count_per_block", json!(9)),
+        ("gas_limit", json!(20_999)),
+        ("gas_limit", json!(15_000_001)),
+        ("kind", json!("create")),
+    ] {
+        let mut value = good.clone();
+        value["program"]["transactions"][field] = invalid;
+        let (output, dir) = export_with_profile(&value, "evm-gas-only");
+        assert!(!output.status.success(), "accepted invalid {field}");
+        absent_outputs(&dir);
+    }
+    for (field, invalid) in [
+        ("block_count", json!(2)),
+        ("authorizations", json!({"pattern":"compact","count":1})),
+        ("access_list", json!({"pattern":"repeated_key","count":1})),
+        (
+            "prestate_contracts",
+            json!([{"address":"0x0000000000000000000000000000000000010000","code_hex":"0x00"}]),
+        ),
+    ] {
+        let mut value = good.clone();
+        value["program"][field] = invalid;
+        let (output, dir) = export_with_profile(&value, "evm-gas-only");
+        assert!(!output.status.success(), "accepted invalid {field}");
+        absent_outputs(&dir);
+    }
 }
 
 #[test]

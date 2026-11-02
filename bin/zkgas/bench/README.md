@@ -1432,7 +1432,8 @@ the authenticated proof reduction. These diagnostics do not allocate actual PGU.
 The multi-account code-loading producer uses this mode to vary 16/128/512 target
 accounts, 32/4096/24576 code bytes and shared versus unique code hashes. Each of
 the 18 settings has its own zero-call control and full-gas case, for 36 inputs.
-Four signed users cycle through targets; every child returns its own ADDRESS in
+The default uses CALL children. Four signed users cycle through targets; every
+CALL child returns its own ADDRESS in
 32 bytes and the parent checks status, return length, address and final counter.
 The executed child prefix is identical; unreachable tails and fixed-width salts
 vary loading/analysis work. Distinct accounts still execute separate calls and
@@ -1441,6 +1442,8 @@ have separate warmth; shared hashes only deduplicate code bytes and analysis.
 ```sh
 ~/.venv/bin/python -S bin/zkgas/bench/cases/multiaccount_code.py \
   --output-dir "$CASES_DIR"
+~/.venv/bin/python -S bin/zkgas/bench/cases/multiaccount_code.py \
+  --child-call-kind delegatecall --output-dir "$DELEGATE_CASES_DIR"
 ~/.venv/bin/python -S -m unittest discover -s bin/zkgas/bench/tests \
   -p test_multiaccount_code.py
 NATIVE_FIXTURE_BIN="$NATIVE_BIN" ZKGAS_QUOTE_BIN="$QUOTE_BIN" \
@@ -1457,3 +1460,17 @@ at least 99% of the 30M charged whole-block gas budget, including Anchor; header
 remain 31M. This selects no future node limit. The per-user gas envelope is the
 same for each zero/full pair. A native-only one-account control and semantic
 negatives supplement the matrix; they do not supply invented actual PGU.
+
+`--child-call-kind delegatecall` emits a separate 36-input matrix with distinct
+sample IDs and independently derived gas bounds. Top-level users remain ordinary
+CALL transactions. The child still executes ADDRESS/MSTORE/RETURN32, but ADDRESS
+returns the parent context under DELEGATECALL. The parent checks that context,
+status, length and counter; independent target-order, code-hash and authenticated
+account checks establish which account's code was loaded. Returned ADDRESS alone
+does not establish code-target identity. These code-only children access no storage.
+
+This comparison avoids the existing 1M PGU confirmed-CALL wrapper reserve masking
+code-loading cost. Confirmed DELEGATECALL retains its existing 6000 PGU wrapper;
+both also pay normal dispatch. Keep all CALL observations and their overquotes.
+Freeze each matrix's source, canonical inputs and configuration separately before
+SP1 sampling; running the second matrix does not reprice or rewrite the first.

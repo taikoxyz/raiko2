@@ -116,3 +116,27 @@ data and provenance in a new immutable Atlas fixture revision/PR after auditing.
 Reth #260 and Raiko #284/#296 remain pending for the future fork; no automatic
 merge, deployment, activation, repricing or limit adjustment. Multi-account
 storage mutation/deletion/ancestor rollback follows only after this code panel.
+
+## Additional comparison after observed CALL reserve masking
+
+The first36 CALL observations are frozen and retained. Their full quotes are
+dominated by the existing confirmed-CALL wrapper:1M PGU plus64 dispatch per event.
+For example108780 calls contribute108786961920 PGU, while the proposal's actual
+SP1 workload is1300643989. This conservative quote cannot isolate code-loading
+underpricing. It does not justify changing prices during validation.
+
+Add a separately frozen36-input DELEGATECALL matrix through an optional semantic
+generator argument. Keep the original CALL requests, IDs and metadata compatible.
+DELEGATECALL's existing wrapper is6000 PGU plus64 dispatch; avoid the unrelated
+CALL reserve while retaining every opcode/frame and its actual work. The matrix
+axes, four top-level CALL users, gas/domain/resource rules and18 own-N0 pairs remain.
+
+Child ADDRESS returns the parent context for DELEGATECALL; assert that context
+in the parent and independently authenticate actual code-target addresses/order,
+nonce/balance/storage/codehash leaves and supplied code bytes. Do not claim that
+returned ADDRESS proves the code account. Recalculate exact route maps and gas,
+with265 rather than272 gas per additional warm call. Keep old and new source/
+input/configuration freezes explicit in the final two-panel data fixture.
+
+Original CALL actuals finished before integrating the optional generator change.
+No guest, SDK, ELF, host rebuild, pricing or admission-limit changes are required.

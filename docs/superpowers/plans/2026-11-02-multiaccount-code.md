@@ -91,6 +91,14 @@ guards, independent bounded gas/count/target oracle and native-only negatives.
 
 ### Task 5: Retain tools and results
 
+Adaptive scope: retain the completed36 CALL observations and add36 separately
+frozen DELEGATECALL observations after detecting confirmed-CALL reserve masking.
+The spec's additional-comparison section is authoritative. The follow-up source
+uses the same generator, host input format and frozen native/model/ELF. Independent
+source review, all36 native/quote qualifications and actual auditing apply to
+both panels. The final fixture retains72 observations with per-panel source and
+configuration identities; no existing result is overwritten or repriced.
+
 - [ ] Write factual research/usage with overquotes, controls and finite-scope
   limits. Update #296 while keeping Draft/do-not-merge.
 - [ ] Prepare new data-only Atlas fixture, independently review preseal/metadata/

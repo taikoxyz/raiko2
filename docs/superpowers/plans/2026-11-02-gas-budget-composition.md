@@ -45,10 +45,15 @@ frozen native/quote/SP1 tools. Root alone orchestrates sequential actual samplin
 6. [x] Root commits the reviewed source/input inventory and freezes configuration.
    Run existing bounded SP1 measure sequentially on qualified inputs; preserve
    every attempt and resource receipt. No coefficient or guest change.
-7. [ ] Independently audit raw normalization/input/output/model joins, all32
+7. [x] Independently audit raw normalization/input/output/model joins, all32
    comparisons,2B priority, exact ownN0/packing differences and resource cleanup.
    Record research/usage, update the existing pending source PR and retain
    immutable fixtures in Atlas following its existing publication checks.
+
+Completed evidence: [measured research record](../../research/2026-11-02-gas-budget-composition.md),
+[Atlas #25](https://github.com/taikoxyz/raiko2-atlas/pull/25) and its immutable
+`fixture-unzen-gas-budget-composition-v1` Release. Source remains in pending
+Raiko #296; no merge or pricing activation is part of this plan.
 
 Use `~/.venv/bin/python -S -m unittest discover -s bin/zkgas/bench/tests -p
 test_gas_budget_density.py -v` and the corresponding journal module for focused

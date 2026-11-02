@@ -147,7 +147,9 @@ The generators, semantic/gas tests and read-only priority report live under
 [`bin/zkgas/bench`](../../bin/zkgas/bench/README.md#near30m-charged-gas-density-composition).
 Canonical requests/GuestInputs, raw native/quote/SP1 reports, controls, native
 negatives, model/program identities and independent audits belong to Atlas
-fixture `unzen-gas-budget-composition-v1`. Atlas contains data; the Raiko source
+fixture [`unzen-gas-budget-composition-v1`](https://github.com/taikoxyz/raiko2-atlas/pull/25),
+with an [immutable data Release](https://github.com/taikoxyz/raiko2-atlas/releases/tag/fixture-unzen-gas-budget-composition-v1).
+Atlas contains data; the Raiko source
 owns execution and reporting. An archived projection of operator receipts is
 not a resumable workload directory; use its canonical GuestInputs in a fresh
 output root to repeat execution.
@@ -163,6 +165,11 @@ Checks actually completed before the results record:
   cleanup.
 - Independent recomputation of all32 report rows and16 paired increments;
   source review and `git diff --check` passed.
+- Atlas independent data/metadata/archive review passed. The696-member archive
+  passed compressed/decoded and inner checksum closure, followed by the unchanged
+  boundary-fixture workflow against a fresh published GitHub download. A
+  temporary-index combined tree with Atlas #22/#23/#24 verified all four
+  registrations and metadata checksum sets without altering real refs or index.
 
 Optional native/backend tests are not implicitly covered by their stdlib skips;
 the separate32-input qualification and actual audit provide the listed backend

@@ -1474,3 +1474,8 @@ code-loading cost. Confirmed DELEGATECALL retains its existing 6000 PGU wrapper;
 both also pay normal dispatch. Keep all CALL observations and their overquotes.
 Freeze each matrix's source, canonical inputs and configuration separately before
 SP1 sampling; running the second matrix does not reprice or rewrite the first.
+
+The [72-observation research record](../../../docs/research/2026-11-02-multiaccount-code-loading.md)
+keeps the two source/input freezes, CALL reserve masking, DELEGATECALL results,
+all N0 gaps and small code-length growth discrepancies. Whole-block coverage
+does not certify every marginal coefficient or the maximum possible code footprint.

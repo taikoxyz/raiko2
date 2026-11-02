@@ -145,6 +145,12 @@ outside this panel. Earlier storage/rollback gaps and published fixtures are not
 rewritten by these observations.
 
 Maintained [producers, semantic tests and usage](../../bin/zkgas/bench/README.md#shared-account-transaction-order-composition)
-stay in pending Raiko #296. Input/result data belongs to Atlas fixture
-`unzen-order-cold-frame-boundaries-v1`; archive review/download checks are reported
-separately when completed. No automatic merge, deployment or pricing activation.
+stay in pending Raiko #296. Input/result data is retained in
+[Atlas #26](https://github.com/taikoxyz/raiko2-atlas/pull/26) and its
+[immutable data Release](https://github.com/taikoxyz/raiko2-atlas/releases/tag/fixture-unzen-order-cold-frame-boundaries-v1).
+Independent preseal and final archive checks passed:909 safe regular members,
+compressed/decoded hashes and exact inner checksum closure. The unchanged
+boundary-fixture workflow also passed using a fresh published GitHub download.
+A temporary-index combined tree with pending Atlas #22–#25 passed all five
+registrations/metadata checksum sets without changing real refs or index.
+No automatic merge, deployment or pricing activation.

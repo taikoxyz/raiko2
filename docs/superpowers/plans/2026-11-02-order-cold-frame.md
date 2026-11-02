@@ -55,10 +55,15 @@ SDK6.3 execute-only ELF. No Rust/guest/SDK/pricing change.
 5. [x] Root commits coherent reviewed source and freezes final source/catalog/
    qualified inventory/config before sequential SP1 measurements. Use existing
    bounded measurement tools; keep all attempts and owned-resource cleanup.
-6. [ ] Independently audit canonical joins, normalization, both literal/full
+6. [x] Independently audit canonical joins, normalization, both literal/full
    shortfalls,18 exact baselines, priority and resources. Root records actual
    results with finite scope, updates pending #296 and retains data-only Atlas
    fixtures following preseal/archive/fresh-download checks. No automatic merge.
+
+Completed evidence: [measured research record](../../research/2026-11-02-order-cold-frame.md),
+[Atlas #26](https://github.com/taikoxyz/raiko2-atlas/pull/26) and immutable
+`fixture-unzen-order-cold-frame-boundaries-v1` Release. No price changes;
+the severe REVERT overquote remains explicit alongside coverage results.
 
 Focused commands use `~/.venv/bin/python -S -m unittest discover -s
 bin/zkgas/bench/tests -p test_order_composition.py -v` and the corresponding

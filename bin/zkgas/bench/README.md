@@ -1479,3 +1479,49 @@ The [72-observation research record](../../../docs/research/2026-11-02-multiacco
 keeps the two source/input freezes, CALL reserve masking, DELEGATECALL results,
 all N0 gaps and small code-length growth discrepancies. Whole-block coverage
 does not certify every marginal coefficient or the maximum possible code footprint.
+
+The separate unreachable code-analysis catalog adds six tail profiles at4096 and
+24576 bytes with512 unique targets and own-N0 pairs (24 requests). It composes the
+same four-user DELEGATECALL parent and transaction envelopes. Only unreachable
+target bytes and campaign metadata change. `stop`, `jumpdest`, `mixed` and
+`push32` vary scanning/JUMPDEST work; `jumpdest-copy` ends with ADD and
+`jumpdest-pad32` ends with PUSH32 to exercise the legacy copy/padding branches.
+Every target starts with `3060005260206000f3`, then its tail, then an aligned
+`PUSH4 <index+1> <terminal>` suffix. PUSH32 groups contain32 JUMPDEST immediate
+bytes, which must not become jump-table entries. Under the retained
+revm-bytecode43.0.0 analysis, the final STOP needs no padding, ADD needs one byte,
+and the incomplete PUSH32 needs33 bytes including a synthetic STOP.
+
+```sh
+~/.venv/bin/python -S bin/zkgas/bench/cases/code_analysis_tail.py \
+  --output-dir "$TAIL_CASES_DIR"
+~/.venv/bin/python -S -m unittest discover -s bin/zkgas/bench/tests \
+  -p test_code_analysis_tail.py
+CODE_ANALYSIS_NATIVE_BIN="$NATIVE_BIN" CODE_ANALYSIS_NATIVE_LEVELS=zero,full \
+  CODE_ANALYSIS_NATIVE_ARTIFACT_DIR="$TAIL_NATIVE_DIR" \
+  ~/.venv/bin/python -S -m unittest discover -s bin/zkgas/bench/tests \
+  -p test_code_analysis_tail.py
+```
+
+All output directories must be new. The catalog records the model ID, producer
+and imported local producer hashes, profiles, lengths and levels. Generation
+uses roughly350MiB for24 requests; leave additional room for canonical native
+inputs and receipts. Native smoke is opt-in, uses the supplied frozen executable
+without builds, and covers all six profiles at both lengths for the selected
+levels (`zero`, `full`, or both). With a retention directory, keep native requests,
+canonical JSON/bincode, reports and process results for inspection; without one,
+each native case is removed before the next case to bound temporary disk usage.
+The mandatory suite generates the catalog once and runs representative concrete
+full/zero loops plus each profile's RETURN/context and independent tail checks.
+
+Use this catalog with `workload.py screen` and `measure` and a fresh frozen
+configuration/root as documented above, keeping native, quote, SDK6.3 estimator,
+workload ELF and model unchanged. Qualify all24 canonical inputs and receipts
+before freezing source and inputs for sequential guarded SP1 sampling. Retain
+literal actual same-proposal SP1 PGU, each block node estimate and their literal
+sum, and complete proposal estimate separately. Positive actual-minus-node PGU
+strictly above2B within30M charged block gas is high priority; smaller differences
+can remain TODOs. Content changes also change authenticated state, so contrasts
+are whole-input observations. These probes establish no global bytecode bound,
+price refit, generated proof or GPU throughput result. Preserve the prior72-case
+campaign and publish any qualified new fixture under a separate immutable identity.

@@ -21,6 +21,7 @@ SDK6.3 execute-only ELF. No Rust/guest/SDK/pricing change.
 - All full rows must occupy at least99% without exceeding30M charged gas.
 - Signed users share calldata/target/envelope; contract state selects order.
 - Track phase-slot originals per transaction separately from journal slot2.
+- Check nonempty calldata intrinsic and applicable floor gas, including N0.
 - Rollback restores only warmth introduced after the checkpoint, not outer warmth.
 - Coldness does not imply DB reread/MPT materialization; retain actual selectors.
 - Preserve semantic native-success negatives, rejected candidates and all controls.
@@ -28,7 +29,7 @@ SDK6.3 execute-only ELF. No Rust/guest/SDK/pricing change.
 
 ## Tasks
 
-1. [ ] Order producer owner creates
+1. [x] Order producer owner creates
    `bin/zkgas/bench/cases/order_composition.py` and
    `bin/zkgas/bench/tests/test_order_composition.py`.
    Write expected-failing tests, implement24 inputs, validate bounded actual
@@ -36,18 +37,18 @@ SDK6.3 execute-only ELF. No Rust/guest/SDK/pricing change.
    order/phase/read/write mutations. Existing producers remain byte-identical.
    Native smoke precedes any actual. Hand off source hashes and usage fragment;
    do not edit shared README, run SP1, commit or push.
-2. [ ] Cold-frame owner creates
+2. [x] Cold-frame owner creates
    `bin/zkgas/bench/cases/cold_frame_composition.py` and
    `bin/zkgas/bench/tests/test_cold_frame_composition.py`.
    Apply the same TDD cycle to12 inputs, concrete warmset checkpoints and child
    markers, exact zero/full gas arithmetic and bounded cold/prewarm controls.
    Keep child return/revert and transaction reset semantics explicit. Hand off
    source hashes and usage; no shared README/backend build/SP1/commit/push.
-3. [ ] Reviewer independently checks spec and both complete diffs for scoped
+3. [x] Reviewer independently checks spec and both complete diffs for scoped
    labels, dispatch/input bounds, operand guards, state/original/refund semantics,
    exact counts/gas, cold rollback and expected-negative handling. Authors fix
    confirmed findings; reviewer rechecks up to two material iterations.
-4. [ ] Root integrates usage; run the complete stdlib bench suite. Independent
+4. [x] Root integrates usage; run the complete stdlib bench suite. Independent
    tester qualifies all36 canonical native/quote inputs and retained negative
    controls, including ordered signed input identity and exact receipt gas.
    Native descriptors/31M remaining envelopes must match predictions.

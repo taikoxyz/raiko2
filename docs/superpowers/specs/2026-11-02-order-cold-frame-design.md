@@ -46,6 +46,8 @@ miss the new order axis. Do not change Rust, guest, SDK, prices or admission pol
   cursor operations, refunds, memory and all call/guard overhead. Select a common
   user envelope sufficient for the largest gross/EIP-150 requirement. Verify it
   fits every user's remaining native-header gas. Target at least99% of30M.
+  Check the shared calldata's applicable EIP-7623 floor as well; retain a
+  nonbinding-floor calculation when execution already exceeds that floor.
 
 The persistent cursor is genuine contract work and remains part of actual PGU
 and both quotes. Own-N0 differences are diagnostics; no cursor/startup cost is

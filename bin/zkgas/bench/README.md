@@ -1297,3 +1297,99 @@ The [first32-input gas-budget results](../../../docs/research/2026-11-02-gas-bud
 retain all16 controls, literal node/full shortfalls and near-full measurements.
 They leave heterogeneous transaction sequences and cold-access/rollback
 combinations open; their measured maxima are not bounds for those combinations.
+
+### Repeated child-access composition
+
+`cold_frame_composition.py` creates12 unfitted inputs: cold-first child RETURN,
+cold-first child REVERT and parent-prewarmed child REVERT, each at4/16 signed
+user CALLs with an exact zero/full control pair. All users share empty calldata.
+
+```sh
+~/.venv/bin/python -S bin/zkgas/bench/cases/cold_frame_composition.py \
+  --output-dir experiment/cold-frame-cases
+~/.venv/bin/python -S -m unittest discover \
+  -s bin/zkgas/bench/tests -p test_cold_frame_composition.py -v
+NATIVE_FIXTURE_BIN="$NATIVE_BIN" ZKGAS_QUOTE_BIN="$QUOTE_BIN" \
+  ~/.venv/bin/python -S -m unittest discover \
+  -s bin/zkgas/bench/tests -p test_cold_frame_composition.py -v
+```
+
+The parent uses a fixed four-site self-DELEGATECALL body. Each child validates its
+32-byte input tag, SLOADs absent slot2=0, and returns/reverts32 bytes from that read.
+The parent checks status, returndata length and the actual output for every call,
+its final loop counter and a final read of slot2. Only the prewarm profile reads
+slot2 before the loop; no profile reads it between child calls. No SSTORE or refund
+occurs. Separate memory locations hold the counter64, output128 and input tag256.
+
+Native cold RETURN first warms the slot and retains warmth; child REVERT restores
+its checkpoint, preserving an outer prewarm but undoing a child's newly introduced
+warmth. New transactions reset EVM warmth even when the cached slot remains. The
+concrete test oracle checks ordered keys/values, checkpointed warmth, cache/reset
+separation, call/return data and per-transaction gas. Native receipts alone are not
+a cold-access trace. In particular, coldness does not imply a DB reread or MPT
+materialization; keep the actual quote's witness/path selectors separately.
+
+WithN calls per user, whereN is divisible by4, exact charged gas is:
+
+- cold RETURN: `23244 + 379*N + 55*(N//4)`;
+- cold REVERT: `23244 + 2379*N + 55*(N//4)`;
+- parent-prewarmed REVERT: `23369 + 379*N + 55*(N//4)`.
+
+These include intrinsic21000, all guards/call/loop instructions, nine parent memory
+words and one new child memory word per call. They are whole-user execution formulas,
+not isolated child or SLOAD tariffs. The full selects the largest batch below29.99M
+charged block gas including fixture Anchor167355; predictions are29,941,371..29,989,935.
+Controls share the same full-selected gas envelope, gross+100000, sufficient for the
+short child even under EIP-150. It fits every remaining native31M-header prefix.
+Thirty million is the charged benchmark budget, not30M-header admission evidence.
+
+Keep all six controls, semantic native-success mutations and native rejects; failed
+or unmeasured samples have no invented PGU. Compare identical-proposal actual SP1PGU,
+node per-block estimates/literal sum and the complete proposal estimate separately.
+Frozen modelc893, SDK6.3, ELFb76 and explicit `evm-gas-only` remain unchanged. No new
+node limit is selected. Strictly more than2B positive actual-minus-node PGU within
+30M charged gas is high priority; finite measurements do not establish a bound,
+production capacity or a proof deadline.
+
+### Shared-account transaction-order composition
+
+Generate24 shared-account transaction-order inputs:
+
+```sh
+~/.venv/bin/python -S bin/zkgas/bench/cases/order_composition.py --output-dir experiment/order-composition-cases
+~/.venv/bin/python -S -m unittest discover -s bin/zkgas/bench/tests -p test_order_composition.py -v
+NATIVE_FIXTURE_BIN=/path/to/frozen/native ~/.venv/bin/python -S -m unittest discover -s bin/zkgas/bench/tests -p test_order_composition.py -v
+```
+
+Each dirty/mixed journal combination packs4 or16 signed users, half paired-SWAP16
+and half self-DELEGATECALL journal work ending in caught REVERT. Alternating,
+density-first and journal-first order use one shared32-byte-word calldata table;
+a genuine persistent phase slot4096 selects the next role and advances across
+transactions. Every transaction observes its own storage originals: the initial
+phase set costs20000 gas and subsequent clean nonzero updates cost2900. Journal
+slot2 starts and ends zero per user. All phase, table, dispatch and state-root
+work remains included in absolute same-proposal actual/node/full comparisons.
+
+Each order keeps its own N0, with identical calldata/code layout and the same
+full-selected transaction envelope. Full bounds are the largest integer batch
+counts within each role's equal charged-gas allocation, and occupy29.7M..30M
+charged whole-block gas including Anchor. Native header remains31M; all ordered
+transaction envelopes fit the remaining header gas. This does not demonstrate
+30M-header admission or select a node limit. Explicit gas records distinguish
+intrinsic nonempty-calldata gas, the nonbinding candidate EIP-7623 floor,
+gross execution, journal refund-cap effects, charged receipts and EIP-150/SSTORE
+sentry envelope headroom.
+
+The mandatory stdlib oracle checks bounded actual stack seeds, table/order,
+per-transaction originals/cold reads, ordered writes, hashes, rollback frames
+and derived markers. Full opcode totals use independently interpreted fixed
+bodies and affine loop counts. Native-success mutations retain opcode counts
+while violating order, phase key, stack seeds, a reverted bulk write key or a
+final read key; their receipt success alone is insufficient semantic evidence.
+The native report has no per-slot phase trajectory field: phase history relies
+on the independent oracle and runtime guards, rather than state-root equality
+alone. Keep all12 controls and native failures. SP1 measurements, when separately
+qualified, must retain actual normalized PGU, each node block estimate and literal
+sum, and the complete proposal estimate. Own-N0 differences remain diagnostic;
+no per-user actual allocation, pricing refit, proof throughput or universal bound
+is implied.

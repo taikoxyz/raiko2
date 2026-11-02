@@ -86,7 +86,14 @@ pub fn parse_request(bytes: &[u8]) -> Result<ProgramRequest> {
         program.prestate_contracts.is_some() || bytes.len() as u64 <= MAX_REQUEST_BYTES,
         "request byte limit exceeded"
     );
-    prestate::validate(program)?;
+    prestate::validate(
+        program.prestate_contracts.as_deref(),
+        program.transactions.as_ref(),
+        program.block_count,
+        program.storage_state.is_some(),
+        program.access_list.is_some(),
+        program.authorizations.is_some(),
+    )?;
     ensure!(
         (1..=32).contains(&program.block_count),
         "local program block_count must be in 1..=32"

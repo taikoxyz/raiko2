@@ -1741,3 +1741,240 @@ fn multiaccount_unused_background_accounts_do_not_pad_proof_targets() {
     assert_eq!(diagnostics["configured_code_bytes"], 32 * 3);
     assert_eq!(diagnostics["configured_unique_code_bytes"], 3);
 }
+
+fn initialized_fanout_request(code: &str, opcode: &str) -> Value {
+    let mut value = multiaccount_request(&[code, code], false);
+    value["program"]["transactions"]["count_per_block"] = json!(3);
+    value["program"]["transactions"]["recipients"] = json!([
+        "0x0000000000000000000000000000000000010000",
+        "0x0000000000000000000000000000000000010001",
+        "0x0000000000000000000000000000000000010000"
+    ]);
+    value["program"]["prestate_contracts"][0]["initial_storage"] = json!({"0x0":"0x1","0x9":"0xb"});
+    value["program"]["prestate_contracts"][1]["initial_storage"] = json!({"0x0":"0x5","0x9":"0xd"});
+    value["program"]["expected_route_counts"] = json!({(opcode):3});
+    value
+}
+
+fn independent_storage_root(values: &[(u64, u64)]) -> Value {
+    use alloy_primitives::{B256, U256};
+    serde_json::to_value(alloy_trie::root::storage_root_unhashed(values.iter().map(
+        |(key, value)| {
+            (
+                B256::from(U256::from(*key).to_be_bytes::<32>()),
+                U256::from(*value),
+            )
+        },
+    )))
+    .unwrap()
+}
+
+#[test]
+fn initialized_fanout_commits_distinct_and_repeated_recipients_with_actual_roots() {
+    use reth_primitives_traits::SignerRecoverable as _;
+    // Increment raw slot0: A is visited twice and B once. Slot9 is untouched background.
+    let value = initialized_fanout_request("0x5f546001015f5500", "opcode:0x55");
+    let (output, dir) = export_with_profile(&value, "evm-gas-only");
+    success(&output);
+    let report = report(&dir);
+    let input = input(&dir);
+    let diagnostics = report["prestate_contracts"]["initialized_storage"]
+        .as_array()
+        .unwrap();
+    assert_eq!(diagnostics.len(), 2);
+    for (index, initial, final_values) in [
+        (0, vec![(0, 1), (9, 11)], vec![(0, 3), (9, 11)]),
+        (1, vec![(0, 5), (9, 13)], vec![(0, 6), (9, 13)]),
+    ] {
+        assert_eq!(
+            diagnostics[index]["initial_storage_root"],
+            independent_storage_root(&initial)
+        );
+        assert_eq!(
+            diagnostics[index]["final_storage_root"],
+            independent_storage_root(&final_values)
+        );
+        assert_eq!(diagnostics[index]["initial_storage_entry_count"], 2);
+        assert_eq!(diagnostics[index]["final_storage_entry_count"], 2);
+    }
+    let mut sender = None;
+    for (index, tx) in input.witnesses[0].block.body.transactions[1..]
+        .iter()
+        .enumerate()
+    {
+        let expected = value["program"]["transactions"]["recipients"][index]
+            .as_str()
+            .unwrap()
+            .parse::<alloy_primitives::Address>()
+            .unwrap();
+        assert_eq!(tx.to(), Some(expected));
+        assert_eq!(tx.nonce(), index as u64);
+        let recovered = tx.recover_signer().unwrap();
+        assert_eq!(*sender.get_or_insert(recovered), recovered);
+        assert_eq!(
+            report["transactions"]["blocks"][0]["users"][index]["to"],
+            serde_json::to_value(expected).unwrap()
+        );
+        assert_eq!(report["receipts_by_block"][0][index + 1]["success"], true);
+    }
+    assert_eq!(report["observed_route_counts"]["opcode:0x54"], 3);
+    assert_eq!(report["observed_route_counts"]["opcode:0x55"], 3);
+    assert_eq!(report["observed_route_counts"].get("opcode:0xf1"), None);
+    let quote = raiko2_zkgas_trace::quote_shasta_proposal_with_execution_profile(
+        &input,
+        raiko2_zkgas_trace::ExecutionProfile::EvmGasOnly,
+    )
+    .unwrap();
+    assert_eq!(
+        serde_json::to_value(quote.public_output).unwrap(),
+        report["public_output"]
+    );
+}
+
+#[test]
+fn initialized_fanout_delete_and_revert_report_committed_roots() {
+    for (code, reverts) in [("0x5f5f5500", false), ("0x5f5f555f5ffd", true)] {
+        let mut value = initialized_fanout_request(code, "opcode:0x55");
+        value["expected_user_success"] = json!(!reverts);
+        let (output, dir) = export_with_profile(&value, "evm-gas-only");
+        success(&output);
+        let report = report(&dir);
+        let diagnostics = &report["prestate_contracts"]["initialized_storage"];
+        for (index, original, background) in [(0, 1, 11), (1, 5, 13)] {
+            let expected = if reverts {
+                vec![(0, original), (9, background)]
+            } else {
+                vec![(9, background)]
+            };
+            assert_eq!(
+                diagnostics[index]["final_storage_root"],
+                independent_storage_root(&expected)
+            );
+            assert_eq!(
+                diagnostics[index]["final_storage_entry_count"],
+                expected.len()
+            );
+        }
+    }
+}
+
+#[test]
+fn initialized_fanout_validates_map_bounds_and_optional_empty_mode() {
+    let mut value = initialized_fanout_request("0x00", "opcode:0x00");
+    for contract in value["program"]["prestate_contracts"]
+        .as_array_mut()
+        .unwrap()
+    {
+        contract["initial_storage"] = json!({});
+    }
+    let (output, dir) = export_with_profile(&value, "evm-gas-only");
+    success(&output);
+    assert_eq!(
+        report(&dir)["prestate_contracts"]["initialized_storage"][0]["final_storage_entry_count"],
+        0
+    );
+    let entries = (0..8192)
+        .map(|i| (format!("0x{i:x}"), json!("0x1")))
+        .collect::<serde_json::Map<_, _>>();
+    for contract in value["program"]["prestate_contracts"]
+        .as_array_mut()
+        .unwrap()
+    {
+        contract["initial_storage"] = Value::Object(entries.clone());
+    }
+    assert!(zkgas::fixture::parse_request(&serde_json::to_vec(&value).unwrap()).is_ok());
+    value["program"]["prestate_contracts"][0]["initial_storage"]["0x2000"] = json!("0x1");
+    assert!(zkgas::fixture::parse_request(&serde_json::to_vec(&value).unwrap()).is_err());
+}
+
+#[test]
+fn initialized_fanout_rejects_invalid_recipients_and_storage_without_publication() {
+    let base = initialized_fanout_request("0x00", "opcode:0x00");
+    let mut variants = Vec::new();
+    for recipients in [
+        json!([]),
+        json!(["0x0000000000000000000000000000000000010000"]),
+        json!([
+            "0x0000000000000000000000000000000000010000",
+            "0x0000000000000000000000000000000000010002",
+            "0x0000000000000000000000000000000000010000"
+        ]),
+    ] {
+        let mut bad = base.clone();
+        bad["program"]["transactions"]["recipients"] = recipients;
+        variants.push(bad);
+    }
+    for (field, content) in [
+        ("block_count", json!(2)),
+        (
+            "storage_state",
+            json!({"initial_storage":{},"proof_slots":["0x0"]}),
+        ),
+        (
+            "access_list",
+            json!({"pattern":"distinct_addresses","count":1}),
+        ),
+        ("authorizations", json!({"pattern":"distinct","count":1})),
+    ] {
+        let mut bad = base.clone();
+        bad["program"][field] = content;
+        variants.push(bad);
+    }
+    let mut create = base.clone();
+    create["program"]["transactions"]["kind"] = json!("create");
+    variants.push(create);
+    let mut missing = base.clone();
+    missing["program"]
+        .as_object_mut()
+        .unwrap()
+        .remove("prestate_contracts");
+    variants.push(missing);
+    for map in [
+        json!({"0x0":"0x0"}),
+        json!({"garbage":"0x1"}),
+        json!({"0x0":"garbage"}),
+        json!({"0x0":"0x1", "0x00":"0x2"}),
+    ] {
+        let mut bad = base.clone();
+        bad["program"]["prestate_contracts"][0]["initial_storage"] = map;
+        variants.push(bad);
+    }
+    let duplicate_raw_slot = serde_json::to_string(&base)
+        .unwrap()
+        .replace("\"0x0\":\"0x1\"", "\"0x0\":\"0x1\",\"0x0\":\"0x2\"");
+    assert!(zkgas::fixture::parse_request(duplicate_raw_slot.as_bytes()).is_err());
+    for bad in variants {
+        assert!(
+            zkgas::fixture::parse_request(&serde_json::to_vec(&bad).unwrap()).is_err(),
+            "{bad}"
+        );
+        let (output, dir) = export_with_profile(&bad, "evm-gas-only");
+        assert!(!output.status.success());
+        absent_outputs(&dir);
+    }
+}
+
+#[test]
+fn legacy_code_only_prestate_omits_initialized_storage_diagnostics() {
+    let value = multiaccount_request(&["0x00"], false);
+    let (output, dir) = export_with_profile(&value, "evm-gas-only");
+    success(&output);
+    assert!(
+        report(&dir)["prestate_contracts"]
+            .get("initialized_storage")
+            .is_none()
+    );
+    let parsed = zkgas::fixture::parse_request(&serde_json::to_vec(&value).unwrap()).unwrap();
+    assert!(
+        serde_json::to_value(&parsed.program.prestate_contracts.as_ref().unwrap()[0])
+            .unwrap()
+            .get("initial_storage")
+            .is_none()
+    );
+    assert!(
+        serde_json::to_value(parsed.program.transactions.unwrap())
+            .unwrap()
+            .get("recipients")
+            .is_none()
+    );
+}

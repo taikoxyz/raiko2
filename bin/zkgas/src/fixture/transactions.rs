@@ -21,6 +21,8 @@ pub struct ProgramTransactions {
     pub gas_limit: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_runtime_hex: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipients: Option<Vec<Address>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -56,6 +58,21 @@ pub struct TransactionAccountPostState {
 }
 
 impl ProgramTransactions {
+    /// One source of truth for signing and committed-envelope/poststate checks.
+    pub(super) fn call_recipient(&self, index: usize) -> Result<Address> {
+        ensure!(
+            self.kind == TransactionKind::Call,
+            "CALL recipient requested for CREATE"
+        );
+        match &self.recipients {
+            Some(recipients) => recipients
+                .get(index)
+                .copied()
+                .ok_or_else(|| anyhow::anyhow!("transactions recipient index out of bounds")),
+            None => Ok(Address::repeat_byte(0x66)),
+        }
+    }
+
     pub(super) fn validate(
         &self,
         code: &[u8],
@@ -157,8 +174,9 @@ impl ProgramTransactions {
         let mut users = Vec::with_capacity(self.count_per_block);
         for (index, tx) in transactions.iter().enumerate() {
             let nonce = u64::try_from(block_index * self.count_per_block + index)?;
-            let expected_to =
-                (self.kind == TransactionKind::Call).then_some(Address::repeat_byte(0x66));
+            let expected_to = (self.kind == TransactionKind::Call)
+                .then(|| self.call_recipient(index))
+                .transpose()?;
             ensure!(
                 tx.nonce() == nonce && tx.to() == expected_to && tx.gas_limit() == self.gas_limit,
                 "committed transaction envelope differs from descriptor"

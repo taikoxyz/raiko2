@@ -203,7 +203,10 @@ fn candidate_transactions(
                 to: if transactions.is_some_and(|t| t.kind == TransactionKind::Create) {
                     TxKind::Create
                 } else {
-                    TxKind::Call(Address::repeat_byte(0x66))
+                    TxKind::Call(match transactions {
+                        Some(t) => t.call_recipient(nonce)?,
+                        None => Address::repeat_byte(0x66),
+                    })
                 },
                 value: U256::ZERO,
                 access_list: access_list.clone(),
@@ -493,6 +496,14 @@ pub(super) fn build_program(
     prestate_contracts: Option<&[PrestateContract]>,
     execution_profile: raiko2_stateless::workload_lab::ExecutionProfile,
 ) -> Result<BuiltProgram> {
+    super::prestate::validate(
+        prestate_contracts,
+        transactions,
+        block_count,
+        storage_state.is_some(),
+        access_list.is_some(),
+        authorizations.is_some(),
+    )?;
     if let Some(t) = transactions {
         t.validate(
             code,
@@ -561,6 +572,15 @@ pub(super) fn build_program(
                 "prestate contract conflicts with initial account"
             );
             controlled_state.insert_account(address, U256::ZERO, 1, keccak256(&code));
+            if let Some(storage) = &contract.initial_storage {
+                controlled_state.storages.insert(
+                    keccak256(address),
+                    storage
+                        .iter()
+                        .map(|(slot, value)| (keccak256(slot.to_be_bytes::<32>()), *value))
+                        .collect(),
+                );
+            }
             codes.push(code);
         }
         codes.sort_by_key(|code| keccak256(code));
@@ -731,6 +751,7 @@ pub(super) fn build_program(
             prestate_report = Some(PrestateReport::new(
                 contracts,
                 &executor.reads,
+                &controlled_state,
                 full_witness_node_count,
                 nodes.len(),
             )?);
@@ -873,6 +894,9 @@ pub(super) fn build_program(
                 "controlled fixture hashed post-state differs from rebuilt state: pre={prestate_root}, post={}, rebuilt={post_state_root}",
                 block.header.state_root,
             );
+        }
+        if let Some(report) = &mut prestate_report {
+            report.finish_storage(&controlled_state);
         }
         if index + 1 < block_count {
             prestate_root = post_state_root;
@@ -1020,4 +1044,170 @@ pub(super) fn build_program(
             report
         }),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    fn initialized_request() -> Value {
+        json!({"schema_version":1,"program": {
+            "code_hex":"0x00", "input_hex":"0x", "expected_route_counts":{"opcode:0x00":1},
+            "transactions":{"kind":"call","count_per_block":1,"gas_limit":100000,
+                "recipients":["0x0000000000000000000000000000000000010000"]},
+            "prestate_contracts":[{"address":"0x0000000000000000000000000000000000010000",
+                "code_hex":"0x00","initial_storage":{"0x0":"0x1"}}]
+        }})
+    }
+
+    // Bypass parse_request deliberately: core construction must enforce the same invariants.
+    fn direct_build(value: Value) -> Result<BuiltProgram> {
+        let request: super::super::ProgramRequest = serde_json::from_value(value)?;
+        let p = request.program;
+        build_program(
+            &super::super::program_bytes(&p.code_hex)?,
+            &super::super::program_bytes(&p.input_hex)?,
+            p.block_count,
+            p.storage_state.as_ref(),
+            p.authorizations.as_ref(),
+            p.access_list.as_ref(),
+            p.transactions.as_ref(),
+            p.prestate_contracts.as_deref(),
+            raiko2_stateless::workload_lab::ExecutionProfile::EvmGasOnly,
+        )
+    }
+
+    #[test]
+    fn initialized_fanout_core_constructor_rejects_cross_field_bypasses() {
+        let base = initialized_request();
+        let mut variants = Vec::new();
+        for (field, value, error) in [
+            ("block_count", json!(2), "one block"),
+            (
+                "storage_state",
+                json!({"initial_storage":{}, "proof_slots":["0x0"]}),
+                "cannot combine",
+            ),
+        ] {
+            let mut bad = base.clone();
+            bad["program"][field] = value;
+            variants.push((bad, error));
+        }
+        for (field, value, error) in [
+            ("kind", json!("create"), "CALL"),
+            ("recipients", json!([]), "length"),
+            (
+                "recipients",
+                json!(["0x0000000000000000000000000000000000010001"]),
+                "declared",
+            ),
+            ("count_per_block", json!(2049), "length"),
+        ] {
+            let mut bad = base.clone();
+            bad["program"]["transactions"][field] = value;
+            variants.push((bad, error));
+        }
+        for (field, value) in [
+            (
+                "access_list",
+                json!({"pattern":"distinct_addresses","count":1}),
+            ),
+            ("authorizations", json!({"pattern":"distinct","count":1})),
+        ] {
+            let mut bad = base.clone();
+            bad["program"][field] = value;
+            variants.push((bad, "cannot combine"));
+        }
+        let mut missing = base.clone();
+        missing["program"]
+            .as_object_mut()
+            .unwrap()
+            .remove("prestate_contracts");
+        variants.push((missing, "prestate_contracts"));
+        let mut zero = base.clone();
+        zero["program"]["prestate_contracts"][0]["initial_storage"] = json!({"0x0":"0x0"});
+        variants.push((zero, "nonzero"));
+        let mut reserved = base.clone();
+        reserved["program"]["prestate_contracts"][0]["address"] =
+            json!("0x6666666666666666666666666666666666666666");
+        variants.push((reserved, "reserved"));
+        let entries = (0..16385)
+            .map(|i| (format!("0x{i:x}"), json!("0x1")))
+            .collect::<serde_json::Map<_, _>>();
+        let mut overflow = base;
+        overflow["program"]["prestate_contracts"][0]["initial_storage"] = Value::Object(entries);
+        variants.push((overflow, "16384"));
+        for (bad, expected) in variants {
+            let err = match direct_build(bad) {
+                Ok(_) => panic!("core accepted invalid configuration"),
+                Err(err) => err,
+            };
+            assert!(err.to_string().contains(expected), "{err:#}");
+        }
+    }
+
+    #[test]
+    fn initialized_fanout_committed_gate_rejects_wrong_recipient_order() {
+        let a = "0x0000000000000000000000000000000000010000"
+            .parse::<Address>()
+            .unwrap();
+        let b = "0x0000000000000000000000000000000000010001"
+            .parse::<Address>()
+            .unwrap();
+        let descriptor: ProgramTransactions = serde_json::from_value(json!({
+            "kind":"call", "count_per_block":3, "gas_limit":100000, "recipients":[a,b,a]
+        }))
+        .unwrap();
+        let candidates =
+            candidate_transactions(&Bytes::new(), 3, None, None, Some(&descriptor)).unwrap();
+        let sender = controlled_candidate_signer().unwrap().address();
+        let mut state = BTreeMap::new();
+        state.insert(
+            keccak256(sender),
+            TrieAccount {
+                nonce: 3,
+                ..Default::default()
+            },
+        );
+        state.insert(
+            keccak256(a),
+            TrieAccount {
+                nonce: 1,
+                balance: U256::from(7),
+                ..Default::default()
+            },
+        );
+        state.insert(
+            keccak256(b),
+            TrieAccount {
+                nonce: 1,
+                balance: U256::from(9),
+                ..Default::default()
+            },
+        );
+        let report = descriptor
+            .after_block(0, sender, &candidates, &state)
+            .unwrap();
+        assert_eq!(
+            report.users[0].poststate.as_ref().unwrap().balance,
+            U256::from(7)
+        );
+        assert_eq!(
+            report.users[1].poststate.as_ref().unwrap().balance,
+            U256::from(9)
+        );
+        assert_eq!(
+            report.users[2].poststate.as_ref().unwrap().balance,
+            U256::from(7)
+        );
+        let wrong_descriptor: ProgramTransactions = serde_json::from_value(json!({
+            "kind":"call", "count_per_block":3, "gas_limit":100000, "recipients":[b,a,a]
+        }))
+        .unwrap();
+        let wrong =
+            candidate_transactions(&Bytes::new(), 3, None, None, Some(&wrong_descriptor)).unwrap();
+        assert!(descriptor.after_block(0, sender, &wrong, &state).is_err());
+        assert!(descriptor.call_recipient(3).is_err());
+    }
 }

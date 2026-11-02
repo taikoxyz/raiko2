@@ -1292,3 +1292,8 @@ single-block node-limit comparison remains separate from gas-only priority.
 Output files are exclusive and original evidence is never rewritten. Independent
 operand/input qualification remains required; a report cannot establish the
 semantics of a wrongly constructed program.
+
+The [first32-input gas-budget results](../../../docs/research/2026-11-02-gas-budget-composition.md)
+retain all16 controls, literal node/full shortfalls and near-full measurements.
+They leave heterogeneous transaction sequences and cold-access/rollback
+combinations open; their measured maxima are not bounds for those combinations.

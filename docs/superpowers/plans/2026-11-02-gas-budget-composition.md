@@ -26,23 +26,23 @@ frozen native/quote/SP1 tools. Root alone orchestrates sequential actual samplin
 
 ## Tasks
 
-1. [ ] Density implementer owns its generator/tests. Write expected-failing tests,
+1. [x] Density implementer owns its generator/tests. Write expected-failing tests,
    implement20 cases, then run focused stdlib and frozen-native smoke checks.
    Hand off a usage fragment and exact file hashes; do not edit shared README.
-2. [ ] Journal implementer owns its generator/tests. Apply the same TDD cycle to
+2. [x] Journal implementer owns its generator/tests. Apply the same TDD cycle to
    12 cases, including refund arithmetic, caught status/marker and semantic
    negative gates. Preserve old producer bytes; no Rust or guest build.
-3. [ ] Root owns new `bin/zkgas/bench/gas_budget_report.py` and
+3. [x] Root owns new `bin/zkgas/bench/gas_budget_report.py` and
    `bin/zkgas/bench/tests/test_gas_budget_report.py`. Test receipt arithmetic,
    strict2B boundary, unmeasured/multi-block handling and optional node limit
    before implementing the read-only existing-workload report command.
-4. [ ] Reviewer independently reads the final diffs/spec and verifies gas,
+4. [x] Reviewer independently reads the final diffs/spec and verifies gas,
    counter, stack/state/frame ownership and negative-oracle behavior. Fix and
    re-check findings. Root integrates usage; run full stdlib bench suite once.
-5. [ ] Tester independently qualifies all32 actual native/quote inputs, checks
+5. [x] Tester independently qualifies all32 actual native/quote inputs, checks
    declared gas arithmetic against receipts, captures occupancy and canonical
    binaries, and retains meaningful native/semantic negatives.
-6. [ ] Root commits the reviewed source/input inventory and freezes configuration.
+6. [x] Root commits the reviewed source/input inventory and freezes configuration.
    Run existing bounded SP1 measure sequentially on qualified inputs; preserve
    every attempt and resource receipt. No coefficient or guest change.
 7. [ ] Independently audit raw normalization/input/output/model joins, all32

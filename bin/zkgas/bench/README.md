@@ -1428,3 +1428,32 @@ and `witnessed_code_bytes` count their code hashes actually fetched.
 execution targets, not encoded trie leaf counts. The total witness code counts
 and bytes include system/primary code. Full/minimized witness node counts expose
 the authenticated proof reduction. These diagnostics do not allocate actual PGU.
+
+The multi-account code-loading producer uses this mode to vary 16/128/512 target
+accounts, 32/4096/24576 code bytes and shared versus unique code hashes. Each of
+the 18 settings has its own zero-call control and full-gas case, for 36 inputs.
+Four signed users cycle through targets; every child returns its own ADDRESS in
+32 bytes and the parent checks status, return length, address and final counter.
+The executed child prefix is identical; unreachable tails and fixed-width salts
+vary loading/analysis work. Distinct accounts still execute separate calls and
+have separate warmth; shared hashes only deduplicate code bytes and analysis.
+
+```sh
+~/.venv/bin/python -S bin/zkgas/bench/cases/multiaccount_code.py \
+  --output-dir "$CASES_DIR"
+~/.venv/bin/python -S -m unittest discover -s bin/zkgas/bench/tests \
+  -p test_multiaccount_code.py
+NATIVE_FIXTURE_BIN="$NATIVE_BIN" ZKGAS_QUOTE_BIN="$QUOTE_BIN" \
+  ~/.venv/bin/python -S -m unittest discover -s bin/zkgas/bench/tests \
+  -p test_multiaccount_code.py
+```
+
+Use a host fixture built with this optional prestate interface. GuestInput remains
+the ordinary vendor-neutral input; this producer requires no new guest format.
+Use `workload.py screen` and `measure` with frozen artifacts as above. Preserve
+literal node per-block quotes/sum, full proposal quote and actual same-proposal
+SP1 PGU separately, including all controls and failed attempts. Full cases target
+at least 99% of the 30M charged whole-block gas budget, including Anchor; headers
+remain 31M. This selects no future node limit. The per-user gas envelope is the
+same for each zero/full pair. A native-only one-account control and semantic
+negatives supplement the matrix; they do not supply invented actual PGU.

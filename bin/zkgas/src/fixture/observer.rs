@@ -6,6 +6,7 @@ use alethia_reth_block::{
 };
 use alethia_reth_evm::{alloy::TaikoEvmContext, zk_gas::pricing::ZkGasMode};
 use alloy_evm::EvmFactory as _;
+use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
 use reth_ethereum_primitives::Block;
 use reth_evm::{ConfigureEvm as _, block::BlockExecutionError};
 use reth_primitives_traits::{RecoveredBlock, SealedHeader};
@@ -22,11 +23,11 @@ use reth_revm::{
 use reth_trie_common::{HashedPostState, KeccakKeyHasher};
 use serde::Serialize;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex},
 };
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]
 pub struct OpcodeObservation {
     /// Completed opcode instructions, including work in reverted child frames.
     pub completed: BTreeMap<String, u64>,
@@ -35,6 +36,51 @@ pub struct OpcodeObservation {
     /// Explicit STOP, RETURN, REVERT and SELFDESTRUCT completions.
     pub terminals: BTreeMap<String, u64>,
     pub exceptional_instructions: u64,
+}
+/// Reads that reached the backing authenticated database, including reverted frames.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct NativeReads {
+    pub accounts: BTreeSet<Address>,
+    pub storage: BTreeMap<Address, BTreeSet<U256>>,
+    pub codes: BTreeMap<B256, Bytes>,
+}
+#[derive(Debug)]
+struct RecordingDatabase<DB> {
+    inner: DB,
+    reads: NativeReads,
+}
+impl<DB: Database> Database for RecordingDatabase<DB> {
+    type Error = DB::Error;
+    fn basic(
+        &mut self,
+        address: Address,
+    ) -> Result<Option<reth_revm::state::AccountInfo>, Self::Error> {
+        let info = self.inner.basic(address)?;
+        self.reads.accounts.insert(address);
+        if let Some(code) = info.as_ref().and_then(|info| info.code.as_ref()) {
+            let bytes = code.original_bytes();
+            if !bytes.is_empty() {
+                self.reads.codes.insert(keccak256(&bytes), bytes);
+            }
+        }
+        Ok(info)
+    }
+    fn code_by_hash(&mut self, hash: B256) -> Result<reth_revm::bytecode::Bytecode, Self::Error> {
+        let code = self.inner.code_by_hash(hash)?;
+        let bytes = code.original_bytes();
+        if !bytes.is_empty() {
+            self.reads.codes.insert(hash, bytes);
+        }
+        Ok(code)
+    }
+    fn storage(&mut self, address: Address, index: U256) -> Result<U256, Self::Error> {
+        let value = self.inner.storage(address, index)?;
+        self.reads.storage.entry(address).or_default().insert(index);
+        Ok(value)
+    }
+    fn block_hash(&mut self, number: u64) -> Result<B256, Self::Error> {
+        self.inner.block_hash(number)
+    }
 }
 #[derive(Default)]
 struct Ledger {
@@ -109,6 +155,7 @@ pub(super) struct FixtureExecutor {
     pub user_transaction_count: Option<usize>,
     /// Actual code produced by committed native execution, for later block witnesses.
     pub generated_codes: Vec<alloy_primitives::Bytes>,
+    pub reads: NativeReads,
     pub execution_profile: raiko2_stateless::workload_lab::ExecutionProfile,
 }
 impl raiko2_stateless::DerivedBlockExecutor for FixtureExecutor {
@@ -120,7 +167,10 @@ impl raiko2_stateless::DerivedBlockExecutor for FixtureExecutor {
         db: DB,
     ) -> Result<DerivedBlockExecutionOutcome, BlockExecutionError> {
         let mut state = State::builder()
-            .with_database(db)
+            .with_database(RecordingDatabase {
+                inner: db,
+                reads: NativeReads::default(),
+            })
             .with_bundle_update()
             .build();
         let ledger = Arc::new(Mutex::new(Ledger::default()));
@@ -192,6 +242,7 @@ impl raiko2_stateless::DerivedBlockExecutor for FixtureExecutor {
             .expect("fixture observer poisoned")
             .counts
             .clone();
+        self.reads = std::mem::take(&mut state.database.reads);
         state.merge_transitions(BundleRetention::Reverts);
         let bundle = state.take_bundle();
         self.generated_codes = bundle

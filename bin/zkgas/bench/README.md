@@ -1398,3 +1398,33 @@ The [36-input results](../../../docs/research/2026-11-02-order-cold-frame.md)
 retain both absolute deficits and the severe REVERT overquote tail. The latter
 comes from the existing accepted5M/event reserve; covered observations are not
 automatically accurate prices. All original controls and counterexamples remain.
+
+The host fixture also accepts optional `program.prestate_contracts`, a nonempty
+list of up to512 `{ "address": "0x…", "code_hex": "0x…" }` objects. Each address
+has exactly20 bytes, is unique, exceeds the reserved low range0x0..0xffff and
+avoids the primary runtime, sender, Golden Touch, Anchor, checkpoint and resolver
+accounts. Ordinary deployed runtime must contain1..=24576 bytes and cannot start
+with the reserved0xef prefix. Extra accounts start with nonce1, zero balance and
+empty storage. This mode requires one block and explicit `transactions.kind =
+"call"`, and excludes storage_state, access_list and authorizations. It raises
+only this mode's request bound to32MiB; legacy requests retain4MiB.
+
+A preparatory native pass records actual backing-database account, storage and
+code reads, including reads in reverted frames. The fixture exports the canonical
+multiproof for those targets with mutation support, deduplicates fetched code by
+hash, and replays the minimized witness to check identical block, receipts,
+poststate, opcode observations and read identities before ordinary proposal
+validation. Unused code is absent. Trie sibling structure needed to authenticate
+accessed targets can still commit to background accounts. Predeployment costs
+are outside this measured block; preparatory native execution is not SP1 PGU.
+
+Only this mode adds the optional `prestate_contracts` report object.
+`configured_code_bytes` sums runtime bytes per configured address, while
+`configured_unique_code_bytes` deduplicates hashes. `witnessed_account_count`
+counts configured addresses actually loaded, and `witnessed_unique_code_count`
+and `witnessed_code_bytes` count their code hashes actually fetched.
+`loaded_account_target_count` includes system and absent-account reads;
+`loaded_storage_target_count` counts actual raw storage targets. These are
+execution targets, not encoded trie leaf counts. The total witness code counts
+and bytes include system/primary code. Full/minimized witness node counts expose
+the authenticated proof reduction. These diagnostics do not allocate actual PGU.

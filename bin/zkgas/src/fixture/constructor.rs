@@ -3,6 +3,7 @@ use super::{
     access_list::{AccessListReport, ProgramAccessList},
     authorization::{AuthorizationReport, ProgramAuthorizations},
     observer::{FixtureExecutor, OpcodeObservation},
+    prestate::{PrestateContract, PrestateReport},
     storage::{ProgramStorageState, ProgramStorageStateReport},
     transactions::{ProgramTransactions, TransactionKind, TransactionsReport},
 };
@@ -70,6 +71,7 @@ pub(super) struct BuiltProgram {
     pub authorizations: Option<AuthorizationReport>,
     pub access_list: Option<AccessListReport>,
     pub transactions: Option<TransactionsReport>,
+    pub prestate: Option<PrestateReport>,
 }
 /// Native execution receipt data; gas is the charged cumulative-receipt delta.
 #[derive(Clone, Debug, Serialize)]
@@ -142,6 +144,21 @@ fn anchor_tx(
 fn controlled_candidate_signer() -> Result<PrivateKeySigner> {
     // Public, fixed offline test identity. Never read a wallet or credential source.
     Ok(PrivateKeySigner::from_bytes(&B256::repeat_byte(0x11))?)
+}
+pub(super) fn prestate_reserved_addresses() -> Result<Vec<Address>> {
+    let chain_spec = SupportedChainSpecs::default()
+        .get_chain_spec_with_chain_id(OVERHEAD_CHAIN_ID)
+        .ok_or_else(|| anyhow::anyhow!("missing controlled chain spec"))?;
+    Ok(vec![
+        Address::repeat_byte(0x66),
+        controlled_candidate_signer()?.address(),
+        chain_spec
+            .l2_contract
+            .ok_or_else(|| anyhow::anyhow!("missing Anchor address"))?,
+        CONTROLLED_CHECKPOINT_STORE,
+        CONTROLLED_RESOLVER,
+        FixedKSigner::golden_touch()?.address(),
+    ])
 }
 fn candidate_transactions(
     code_input: &Bytes,
@@ -473,6 +490,7 @@ pub(super) fn build_program(
     authorizations: Option<&ProgramAuthorizations>,
     access_list: Option<&ProgramAccessList>,
     transactions: Option<&ProgramTransactions>,
+    prestate_contracts: Option<&[PrestateContract]>,
     execution_profile: raiko2_stateless::workload_lab::ExecutionProfile,
 ) -> Result<BuiltProgram> {
     if let Some(t) = transactions {
@@ -535,6 +553,19 @@ pub(super) fn build_program(
         &Bytes::copy_from_slice(code),
         transactions,
     )?;
+    if let Some(contracts) = prestate_contracts {
+        for contract in contracts {
+            let (address, code) = contract.decoded()?;
+            anyhow::ensure!(
+                !controlled_state.accounts.contains_key(&keccak256(address)),
+                "prestate contract conflicts with initial account"
+            );
+            controlled_state.insert_account(address, U256::ZERO, 1, keccak256(&code));
+            codes.push(code);
+        }
+        codes.sort_by_key(|code| keccak256(code));
+        codes.dedup();
+    }
     if let Some(state) = storage_state {
         state.apply_fixture(&mut controlled_state, &candidates)?;
     }
@@ -608,6 +639,7 @@ pub(super) fn build_program(
     let mut authorization_blocks = Vec::with_capacity(block_count);
     let mut access_list_blocks = Vec::with_capacity(block_count);
     let mut transaction_blocks = Vec::with_capacity(block_count);
+    let mut prestate_report = None;
 
     for index in 0..block_count {
         let block_number = OVERHEAD_BLOCK_NUMBER + u64::try_from(index)?;
@@ -641,7 +673,7 @@ pub(super) fn build_program(
                 &controlled_state.accounts,
             )?;
         }
-        let witness = ExecutionWitness {
+        let mut witness = ExecutionWitness {
             state: state_nodes.clone(),
             codes: codes.clone(),
             headers: ancestor_headers.clone(),
@@ -672,12 +704,13 @@ pub(super) fn build_program(
         let expected_transactions = std::iter::once(anchor.clone())
             .chain(user_transactions.iter().cloned())
             .collect::<Vec<_>>();
-        let outcome = reconstruct_block_from_transactions_with_executor_and_witness_resources(
+        let mut outcome = reconstruct_block_from_transactions_with_executor_and_witness_resources(
             anchor
+                .clone()
                 .try_into_recovered()
                 .map_err(|_| anyhow::anyhow!("controlled anchor signature is unrecoverable"))?,
             user_transactions.clone(),
-            block_env,
+            block_env.clone(),
             &witness,
             &ancestor_headers,
             &[],
@@ -685,6 +718,53 @@ pub(super) fn build_program(
             &evm_config,
             &mut executor,
         )?;
+        if let Some(contracts) = prestate_contracts {
+            let (root, nodes) = super::prestate::minimized_witness(
+                &controlled_state,
+                &executor.reads,
+                &outcome.hashed_state,
+            );
+            anyhow::ensure!(
+                root == prestate_root,
+                "native-read proof root differs from full prestate"
+            );
+            prestate_report = Some(PrestateReport::new(
+                contracts,
+                &executor.reads,
+                full_witness_node_count,
+                nodes.len(),
+            )?);
+            witness.state = nodes;
+            witness.codes = executor.reads.codes.values().cloned().collect();
+            let mut replay_executor = FixtureExecutor {
+                user_transaction_count: Some(users_per_block),
+                execution_profile,
+                ..Default::default()
+            };
+            let replay = reconstruct_block_from_transactions_with_executor_and_witness_resources(
+                anchor
+                    .try_into_recovered()
+                    .map_err(|_| anyhow::anyhow!("controlled anchor signature is unrecoverable"))?,
+                user_transactions.clone(),
+                block_env,
+                &witness,
+                &ancestor_headers,
+                &[],
+                &runtime_chain_spec,
+                &evm_config,
+                &mut replay_executor,
+            )?;
+            anyhow::ensure!(
+                replay.filtered_block == outcome.filtered_block
+                    && replay.hashed_state == outcome.hashed_state
+                    && replay.execution_result == outcome.execution_result
+                    && replay_executor.observation == executor.observation
+                    && replay_executor.reads == executor.reads,
+                "minimized native replay differs from full prestate execution"
+            );
+            outcome = replay;
+            executor = replay_executor;
+        }
         anyhow::ensure!(
             outcome.filtered_block.body().transactions == expected_transactions,
             "fixture committed transactions differ from exact signed candidate order"
@@ -897,6 +977,7 @@ pub(super) fn build_program(
         bail!("fee-neutral fixture sender did not finish at expected balance");
     }
     Ok(BuiltProgram {
+        prestate: prestate_report,
         input: guest_input,
         transactions: transactions.map(|t| TransactionsReport {
             kind: t.kind,

@@ -3,11 +3,13 @@ mod access_list;
 mod authorization;
 mod constructor;
 mod observer;
+mod prestate;
 mod storage;
 mod transactions;
 pub use access_list::{AccessListPattern, ProgramAccessList};
 pub use authorization::{AuthorizationPattern, ProgramAuthorizations};
 pub use observer::OpcodeObservation;
+pub use prestate::PrestateContract;
 pub use storage::{ProgramStorageState, ProgramStorageStateReport};
 pub use transactions::{ProgramTransactions, TransactionKind};
 
@@ -26,6 +28,7 @@ use std::{
 };
 
 const MAX_REQUEST_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_PRESTATE_REQUEST_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_OUTPUT_BYTES: u64 = 128 * 1024 * 1024;
 fn one() -> usize {
     1
@@ -57,6 +60,8 @@ pub struct Program {
     pub access_list: Option<ProgramAccessList>,
     #[serde(default)]
     pub transactions: Option<ProgramTransactions>,
+    #[serde(default)]
+    pub prestate_contracts: Option<Vec<PrestateContract>>,
 }
 fn program_bytes(value: &str) -> Result<Vec<u8>> {
     hex::decode(
@@ -68,7 +73,7 @@ fn program_bytes(value: &str) -> Result<Vec<u8>> {
 }
 pub fn parse_request(bytes: &[u8]) -> Result<ProgramRequest> {
     ensure!(
-        bytes.len() as u64 <= MAX_REQUEST_BYTES,
+        bytes.len() as u64 <= MAX_PRESTATE_REQUEST_BYTES,
         "request byte limit exceeded"
     );
     let request: ProgramRequest = serde_json::from_slice(bytes).context("parse ProgramRequest")?;
@@ -77,6 +82,11 @@ pub fn parse_request(bytes: &[u8]) -> Result<ProgramRequest> {
         "fixture request schema_version must be 1"
     );
     let program = &request.program;
+    ensure!(
+        program.prestate_contracts.is_some() || bytes.len() as u64 <= MAX_REQUEST_BYTES,
+        "request byte limit exceeded"
+    );
+    prestate::validate(program)?;
     ensure!(
         (1..=32).contains(&program.block_count),
         "local program block_count must be in 1..=32"
@@ -158,13 +168,14 @@ fn read_request(path: &Path) -> Result<Vec<u8>> {
     )?);
     let metadata = file.metadata()?;
     ensure!(
-        metadata.is_file() && metadata.len() <= MAX_REQUEST_BYTES,
-        "request must be a regular file of at most4MiB"
+        metadata.is_file() && metadata.len() <= MAX_PRESTATE_REQUEST_BYTES,
+        "request must be a regular file of at most32MiB"
     );
     let mut bytes = Vec::new();
-    file.take(MAX_REQUEST_BYTES + 1).read_to_end(&mut bytes)?;
+    file.take(MAX_PRESTATE_REQUEST_BYTES + 1)
+        .read_to_end(&mut bytes)?;
     ensure!(
-        bytes.len() as u64 <= MAX_REQUEST_BYTES,
+        bytes.len() as u64 <= MAX_PRESTATE_REQUEST_BYTES,
         "request byte limit exceeded"
     );
     Ok(bytes)
@@ -223,6 +234,7 @@ pub fn run(args: &FixtureArgs) -> Result<serde_json::Value> {
         request.program.authorizations.as_ref(),
         request.program.access_list.as_ref(),
         request.program.transactions.as_ref(),
+        request.program.prestate_contracts.as_deref(),
         args.execution_profile,
     )?;
     let user_count = request
@@ -307,6 +319,9 @@ pub fn run(args: &FixtureArgs) -> Result<serde_json::Value> {
     }
     if let Some(transactions) = &built.transactions {
         report["transactions"] = serde_json::to_value(transactions)?;
+    }
+    if let Some(prestate) = &built.prestate {
+        report["prestate_contracts"] = serde_json::to_value(prestate)?;
     }
     let mut outputs = vec![stage_json(&args.output, &built.input)?];
     if let Some(path) = &args.output_bincode {

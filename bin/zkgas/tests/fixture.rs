@@ -1353,3 +1353,232 @@ fn transaction_descriptor_route_bounds_cover_block_instruction_budget() {
     value["program"]["expected_route_counts"]["opcode:0x5b"] = 15_974_400u64.into();
     assert!(zkgas::fixture::parse_request(&serde_json::to_vec(&value).unwrap()).is_err());
 }
+
+fn multiaccount_request(codes: &[&str], call: bool) -> Value {
+    let addresses = (0..codes.len())
+        .map(|index| format!("0x{:040x}", 0x10000 + index))
+        .collect::<Vec<_>>();
+    let mut code = String::from("0x");
+    if call {
+        for address in addresses.iter().take(2) {
+            code.push_str(&format!("5f5f5f5f5f73{}61fffff150", &address[2..]));
+        }
+    }
+    code.push_str("00");
+    let mut value = request(&code, json!({"opcode:0xf1":if call {2} else {0}}));
+    value["program"]["transactions"] =
+        json!({"kind":"call","count_per_block":1,"gas_limit":1000000});
+    value["program"]["prestate_contracts"] = codes
+        .iter()
+        .zip(addresses)
+        .map(|(code, address)| json!({"address":address,"code_hex":code}))
+        .collect();
+    value
+}
+
+#[test]
+fn multiaccount_code_is_selected_from_native_reads_and_deduplicated() {
+    for (codes, unique) in [
+        (["0x305f5260205ff3", "0x305f5260205ff3", "0x604200"], 1),
+        (["0x305f5260205ff3", "0x305f5260205ff300", "0x604200"], 2),
+    ] {
+        for call in [false, true] {
+            let value = multiaccount_request(&codes, call);
+            let (output, dir) = export_with_profile(&value, "evm-gas-only");
+            success(&output);
+            let input = input(&dir);
+            let report = report(&dir);
+            assert_eq!(report["prestate_contracts"]["configured_account_count"], 3);
+            assert_eq!(
+                report["prestate_contracts"]["witnessed_account_count"],
+                if call { 2 } else { 0 }
+            );
+            assert_eq!(
+                report["prestate_contracts"]["witnessed_unique_code_count"],
+                if call { unique } else { 0 }
+            );
+            let code_bytes = &input.witnesses[0].witness.codes;
+            assert!(
+                !code_bytes
+                    .iter()
+                    .any(|code| code.as_ref() == hex::decode("604200").unwrap())
+            );
+            // N0's primary STOP shares the checkpoint runtime; full has a distinct parent.
+            assert_eq!(code_bytes.len(), if call { 3 + unique } else { 2 });
+            if call {
+                let mut missing_code = input.clone();
+                missing_code.witnesses[0]
+                    .witness
+                    .codes
+                    .retain(|code| code.as_ref() != hex::decode("305f5260205ff3").unwrap());
+                assert!(
+                    raiko2_zkgas_trace::quote_shasta_proposal_with_execution_profile(
+                        &missing_code,
+                        raiko2_zkgas_trace::ExecutionProfile::EvmGasOnly
+                    )
+                    .is_err()
+                );
+                let mut missing_state = input.clone();
+                // JSON decoding canonicalizes inline nodes into the proposal pool.
+                missing_state.proposal_state_nodes.clear();
+                missing_state.witnesses[0].witness.state.clear();
+                missing_state.witnesses[0].witness.state_indices.clear();
+                assert!(
+                    raiko2_zkgas_trace::quote_shasta_proposal_with_execution_profile(
+                        &missing_state,
+                        raiko2_zkgas_trace::ExecutionProfile::EvmGasOnly
+                    )
+                    .is_err()
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn multiaccount_rejects_invalid_configuration_before_publication() {
+    let base = multiaccount_request(&["0x00"], false);
+    for (field, value) in [
+        ("address", json!("0x01")),
+        ("address", json!(format!("0x{}", "00".repeat(20)))),
+        ("address", json!(format!("0x{}", "66".repeat(20)))),
+        ("code_hex", json!("0x")),
+        ("code_hex", json!("00")),
+        ("code_hex", json!("0xzz")),
+        ("code_hex", json!(format!("0x{}", "00".repeat(24577)))),
+        ("code_hex", json!("0xef00")),
+    ] {
+        let mut bad = base.clone();
+        bad["program"]["prestate_contracts"][0][field] = value;
+        let (output, dir) = export(&bad);
+        assert!(!output.status.success());
+        absent_outputs(&dir);
+    }
+    let mut duplicate = base.clone();
+    duplicate["program"]["prestate_contracts"] = json!([
+        base["program"]["prestate_contracts"][0],
+        base["program"]["prestate_contracts"][0]
+    ]);
+    assert!(zkgas::fixture::parse_request(&serde_json::to_vec(&duplicate).unwrap()).is_err());
+    for (field, value) in [
+        ("block_count", json!(2)),
+        (
+            "transactions",
+            json!({"kind":"create","count_per_block":1,"gas_limit":1000000}),
+        ),
+        (
+            "storage_state",
+            json!({"initial_storage":{},"proof_slots":["0x0"]}),
+        ),
+        ("prestate_contracts", json!([])),
+    ] {
+        let mut bad = base.clone();
+        bad["program"][field] = value;
+        assert!(zkgas::fixture::parse_request(&serde_json::to_vec(&bad).unwrap()).is_err());
+    }
+    let mut legacy = base.clone();
+    legacy["program"]
+        .as_object_mut()
+        .unwrap()
+        .remove("transactions");
+    assert!(zkgas::fixture::parse_request(&serde_json::to_vec(&legacy).unwrap()).is_err());
+}
+
+#[test]
+fn multiaccount_preserves_read_only_and_reverted_storage_reads() {
+    for (code, reverts) in [
+        ("0x6000545000", false),
+        ("0x6001600055600054505f5ffd", true),
+    ] {
+        let value = multiaccount_request(&[code, code, "0x604200"], true);
+        let (output, dir) = export_with_profile(&value, "evm-gas-only");
+        success(&output);
+        let report = report(&dir);
+        assert!(
+            report["prestate_contracts"]["loaded_storage_target_count"]
+                .as_u64()
+                .unwrap()
+                >= 2
+        );
+        assert_eq!(report["prestate_contracts"]["witnessed_account_count"], 2);
+        if reverts {
+            assert_eq!(report["terminal_counts"]["revert"], 2);
+        }
+    }
+}
+
+#[test]
+fn multiaccount_account_only_read_does_not_load_code() {
+    let mut value = multiaccount_request(&["0x604200"], false);
+    value["program"]["code_hex"] = json!(format!("0x73{:040x}3f5000", 0x10000));
+    value["program"]["expected_route_counts"] = json!({"opcode:0x3f":1});
+    let (output, dir) = export_with_profile(&value, "evm-gas-only");
+    success(&output);
+    let report = report(&dir);
+    assert_eq!(report["prestate_contracts"]["witnessed_account_count"], 1);
+    assert_eq!(
+        report["prestate_contracts"]["witnessed_unique_code_count"],
+        0
+    );
+}
+
+#[test]
+fn multiaccount_request_size_is_scoped_and_contract_count_bounded() {
+    let code = format!("0x{}", "00".repeat(4096));
+    let mut value = multiaccount_request(&[], false);
+    value["program"]["prestate_contracts"] = (0..512)
+        .map(|index| json!({"address":format!("0x{:040x}",0x10000+index),"code_hex":code}))
+        .collect();
+    let bytes = serde_json::to_vec(&value).unwrap();
+    assert!(bytes.len() > 4 * 1024 * 1024);
+    assert!(zkgas::fixture::parse_request(&bytes).is_ok());
+    let duplicate = value["program"]["prestate_contracts"][0].clone();
+    value["program"]["prestate_contracts"]
+        .as_array_mut()
+        .unwrap()
+        .push(duplicate);
+    assert!(zkgas::fixture::parse_request(&serde_json::to_vec(&value).unwrap()).is_err());
+    value["program"]
+        .as_object_mut()
+        .unwrap()
+        .remove("prestate_contracts");
+    let mut legacy = serde_json::to_vec(&value).unwrap();
+    legacy.resize(4 * 1024 * 1024 + 1, b' ');
+    assert!(zkgas::fixture::parse_request(&legacy).is_err());
+}
+
+#[test]
+fn multiaccount_rejects_system_identities_from_canonical_sources() {
+    let mut value = multiaccount_request(&["0x00"], false);
+    let spec = raiko2_primitives::SupportedChainSpecs::default()
+        .get_chain_spec_with_chain_id(167000)
+        .unwrap();
+    for address in [
+        taiko_client_protocol::FixedKSigner::golden_touch()
+            .unwrap()
+            .address(),
+        spec.l2_contract.unwrap(),
+    ] {
+        value["program"]["prestate_contracts"][0]["address"] = json!(address);
+        assert!(zkgas::fixture::parse_request(&serde_json::to_vec(&value).unwrap()).is_err());
+    }
+}
+
+#[test]
+fn multiaccount_unused_background_accounts_do_not_pad_proof_targets() {
+    let value = multiaccount_request(&["0x604200"; 32], false);
+    let (output, dir) = export_with_profile(&value, "evm-gas-only");
+    success(&output);
+    let report = report(&dir);
+    let diagnostics = &report["prestate_contracts"];
+    assert_eq!(diagnostics["witnessed_account_count"], 0);
+    assert_eq!(diagnostics["witnessed_unique_code_count"], 0);
+    assert!(
+        diagnostics["minimized_witness_node_count"]
+            .as_u64()
+            .unwrap()
+            < diagnostics["full_witness_node_count"].as_u64().unwrap()
+    );
+    assert_eq!(diagnostics["configured_code_bytes"], 32 * 3);
+    assert_eq!(diagnostics["configured_unique_code_bytes"], 3);
+}

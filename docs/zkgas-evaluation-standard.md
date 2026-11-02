@@ -210,6 +210,55 @@ the declared domain has `A <= C`. A zero denominator is not applicable, not a pa
 Finite zero counts cover only the declared domain. Complete routing, bounded dimensions, monotonic
 pricing, and fail-closed behavior establish the structural boundary.
 
+#### Gas-bounded priority and pricing complexity
+
+For the current SP1 research worklist, apply the same severity dimension to every pricing family:
+opcodes, precompiles, memory, witness/MPT, payload and transaction/block/proposal-level terms.
+Use a30,000,000 charged-EVM-gas block budget and the positive absolute underpricing in matched
+SP1 PGU units:
+
+```text
+node_shortfall(x)     = max(0, actual_SP1_PGU(x) - node_estimate_PGU(x))
+proposal_shortfall(x) = max(0, actual_SP1_PGU(x) - full_proposal_estimate_PGU(x))
+worst_observed_node_shortfall_30m = max(node_shortfall(x) over tested valid blocks with gas_used <= 30,000,000)
+```
+
+Keep the campaign's honest minimal-input/witness eligibility rule. If no eligible block was tested,
+this maximum is not applicable rather than zero. A block already exceeding the shortfall threshold
+below30M remains relevant; exact saturation is not an eligibility requirement.
+
+For block-aware work, the node shortfall controls the priority; report the full-proposal shortfall
+separately. More than2,000,000,000PGU of shortfall within this budget is high priority;
+at or below2,000,000,000 is low priority in the tested domain and may remain a documented TODO.
+The threshold concerns the missing workload, not total actual PGU or a ratio. High ratios remain
+useful search diagnostics, including controls, without automatically requiring a complex fix.
+Record the exact model, program, input/assembly, gas usage and any node admission limit/filter.
+A gas-only experiment does not establish that a candidate also passes a separately selected filter.
+
+Use receipt charged gas, including intrinsic, floor, refund and system/Anchor effects. Keep those
+effects and any gross-execution-gas diagnostic explicit. Controlled single-block proposals provide
+matched whole-proposal actuals for this block-budget diagnostic. Multi-block context studies retain
+their actual whole-proposal results and block counts separately; do not divide proposal PGU into
+invented block truth. Count proposal-once startup once. State whether a reported30M result is a
+saturation measurement, an extrapolation or a structural bound. A short-sample extrapolation can
+support provisional prioritization, but cannot certify the30M maximum or become a measured result.
+
+Evaluate freely composed transactions and mixed workload families under the same total gas budget.
+Independent low-priority findings do not establish a low-priority combined block. Keep baseline
+shortfalls, growth shortfalls, maximum actual workload and original literal ratios visible alongside
+this severity dimension. This worklist threshold changes neither admission limits nor the separate
+proposal-capacity/deadline policy.
+
+Pricing precision is traded against implementation, runtime and maintenance cost. This applies to
+new fixes and to simplifying existing rules: an opcode special case, witness selector or
+level-aware tariff can be replaced by a simpler candidate when gas-bounded composition tests and
+normal-workload compatibility support accepting the remaining low-priority discrepancy. Record
+the removed branches/selectors, price changes and observed residuals; retain old data and model
+identities. Prefer an explicit small residual/TODO to complexity whose measured benefit does not
+justify its cost. The present engineering focus remains block-mining-aware workload pricing;
+proposal-aware allocation remains undecided. See the
+[initial application and numerical evidence](research/2026-11-02-gas-bounded-pricing-priority.md).
+
 ### 4. Normal-workload availability
 
 For the same `(L, C)` pairs, report:

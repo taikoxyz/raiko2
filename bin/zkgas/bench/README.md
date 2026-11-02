@@ -1612,3 +1612,65 @@ PGU within 30M charged block gas is high priority. These ordinary batch-storage
 patterns are finite evidence; they imply no global MPT bound, fitted price,
 per-user actual allocation, generated proof or GPU throughput result. Existing
 producers, pricing, protocol limits, dependencies, guest and ELF remain unchanged.
+
+### Initialized-storage fanout
+
+`storage_fanout.py` creates the separate `unzen-storage-fanout-20261102` corpus:
+24 inputs crossing 1/8/64 accounts, 8192/16384 aggregate initialized entries,
+update/delete, and own-N0/full pairs. Each account starts with exactly raw slots
+`0..S/A-1` equal to 1, including phase slot 0. All configured accounts share the
+existing guarded `storage_mutation` runtime. The unused primary runtime stays
+`0x00`. There are always 64 ordinary signed CALL users with empty calldata;
+user `j` calls account `j%A`, starts at `1+floor(j/A)*N`, processes N consecutive
+slots, and commits the next phase to that account. These users execute no
+CALL/CALLCODE/DELEGATECALL/STATICCALL opcode; the Anchor remains separate.
+
+```sh
+~/.venv/bin/python -S bin/zkgas/bench/cases/storage_fanout.py \
+  --output-dir "$FANOUT_CASES_DIR"
+~/.venv/bin/python -S -m unittest discover -s bin/zkgas/bench/tests \
+  -p test_storage_fanout.py -v
+STORAGE_FANOUT_NATIVE_BIN="$NATIVE_BIN" \
+  ~/.venv/bin/python -S -m unittest discover -s bin/zkgas/bench/tests \
+  -p test_storage_fanout.py -k frozen_native -v
+```
+
+Output directories must be new; `--model-id` accepts a lowercase SHA256 and
+defaults to frozen model c893. The catalog records request hashes, generator and
+imported source hashes, explicit runtime/gas helper hashes, recipient and phase
+schedules, aggregate/per-account counts, and gross/refund/charged gas separately.
+`account_count`, `aggregate_state_size` and `state_size_per_account` describe the
+account split. No observations are used for fitting.
+
+Full N is derived from all constraints: `64*N+A<=8192` distinct account-slot
+pairs, `(64/A)*N<=S/A-1` initialized body slots per account, the 30M charged
+block budget including the 167355-gas Anchor, the 31M header at every prefix,
+and each candidate's gross gas plus 1000 envelope within the 15M host and
+EIP-7825 caps. The resulting N is 84 for update and 106 for delete, with charged
+block gas 29986683/29918395 and envelopes 466927/582075. Zero/full pairs reuse
+the full envelope. Every user writes N body slots and phase slot 0; aggregate
+writes are `64*(N+1)`. Final initialized-entry count is S for update and
+`S-64*N` for delete, and every account ends at phase `1+(64/A)*N`.
+
+The mandatory standard-library suite executes all 24 actual bytecode programs
+over separate rolling account maps, checking recipient order even for symmetric
+N0 states, raw reads/writes, per-transaction originals/warmth/refunds, phases,
+final maps/counts, routes and concretely executed N+1 infeasibility. It rejects
+rotated/collapsed recipients, swapped storage owners, wrong phase/value and
+malformed declarations. A changed update value with a matching changed checksum
+can execute successfully and still fails intended semantics.
+
+The opt-in native smoke runs two bounded full cases (8-account update and
+64-account delete) against the supplied executable, with a 180-second timeout
+per case and one temporary case retained at a time. It performs no builds or
+downloads and checks all 65 receipts, charged gas, and declaration-ordered
+`prestate_contracts.initialized_storage` initial/final root/count diagnostics.
+Root shape/count checks do not independently authenticate roots or signed order.
+Before actuals, independently review source and qualify all 24 canonical inputs,
+real quotes, authenticated initial/final roots, all 64 signed destinations,
+receipts and intended bytecode semantics. Preserve own-N0 controls and every
+failure; freeze source/host/input hashes with unchanged quote, SDK6.3, workload
+ELF and model. Compare actual same-proposal SP1 PGU, literal node block estimates
+and sum, and complete-proposal estimate separately, retaining both deficit flags.
+These finite inputs establish no universal storage-trie bound, price refit,
+per-user actual allocation, generated proof or throughput result.

@@ -52,7 +52,7 @@ SDK6.3 execute-only ELF. No Rust/guest/SDK/pricing change.
    tester qualifies all36 canonical native/quote inputs and retained negative
    controls, including ordered signed input identity and exact receipt gas.
    Native descriptors/31M remaining envelopes must match predictions.
-5. [ ] Root commits coherent reviewed source and freezes final source/catalog/
+5. [x] Root commits coherent reviewed source and freezes final source/catalog/
    qualified inventory/config before sequential SP1 measurements. Use existing
    bounded measurement tools; keep all attempts and owned-resource cleanup.
 6. [ ] Independently audit canonical joins, normalization, both literal/full

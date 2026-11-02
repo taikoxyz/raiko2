@@ -1393,3 +1393,8 @@ qualified, must retain actual normalized PGU, each node block estimate and liter
 sum, and the complete proposal estimate. Own-N0 differences remain diagnostic;
 no per-user actual allocation, pricing refit, proof throughput or universal bound
 is implied.
+
+The [36-input results](../../../docs/research/2026-11-02-order-cold-frame.md)
+retain both absolute deficits and the severe REVERT overquote tail. The latter
+comes from the existing accepted5M/event reserve; covered observations are not
+automatically accurate prices. All original controls and counterexamples remain.

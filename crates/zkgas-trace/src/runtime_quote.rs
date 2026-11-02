@@ -506,6 +506,44 @@ struct ReplayedBlock {
     execution: BlockExecutionObservation,
 }
 
+/// Validates the complete canonical proposal and returns its public output without pricing it.
+///
+/// Uses the same proposal validation and state reconstruction as a quote, with MPT observation
+/// disabled because no measured selectors are consumed by this path.
+///
+/// # Errors
+///
+/// Returns an error on invalid witnesses, derivation, execution, or canonical block/output mismatch.
+pub fn validate_shasta_proposal_with_execution_profile(
+    input: &GuestInput,
+    execution_profile: crate::ExecutionProfile,
+) -> Result<B256, RuntimeQuoteError> {
+    raiko2_guest_common::prove_shasta_proposal_with_reconstructor_and_parent_reader(
+        input,
+        |request| {
+            let mut executor = raiko2_stateless::workload_lab::PlainDerivedBlockExecutor::new(execution_profile);
+            raiko2_stateless::reconstruct_block_from_transactions_with_executor_and_witness_resources(
+                request.anchor_tx,
+                request.transactions,
+                request.block_env,
+                request.witness,
+                request.ancestor_headers,
+                request.shared_state_nodes,
+                request.chain_spec,
+                request.evm_config,
+                &mut executor,
+            ).map_err(anyhow::Error::from)
+        },
+        |request| raiko2_stateless::read_parent_storage_with_witness_resources(
+            request.address,
+            request.slot,
+            request.witness,
+            request.ancestor_headers,
+            request.shared_state_nodes,
+        ).map_err(anyhow::Error::from),
+    ).map_err(|error| RuntimeQuoteError::Validation(error.to_string()))
+}
+
 /// Replays one current-format Shasta `GuestInput` and returns a complete host-only workload quote.
 ///
 /// The production guest path is unchanged. This host utility uses the same proposal validator and

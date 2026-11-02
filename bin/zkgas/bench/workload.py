@@ -204,15 +204,19 @@ def node_prices(quote):
 def validate_quote(quote, native, input_identity, sid, contract):
     require(quote['status'] == 'complete', 'quote rejected input')
     require(quote['schema_version'] == 1, 'unsupported quote schema')
+    require(quote['quote']['schema_version'] == 1, 'unsupported quote body schema')
     validate_report_profile(quote, contract)
     validate_report_profile(quote['quote'], contract)
     require(quote['key'] == {'corpus_id': contract['corpus_id'], 'sample_id': sid,
                            'guest_input_sha256': input_identity[0]}, 'quote key mismatch')
     require(quote['guest_input_byte_length'] == input_identity[1], 'quote input length mismatch')
+    require(quote['quote']['guest_input_sha256'] == input_identity[0] and
+            quote['quote']['guest_input_bincode_length'] == input_identity[1], 'quote body/input identity mismatch')
     require(quote['executable']['sha256'] == contract['identities']['quote'], 'quote executable mismatch')
     require(quote['calibration_profile'] == quote['quote']['model_id'] == contract['model_id'],
             'quote model mismatch')
-    require(public_bytes(quote['proposal']['public_output']) == public_bytes(native['public_output']),
+    require(public_bytes(quote['proposal']['public_output']) == public_bytes(quote['quote']['public_output']) ==
+            public_bytes(native['public_output']),
             'native/quote output mismatch')
     node_prices(quote)
     require(number(quote['quote']['prove']['total_pgu']) > 0, 'zero pricing denominator')
@@ -266,6 +270,15 @@ def read_attempt(folder):
     require(read_json(folder / 'started.json') == {'schema_version': 1, 'source': status['source'],
                                                 'contract': status['contract']}, 'started/status mismatch')
     validate_artifacts(folder, status['artifacts'])
+    retained_quote = status['source'].get('quote_report_sha256')
+    if retained_quote and ((folder / 'quote-source.json').exists() or status['status'] in SUCCESS):
+        digest, length = identity(folder / 'quote.jsonl')
+        require(digest == retained_quote, 'retained quote identity mismatch')
+        require(read_json(folder / 'quote-source.json') == {
+            'kind': 'retained', 'path': status['source']['quote_report_path'],
+            'sha256': digest, 'byte_length': length}, 'retained quote source receipt mismatch')
+        require(not (folder / 'quote-command.json').exists() and
+                not (folder / 'quote-outcome.json').exists(), 'retained quote has fabricated execution evidence')
     manifest_sha256 = status['contract']['identities'].get('program_manifest')
     manifest_path = folder / 'program-manifest.json'
     if manifest_sha256 and (status['status'] in SUCCESS or manifest_path.exists()):
@@ -381,6 +394,9 @@ def artifact_receipts(folder, compressed_records):
 
 
 def execute_source(root, source, paths, contract, through, retry=False, catalog_dir=None):
+    require('quote_report_path' not in source or
+            source['kind'] == 'retained_input' and through == 'measure',
+            'retained quote requires measure with canonical input and native report')
     sid = sample_id(source['case']['sample_id'] if source['kind'] == 'request' else source['sample_id'])
     sample = safe_child(root, sid)
     sample.mkdir(exist_ok=True)
@@ -426,7 +442,13 @@ def execute_source(root, source, paths, contract, through, retry=False, catalog_
         input_identity = identity(input_path, limit=MAX_INPUT)
         native = read_json(native_path)
         validate_native(native, input_identity, source, contract)
-        if not prior:
+        if not prior and 'quote_report_path' in source:
+            copy_exclusive(Path(source['quote_report_path']), quote_path, source['quote_report_sha256'])
+            digest, length = identity(quote_path)
+            exclusive_json(folder / 'quote-source.json', {
+                'kind': 'retained', 'path': source['quote_report_path'],
+                'sha256': digest, 'byte_length': length})
+        elif not prior:
             phase = 'quote'
             run([str(paths['quote']), '--input-bincode', str(input_path), '--corpus-id', contract['corpus_id'],
                  '--sample-id', sid, '--output', str(quote_path)] + profile_args,
@@ -563,6 +585,8 @@ def parser():
         else:
             sub.add_argument('--input-bincode', type=Path, required=True)
             sub.add_argument('--native-report', type=Path, required=True)
+            sub.add_argument('--quote-report', type=Path,
+                             help='reuse exactly one complete quote for this canonical input; do not execute quote')
             sub.add_argument('--sample-id', required=True)
     for action in ('verify', 'report'):
         sub = commands.add_parser(action)
@@ -590,6 +614,10 @@ def main(argv=None):
         sources = [{'kind': 'retained_input', 'sample_id': sample_id(args.sample_id),
                     'input_path': str(input_path), 'input_sha256': identity(input_path, limit=MAX_INPUT)[0],
                     'native_report_path': str(native_path), 'native_report_sha256': identity(native_path)[0]}]
+        if args.quote_report is not None:
+            quote_path = args.quote_report.resolve()
+            sources[0].update(quote_report_path=str(quote_path),
+                              quote_report_sha256=identity(quote_path, limit=MAX_INPUT)[0])
     else:
         catalog = args.catalog.resolve()
         catalog_dir = catalog.parent

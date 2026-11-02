@@ -15,5 +15,5 @@ pub use runtime_quote::{
     PricingBreakdownSnapshot, ProposalPricingSelectorsSnapshot, ProposalWorkloadQuote,
     ProveBlockWorkloadQuote, ProveProposalWorkloadQuote, ResourceSelectorsSnapshot,
     RuntimeQuoteError, TransactionPayloadSelectorsSnapshot, quote_shasta_proposal,
-    quote_shasta_proposal_with_execution_profile,
+    quote_shasta_proposal_with_execution_profile, validate_shasta_proposal_with_execution_profile,
 };

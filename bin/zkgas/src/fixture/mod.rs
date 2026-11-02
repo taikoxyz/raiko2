@@ -277,7 +277,7 @@ pub fn run(args: &FixtureArgs) -> Result<serde_json::Value> {
     }
     // Full proposal replay retains blob decoding, derivation and output validation under the
     // explicitly selected admission policy; only the default profile is production admission.
-    let quote = raiko2_zkgas_trace::quote_shasta_proposal_with_execution_profile(
+    let public_output = raiko2_zkgas_trace::validate_shasta_proposal_with_execution_profile(
         &built.input,
         args.execution_profile,
     )?;
@@ -296,7 +296,7 @@ pub fn run(args: &FixtureArgs) -> Result<serde_json::Value> {
     })).collect::<Vec<_>>();
     let mut report = serde_json::json!({
         "schema_version":1,"construction_request_sha256":sha256_hex(&bytes),"guest_input_sha256":hash,
-        "guest_input_bincode_length":length,"public_output":quote.public_output,"public_values":quote.public_output.as_slice(),
+        "guest_input_bincode_length":length,"public_output":public_output,"public_values":public_output.as_slice(),
         "chain_id":built.input.taiko.chain_spec.chain_id,"fork_profile":"controlled_mainnet_post_unzen",
         "anchor_artifact_sha256":sha256_hex(include_bytes!("../../../../scripts/regression/shasta/Anchor.json")),
         "block_count":request.program.block_count,"blocks":blocks,"proposal_id":built.input.taiko.proposal_id,
@@ -341,6 +341,6 @@ pub fn run(args: &FixtureArgs) -> Result<serde_json::Value> {
         );
     }
     Ok(
-        serde_json::json!({"schema_version":1,"guest_input_sha256":hash,"guest_input_bincode_length":length,"public_output":quote.public_output}),
+        serde_json::json!({"schema_version":1,"guest_input_sha256":hash,"guest_input_bincode_length":length,"public_output":public_output}),
     )
 }

@@ -59,7 +59,25 @@
 - [ ] Add opt-in frozen-native smoke controls and usage. Preserve existing producers; avoid duplicate private runtime implementations in product code.
 - [ ] Run focused Python tests plus relevant existing regressions, inspect full diff and commit. Independent source review and all24 native/quote/root/signed-receipt qualifications precede actuals.
 
-### Task 3: Frozen actuals and findings
+### Task 3: Efficient host observation and retained quote input
+
+**Files:**
+- Modify: narrow MPT observation wiring under `crates/stateless` and public-output validation under `crates/zkgas-trace`/`bin/zkgas/src/fixture` as needed.
+- Modify: `bin/zkgas/bench/workload.py`, focused existing/new harness tests and `bin/zkgas/bench/README.md`.
+
+**Interfaces:**
+- Consumes: existing reconstruction/state pipeline, full quote API and canonical retained-input/native-report workload mode.
+- Produces: per-instance unobserved native validation; unchanged default measured full quotes; optional `measure --quote-report <jsonl>` with explicit retained provenance.
+
+- [x] Reproduce the unused host snapshot path and write tests for unobserved/measured state-output equivalence and nonzero/default MPT selector preservation.
+- [x] Skip unused MPT observations per instance in witness-only/plain validation paths; remove discarded fixture pricing replay while preserving complete validation/output. No global mutable flag, alternate trie executor, guest rebuild or price change.
+- [x] Add retained quote argument with shared exact quote validation, source receipt and raw-byte retention; reject wrong input/length/sample/corpus/model/profile/executable/public-output, failed/multiple/corrupt records and unsupported invocation before SP1.
+- [x] Test valid retained mode never invokes quote and never fabricates process outcomes, defaults remain compatible, failures remain explicit, and SP1 actual still joins the same canonical input/output.
+- [ ] Run focused Rust/Python checks and relevant Clippy/fmt; document any environment limits precisely. Commit and independently review before new host freeze.
+- [ ] Independently compare representative legacy and paused small-case native bytes, validate full-case new native completion and measured quote preservation. Freeze a separate new native identity; preserve earlier native and cancelled run. Resume qualification in a fresh subroot. Use the canonical campaign corpus ID for real quote records to permit exact retained reuse.
+
+
+### Task 4: Frozen actuals and findings
 
 **Files:**
 - Create: `docs/research/2026-11-02-storage-mutation.md`

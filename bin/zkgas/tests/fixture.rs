@@ -1144,6 +1144,58 @@ fn storage_transaction_descriptor_calls_share_initialized_state_for_one_two_and_
 }
 
 #[test]
+fn validation_only_output_matches_measured_quote_and_rejects_changed_canonical_block() {
+    let (output, dir) = export(&storage_transaction_request(2));
+    success(&output);
+    let mut input = input(&dir);
+    let profile = raiko2_zkgas_trace::ExecutionProfile::LegacyUnzen;
+    let public_output =
+        raiko2_zkgas_trace::validate_shasta_proposal_with_execution_profile(&input, profile)
+            .unwrap();
+    let quote = raiko2_zkgas_trace::quote_shasta_proposal(&input).unwrap();
+    assert_eq!(quote.public_output, public_output);
+    assert_eq!(
+        serde_json::to_value(public_output).unwrap(),
+        report(&dir)["public_output"]
+    );
+    assert!(quote.blocks[0].prove.mpt.path_node_visits > 0);
+    input.witnesses[0].block.header.state_root = alloy_primitives::B256::ZERO;
+    assert!(
+        raiko2_zkgas_trace::validate_shasta_proposal_with_execution_profile(&input, profile)
+            .is_err()
+    );
+    assert!(raiko2_zkgas_trace::quote_shasta_proposal(&input).is_err());
+}
+
+#[test]
+fn retained_quote_preserves_every_measured_selector_and_price() {
+    let Some(path) = std::env::var_os("ZKGAS_RETAINED_INPUT_JSON") else {
+        return;
+    };
+    let quote_path = std::env::var_os("ZKGAS_RETAINED_QUOTE_JSONL").expect("retained quote path");
+    let input: GuestInput = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    let zkgas::contracts::QuoteRowV1::Complete(retained) =
+        serde_json::from_slice(&fs::read(quote_path).unwrap()).unwrap()
+    else {
+        panic!("retained quote must be complete");
+    };
+    let profile = retained.execution_profile;
+    let quote =
+        raiko2_zkgas_trace::quote_shasta_proposal_with_execution_profile(&input, profile).unwrap();
+    assert_eq!(quote, retained.quote);
+    let public_output =
+        raiko2_zkgas_trace::validate_shasta_proposal_with_execution_profile(&input, profile)
+            .unwrap();
+    assert_eq!(public_output, quote.public_output);
+    assert!(
+        quote
+            .blocks
+            .iter()
+            .any(|block| block.prove.mpt.path_node_visits > 0)
+    );
+}
+
+#[test]
 fn storage_transaction_descriptor_preserves_gas_bounds_and_composition_exclusions() {
     let good = storage_transaction_request(8);
     for gas in [21_000, 15_000_000] {

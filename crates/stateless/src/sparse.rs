@@ -6,7 +6,7 @@ use alloy_trie::EMPTY_ROOT_HASH;
 use raiko2_primitives::{ExecutionWitness, StatelessValidationError, WitnessStateNode};
 use reth_errors::ProviderError;
 use reth_revm::state::Bytecode;
-use reth_trie_common::HashedPostState;
+use reth_trie_common::{HashedPostState, HashedStorageSorted};
 use risc0_ethereum_trie::CachedTrie;
 #[cfg(feature = "mpt-metrics")]
 use std::collections::BTreeSet;
@@ -25,7 +25,7 @@ use crate::mpt_metrics::{
 use crate::trie::StatelessTrie;
 
 /// Zero-overhead helper for tries that only contain RLP encoded data.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 #[cfg_attr(not(feature = "mpt-metrics"), repr(transparent))]
 struct RlpTrie<T> {
     inner: CachedTrie,
@@ -35,9 +35,26 @@ struct RlpTrie<T> {
     #[cfg(feature = "mpt-metrics")]
     materialization: MptMaterializationMetrics,
     #[cfg(feature = "mpt-metrics")]
-    snapshot: TrieSnapshot,
+    snapshot: Option<TrieSnapshot>,
     #[cfg(all(feature = "mpt-metrics", test))]
     snapshot_rebuilds: u64,
+}
+
+impl<T> Default for RlpTrie<T> {
+    fn default() -> Self {
+        Self {
+            inner: CachedTrie::default(),
+            phantom: PhantomData,
+            #[cfg(feature = "mpt-metrics")]
+            cached_paths: BTreeSet::new(),
+            #[cfg(feature = "mpt-metrics")]
+            materialization: MptMaterializationMetrics::default(),
+            #[cfg(feature = "mpt-metrics")]
+            snapshot: Some(TrieSnapshot::default()),
+            #[cfg(all(feature = "mpt-metrics", test))]
+            snapshot_rebuilds: 0,
+        }
+    }
 }
 
 impl<T: alloy_rlp::Decodable + alloy_rlp::Encodable> RlpTrie<T> {
@@ -59,7 +76,7 @@ impl<T: alloy_rlp::Decodable + alloy_rlp::Encodable> RlpTrie<T> {
             phantom: PhantomData,
             cached_paths: BTreeSet::new(),
             materialization: MptMaterializationMetrics::default(),
-            snapshot,
+            snapshot: Some(snapshot),
             snapshot_rebuilds: 1,
         }
     }
@@ -67,22 +84,29 @@ impl<T: alloy_rlp::Decodable + alloy_rlp::Encodable> RlpTrie<T> {
     fn from_prehashed(
         root: B256,
         rlp_by_digest: &B256Map<impl AsRef<[u8]>>,
+        #[cfg(feature = "mpt-metrics")] observe_mpt: bool,
     ) -> alloy_rlp::Result<Self> {
         #[cfg(feature = "mpt-metrics")]
         {
-            let (snapshot, materialization) = TrieSnapshot::from_prehashed(root, rlp_by_digest)
-                .map_err(|_| {
-                    alloy_rlp::Error::Custom("failed to inspect resolved MPT cache topology")
-                })?;
+            let (snapshot, materialization, cached_paths) = if observe_mpt {
+                let (snapshot, materialization) = TrieSnapshot::from_prehashed(root, rlp_by_digest)
+                    .map_err(|_| {
+                        alloy_rlp::Error::Custom("failed to inspect resolved MPT cache topology")
+                    })?;
+                let paths = snapshot.cached_paths_on_prehashed_load();
+                (Some(snapshot), materialization, paths)
+            } else {
+                (None, MptMaterializationMetrics::default(), BTreeSet::new())
+            };
             let inner = CachedTrie::from_prehashed_nodes(root, rlp_by_digest)?;
             Ok(Self {
                 inner,
                 phantom: PhantomData,
-                cached_paths: snapshot.cached_paths_on_prehashed_load(),
+                cached_paths,
                 materialization,
                 snapshot,
                 #[cfg(test)]
-                snapshot_rebuilds: 1,
+                snapshot_rebuilds: u64::from(observe_mpt),
             })
         }
         #[cfg(not(feature = "mpt-metrics"))]
@@ -96,7 +120,7 @@ impl<T: alloy_rlp::Decodable + alloy_rlp::Encodable> RlpTrie<T> {
         self.inner.get(key).map(alloy_rlp::decode_exact).transpose()
     }
 
-    #[cfg(not(feature = "mpt-metrics"))]
+    #[cfg(not(all(feature = "mpt-metrics", test)))]
     fn insert(&mut self, key: impl AsRef<[u8]>, value: T) {
         self.inner.insert(key, alloy_rlp::encode(value));
     }
@@ -104,16 +128,16 @@ impl<T: alloy_rlp::Decodable + alloy_rlp::Encodable> RlpTrie<T> {
     #[cfg(all(feature = "mpt-metrics", test))]
     fn insert(&mut self, key: impl AsRef<[u8]>, value: T) {
         self.inner.insert(key, alloy_rlp::encode(value));
-        self.rebuild_snapshot()
-            .expect("test trie must remain within the snapshot bound");
+        if self.snapshot.is_some() {
+            self.rebuild_snapshot()
+                .expect("test trie must remain within the snapshot bound");
+        }
     }
 
-    #[cfg(not(feature = "mpt-metrics"))]
     fn remove(&mut self, key: impl AsRef<[u8]>) -> bool {
         self.inner.remove(key)
     }
 
-    #[cfg(not(feature = "mpt-metrics"))]
     fn hash(&mut self) -> B256 {
         self.inner.hash()
     }
@@ -128,18 +152,18 @@ impl<T: alloy_rlp::Decodable + alloy_rlp::Encodable> RlpTrie<T> {
 
     #[cfg(feature = "mpt-metrics")]
     const fn snapshot(&self) -> &TrieSnapshot {
-        &self.snapshot
+        self.snapshot.as_ref().expect("MPT observation is disabled")
     }
 
     #[cfg(feature = "mpt-metrics")]
     fn observe_path(&self, key: impl AsRef<[u8]>) -> Result<PathObservation, MptObservationError> {
-        self.snapshot.observe_path(key)
+        self.snapshot().observe_path(key)
     }
 
     #[cfg(feature = "mpt-metrics")]
     fn rebuild_snapshot(&mut self) -> Result<(), MptObservationError> {
         TrieSnapshot::ensure_node_bound(self.inner.size())?;
-        self.snapshot = TrieSnapshot::from_rlp_nodes(&self.inner.rlp_nodes())?;
+        self.snapshot = Some(TrieSnapshot::from_rlp_nodes(&self.inner.rlp_nodes())?);
         #[cfg(test)]
         {
             self.snapshot_rebuilds += 1;
@@ -159,13 +183,13 @@ impl<T: alloy_rlp::Decodable + alloy_rlp::Encodable> RlpTrie<T> {
         value: T,
     ) -> Result<MutationObservation, MptObservationError> {
         let key = key.as_ref();
-        let path = self.snapshot.observe_path(key)?;
-        let before = std::mem::take(&mut self.snapshot);
+        let path = self.snapshot().observe_path(key)?;
+        let before = self.snapshot.take().expect("MPT observation is disabled");
         self.inner.insert(key, alloy_rlp::encode(value));
         self.rebuild_snapshot()?;
         Ok(observe_mutation(
             &before,
-            &self.snapshot,
+            self.snapshot.as_ref().expect("MPT observation is disabled"),
             path,
             true,
             &mut self.cached_paths,
@@ -178,14 +202,14 @@ impl<T: alloy_rlp::Decodable + alloy_rlp::Encodable> RlpTrie<T> {
         key: impl AsRef<[u8]>,
     ) -> Result<MutationObservation, MptObservationError> {
         let key = key.as_ref();
-        let path = self.snapshot.observe_path(key)?;
-        let before = std::mem::take(&mut self.snapshot);
+        let path = self.snapshot().observe_path(key)?;
+        let before = self.snapshot.take().expect("MPT observation is disabled");
         let removed = self.inner.remove(key);
         if removed {
             self.rebuild_snapshot()?;
             Ok(observe_mutation(
                 &before,
-                &self.snapshot,
+                self.snapshot.as_ref().expect("MPT observation is disabled"),
                 path,
                 true,
                 &mut self.cached_paths,
@@ -193,14 +217,15 @@ impl<T: alloy_rlp::Decodable + alloy_rlp::Encodable> RlpTrie<T> {
         } else {
             let observation =
                 observe_mutation(&before, &before, path, false, &mut self.cached_paths);
-            self.snapshot = before;
+            self.snapshot = Some(before);
             Ok(observation)
         }
     }
 
     #[cfg(feature = "mpt-metrics")]
     fn hash_observed(&mut self) -> (B256, HashObservation) {
-        let (observation, newly_cached_paths) = self.snapshot.hash_observation(&self.cached_paths);
+        let (observation, newly_cached_paths) =
+            self.snapshot().hash_observation(&self.cached_paths);
         let root = self.inner.hash();
         self.cached_paths.extend(newly_cached_paths);
         (root, observation)
@@ -222,6 +247,8 @@ pub(super) struct SparseState {
 
     #[cfg(feature = "mpt-metrics")]
     metrics: RefCell<MptWorkloadMetrics>,
+    #[cfg(feature = "mpt-metrics")]
+    observe_mpt: bool,
 }
 
 #[cfg(feature = "mpt-metrics")]
@@ -262,6 +289,7 @@ impl SparseState {
     fn rlp_by_digest(
         witness: &ExecutionWitness,
         shared_state_nodes: &[WitnessStateNode],
+        observe_mpt: bool,
     ) -> Result<RlpByDigestResult, StatelessValidationError> {
         let capacity = if witness.state_indices.is_empty() {
             witness.state.len()
@@ -274,7 +302,9 @@ impl SparseState {
 
         if witness.state_indices.is_empty() {
             for node in &witness.state {
-                hydration.record_rlp(node.bytes.len());
+                if observe_mpt {
+                    hydration.record_rlp(node.bytes.len());
+                }
                 rlp_by_digest.insert(keccak256(&node.bytes), node.bytes.clone());
             }
         } else {
@@ -285,7 +315,9 @@ impl SparseState {
                         len: shared_state_nodes.len(),
                     },
                 )?;
-                hydration.record_rlp(node.bytes.len());
+                if observe_mpt {
+                    hydration.record_rlp(node.bytes.len());
+                }
                 rlp_by_digest.insert(keccak256(&node.bytes), node.bytes.clone());
             }
         }
@@ -293,11 +325,83 @@ impl SparseState {
         Ok((rlp_by_digest, hydration))
     }
 
+    pub(super) fn new_with_observation(
+        witness: &ExecutionWitness,
+        shared_state_nodes: &[WitnessStateNode],
+        pre_state_root: B256,
+        #[cfg(feature = "mpt-metrics")] observe_mpt: bool,
+    ) -> Result<(Self, B256Map<Bytecode>), StatelessValidationError> {
+        // First, hash all the RLP nodes once.
+        #[cfg(feature = "mpt-metrics")]
+        let (rlp_by_digest, witness_hydration) =
+            Self::rlp_by_digest(witness, shared_state_nodes, observe_mpt)?;
+        #[cfg(not(feature = "mpt-metrics"))]
+        let rlp_by_digest = Self::rlp_by_digest(witness, shared_state_nodes)?;
+
+        // construct the state trie from the witness data and the given state root
+        let state = RlpTrie::from_prehashed(
+            pre_state_root,
+            &rlp_by_digest,
+            #[cfg(feature = "mpt-metrics")]
+            observe_mpt,
+        )
+        .map_err(|_| StatelessValidationError::WitnessRevealFailed { pre_state_root })?;
+        #[cfg(feature = "mpt-metrics")]
+        let state_materialization = state.materialization_observation();
+
+        // hash all the supplied bytecode
+        let bytecode = witness
+            .codes
+            .iter()
+            .map(|code| (keccak256(code), Bytecode::new_raw(code.clone())))
+            .collect();
+
+        Ok((
+            Self {
+                state,
+                storages: RefCell::new(B256Map::default()),
+                rlp_by_digest,
+                #[cfg(feature = "mpt-metrics")]
+                observe_mpt,
+                #[cfg(feature = "mpt-metrics")]
+                metrics: RefCell::new(MptWorkloadMetrics {
+                    witness_hydration,
+                    state_materializations: state_materialization,
+                    ..Default::default()
+                }),
+            },
+            bytecode,
+        ))
+    }
+
+    fn storage_root_unobserved(
+        &mut self,
+        hashed_address: B256,
+        storage: Option<&HashedStorageSorted>,
+    ) -> Result<B256, StatelessValidationError> {
+        let storage_trie = self.storage_trie_mut(hashed_address).map_err(|error| {
+            StatelessValidationError::StatelessExecutionFailed(error.to_string())
+        })?;
+        if let Some(storage) = storage {
+            for (hashed_key, value) in &storage.storage_slots {
+                if !value.is_zero() {
+                    storage_trie.insert(hashed_key, *value);
+                }
+            }
+            for (hashed_key, value) in &storage.storage_slots {
+                if value.is_zero() {
+                    storage_trie.remove(hashed_key);
+                }
+            }
+        }
+        Ok(storage_trie.hash())
+    }
+
     /// Removes an account from the state.
     #[allow(clippy::unnecessary_wraps)]
     fn remove_account(&mut self, hashed_address: &B256) -> Result<(), StatelessValidationError> {
         #[cfg(feature = "mpt-metrics")]
-        {
+        if self.observe_mpt {
             let observation = self
                 .state
                 .remove_observed(hashed_address)
@@ -310,12 +414,10 @@ impl SparseState {
                 metrics.materialized_storage_drop_nodes.add_assign(nodes);
                 metrics.materialized_storage_drop_encoded_bytes += bytes;
             }
+            return Ok(());
         }
-        #[cfg(not(feature = "mpt-metrics"))]
-        {
-            self.state.remove(hashed_address);
-            self.storages.get_mut().remove(hashed_address);
-        }
+        self.state.remove(hashed_address);
+        self.storages.get_mut().remove(hashed_address);
         Ok(())
     }
 
@@ -329,7 +431,7 @@ impl SparseState {
             Entry::Vacant(entry) => {
                 // build the storage trie matching the storage root of the account
                 #[cfg(feature = "mpt-metrics")]
-                {
+                if self.observe_mpt {
                     let observation = self
                         .state
                         .observe_path(hashed_address)
@@ -340,13 +442,20 @@ impl SparseState {
                     .state
                     .get(hashed_address)?
                     .map_or(EMPTY_ROOT_HASH, |a| a.storage_root);
-                let trie = RlpTrie::from_prehashed(storage_root, &self.rlp_by_digest)
-                    .map_err(ProviderError::other)?;
+                let trie = RlpTrie::from_prehashed(
+                    storage_root,
+                    &self.rlp_by_digest,
+                    #[cfg(feature = "mpt-metrics")]
+                    self.observe_mpt,
+                )
+                .map_err(ProviderError::other)?;
                 #[cfg(feature = "mpt-metrics")]
-                self.metrics
-                    .get_mut()
-                    .storage_materializations
-                    .add_assign(trie.materialization_observation());
+                if self.observe_mpt {
+                    self.metrics
+                        .get_mut()
+                        .storage_materializations
+                        .add_assign(trie.materialization_observation());
+                }
                 entry.insert(trie)
             }
         };
@@ -385,6 +494,7 @@ impl SparseState {
 
     #[cfg(feature = "mpt-metrics")]
     pub(super) fn mpt_workload_metrics(&self) -> MptWorkloadMetrics {
+        assert!(self.observe_mpt, "MPT observation is disabled");
         *self.metrics.borrow()
     }
 
@@ -401,7 +511,10 @@ impl SparseState {
         })?;
         #[cfg(feature = "mpt-metrics")]
         let observation = storage_trie
-            .observe_path(hashed_slot)
+            .snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.observe_path(hashed_slot))
+            .transpose()
             .map_err(observation_provider_error)?;
         let value = catch_unwind(AssertUnwindSafe(|| storage_trie.get(hashed_slot))).map_err(
             |_| {
@@ -411,7 +524,9 @@ impl SparseState {
             },
         )??;
         #[cfg(feature = "mpt-metrics")]
-        self.metrics.get_mut().storage_reads.record(&observation);
+        if let Some(observation) = observation {
+            self.metrics.get_mut().storage_reads.record(&observation);
+        }
         Ok(value.unwrap_or(U256::ZERO))
     }
 }
@@ -444,39 +559,13 @@ impl StatelessTrie for SparseState {
         shared_state_nodes: &[WitnessStateNode],
         pre_state_root: B256,
     ) -> Result<(Self, B256Map<Bytecode>), StatelessValidationError> {
-        // First, hash all the RLP nodes once.
-        #[cfg(feature = "mpt-metrics")]
-        let (rlp_by_digest, witness_hydration) = Self::rlp_by_digest(witness, shared_state_nodes)?;
-        #[cfg(not(feature = "mpt-metrics"))]
-        let rlp_by_digest = Self::rlp_by_digest(witness, shared_state_nodes)?;
-
-        // construct the state trie from the witness data and the given state root
-        let state = RlpTrie::from_prehashed(pre_state_root, &rlp_by_digest)
-            .map_err(|_| StatelessValidationError::WitnessRevealFailed { pre_state_root })?;
-        #[cfg(feature = "mpt-metrics")]
-        let state_materialization = state.materialization_observation();
-
-        // hash all the supplied bytecode
-        let bytecode = witness
-            .codes
-            .iter()
-            .map(|code| (keccak256(code), Bytecode::new_raw(code.clone())))
-            .collect();
-
-        Ok((
-            Self {
-                state,
-                storages: RefCell::new(B256Map::default()),
-                rlp_by_digest,
-                #[cfg(feature = "mpt-metrics")]
-                metrics: RefCell::new(MptWorkloadMetrics {
-                    witness_hydration,
-                    state_materializations: state_materialization,
-                    ..Default::default()
-                }),
-            },
-            bytecode,
-        ))
+        Self::new_with_observation(
+            witness,
+            shared_state_nodes,
+            pre_state_root,
+            #[cfg(feature = "mpt-metrics")]
+            false,
+        )
     }
 
     /// Returns the `TrieAccount` that corresponds to the `Address`.
@@ -485,7 +574,10 @@ impl StatelessTrie for SparseState {
         #[cfg(feature = "mpt-metrics")]
         let observation = self
             .state
-            .observe_path(hashed_address)
+            .snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.observe_path(hashed_address))
+            .transpose()
             .map_err(observation_provider_error)?;
         let account = catch_unwind(AssertUnwindSafe(|| self.state.get(hashed_address))).map_err(
             |_| {
@@ -495,7 +587,9 @@ impl StatelessTrie for SparseState {
             },
         )??;
         #[cfg(feature = "mpt-metrics")]
-        self.metrics.borrow_mut().account_reads.record(&observation);
+        if let Some(observation) = observation {
+            self.metrics.borrow_mut().account_reads.record(&observation);
+        }
 
         match account {
             None => Ok(None),
@@ -504,10 +598,14 @@ impl StatelessTrie for SparseState {
                 // otherwise construct it from the witness data and the account's storage root
                 match self.storages.borrow_mut().entry(hashed_address) {
                     Entry::Vacant(entry) => {
-                        let trie =
-                            RlpTrie::from_prehashed(account.storage_root, &self.rlp_by_digest)?;
+                        let trie = RlpTrie::from_prehashed(
+                            account.storage_root,
+                            &self.rlp_by_digest,
+                            #[cfg(feature = "mpt-metrics")]
+                            self.observe_mpt,
+                        )?;
                         #[cfg(feature = "mpt-metrics")]
-                        {
+                        if self.observe_mpt {
                             self.metrics
                                 .borrow_mut()
                                 .storage_materializations
@@ -532,7 +630,10 @@ impl StatelessTrie for SparseState {
         let hashed_slot = keccak256(B256::from(slot));
         #[cfg(feature = "mpt-metrics")]
         let observation = storage_trie
-            .observe_path(hashed_slot)
+            .snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.observe_path(hashed_slot))
+            .transpose()
             .map_err(observation_provider_error)?;
         let value = catch_unwind(AssertUnwindSafe(|| storage_trie.get(hashed_slot))).map_err(
             |_| {
@@ -542,7 +643,9 @@ impl StatelessTrie for SparseState {
             },
         )??;
         #[cfg(feature = "mpt-metrics")]
-        self.metrics.borrow_mut().storage_reads.record(&observation);
+        if let Some(observation) = observation {
+            self.metrics.borrow_mut().storage_reads.record(&observation);
+        }
         Ok(value.unwrap_or(U256::ZERO))
     }
 
@@ -566,7 +669,7 @@ impl StatelessTrie for SparseState {
 
             // Apply storage changes before computing the storage root.
             #[cfg(feature = "mpt-metrics")]
-            let storage_root = {
+            let storage_root = if self.observe_mpt {
                 let mut inserts_and_updates = Vec::new();
                 let mut deletes = Vec::new();
                 let (root, hash_observation) = {
@@ -610,27 +713,13 @@ impl StatelessTrie for SparseState {
                 }
                 metrics.storage_hashes.record(hash_observation);
                 root
+            } else {
+                self.storage_root_unobserved(hashed_address, state.storages.get(&hashed_address))?
             };
 
             #[cfg(not(feature = "mpt-metrics"))]
-            let storage_root = {
-                let storage_trie = self.storage_trie_mut(hashed_address).map_err(|error| {
-                    StatelessValidationError::StatelessExecutionFailed(error.to_string())
-                })?;
-                if let Some(storage) = state.storages.get(&hashed_address) {
-                    for (hashed_key, value) in &storage.storage_slots {
-                        if !value.is_zero() {
-                            storage_trie.insert(hashed_key, *value);
-                        }
-                    }
-                    for (hashed_key, value) in &storage.storage_slots {
-                        if value.is_zero() {
-                            storage_trie.remove(hashed_key);
-                        }
-                    }
-                }
-                storage_trie.hash()
-            };
+            let storage_root =
+                self.storage_root_unobserved(hashed_address, state.storages.get(&hashed_address))?;
 
             // update/insert the account after all changes have been processed
             let account = TrieAccount {
@@ -640,7 +729,7 @@ impl StatelessTrie for SparseState {
                 code_hash: account.bytecode_hash.unwrap_or(KECCAK256_EMPTY),
             };
             #[cfg(feature = "mpt-metrics")]
-            {
+            if self.observe_mpt {
                 let observation = self
                     .state
                     .insert_observed(hashed_address, account)
@@ -651,6 +740,10 @@ impl StatelessTrie for SparseState {
                     self.metrics.get_mut().account_inserts.record(&observation);
                 }
             }
+            #[cfg(feature = "mpt-metrics")]
+            if !self.observe_mpt {
+                self.state.insert(hashed_address, account);
+            }
             #[cfg(not(feature = "mpt-metrics"))]
             self.state.insert(hashed_address, account);
         }
@@ -659,15 +752,12 @@ impl StatelessTrie for SparseState {
         }
 
         #[cfg(feature = "mpt-metrics")]
-        {
+        if self.observe_mpt {
             let (root, observation) = self.state.hash_observed();
             self.metrics.get_mut().account_hashes.record(observation);
-            Ok(root)
+            return Ok(root);
         }
-        #[cfg(not(feature = "mpt-metrics"))]
-        {
-            Ok(self.state.hash())
-        }
+        Ok(self.state.hash())
     }
 }
 
@@ -826,7 +916,7 @@ mod mpt_metrics_tests {
             .into_iter()
             .map(|rlp| (keccak256(&rlp), rlp))
             .collect::<B256Map<_>>();
-        let mut trie = RlpTrie::<U256>::from_prehashed(root, &rlp_by_digest).unwrap();
+        let mut trie = RlpTrie::<U256>::from_prehashed(root, &rlp_by_digest, true).unwrap();
 
         trie.insert_observed([0x10], U256::from(3)).unwrap();
         let (_, hash) = trie.hash_observed();
@@ -863,7 +953,7 @@ mod mpt_metrics_tests {
             .into_iter()
             .map(|rlp| (keccak256(&rlp), rlp))
             .collect::<B256Map<_>>();
-        let mut trie = RlpTrie::<U256>::from_prehashed(root, &rlp_by_digest).unwrap();
+        let mut trie = RlpTrie::<U256>::from_prehashed(root, &rlp_by_digest, true).unwrap();
 
         trie.insert_observed([0x10], value + U256::from(1)).unwrap();
         let (_, hash) = trie.hash_observed();
@@ -888,7 +978,7 @@ mod mpt_metrics_tests {
             .map(|rlp| (keccak256(&rlp), rlp))
             .collect::<B256Map<_>>();
 
-        let trie = RlpTrie::<U256>::from_prehashed(root, &rlp_by_digest).unwrap();
+        let trie = RlpTrie::<U256>::from_prehashed(root, &rlp_by_digest, true).unwrap();
         let materialization = trie.materialization_observation();
 
         assert_eq!(materialization.resolved_hashed_rlp_nodes, 1);
@@ -914,7 +1004,7 @@ mod mpt_metrics_tests {
             .collect::<B256Map<_>>();
         rlp_by_digest.remove(&missing_digest);
 
-        let trie = RlpTrie::<U256>::from_prehashed(root, &rlp_by_digest).unwrap();
+        let trie = RlpTrie::<U256>::from_prehashed(root, &rlp_by_digest, true).unwrap();
         let materialization = trie.materialization_observation();
 
         assert_eq!(materialization.resolved_hashed_rlp_nodes, 2);
@@ -1004,9 +1094,13 @@ mod mpt_metrics_tests {
 
     #[test]
     fn sparse_state_keeps_account_and_storage_read_metrics_separate() {
-        let (state, _) =
-            <SparseState as StatelessTrie>::new(&ExecutionWitness::default(), EMPTY_ROOT_HASH)
-                .unwrap();
+        let (state, _) = SparseState::new_with_observation(
+            &ExecutionWitness::default(),
+            &[],
+            EMPTY_ROOT_HASH,
+            true,
+        )
+        .unwrap();
 
         assert_eq!(state.account(Address::ZERO).unwrap(), None);
         let metrics = state.mpt_workload_metrics();
@@ -1028,9 +1122,13 @@ mod mpt_metrics_tests {
     }
 
     fn seeded_state() -> SparseState {
-        let (mut trie, _) =
-            <SparseState as StatelessTrie>::new(&ExecutionWitness::default(), EMPTY_ROOT_HASH)
-                .unwrap();
+        let (mut trie, _) = SparseState::new_with_observation(
+            &ExecutionWitness::default(),
+            &[],
+            EMPTY_ROOT_HASH,
+            true,
+        )
+        .unwrap();
         let addresses = [
             B256::repeat_byte(0x10),
             B256::repeat_byte(0x20),
@@ -1075,6 +1173,46 @@ mod mpt_metrics_tests {
     }
 
     #[test]
+    fn unobserved_state_preserves_mutations_without_building_snapshots() {
+        let mut observed = seeded_state();
+        let witness = ExecutionWitness {
+            state: observed.materialized_witness_state_nodes(),
+            ..Default::default()
+        };
+        let root = observed.state.inner.hash();
+        let (mut plain, _) = SparseState::new_with_observation(&witness, &[], root, false).unwrap();
+        assert_eq!(plain.state.snapshot_rebuilds, 0);
+        assert!(plain.state.snapshot.is_none());
+        let observed_root = observed.calculate_state_root(update_state(false)).unwrap();
+        let plain_root = plain.calculate_state_root(update_state(false)).unwrap();
+        assert_eq!(plain_root, observed_root);
+        assert_eq!(
+            plain.materialized_witness_state_nodes(),
+            observed.materialized_witness_state_nodes()
+        );
+        assert_eq!(plain.state.snapshot_rebuilds, 0);
+        assert!(
+            plain
+                .storages
+                .borrow()
+                .values()
+                .all(|trie| trie.snapshot.is_none() && trie.snapshot_rebuilds == 0)
+        );
+        let measured = observed.mpt_workload_metrics();
+        assert!(measured.storage_updates.operations > 0);
+        assert!(measured.storage_deletes.operations > 0);
+        assert!(measured.storage_inserts.operations > 0);
+        assert!(measured.account_hashes.operations > 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "MPT observation is disabled")]
+    fn unobserved_state_cannot_report_zero_metrics_as_measurement() {
+        let (plain, _) = SparseState::new(&ExecutionWitness::default(), EMPTY_ROOT_HASH).unwrap();
+        plain.mpt_workload_metrics();
+    }
+
+    #[test]
     fn state_and_storage_materialization_metrics_are_separate() {
         let state = seeded_state();
         let metrics = state.mpt_workload_metrics();
@@ -1093,9 +1231,13 @@ mod mpt_metrics_tests {
         let reverse_root = reverse.calculate_state_root(update_state(true)).unwrap();
         assert_eq!(forward_root, reverse_root);
 
-        let (mut expected, _) =
-            <SparseState as StatelessTrie>::new(&ExecutionWitness::default(), EMPTY_ROOT_HASH)
-                .unwrap();
+        let (mut expected, _) = SparseState::new_with_observation(
+            &ExecutionWitness::default(),
+            &[],
+            EMPTY_ROOT_HASH,
+            true,
+        )
+        .unwrap();
         let expected_root = expected
             .calculate_state_root(
                 HashedPostState::default()
@@ -1146,7 +1288,7 @@ mod mpt_metrics_tests {
             ..Default::default()
         };
 
-        let (by_digest, metrics) = SparseState::rlp_by_digest(&witness, &[]).unwrap();
+        let (by_digest, metrics) = SparseState::rlp_by_digest(&witness, &[], true).unwrap();
         assert_eq!(by_digest.len(), 1);
         assert_eq!(metrics.hashed_rlp_nodes, 2);
         assert_eq!(metrics.hash_input_bytes, 2);
@@ -1161,7 +1303,7 @@ mod mpt_metrics_tests {
             ..Default::default()
         };
 
-        let (by_digest, metrics) = SparseState::rlp_by_digest(&witness, &shared).unwrap();
+        let (by_digest, metrics) = SparseState::rlp_by_digest(&witness, &shared, true).unwrap();
         assert_eq!(by_digest.len(), 1);
         assert_eq!(metrics.hashed_rlp_nodes, 2);
         assert_eq!(metrics.hash_input_bytes, 272);

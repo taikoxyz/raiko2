@@ -62,7 +62,9 @@ else:
                     'guest_input_sha256': sha}, 'guest_input_byte_length': len(raw),
             'executable': {'sha256': digest(sys.argv[0])}, 'calibration_profile': 'model-v1',
             'proposal': {'public_output': '0x'+bytes(output).hex()},
-            'quote': {'model_id': 'model-v1', 'node': node, 'blocks': blocks,
+            'quote': {'schema_version': 1, 'guest_input_sha256': sha,
+                      'guest_input_bincode_length': len(raw), 'public_output': '0x'+bytes(output).hex(),
+                      'model_id': 'model-v1', 'node': node, 'blocks': blocks,
                       'prove': {'total_pgu': '100'}}}
         if case.get('quote_omit_blocks'): quote['quote'].pop('blocks')
         if '--execution-profile' in args:
@@ -180,6 +182,96 @@ class HarnessTests(unittest.TestCase):
             'production_sdk_parity_verified': False, 'limits': workload.DEFAULT_LIMITS,
             'provenance': {}}
         self.assertEqual(frozen, expected)
+
+    def retained_quote_arguments(self, case=None):
+        catalog = self.catalog([('control', case or {})])
+        self.assertEqual(self.invoke('screen', catalog), 0)
+        origin = self.attempts('control')[0]
+        raw = self.root / 'retained-input.bin'
+        raw.write_bytes(gzip.decompress((origin / 'input.bin.gz').read_bytes()))
+        self.runroot = self.root / 'retained-run'
+        return origin, ['--input-bincode', str(raw), '--native-report', str(origin / 'native.json'),
+                        '--sample-id', 'control', '--quote-report', str(origin / 'quote.jsonl')]
+
+    def test_retained_quote_copies_original_bytes_and_only_executes_sp1(self):
+        origin, arguments = self.retained_quote_arguments()
+        quote = origin / 'quote.jsonl'
+        quote.write_bytes(b'\n  ' + quote.read_bytes() + b' \n')
+        self.assertEqual(self.invoke('measure', extra=arguments), 0)
+        folder = self.attempts('control')[0]
+        status = workload.read_attempt(folder)
+        self.assertEqual(status['status'], 'complete')
+        self.assertEqual((folder / 'quote.jsonl').read_bytes(), quote.read_bytes())
+        self.assertEqual(status['source']['quote_report_path'], str(quote))
+        self.assertEqual(status['source']['quote_report_sha256'], artifacts.identity(quote)[0])
+        provenance = artifacts.read_json(folder / 'quote-source.json')
+        self.assertEqual(provenance, {'kind': 'retained', 'path': str(quote),
+            'sha256': artifacts.identity(quote)[0], 'byte_length': quote.stat().st_size})
+        self.assertFalse((folder / 'quote-command.json').exists())
+        self.assertFalse((folder / 'quote-outcome.json').exists())
+        self.assertTrue((folder / 'sp1-command.json').exists())
+        self.assertEqual(self.invoke('measure', extra=arguments), 0)
+        self.assertEqual(len(self.attempts('control')), 1)
+        self.assertEqual(self.invoke('verify'), 0)
+
+    def test_retained_quote_mismatches_fail_before_sp1_and_preserve_bytes(self):
+        origin, arguments = self.retained_quote_arguments()
+        path = origin / 'quote.jsonl'
+        original = path.read_bytes()
+        mutations = [('status', 'failed'), ('schema_version', 2),
+            ('key.corpus_id', 'other'), ('key.sample_id', 'other'),
+            ('key.guest_input_sha256', '0'*64), ('guest_input_byte_length', 1),
+            ('executable.sha256', '0'*64), ('calibration_profile', 'other'),
+            ('quote.model_id', 'other'), ('quote.schema_version', 2),
+            ('quote.guest_input_sha256', '0'*64), ('quote.guest_input_bincode_length', 1),
+            ('quote.public_output', '0x'+'08'*32), ('execution_profile', 'evm-gas-only'),
+            ('quote.execution_profile', 'evm-gas-only'), ('proposal.public_output', '0x'+'08'*32)]
+        for index, (field, value) in enumerate(mutations):
+            row = json.loads(original)
+            target = row
+            parts = field.split('.')
+            for part in parts[:-1]: target = target[part]
+            target[parts[-1]] = value
+            path.write_text(json.dumps(row))
+            self.runroot = self.root / f'invalid-retained-{index}'
+            with self.subTest(field=field):
+                self.assertEqual(self.invoke('measure', extra=arguments), 1)
+                folder = self.attempts('control')[0]
+                status = workload.read_attempt(folder)
+                self.assertEqual(status['status'], 'validation_failed')
+                self.assertFalse((folder / 'sp1-command.json').exists())
+                self.assertEqual((folder / 'quote.jsonl').read_bytes(), path.read_bytes())
+        for index, raw in enumerate((b'{broken', original + original, b'[]', b'{}')):
+            path.write_bytes(raw)
+            self.runroot = self.root / f'corrupt-retained-{index}'
+            self.assertEqual(self.invoke('measure', extra=arguments), 1)
+            folder = self.attempts('control')[0]
+            self.assertFalse((folder / 'sp1-command.json').exists())
+            self.assertEqual(workload.read_attempt(folder)['status'], 'validation_failed')
+
+    def test_retained_quote_failure_is_retained_and_not_automatically_retried(self):
+        _, arguments = self.retained_quote_arguments({'sp1_fail': True})
+        self.assertEqual(self.invoke('measure', extra=arguments), 1)
+        status = workload.read_attempt(self.attempts('control')[0])
+        self.assertEqual(status['status'], 'measurement_failed')
+        with self.assertRaises(workload.RetainedFailure):
+            self.invoke('measure', extra=arguments)
+
+    def test_retained_quote_uses_bound_profile_and_checks_actual_public_output(self):
+        self.execution_profile()
+        _, arguments = self.retained_quote_arguments({'bad_output': True})
+        self.assertEqual(self.invoke('measure', extra=arguments), 1)
+        folder = self.attempts('control')[0]
+        state = workload.read_attempt(folder)
+        self.assertEqual(state['status'], 'validation_failed')
+        self.assertIn('SP1/native public output mismatch', state['failure']['message'])
+        self.assertNotIn('metrics', state)
+
+    def test_retained_quote_option_rejects_catalog_invocation(self):
+        with self.assertRaises(SystemExit):
+            workload.parser().parse_args(['run', '--config', str(self.config),
+                '--output-root', str(self.runroot), '--catalog', 'catalog.json',
+                '--quote-report', 'quote.jsonl'])
 
     def test_experimental_profile_binds_manifest_and_all_stages(self):
         self.execution_profile()

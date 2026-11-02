@@ -473,6 +473,12 @@ outcome and artifacts. The native CLI receives `--input`, `--output`, `--output-
 `--report`. The quote and sampler both consume `--input-bincode`; the sampler also takes `--elf`.
 Native, quote and sampler hashes/lengths and32-byte public output must join before ranking.
 
+The native constructor's public-output replay performs complete canonical proposal validation
+without computing a discarded price. Witness-only and plain validation skip MPT snapshot
+observation per state instance, including when host feature union enables `mpt-metrics`.
+Explicit full quotes continue measuring the real MPT selectors and applying the same prices.
+Host construction time is not guest workload or measured PGU.
+
 ## Measure an already retained input
 
 No generator or compiler is required. Supply the canonical bincode and its matching native
@@ -485,6 +491,19 @@ sampler runs. The JSON GuestInput is optional for this path.
   --native-report saved/native.json --sample-id retained-control \
   --output-root experiment/retained-run
 ```
+
+To reuse a qualified complete quote for that exact input, add `--quote-report saved/quote.jsonl`.
+This option is available only with `measure`, canonical bincode and a matching native report.
+The same quote validator checks exactly one complete record, sample/corpus/input hash and length,
+quote executable hash, model, execution profile and native public output, including the nested
+quote identities. Mismatches fail before SP1. The input must keep its original sample and corpus
+identities; changing a quote key does not qualify it for another campaign.
+
+The harness copies the original quote bytes into `quote.jsonl`, records the retained source path
+and SHA256 in `started.json`/`status.json`, and writes `quote-source.json` with the source path,
+hash and byte length. It creates no quote command or process outcome for retained mode: only the
+subsequent SP1 invocation executes in this attempt. Without this option, quote execution, resume
+behavior and failure statuses are unchanged. Existing input/output/resource guards still apply.
 
 For direct composition, call `zkgas-sp1-estimator --input-bincode saved/input.bin --elf
 programs/proposal.elf --output saved/sp1.json --resource-receipt saved/sp1-resources.json`.

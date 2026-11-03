@@ -2435,3 +2435,67 @@ single→full, plus nine matched identity/nonidentity contrasts. This panel rema
 separate from prior persistent236 and transient8 cohorts. No isolated pairing-PGU
 allocation, price fit, arbitrary operand/failure/cache bound, global/IID/proof/GPU/
 production claim, Rust/guest/SDK/ELF/pin change or deployment follows.
+
+`cases/sha256_bulk.py` generates18 compiler-free SHA-256 precompile0x02 inputs:
+zero/a5 tails ×64/4096/1048576 input bytes × own-zero/single/maximal-uniform-full.
+Two users call distinct authenticated code accounts with empty persistent storage;
+owner tags0/1 and different code hashes are intentional. Call i hashes
+`BE256((owner_tag<<128)|i) || pattern_byte*(input_bytes-32)` for i0..R-1.
+Every input is unique within its proposal. Equal lengths do not mean equal bytes
+or demonstrate general cache behavior.
+
+Both patterns, including R0, use one seed MSTORE and logarithmic MCOPY doubling.
+Counter, digest XOR accumulator, input and output start at0,32,64 and64+L.
+Memory has3+L/32 words. Output sentinel2 is preallocated and reset before every
+call; status1, returndata32, final counter and exact digest XOR guard STOP.
+The independent byte oracle checks every ordered input and digest: XOR alone is
+not collision-free and repeated output errors can cancel. Empty selected storage
+support does not remove code/account/whole-world witness requirements.
+
+Frozen revm-precompile41.0.0 `src/hash.rs` and the primary
+[SHA-256 execution spec](https://ethereum.github.io/execution-specs/src/ethereum/forks/berlin/vm/precompiled_contracts/sha256.py.html)
+charge60+12ceil(L/32) native gas; warm STATICCALL adds100.
+[EIP-5656](https://eips.ethereum.org/EIPS/eip-5656) MCOPY costs3+3ceil(n/32),
+plus memory expansion3w+w*w//512. Ordinary executed opcodes and21000 intrinsic
+are counted with no refund or empty-calldata payload floor. Full is the maximal
+uniform repetition count under15M/user fixture cap, EIP-7825's16777216 cap,
+31M header and every ordered admission prefix,30M charged block including167355
+Anchor, and24576-byte code limit. Full+1 is executed with sufficient test gas
+before admission rejection; this is not globally optimal packing. Charged block
+gas below29.7M is not near-full. The signed envelope addsceil(native/63)+2301
+to full gross as a fixture continuation reserve, with the same envelope for
+matching zero/single rows. The oracle checks actual EIP-150 forwarded and returned
+gas. Binary search uses fixed-width zero-XOR sizing assembly only; emitted real
+guards are computed with stdlib hashlib, independently checked before measurement.
+
+```sh
+"$PYTHON_BIN" -S bin/zkgas/bench/cases/sha256_bulk.py \
+  --output-dir "$SHA256_CASES_DIR" --model-id "$ZKGAS_MODEL_ID"
+"$PYTHON_BIN" -S -m unittest discover -s bin/zkgas/bench/tests \
+  -p test_sha256_bulk.py -v
+SHA256_BULK_NATIVE_BIN="$NATIVE_BIN" \
+  SHA256_BULK_NATIVE_OUTPUT_DIR="$SHA256_NATIVE_OUTPUT_DIR" \
+  "$PYTHON_BIN" -S -m unittest discover -s bin/zkgas/bench/tests \
+  -p test_sha256_bulk.py -k test_frozen_native_three_specimens -v
+```
+
+Use the existing managed Python environment and fresh output directories. The
+catalogue binds18 distinct canonical request hashes and source/helper/model
+identities. Only the new focused module is needed; do not discover legacy suites.
+The optional Linux native smoke runs exactly a5/1MiB single, zero/64 full and
+an a5→5a mutant with recomputed XOR accepted by native but rejected by original
+requested intent. Existing `process_guard.py` enforces sampled process-tree PSS
+6GiB,180s,256MiB free floor,192MiB output and16MiB retained combined stdout/stderr
+log. Each invocation retains canonical request/intent, source bytes/hashes,
+command/start/elapsed/exit/limits/outcome, output identities and raw native report;
+failures stop without implicit retry. A skipped optional test is not native evidence.
+
+Independent source review and all18 canonical native/signature/receipt/operands/
+code/account/empty-root/witness/counter/original-fresh-quote gates precede freeze
+and sequential execute-only actuals. Matching smoke positives are reusable only
+with an explicit exact source/request/object/GuestInput bridge. Compare actual
+same-proposal SP1 PGU, literal node block estimates/sum and complete-proposal
+quotes separately. This panel stays separate from prior persistent236,
+transient8 and pairing18. No isolated SHA-PGU allocation, price/model fit,
+arbitrary-input/failure/cache/global/IID bound, proof/GPU/production parity,
+Rust/guest/SDK/ELF/pin change or deployment follows.

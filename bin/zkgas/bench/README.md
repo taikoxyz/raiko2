@@ -2452,7 +2452,7 @@ The independent byte oracle checks every ordered input and digest: XOR alone is
 not collision-free and repeated output errors can cancel. Empty selected storage
 support does not remove code/account/whole-world witness requirements.
 
-Frozen revm-precompile41.0.0 `src/hash.rs` and the primary
+Selected host and declared guest revm-precompile43.0.3 `src/hash.rs` and the primary
 [SHA-256 execution spec](https://ethereum.github.io/execution-specs/src/ethereum/forks/berlin/vm/precompiled_contracts/sha256.py.html)
 charge60+12ceil(L/32) native gas; warm STATICCALL adds100.
 [EIP-5656](https://eips.ethereum.org/EIPS/eip-5656) MCOPY costs3+3ceil(n/32),
@@ -2558,7 +2558,7 @@ and every opcode count; compact event digests avoid retaining repeated256KiB dat
 Its sequence SHA256 is an intent/debug commitment, not a protocol receipt root.
 
 Complete LOG EVM gas is `375+375*N+8*L`, counting the static375 base once: the
-frozen revm41 host dynamic log cost excludes that separately charged base.
+selected revm-interpreter43.0.2 host dynamic log cost excludes that separately charged base.
 Memory costs `3*w+w*w//512` for `w=2+max(32,L)/32`; MCOPY costs
 `3+3*ceil(n/32)` per copy. Empty-calldata intrinsic is21000 and refunds are0.
 Full sizing checks the15M fixture transaction cap separately from the16777216
@@ -2827,3 +2827,74 @@ Native gas/status/routes, full/minimized execution-result equality and same-inpu
 stage validation do not directly export arithmetic operands, stacks, results or
 per-op PGU. Independent canonical16 qualification, fresh quotes and source/input
 freeze precede actual16. No pricing, model, proof or production claim follows.
+
+
+## Bounded cold code reads
+
+`cases/cold_code_reads.py` emits12 compiler-free original fixtures:
+BALANCE (`0x31`) or EXTCODESIZE (`0x3b`), configured footprints16/128/512,
+and each group's own `zero`/`selected` level. Each fixture has one signed
+EIP-1559 user CALL (nonce0, empty calldata/value0) to the primary program.
+Every level retains the same configured target count. Selected visits each
+consecutive target once; zero visits none. Target accounts have zero balance,
+empty persistent storage and unique24576-byte legacy runtime
+`PUSH32(index+1) || STOP || JUMPDEST*24542`. Fixture predeployment occurs outside
+the measured block and is not free over the lifecycle. Targets are read without
+CALL, DELEGATECALL, creation, logs, persistent writes or refunds.
+
+```sh
+python -S -B bin/zkgas/bench/cases/cold_code_reads.py \
+  --output-dir artifacts/cold-code-reads/recipes --model-id "$FROZEN_MODEL_ID"
+python -S -B -m unittest discover -s bin/zkgas/bench/tests \
+  -p test_cold_code_reads.py -v
+# Optional: existing frozen binary and fresh retention root; runs exactly3 once.
+ZKGAS_FIXTURE_BIN=/path/to/frozen/native \
+COLD_CODE_READS_NATIVE_OUTPUT_DIR=artifacts/cold-code-reads/native-smoke \
+  python -S -B -m unittest discover -s bin/zkgas/bench/tests \
+  -p test_cold_code_reads.py -k test_frozen_native_exact_three_specimens -v
+```
+
+The maintained APIs are `make_case(operation='size', footprint=128,
+level='selected')`, `_runtime(operation, footprint, visits)`,
+`gas_accounting(operation, footprint, visits)` and
+`prepare(output: Path, *, model_id=MODEL)`. Public levels are `zero` and
+`selected`; direct bounded byte tests also cover0/1/2 visits. Exports stream one
+request at a time into a fresh output directory and retain request, target-code,
+source/helper SHA256 commitments. Metadata stores no duplicate target code blobs.
+
+The runtime checks every result (BALANCE0 or size24576) and final counter. A
+separate bounded byte oracle checks counter progression and clean terminal stack,
+and records actual decoded opcode counts, ordered address/value SHA256, cold set,
+counter commitment and at most eight samples. These commitments are host intent/debug
+evidence, not protocol roots or direct native per-read exports. Under the frozen
+pre-Amsterdam domain each target costs2600 cold-account gas; witness preloading
+does not warm access. Ordinary/memory gas,21000 intrinsic and167355 Anchor gas
+are separate. Each footprint retains one envelope across both operations/levels,
+max selected gross+1000, checked against15M fixture,16777216 EIP-7825,31M header
+prefix and30M charged-block limits. K512 is a fixture bound, not a protocol limit
+or a gas maximum; this is an unsaturated selected-footprint pilot.
+
+The opt-in native smoke verifies the existing executable/build/source identities,
+then runs sizeK16 selected and balanceK128 selected originals plus a same-length
+sizeK16 target-tail mutant exactly once. Native accepts the mutant's length
+guards while original content/SHA256 intent rejects it. Originals alone are
+eligible for exact canonical bridges. Each run retains source/helper/request/row/
+original-intent/native-build hashes, prelaunch files, command/start/caps/outcome,
+canonical input, public output and raw report. The unchanged guard enforces6GiB
+sampled PSS,180 seconds,576MiB disk headroom,16MiB log and192MiB combined growing
+outputs; uncompressed32MiB request,128MiB canonical/native and64MiB benchmark
+input limits remain. Failures stop without implicit retry.
+
+Qualification requires target-code SHA256 intersection with minimized witness
+bodies: size-selected needs every visited target body, while BALANCE and zero
+need none. Account proofs, primary/system code and whole-world commitments remain
+separate. Independent canonical/signature/genesis/account/code/root/receipt/quote
+verification still precedes actuals. Full target loading in a declared source
+path with an Account-only node selector does not establish underpricing:
+EXTCODESIZE already reserves1M per event plus64 dispatch and code64 PGU/byte;
+whole-proposal pricing and literal node block-known estimates remain distinct.
+No price, model, SDK, guest, ELF, dependency or build change follows.
+
+The two dependency wording corrections above identify selected host/declared
+guest sources, not an ELF build attestation. The relevant41/43 function bodies
+and formulas were verified unchanged; historical source hashes and data remain.

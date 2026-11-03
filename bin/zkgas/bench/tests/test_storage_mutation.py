@@ -49,6 +49,9 @@ def execute(code, state, envelope):
             width = op - 0x5f; stack.append(int.from_bytes(code[pc:pc + width], 'big')); pc += width; gas += 3
         elif op == 1:
             stack.append((stack.pop() + stack.pop()) & MASK); gas += 3
+        elif op == 0x1b:
+            shift, value = stack.pop(), stack.pop()
+            stack.append(0 if shift >= 256 else (value << shift) & MASK); gas += 3
         elif op == 0x14:
             stack.append(int(stack.pop() == stack.pop())); gas += 3
         elif op == 0x15:

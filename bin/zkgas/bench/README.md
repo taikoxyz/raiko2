@@ -1983,3 +1983,80 @@ SDK6.3, ELF, host/guest and pins. Compare literal same-proposal actual PGU and
 node ceilings/sum, with complete-proposal estimate separately. This finite
 panel makes no price fit, isolated-operation allocation, global/production
 bound, generated-proof or GPU claim.
+
+### High-limb storage-key distributions
+
+`storage_key_shift.py` creates24 **new** inputs in
+`unzen-storage-key-shift-20261103`: STOP/REVERT × K16/1024 × index shifts64/128/192
+× own R0/full. It reuses the authoritative `storage_dirty_keys` runtime, request
+construction, gas accounting and full-R solver. The new catalog separately lists
+**eight existing** shift0 references by original sample ID, canonical request
+SHA256 and runtime SHA256. Join their original observations and source/config/
+ELF/actual/quote identities; do not rerun or count references as newly sampled.
+
+Four distinct users visit four accounts once. Account i has read-only raw slot0
+holding `start=(i+1)*65536+1`; its K body slots are `start+(j<<shift)`, j0..K-1,
+initialized1. The keys are distinct and below2^256. Request storage keys and
+catalog slot schedules use hexadecimal strings; the catalog also records the
+formula. There is no custom hashed-slot injection or collision claim. Each seed,
+dirty and cleanup traversal shifts its index once with fixed-width PUSH3/SHL
+before adding start. The already computed key pointer is reused for all dirty
+writes. Seed `1->5`, R dirty `5->7->5` pairs, cleanup `5->1`, original values,
+warmth, counters/marker,64-pair batching/tail and terminal semantics stay the same.
+Default shift0 emits no new instructions and all16 preceding request/runtime/core
+metadata identities are protected by immutable pre-extension hash goldens.
+
+SHL costs3 gas plus3 for its PUSH, executed3K times/user: shifted ordinary gas
+increases by18K at fixed K/R. All three shifts have the same executed opcode/gas
+shape at fixed terminal/K/R, but different raw keys, code/trie hashes and witness
+bytes. Comparisons remain whole-input measurements. Full R is solved again
+under every unchanged limit and all ordered prefixes:
+
+| Terminal | K | Full R | Gross/user | Applied refund | Charged/user | Shared envelope | Charged block | Near full |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| STOP | 16 | 2108 | 7502508 | 44800 | 7457708 | 7504809 | 29998187 | yes |
+| STOP | 1024 | 12 | 8984508 | 1796901 | 7187607 | 8986809 | 28917783 | no |
+| REVERT | 16 | 2095 | 7457170 | 0 | 7457170 | 7459471 | 29996035 | yes |
+| REVERT | 1024 | 5 | 7421890 | 0 | 7421890 | 7424191 | 29854915 | yes |
+
+Values apply to each shift64/128/192. STOP/K1024 remains below99% charged
+occupancy because R+1 violates its own final admission prefix; no cap is waived.
+Own R0/full initial maps and signed envelopes agree. Each terminal restores the
+complete per-account maps/roots; whole-world fees, nonces and Anchor still change.
+Read access pairs are `4*(K+1)` and write pairs are `4*K`; raw slot0 is read-only.
+
+```sh
+"$PYTHON_BIN" -S bin/zkgas/bench/cases/storage_key_shift.py \
+  --output-dir "$KEY_SHIFT_CASES_DIR" --model-id "$ZKGAS_MODEL_ID"
+"$PYTHON_BIN" -S -m unittest discover -s bin/zkgas/bench/tests \
+  -p test_storage_key_shift.py -v
+STORAGE_KEY_SHIFT_NATIVE_BIN="$NATIVE_BIN" \
+  "$PYTHON_BIN" -S -m unittest discover -s bin/zkgas/bench/tests \
+  -p test_storage_key_shift.py -k frozen_native -v
+```
+
+Use the existing managed Python environment as `PYTHON_BIN`. Output is exclusive,
+and the model ID must be a lowercase SHA256. The stdlib oracle independently
+executes all24 concrete byte trajectories, checks high raw-slot maps and ordered
+per-record read/write events, exact gas/refunds/routes and counters/marker, and
+executes every R+1 under a sufficient20M gas envelope before testing that
+candidate's own bounds. It covers SHL operand order,0/1/63/64/128/192/255/256+
+shifts and U256 truncation, strict APIs/provenance, the16 old default goldens and
+eight reference identities, and wrong limb/key/domain/value/marker/phase-write
+negatives. The bounded interpreter gains only ordinary SHL support.
+
+The opt-in verifies unchanged native SHA256
+`ad0d78dd575228e8685d1f3c0f09f1c4021c76b6d34a9a1341c15e1c4a0e98ec`
+and runs full STOP/K16/shift64 and full REVERT/K1024/shift192 plus their
+native-accepted dirty7->9 semantic negatives, at180 seconds/specimen. All24
+independent native/signature/receipt/whole-world/authenticated per-account-root,
+canonical mutation-witness, original quote and counter gates precede source/input/
+tool/resource freeze and sequential SP1 actuals. Report24 new literal observations
+and64 diagnostics:12 own-R0 increments,12 terminal contrasts,16 adjacent-shift
+contrasts and24 new-versus-exact-unshifted-reference contrasts. Preserve explicit
+same-R/K/charged-gas/signed-envelope/authenticated-storage-support markers; storage
+support equality uses canonical per-address selected node hash sets/digests,
+with underlying identities retained. Global/account witness differences remain
+separate. Preserve controls, failed attempts and frozen prices/model/SDK/ELF/host/
+guest/pins; no isolated-operation actual allocation, pricing fit, global/production
+bound, generated proof or GPU claim follows from this finite panel.

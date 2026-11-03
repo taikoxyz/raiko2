@@ -35,9 +35,15 @@ def _validate(mode, keys):
         raise ValueError('keys must be 1, 16, 256 or 1024')
 
 
-def _runtime(mode, keys, rounds):
+def _slot_shift(value):
+    if type(value) is not int or value not in (0, 64, 128, 192):
+        raise ValueError('slot_shift must be 0, 64, 128 or 192')
+
+
+def _runtime(mode, keys, rounds, *, slot_shift=0):
     """Guard all three key traversals; count actual executed 64-pair batches."""
-    _validate(mode, keys); original.integer(rounds, 0, 65536, 'rounds per key')
+    _validate(mode, keys); _slot_shift(slot_shift)
+    original.integer(rounds, 0, 65536, 'rounds per key')
     asm = _Factory(); batches, tail = divmod(rounds, 64)
 
     def load(offset, times=1):
@@ -61,7 +67,10 @@ def _runtime(mode, keys, rounds):
         asm.label(name, keys + 1)
         load(0, keys + 1); asm.push(keys, times=keys + 1); asm.op(0x14, keys + 1)
         asm.target(name + '-done', keys + 1); asm.op(0x57, keys + 1)
-        load(64, keys); load(0, keys); asm.op(1, keys)
+        load(64, keys); load(0, keys)
+        if slot_shift:
+            asm.push(slot_shift, times=keys); asm.op(0x1b, keys)
+        asm.op(1, keys)
         asm.push(96, times=keys); asm.op(0x52, keys)
 
     def end(name):
@@ -103,10 +112,11 @@ def _runtime(mode, keys, rounds):
     return asm.finish(), asm.counts
 
 
-def gas_accounting(mode, keys, rounds) -> dict:
-    _validate(mode, keys); original.integer(rounds, 0, 65536, 'rounds per key')
-    _, counts = _runtime(mode, keys, rounds)
-    costs = {0: 0, 1: 3, 0x14: 3, 0x15: 3, 0x51: 3, 0x52: 3,
+def gas_accounting(mode, keys, rounds, *, slot_shift=0) -> dict:
+    _validate(mode, keys); _slot_shift(slot_shift)
+    original.integer(rounds, 0, 65536, 'rounds per key')
+    _, counts = _runtime(mode, keys, rounds, slot_shift=slot_shift)
+    costs = {0: 0, 1: 3, 0x14: 3, 0x15: 3, 0x1b: 3, 0x51: 3, 0x52: 3,
              0x54: 0, 0x55: 0, 0x56: 8, 0x57: 10, 0x5b: 1, 0xfd: 0, 0xfe: 0}
     ordinary = sum(n * (3 if 0x60 <= int(op[-2:], 16) <= 0x7f else costs[int(op[-2:], 16)]) for op, n in counts.items())
     reads = 2200 + keys * 2600; writes = keys * (3000 + 200 * rounds)
@@ -117,36 +127,37 @@ def gas_accounting(mode, keys, rounds) -> dict:
         refund_counter_before_terminal=before, refund_counter=refund, refund_applied=applied, charged_gas=gross - applied)
 
 
-def fits(mode, keys, rounds) -> bool:
+def fits(mode, keys, rounds, *, slot_shift=0) -> bool:
     """Candidate's own gross envelope, receipt budget and ordered prefixes."""
-    _validate(mode, keys); original.integer(rounds, 0, 65536, 'rounds per key')
-    gas = gas_accounting(mode, keys, rounds); envelope = gas['gross_gas'] + ENVELOPE_RESERVE
-    code, _ = _runtime(mode, keys, rounds)
+    _validate(mode, keys); _slot_shift(slot_shift)
+    original.integer(rounds, 0, 65536, 'rounds per key')
+    gas = gas_accounting(mode, keys, rounds, slot_shift=slot_shift); envelope = gas['gross_gas'] + ENVELOPE_RESERVE
+    code, _ = _runtime(mode, keys, rounds, slot_shift=slot_shift)
     return (USERS * (keys + 1) <= MAX_DISTINCT_PAIRS and len(code) <= 24576
         and envelope <= min(TRANSACTION_GAS_CAP, EIP7825_GAS_CAP)
         and ANCHOR_GAS + USERS * gas['charged_gas'] <= BLOCK_BUDGET
         and all(HEADER_GAS_LIMIT - ANCHOR_GAS - j * gas['charged_gas'] >= envelope for j in range(USERS)))
 
 
-def full_rounds(mode, keys) -> int:
-    _validate(mode, keys)
+def full_rounds(mode, keys, *, slot_shift=0) -> int:
+    _validate(mode, keys); _slot_shift(slot_shift)
     low, high = 0, 65536
     while low < high:
         middle = (low + high + 1) // 2
-        if fits(mode, keys, middle): low = middle
+        if fits(mode, keys, middle, slot_shift=slot_shift): low = middle
         else: high = middle - 1
-    assert 0 < low < 65536 and fits(mode, keys, low) and not fits(mode, keys, low + 1)
+    assert 0 < low < 65536 and fits(mode, keys, low, slot_shift=slot_shift) and not fits(mode, keys, low + 1, slot_shift=slot_shift)
     return low
 
 
-def make_case(mode='stop', keys=1, level='full') -> dict:
-    _validate(mode, keys)
+def make_case(mode='stop', keys=1, level='full', *, slot_shift=0) -> dict:
+    _validate(mode, keys); _slot_shift(slot_shift)
     if type(level) is not str or level not in LEVELS:
         raise ValueError('level must be zero or full')
-    maximum = full_rounds(mode, keys); rounds = 0 if level == 'zero' else maximum
-    gas = gas_accounting(mode, keys, rounds)
-    envelope = gas_accounting(mode, keys, maximum)['gross_gas'] + ENVELOPE_RESERVE
-    code, counts = _runtime(mode, keys, rounds)
+    maximum = full_rounds(mode, keys, slot_shift=slot_shift); rounds = 0 if level == 'zero' else maximum
+    gas = gas_accounting(mode, keys, rounds, slot_shift=slot_shift)
+    envelope = gas_accounting(mode, keys, maximum, slot_shift=slot_shift)['gross_gas'] + ENVELOPE_RESERVE
+    code, counts = _runtime(mode, keys, rounds, slot_shift=slot_shift)
     request = original.make_case('call', 'stop', count=USERS, gas_limit=envelope)['request']
     stop = mode == 'stop'; request['expected_user_success'] = stop
     program = request['program']; routes = dict.fromkeys(program['expected_route_counts'], 0)
@@ -156,7 +167,7 @@ def make_case(mode='stop', keys=1, level='full') -> dict:
     phases = {owner: base + 1 for owner, base in bases.items()}
     program['transactions']['recipients'] = recipients
     program['prestate_contracts'] = [dict(address=owner, code_hex='0x' + code.hex(),
-        initial_storage={'0x0': hex(start)} | {hex(key): '0x1' for key in range(start, start + keys)})
+        initial_storage={'0x0': hex(start)} | {hex(key): '0x1' for key in (start + (j << slot_shift) for j in range(keys))})
         for owner, start in phases.items()]
     block_gas = ANCHOR_GAS + USERS * gas['charged_gas']; prefix = f'storage-dirty-keys-{mode}-k{keys}'
     return dict(sample_id=f'{prefix}-r{rounds}', family='storage-dirty-keys', corpus_id=CORPUS,
@@ -187,7 +198,8 @@ def make_case(mode='stop', keys=1, level='full') -> dict:
             initial_phase_by_account=phases, expected_final_phase_by_account=phases.copy(),
             recipient_schedule=recipients.copy(), start_phase_schedule=list(phases.values()),
             final_phase_schedule=list(phases.values()), storage_phase_order=['seed', 'dirty', 'cleanup'],
-            body_key_schedule_by_account={owner: list(range(start, start + keys)) for owner, start in phases.items()},
+            body_key_schedule_by_account={owner: ([hex(start + (j << slot_shift)) for j in range(keys)] if slot_shift
+                else list(range(start, start + keys))) for owner, start in phases.items()},
             expected_counter=keys, expected_round_counter=rounds, expected_marker=keys * rounds,
             counter_memory_offset=0, phase_memory_offset=64, key_memory_offset=96,
             round_counter_memory_offset=128, marker_memory_offset=160,
@@ -208,7 +220,7 @@ def helpers():
         'top_level_create.make_case': original.make_case, 'top_level_create.integer': original.integer,
         'storage_dirty_keys._runtime': _runtime, 'storage_dirty_keys.gas_accounting': gas_accounting,
         'storage_dirty_keys.fits': fits, 'storage_dirty_keys.full_rounds': full_rounds,
-        'storage_dirty_keys._validate': _validate,
+        'storage_dirty_keys._validate': _validate, 'storage_dirty_keys._slot_shift': _slot_shift,
         'spawn_memory.digest': digest, 'spawn_memory.encoded': encoded, 'spawn_memory.write': write}
 
 

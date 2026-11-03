@@ -1836,3 +1836,68 @@ Compare actual same-proposal SP1 PGU, literal node block estimates/sum and
 complete-proposal estimate separately. This finite panel establishes no global
 coverage percentage, trie bound, price refit, per-operation actual allocation,
 generated proof or throughput claim.
+
+### Few long root-REVERT calls
+
+`storage_long_revert.py` creates the separate 16-input
+`unzen-storage-long-revert-20261103` corpus: update/restore root REVERT ×
+2/4 users and accounts × 8192/16384 aggregate initialized entries × own-N0/full.
+Each signed top-level CALL visits its own predeployed contract once, with empty
+calldata and no user CALL wrapper. It reuses the unchanged journal runtime/gas
+helpers and builds a fresh request from the top-level CALL schema. For account
+`i`, `B_i=(i+1)*65536`, `K=S/U`, phase slot0 is `B_i+1`, and raw slots
+`B_i+1..B_i+K-1` contain1. Complete maps and signed envelopes match each own
+N0/full pair. The guarded body attempts `1->2` or `1->2->1`, verifies counter,
+checksum and phase+N, then executes zero-range root REVERT. Complete contract
+maps and storage roots restore; whole-world fees, nonces and Anchor change.
+All user receipts fail legitimately; Anchor succeeds.
+
+| Mode | Users | Full N | Gross = charged/user | Preterminal refund | Shared envelope | Charged block | Attempted pairs |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| update-revert | 2 | 2844 | 14911773 | 0 | 14914074 | 29990901 | 5690 |
+| update-revert | 4 | 1419 | 7453323 | 0 | 7455624 | 29980647 | 5680 |
+| restore-revert | 2 | 2725 | 14915677 | 7630000 | 14917978 | 29998709 | 5452 |
+| restore-revert | 4 | 1360 | 7457317 | 3808000 | 7459618 | 29996623 | 5444 |
+
+These full values apply to both S choices. N0 gross/charged per user is23474;
+its charged block is214303 with2 users or261251 with4. Effective and applied
+refunds are zero, including the restore mode's discarded `2800*N` counter.
+The solver checks <=30M charged block gas including Anchor167355, the31M
+header, each candidate's own gross+2301 envelope,15M/user and EIP-7825 caps,
+every ordered admission prefix, initialized ranges, and at most8192 distinct
+attempted `(account,rawslot)` targets. Full/N0 share the selected full envelope;
+actual charged occupancy is recorded independently. Reads, writes and opcode
+counts retain attempted work after rollback.
+
+```sh
+"$PYTHON_BIN" -S bin/zkgas/bench/cases/storage_long_revert.py \
+  --output-dir "$LONG_REVERT_CASES_DIR" --model-id "$ZKGAS_MODEL_ID"
+"$PYTHON_BIN" -S -m unittest discover -s bin/zkgas/bench/tests \
+  -p test_storage_long_revert.py -v
+STORAGE_LONG_REVERT_NATIVE_BIN="$NATIVE_BIN" \
+  "$PYTHON_BIN" -S -m unittest discover -s bin/zkgas/bench/tests \
+  -p test_storage_long_revert.py -k frozen_native -v
+```
+
+Use the existing managed Python environment as `PYTHON_BIN`. Output creation
+is exclusive and the model ID must be a lowercase SHA256, defaulting to c893.
+The catalog records generator, transitive imported-source and helper identities,
+canonical request hashes, exact phase schedules and expected failed receipts.
+The stdlib oracle executes all16 actual byte programs, checks complete maps,
+raw keys/owners/originals/warmth, gas, refunds, routes and memory, and executes
+each full N+1 under a sufficient20M envelope before evaluating its own candidate
+constraints. It checks the SSTORE gasleft>2300 sentry. Matching-terminal wrong
+owner/domain/value/checksum/refund/phase/map mutants fail the semantic oracle.
+The opt-in native test checks frozen SHA256
+`ad0d78dd575228e8685d1f3c0f09f1c4021c76b6d34a9a1341c15e1c4a0e98ec`
+and runs one full U2/S8192 specimen per mode plus matching-value/checksum
+mutants, with180 seconds per specimen. Native-accepted mutants still fail the
+literal semantic oracle; native acceptance alone does not qualify the panel.
+
+All16 independent native/signature/authenticated-root/canonical-witness and
+original real-quote checks precede freeze and sequential actuals. Preserve
+controls and failures, frozen pricing, SDK6.3, ELF and host/guest inputs. Compare
+actual same-proposal SP1 PGU, literal node block estimates/sum and complete
+proposal estimates separately. This finite composition panel changes packing
+and existing REVERT allowances; it makes no isolated opcode-price, refit,
+per-operation actual allocation, universal trie bound, proof or throughput claim.

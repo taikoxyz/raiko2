@@ -2604,3 +2604,76 @@ bridges. Keep actual SP1 PGU, literal node block-known estimates/sum and complet
 proposal estimates separate. Prior236 persistent,8 transient,18 pairing and both
 18-case SHA contexts remain read-only, separate cohorts; no price fit, global
 bound, ordinary-usability certification or production/proof claim follows.
+
+### Preallocated bulk MCOPY layout probes
+
+`cases/mcopy_bulk.py` emits12 compiler-free requests in corpus
+`unzen-mcopy-bulk-20261104`: four layouts × own-zero/single/maximal uniform full.
+Every workload copy has length65536. Relative EVM offsets are
+same-residue-disjoint64→65600, different-residue-disjoint64→65601,
+overlap-right64→65 and overlap-left65→64. These names describe EVM-relative
+residues; they do not expose or establish guest heap base alignment. Repeated
+disjoint copies may write unchanged bytes after the first copy. Both overlap
+directions use snapshot-equivalent copy semantics and evolve each iteration.
+
+Two transactions from one signer with contiguous nonces call distinct tagged,
+authenticated code owners with empty persistent storage and empty calldata.
+Counter0, protected word32 (`0x7b` repeated32) and payload64 use one preallocation.
+`A32=bytes(i|(tag<<7) for i in range(32))`, `B32=inverse(A32)` seed source and
+disjoint destination through MSTORE plus logarithmic MCOPY even for R0. Overlap
+seeds A plus its first byte; different-residue gap65600 is0xcd; unused padding
+remains0xee. Each loop executes exactly one bulk MCOPY and one counter increment.
+Final EVM guards check the exact counter and unique valid full words at32,
+source/destination head, middle (`base+L//2`) and tail (`base+L-32`), the final
+aligned word, plus aligned gap word65600 for different-residue-disjoint. These
+sampled guards detect copy-content mutations; the independent VM additionally
+checks every prepared/final byte and every copy tuple and content hash. Its
+sequence and final-memory SHA256 values are debug intent, not native memory
+exports or protocol commitments.
+
+Complete gas includes intrinsic21000, ordinary opcodes including MSTORE8,
+`3+3*ceil(n/32)` for each preparation and workload MCOPY, and one memory cost
+`3*w+w*w//512`, with refund0. A gas-only fixed-width placeholder assembler sizes
+candidates without bulk-byte simulation; selected requests always contain exact
+expected guards. Full is the largest uniform repetition count fitting the
+separate15M fixture and16777216 EIP-7825 transaction caps, every31M header admission
+prefix, and30M charged block budget including successful Anchor167355. All three
+levels use that layout's full gross+1000 signed envelope. This1000 is fixture
+continuation margin; no CALL/EIP-150 or storage sentry applies. Full+1 independently
+executes under sufficient gas and fails sizing. Near-full>=29.7M is derived, and
+uniform full is not a global packing bound. Runtime stays below24576 bytes.
+
+```sh
+"$PYTHON_BIN" -S -B bin/zkgas/bench/cases/mcopy_bulk.py \
+  --output-dir "$MCOPY_CASES_DIR" --model-id "$ZKGAS_MODEL_ID"
+"$PYTHON_BIN" -S -B -m unittest discover -s bin/zkgas/bench/tests \
+  -p test_mcopy_bulk.py -v
+MCOPY_BULK_NATIVE_BIN="$NATIVE_BIN" \
+  MCOPY_BULK_NATIVE_OUTPUT_DIR="$MCOPY_NATIVE_OUTPUT_DIR" \
+  "$PYTHON_BIN" -S -B -m unittest discover -s bin/zkgas/bench/tests \
+  -p test_mcopy_bulk.py -k test_frozen_native_exact_three_specimens -v
+```
+
+Use the existing managed Python virtual environment and fresh output directories.
+Export binds requests, generator and unchanged helper module/source hashes.
+The optional frozen-native smoke invokes exactly3 specimens once: same-residue-
+disjoint/single positive, overlap-right/full positive, and overlap-left/single
+intent mutant with loop source65 changed to64 (self-copy), recomputing final
+runtime guards so native succeeds while original-intent verification rejects it.
+The mutant is not canonical and is never actually sampled. The unchanged runner
+uses6GiB sampled process-tree PSS,180s per native,576MiB disk preflight/guard,
+192MiB output and16MiB combined log. Each specimen retains request/original-intent/
+row/source/helper/native-build identities and command/start/caps/outcome/exit/
+elapsed/input/output hashes. Failures stop without implicit retries.
+
+Native exports status/gas/routes; the constructor compares complete execution
+results of full and minimized replay. It does not export final memory. Byte
+intent and native whole-input binding support this finite panel, without isolated
+per-copy PGU, price, proof, GPU timing, production parity or ordinary-usability
+claims. Independent source review precedes canonical qualification; the two exact
+smoke positives require source/request/input bridges before reuse. Canonical12
+require10 fresh native runs,12 fresh original quotes and24-signature/authentication/
+world/code/account/empty-root/witness/receipt/byte-intent gates before freeze and
+one sequential actual run (four zero, four single, four full). Keep actual SP1 PGU,
+literal node block-known estimates/sum and complete-proposal estimates separate.
+All prior cohorts remain separate; this producer changes no prices or models.

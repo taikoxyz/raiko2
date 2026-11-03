@@ -227,6 +227,24 @@ That stack starts:
 - `raiko2-sgx-prover` for the `sgx` lane
 - `gaiko2-sgxgeth` for the `sgxgeth` lane
 
+If the **Docker daemon host's kernel** has no MPTCP support and
+`/proc/sys/net/mptcp/enabled` is absent, add the compatibility override to **every** command:
+
+```bash
+docker compose --env-file docker/.env.sgx.regression \
+  -f docker/docker-compose.sgx.regression.yml \
+  -f docker/docker-compose.sgx.regression.no-mptcp.yml config
+```
+
+Use this same file pair when replacing `config` with the init or runtime commands above, or the
+optional `raiko2` command below. Keep the compatibility file immediately after the base file and
+before any additional overlays: placing it after another overlay can leave the sysctl configured in
+the rendered configuration on Compose 2.32.4. This path requires Docker Compose v2 with `!reset`
+support and removes only the unavailable sysctl, retaining gaiko2's `GODEBUG=multipathtcp=0`.
+With a remote Docker context or `DOCKER_HOST`, inspect the daemon host rather than the local CLI
+host. An existing sysctl set to `0` does not justify this override; use the default mitigation on
+MPTCP-capable kernels. See [SGX Compose compatibility](../../README.md#sgx-compose-on-kernels-without-mptcp).
+
 If you also want a dockerized `raiko2`:
 
 ```bash

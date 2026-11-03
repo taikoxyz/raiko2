@@ -2299,3 +2299,75 @@ witness, original quote and attempted-counter gates precede freeze and SP1
 actuals. These are whole-input comparisons; warmth/exit changes do not isolate
 per-opcode actual allocations. Prices, model, Rust, guest, SDK, ELF and pins
 are unchanged; no global, production, proof or throughput claim follows.
+
+`cases/transient_storage.py` adds eight transient-storage inputs: root STOP or
+REVERT, K16 or4096 body keys, and each input's own R0 or generated-full workload.
+Four users call the same code account, whose persistent initial storage is empty.
+Each transaction guards transient sentinel0=0, stores sentinel1, seeds keys1..K
+from0 to5 with pre/post reads, performs R dirty5->7->5 pairs per key with pre/post5
+reads, cleans every body key5->0 with pre/post reads, then checks sentinel1 and
+loop/round/marker counters. STOP retains the sentinel until transaction finalization;
+the next user's entry guard verifies reset. Root REVERT restores transient changes
+while attempted instructions, values and journal entries remain observable.
+
+All four users share one transient owner: the union has K+1 owner/slot pairs,
+with four independent transaction attempt sets and reset boundaries. This is not
+four separate owners or persistent storage witness support. Generic
+`aggregate_state_size` and `state_size_per_account` both remain0 persistent
+entries; `peak_transient_state_entries_per_transaction` explicitly records K+1.
+The request declares
+one prestate code account, empty persistent storage and four explicit recipients
+naming that account. Transient operations must not inject phantom persistent MPT
+targets. Authenticate code/account and whole-world evidence, retain the empty
+persistent roots, and derive any observed persistent tracer selectors from their
+source/system scope before interpreting them. Fees, sender nonces and Anchor
+execution still change whole-world state.
+
+Per user, the guarded program executes2+6K TLOADs and1+K*(2+2R) TSTOREs, uses192
+memory bytes and performs no SLOAD/SSTORE. Each transient opcode costs100 EVM gas,
+without cold surcharges, storage refunds or the2300-gas SSTORE sentry. Ordinary
+instruction gas comes from executed counts; memory expansion18 and intrinsic21000
+are separate. The1000-gas envelope reserve is fixture policy. Each own R0 control
+retains its full candidate's selected envelope. Full means maximal uniform R under
+the30M charged block cap including167355 Anchor gas,31M header, every ordered
+admission prefix,15M user fixture cap,16,777,216 EIP-7825 cap and24576-byte code
+limit. Fixed-width pushes/targets and64-pair batches plus a tail bound runtime size.
+K16 full R2117 is near-full; K4096 full R2 is below99% occupancy because another
+uniform round exceeds the charged budget. These points do not establish arbitrary
+packing capacity or key-distribution/call-graph bounds.
+
+```sh
+"$PYTHON_BIN" -S bin/zkgas/bench/cases/transient_storage.py \
+  --output-dir "$TRANSIENT_CASES_DIR" --model-id "$ZKGAS_MODEL_ID"
+"$PYTHON_BIN" -S -m unittest discover -s bin/zkgas/bench/tests \
+  -p test_transient_storage.py -v
+TRANSIENT_STORAGE_NATIVE_BIN="$NATIVE_BIN" \
+  TRANSIENT_STORAGE_NATIVE_OUTPUT_DIR="$TRANSIENT_NATIVE_OUTPUT_DIR" \
+  "$PYTHON_BIN" -S -m unittest discover -s bin/zkgas/bench/tests \
+  -p test_transient_storage.py -k test_frozen_native_positive_and_dirty_nine -v
+```
+
+Use the existing managed Python environment as `PYTHON_BIN`. Catalogue and optional
+native-output directories must be fresh. The catalogue binds eight distinct request
+hashes, actual generator/imported-source/helper hashes, own-control identities,
+frozen model identity and no-fitting provenance. The separate bounded byte VM
+checks actual gas, stack/memory/counters, owner-qualified transient values/journal,
+frame rollback/exception and transaction finalization. Regression coverage includes
+all eight four-user trajectories, full+1 execution under sufficient gas before
+constraint rejection, K16 R0/1/63/64/65,100/99-gas TSTORE boundaries, strict API/CLI
+and provenance checks, and guard/value/owner/reset/terminal/gas/FD-retention mutants.
+The optional native test authenticates the frozen executable, runs exactly a K16
+full STOP positive and a native-accepted dirty-interim9 mutant rejected by literal
+intent, retains evidence and stops immediately on failure.
+
+Independent exact-source review and all eight canonical native/signature/receipt/
+dispatch/authenticated code/account/whole-world/root/witness/original-real-quote/
+counter gates precede source/input/tool/resource freeze and sequential SP1 actuals.
+The `evm-gas-only` research profile is explicit; it does not establish legacy Unzen
+production admission. This new transient eight-input panel stays separate from the
+236-input persistent-storage cohort. Compare actual whole-proposal SP1 PGU, literal
+node per-block ceilings/sum and the complete-proposal quote separately, preserving
+all four own-control increments and four terminal contrasts with exact scaled
+deltas and identity flags. Whole-input observations do not allocate actual PGU to
+isolated operations. No price/model/Rust/guest/SDK/ELF/pin change or global, proof,
+GPU, throughput or production-readiness conclusion follows.

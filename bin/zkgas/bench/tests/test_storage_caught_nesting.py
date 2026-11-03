@@ -58,8 +58,12 @@ def qualify(test, row, execution=None, *, enforce_bounds=True):
         refund = 2800 * k if mode == 'stop' else 0; applied = min(refund, gross // 5)
         test.assertEqual((root['gas'], root['refund'], root['applied'], root['charged']), (gross, refund, applied, gross - applied))
         gas = p['gas_accounting_per_user']
+        leaf_counter = leaf['result']['refund_before_revert'] if mode == 'revert' else leaf['result']['refund']
+        test.assertEqual(gas['leaf_refund_counter_before_terminal'], leaf_counter)
+        test.assertEqual(p['expected_leaf_refund_counter_before_terminal'], leaf_counter)
+        test.assertEqual(gas['refund_counter_before_terminal'], root['refund'])
         for field, value in dict(gross_gas=gross, refund_counter=refund, refund_applied=applied, charged_gas=gross-applied,
-                                 refund_counter_before_terminal=2800*k).items():
+                                 refund_counter_before_terminal=refund).items():
             test.assertEqual(gas[field], value, field); test.assertEqual(p['expected_user_' + field], value)
         for level, frame in enumerate(record['frames'][:-1]):
             test.assertEqual(frame['owner'], address(i, level)); call = frame['call']
@@ -158,6 +162,24 @@ class StorageCaughtNestingTests(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, 'SSTORE sentry'):
             execute(bytes.fromhex('600160005500'), {0:1}, 21000+6+2300)
         self.assertEqual(execute(bytes.fromhex('600160005500'), {0:1}, 21000+6+2301)['terminal'], 0)
+
+    def test_user_refund_before_terminal_excludes_caught_leaf_refund(self):
+        m = self.load()
+        from storage_caught_vm import run_users
+        for mode, k, d in itertools.product(('revert', 'stop'), (16, 1024), (1, 4)):
+            row = m.make_case(mode, k, d, 'zero'); p = row['parameters']
+            record = run_users(row, limit=1)[0][0]
+            top_counter = record['result']['refund']
+            leaf = record['frames'][-1]['result']
+            leaf_counter = leaf['refund_before_revert'] if mode == 'revert' else leaf['refund']
+            with self.subTest(mode=mode, keys=k, depth=d):
+                self.assertEqual(top_counter, 0 if mode == 'revert' else 2800*k)
+                self.assertEqual(leaf_counter, 2800*k)
+                self.assertEqual(p['gas_accounting_per_user']['refund_counter_before_terminal'], top_counter)
+                self.assertEqual(p['expected_user_refund_counter_before_terminal'], top_counter)
+                self.assertEqual(p['gas_accounting_per_user'].get('leaf_refund_counter_before_terminal'), leaf_counter)
+                self.assertEqual(p.get('expected_leaf_refund_counter_before_terminal'), leaf_counter)
+                self.assertEqual(p['gas_accounting_per_user']['leaf_gas_accounting']['refund_counter_before_terminal'], leaf_counter)
 
     def test_strict_domains(self):
         m = self.load()

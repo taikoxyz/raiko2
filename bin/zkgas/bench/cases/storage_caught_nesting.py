@@ -84,7 +84,8 @@ def gas_accounting(mode, keys, depth, rounds):
         leaf_gas_accounting=leaf, wrapper_ordinary_pre=pre, wrapper_cold_target_gas=cold,
         wrapper_ordinary_post=post, wrapper_gross_gas=pre+cold+post,
         wrapper_total_gas=depth*(pre+cold+post), gross_gas=gross,
-        refund_counter_before_terminal=leaf['refund_counter_before_terminal'], refund_counter=refund,
+        refund_counter_before_terminal=refund,
+        leaf_refund_counter_before_terminal=leaf['refund_counter_before_terminal'], refund_counter=refund,
         refund_applied=applied, charged_gas=gross-applied, child_gas_request=CHILD_GAS,
         minimum_frame_envelopes_leaf_to_root=required_by_depth, transaction_envelope=21000+required)
 
@@ -163,6 +164,7 @@ def _make_case(mode, keys, depth, rounds, maximum):
         expected_user_success=True, expected_user_receipt_statuses=[True]*USERS,
         expected_call_count=USERS*depth, expected_wrapper_stops=USERS*depth,
         expected_leaf_stops=USERS*int(mode=='stop'), expected_leaf_reverts=USERS*int(mode=='revert'),
+        expected_leaf_refund_counter_before_terminal=gas['leaf_refund_counter_before_terminal'],
         expected_all_frame_terminal_counts={'STOP':USERS*(depth+int(mode=='stop')), 'REVERT':USERS*int(mode=='revert')},
         runtime_bytes=len(code), runtime_sha256=digest(code), runtime_scope='shared leaf only',
         shared_runtime=False, shared_leaf_runtime=True,

@@ -2238,3 +2238,64 @@ independent native/signature/receipt/world/account-specific storage-root/
 canonical-witness/original-quote/context-counter checks must precede freeze and
 SP1 actuals. This producer changes no prices, model, Rust, guest, SDK, ELF or
 pins, and makes no global, production, proof or throughput claim.
+
+`cases/storage_warm_rollback.py` adds32 finite caller-warmth and rollback
+controls: leaf or ancestor exit, K16 or256, delegated depth2 or4, caller
+prewarming off or on, and own R0/full. Four successful users visit disjoint
+wrapper chains sharing one leaf CODE account. Each top wrapper owns an
+identical phase0=65537/body65537..65536+K=1 map; intermediate wrappers and
+leaf CODE have empty maps. DELEGATECALL keeps the four storage owners distinct.
+Logical attempted accesses require `4*(K+1)` account/slot pairs and writes
+require `4*K`; the read-only phase is excluded from write support.
+
+TOP optionally reads and guards every phase/body value before calling, then
+always reads and guards them after rollback. Both traversals use a guarded
+ascending loop and one32-byte memory word, separately from the leaf's192 bytes.
+Caller prewarming survives the lower checkpoint: initial leaf reads and post
+reads cost100 per slot when prewarmed. Without prewarming both are cold2100
+reads because the reverting subtree's new warmth is discarded. The original
+leaf kernel is unchanged. Leaf exit catches its REVERT in the innermost
+wrapper. Ancestor exit lets the leaf STOP, then reverts the innermost wrapper;
+its parent catches0. Every user has exactly one REVERT, depth STOPs and depth
+DELEGATECALLs. Leaf preterminal refund is2800K; a successful leaf passes that
+counter only as far as the reverting ancestor. Every top preterminal counter,
+effective refund and applied transaction refund is0. Storage maps restore;
+Anchor effects, transaction fees and sender nonces still change world state.
+
+Ordinary top traversal costs are derived from emitted assembly counts; storage
+fees and the one-time3-gas memory expansion are separate. Each ordinary
+wrapper has18 pre-call gas, a2600 cold target and46 post-call guards. Moving
+the6-gas empty REVERT operands from leaf to ancestor preserves whole-user
+gross gas and aggregate opcode counts at fixed K/depth/warmth/R. For actual
+leaf execution `C`, use `Tleaf=C+2301` and
+`Ti=pre_i+max(ceil(64*Tchild/63),Tchild+post_i)`, including top traversal
+fees/memory in their actual regions. The selected signed envelope is the
+maximum of the two exit modes at their common maximal full R; own R0 retains
+that same envelope and initial map. Selection enforces the31M header,30M
+charged block including167355 Anchor gas, every ordered admission prefix,
+15M user/EIP7825 caps,12M child requests, SSTORE sentry,8192 storage targets,
+24576 code bytes and R0..65536. K256 replaces K1024 because four obligatory
+cold-postcheck K1024 R0 controls would exceed the charged budget. Reported
+occupancy describes this uniform selector, not arbitrary packing capacity.
+
+```sh
+"$PYTHON_BIN" -S bin/zkgas/bench/cases/storage_warm_rollback.py \
+  --output-dir "$WARM_ROLLBACK_CASES_DIR" --model-id "$ZKGAS_MODEL_ID"
+"$PYTHON_BIN" -S -m unittest discover -s bin/zkgas/bench/tests \
+  -p test_storage_warm_rollback.py -v
+```
+
+The separate bounded frame oracle interprets actual loops/SLOAD/DELEGATECALL/
+REVERT bytes, snapshots storage/refund/account warmth/slot warmth per frame,
+and retains attempted work across rollback. Its explicit20000-step wrapper
+bound supports both top traversals at K256; the existing CALL/F4 oracle's64
+step bound and the leaf oracle's default result shape remain unchanged.
+Regression goldens preserve the32 prior reviewed CALL/F4 request and complete
+core metadata identities. Optional `STORAGE_WARM_NATIVE_BIN` with a fresh
+`STORAGE_WARM_NATIVE_OUTPUT` archive runs two full positives and two
+native-accepted dirty9 mutants that literal intent rejects. Independent all32
+native, signature, receipt, whole-world, authenticated owner-root, canonical
+witness, original quote and attempted-counter gates precede freeze and SP1
+actuals. These are whole-input comparisons; warmth/exit changes do not isolate
+per-opcode actual allocations. Prices, model, Rust, guest, SDK, ELF and pins
+are unchanged; no global, production, proof or throughput claim follows.

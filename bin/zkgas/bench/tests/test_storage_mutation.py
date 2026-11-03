@@ -30,9 +30,9 @@ def decode(code):
         pc += width
 
 
-def execute(code, state, envelope):
+def execute(code, state, envelope, *, initial_warm_keys=None):
     """Run actual bytes; originals and access warmth reset at each transaction."""
-    original = state.copy(); warm = set(); stack = []; memory = bytearray()
+    original = state.copy(); warm = set() if initial_warm_keys is None else set(initial_warm_keys); stack = []; memory = bytearray()
     counts = Counter(); reads = []; writes = []; gas = 21000; refund = 0; pc = 0
     boundaries = {at for at, op, _ in decode(code) if op == 0x5b}
 

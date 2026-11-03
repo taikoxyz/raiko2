@@ -1901,3 +1901,85 @@ actual same-proposal SP1 PGU, literal node block estimates/sum and complete
 proposal estimates separately. This finite composition panel changes packing
 and existing REVERT allowances; it makes no isolated opcode-price, refit,
 per-operation actual allocation, universal trie bound, proof or throughput claim.
+
+### Many-key warm dirty writes
+
+`storage_dirty_keys.py` creates the separate16-input
+`unzen-storage-dirty-keys-20261103` corpus: STOP/root REVERT ×
+1/16/256/1024 keys per account × own-R0/maximal uniform full R. Four signed
+users each CALL one distinct predeployed contract once with empty calldata and
+one shared runtime. Account i has `B_i=(i+1)*65536`, read-only raw phase0
+`B_i+1`, and K raw keys `B_i+1..B_i+K` initialized to1; all other slots are
+absent. Each own-R0/full pair shares complete maps and the full signed envelope.
+
+The guarded runtime seeds **all** K keys `1->5`, then visits each key for R
+warm dirty `5->7->5` pairs in64-pair batches plus the exact tail, and finally
+cleans **all** keys `5->1`. No per-pair SLOAD or nested CALL is added. Actual
+per-key round counters accumulate into marker `K*R`; phase0 is read-checked
+and never written. Memory stays within192 bytes. Both terminals restore every
+complete contract map/root; whole-world fees, nonces and Anchor change.
+STOP succeeds and keeps the `2800*K` refund counter subject to the20% cap;
+root REVERT fails legitimately and discards that counter. R0 still seeds and
+cleans every key. Attempted reads/writes/opcodes remain after REVERT.
+
+| Terminal | K | Full R | Gross/user | Applied refund | Charged/user | Shared envelope | Charged block | Near full |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| STOP | 1 | 33955 | 7460941 | 2800 | 7458141 | 7463242 | 29999919 | yes |
+| STOP | 16 | 2108 | 7502220 | 44800 | 7457420 | 7504521 | 29997035 | yes |
+| STOP | 256 | 117 | 8133052 | 716800 | 7416252 | 8135353 | 29832363 | yes |
+| STOP | 1024 | 12 | 8966076 | 1793215 | 7172861 | 8968377 | 28858799 | no |
+| REVERT | 1 | 33942 | 7458113 | 0 | 7458113 | 7460414 | 29999807 | yes |
+| REVERT | 16 | 2095 | 7456882 | 0 | 7456882 | 7459183 | 29994883 | yes |
+| REVERT | 256 | 104 | 7407554 | 0 | 7407554 | 7409855 | 29797571 | yes |
+| REVERT | 1024 | 5 | 7403458 | 0 | 7403458 | 7405759 | 29781187 | yes |
+
+Storage gas per user is `2200+K*(5600+200*R)`, plus21000 intrinsic,
+18 memory gas, and ordinary opcode gas from executed route counts. Literal
+access pairs are `4*(K+1)` and literal write pairs are `4*K`; phase0 only
+belongs to the first set. Full resource counters can use conservative witness
+semantics, so qualify their actual definitions before comparing them with
+literal write sets. The solver keeps the31M header, includes Anchor167355 in
+the<=30M charged budget, limits each gross+2301 envelope to15M and the
+EIP-7825 cap, and checks every ordered header prefix and<=8192 access targets.
+The reserve establishes `gasleft>2300` at every SSTORE. Maximal uniform R is
+not arbitrary block maximality: STOP/K1024 R+1 would charge29573143 including
+Anchor but its last admission prefix lacks413305 gas for its own gross+2301
+envelope. Uniform-R granularity also limits occupancy. `near_full` truthfully
+means charged block>=29700000; no cap or header is waived.
+
+```sh
+"$PYTHON_BIN" -S bin/zkgas/bench/cases/storage_dirty_keys.py \
+  --output-dir "$DIRTY_KEYS_CASES_DIR" --model-id "$ZKGAS_MODEL_ID"
+"$PYTHON_BIN" -S -m unittest discover -s bin/zkgas/bench/tests \
+  -p test_storage_dirty_keys.py -v
+STORAGE_DIRTY_KEYS_NATIVE_BIN="$NATIVE_BIN" \
+  "$PYTHON_BIN" -S -m unittest discover -s bin/zkgas/bench/tests \
+  -p test_storage_dirty_keys.py -k frozen_native -v
+```
+
+Use the existing managed Python environment as `PYTHON_BIN`. Output is
+exclusive; the model ID must be a lowercase SHA256, defaulting to c893. The
+catalog records generator, transitive source, helper and canonical request
+identities, exact phase/key schedules, counters, refunds, routes and receipts.
+The standard-library oracle executes all16 actual byte trajectories, complete
+maps, raw originals/warmth and exact gas. It tests0/1/63/64/65 rounds across
+batch and tail boundaries, sentry and all prefixes, and executes each R+1
+under a sufficient20M envelope
+before evaluating that candidate's own bounds. Semantic negatives include
+wrong dirty values, key/owner/domain, skipped batch/tail, marker, phase writes,
+refund/terminal and stale access/write metadata. Large event streams are
+compared by length and per-record mismatch.
+
+The native opt-in verifies the unchanged binary SHA256
+`ad0d78dd575228e8685d1f3c0f09f1c4021c76b6d34a9a1341c15e1c4a0e98ec`
+and runs full STOP/K1 and full REVERT/K1024 plus their dirty7->9 mutants,
+with180 seconds per specimen. It checks5 receipts per specimen, exact charged
+gas and4 distinct original/final diagnostic roots with per-account equality.
+The mutants remain native-accepted but fail the literal semantic oracle.
+All16 independent native/signature/receipt/whole-world/authenticated-root,
+canonical mutation-witness, original-quote and counter gates precede freeze
+and sequential SP1 actuals. Preserve controls/failures and frozen model,
+SDK6.3, ELF, host/guest and pins. Compare literal same-proposal actual PGU and
+node ceilings/sum, with complete-proposal estimate separately. This finite
+panel makes no price fit, isolated-operation allocation, global/production
+bound, generated-proof or GPU claim.

@@ -2371,3 +2371,67 @@ all four own-control increments and four terminal contrasts with exact scaled
 deltas and identity flags. Whole-input observations do not allocate actual PGU to
 isolated operations. No price/model/Rust/guest/SDK/ELF/pin change or global, proof,
 GPU, throughput or production-readiness conclusion follows.
+
+`cases/bn254_pairing_dense.py` adds18 compiler-free BN254 pairing inputs: product
+identity or nonidentity, K2/16/64 non-infinity elements, and each group's own
+zero/single/generated-full repetition level. Two users call one authenticated
+code account with empty persistent storage. Identity inputs use `(jP,Q),(-jP,Q)`
+for j1..K/2; nonidentity inputs use `(jP,Q)` for j1..K, whose nonzero exponent
+sum yields result0. Both results require successful precompile status1 and valid
+user transactions. [EIP-197](https://eips.ethereum.org/EIPS/eip-197) defines the
+field/group and192-byte element encoding: G1 x/y then G2 x-imag/x-real/y-imag/y-real.
+The producer reuses the existing G1 affine helper; independent test arithmetic
+checks G1 schedules and G2 curve membership and subgroup order.
+
+Every level CODECOPYs the same nonempty embedded input, beyond an unreachable
+instruction prefix, into memory starting32. The counter occupies word0; output
+starts32+192K. Output sentinel2 is allocated once and reset before every
+STATICCALL0x08; guards require status1, returndata32 bytes, exact result0/1,
+completed counter and STOP. No user persistent or transient storage operations
+occur. Empty selected storage support still requires code/account/whole-world
+witness authentication; fees, sender nonces and Anchor change whole-world state.
+
+Per call, [EIP-1108](https://eips.ethereum.org/EIPS/eip-1108) native pairing gas is
+45000+34000K, plus100 warm STATICCALL access gas. Ordinary gas derives from
+executed opcode counts; CODECOPY costs3+18K and memory costs3w+w*w//512 for
+w=2+6K. There are no storage refunds or child intrinsic fees. The signed envelope
+adds ceil(native/63)+2301 to full gross gas as a conservative fixture reserve;
+this is not an SSTORE sentry or a protocol requirement. Zero/single retain their
+matching full envelope. The byte oracle verifies actual EIP-150 available,
+forwarded and returned gas plus continuation at every call. Full is maximal
+uniform repetitions under30M charged block including167355 Anchor,31M header,
+every ordered prefix,15M/user fixture cap,16,777,216 EIP-7825 cap and24576 total
+code bytes. Occupancy below99% is not near-full; uniform packing is not a global
+maximum. Full+1 executes under a sufficient test envelope before candidate
+constraints reject it.
+
+```sh
+"$PYTHON_BIN" -S bin/zkgas/bench/cases/bn254_pairing_dense.py \
+  --output-dir "$PAIRING_CASES_DIR" --model-id "$ZKGAS_MODEL_ID"
+"$PYTHON_BIN" -S -m unittest discover -s bin/zkgas/bench/tests \
+  -p test_bn254_pairing_dense.py -v
+BN254_PAIRING_NATIVE_BIN="$NATIVE_BIN" \
+  BN254_PAIRING_NATIVE_OUTPUT_DIR="$PAIRING_NATIVE_OUTPUT_DIR" \
+  "$PYTHON_BIN" -S -m unittest discover -s bin/zkgas/bench/tests \
+  -p test_bn254_pairing_dense.py -k test_frozen_native_three_specimens -v
+```
+
+Use the managed Python environment; output directories must be fresh. The
+catalogue binds18 distinct canonical request hashes and actual source/helper/model
+identities. Optional frozen-native smoke runs exactly single/nonidentity K2,
+single/identity K64 and a valid reordered K2 input accepted by native pairing but
+rejected by literal ordered intent. Every invocation retains command/start/exit/
+elapsed/180-second timeout, canonical request, stdout/stderr and source/input/
+output hashes, including failures, and stops without implicit retry. The separate
+bounded byte oracle validates actual operands before using mathematical product
+intent as its precompile result stub; it does not emulate pairing performance.
+
+Independent exact-source review and all18 canonical native/signature/receipt/code/
+account/empty-root/witness/operand/wrapper/counter/original-real-quote gates precede
+freeze and sequential actual measurements. Compare actual same-proposal SP1 PGU,
+literal node block estimates/sum and complete-proposal quotes separately. Retain
+all18 raw rows and27 whole-input contrasts: six each zero→single, zero→full and
+single→full, plus nine matched identity/nonidentity contrasts. This panel remains
+separate from prior persistent236 and transient8 cohorts. No isolated pairing-PGU
+allocation, price fit, arbitrary operand/failure/cache bound, global/IID/proof/GPU/
+production claim, Rust/guest/SDK/ELF/pin change or deployment follows.

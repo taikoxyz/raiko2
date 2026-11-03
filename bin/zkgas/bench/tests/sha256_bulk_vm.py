@@ -22,7 +22,7 @@ def decode(code):
 def execute(code, envelope, *, pattern, length, tag, repetitions, override=None):
     assert type(envelope) is int and envelope >= 21000, 'invalid gas envelope'
     assert type(pattern) is str and pattern in ('zero', 'a5'), 'pattern domain'
-    assert type(length) is int and length in (64, 4096, 1048576), 'length domain'
+    assert type(length) is int and length in (64, 4096, 1048576, 1269664, 1269665, 2097152), 'length domain'
     assert type(tag) is int and tag in (0, 1), 'tag domain'
     assert type(repetitions) is int and 0 <= repetitions <= 1_000_000, 'repetition domain'
     assert len(code) <= 24576, 'code size'
@@ -52,6 +52,7 @@ def execute(code, envelope, *, pattern, length, tag, repetitions, override=None)
             assert len(calls) == attempted == completed == repetitions == word(0), 'counter/call mismatch'
             assert word(32) == xor, 'digest XOR mismatch'
             assert word(output) == (2 if not calls else int.from_bytes(calls[-1]['digest'], 'big')), 'output digest'
+            assert not any(memory[max_memory:]), 'memory padding modified'
         return dict(terminal=op, gas=gas, counts=counts, stack=stack, memory=memory,
             calls=calls, attempted_calls=attempted, completed_calls=completed, counter=word(0),
             accumulator=word(32), output=word(output), copies=copies, mcopy_gas=copy_gas)
@@ -74,7 +75,7 @@ def execute(code, envelope, *, pattern, length, tag, repetitions, override=None)
             dest, source, size = stack.pop(), stack.pop(), stack.pop()
             assert (dest, source, size) == (64 + copied, 64, min(copied, length - copied)), 'MCOPY schedule'
             assert size > 0 and not attempted, 'MCOPY phase'
-            assert len(memory) == max_memory, 'output not preallocated'
+            assert len(memory) == 32 * ((max_memory + 31) // 32), 'output not preallocated'
             if not copies:
                 assert memory[64:96] == bytes([0 if pattern == 'zero' else 0xa5]) * 32, 'seed input bytes'
                 assert word(0) == word(32) == 0 and word(output) == 2, 'initial words'

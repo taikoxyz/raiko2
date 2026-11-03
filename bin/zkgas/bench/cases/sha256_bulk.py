@@ -19,6 +19,8 @@ import top_level_create as original
 CORPUS = 'unzen-sha256-bulk-20261104'
 PATTERNS = ('zero', 'a5')
 LENGTHS = (64, 4096, 1048576)
+LINEAR_LENGTHS = (1269664, 1269665, 2097152)
+LINEAR_CORPUS = 'unzen-sha256-linear-regime-20261104'
 LEVELS = ('zero', 'single', 'full')
 MAX_REPETITIONS = 1_000_000
 USERS = 2
@@ -32,7 +34,7 @@ OWNERS = tuple(f'0x{BASE_ADDRESS + tag:040x}' for tag in range(USERS))
 
 def _validate(pattern, length):
     if type(pattern) is not str or pattern not in PATTERNS: raise ValueError('pattern must be zero or a5')
-    if type(length) is not int or length not in LENGTHS: raise ValueError('input length must be 64,4096 or1048576')
+    if type(length) is not int or length not in LENGTHS + LINEAR_LENGTHS: raise ValueError('input length must be64,4096,1048576,1269664,1269665 or2097152')
 
 
 def expected_xor(pattern, length, repetitions, tag=0):
@@ -96,7 +98,7 @@ def gas_accounting(pattern, length, repetitions):
     costs = {0: 0, 1: 3, 0x14: 3, 0x15: 3, 0x17: 3, 0x18: 3, 0x3d: 2,
              0x51: 3, 0x52: 3, 0x56: 8, 0x57: 10, 0x5a: 2, 0x5b: 1, 0x5e: 0, 0xfa: 0, 0xfe: 0}
     ordinary = sum(n * (3 if 0x60 <= int(op[-2:], 16) <= 0x7f else costs[int(op[-2:], 16)]) for op, n in counts.items())
-    words = 3 + length // 32; memory = 3 * words + words * words // 512
+    words = 3 + (length + 31) // 32; memory = 3 * words + words * words // 512
     filled = 32; copy_gas = 0
     while filled < length:
         size = min(filled, length - filled); copy_gas += 3 + 3 * ((size + 31) // 32); filled += size
@@ -146,7 +148,7 @@ def make_case(pattern='a5', length=64, level='full'):
     program['transactions']['recipients'] = list(OWNERS)
     program['prestate_contracts'] = [dict(address=owner, code_hex='0x' + code.hex(), initial_storage={}) for owner, code in zip(OWNERS, codes)]
     prefix = f'sha256-bulk-{pattern}-l{length}'; block_gas = ANCHOR_GAS + USERS * gas['charged_gas']
-    return dict(sample_id=f'{prefix}-n{repetitions}', family='sha256-bulk', corpus_id=CORPUS,
+    return dict(sample_id=f'{prefix}-n{repetitions}', family='sha256-bulk', corpus_id=LINEAR_CORPUS if length in LINEAR_LENGTHS else CORPUS,
         role='control' if repetitions == 0 else 'candidate', baseline_sample_id=f'{prefix}-n0',
         data_role='unfitted_sha256_bulk_validation', holdout_only=True, actuals_used_for_fitting=False,
         completion_gate='Independent source review and all18 native/signature/receipt/code/account/empty-root/witness/unique-input/original-real-quote gates precede freeze and actuals.',
@@ -158,7 +160,7 @@ def make_case(pattern='a5', length=64, level='full'):
             input_schedule='BE256((owner_tag<<128)|index) || pattern_byte*(input_bytes-32), index0..R-1',
             tail_pattern_byte=0 if pattern == 'zero' else 0xa5, outer_calldata_bytes=0,
             counter_memory_offset=0, accumulator_memory_offset=32, input_memory_offset=64, output_memory_offset=64 + length,
-            memory_words=3 + length // 32, output_sentinel=2, expected_counter=repetitions,
+            memory_words=3 + (length + 31) // 32, output_sentinel=2, expected_counter=repetitions,
             account_count=USERS, aggregate_state_size=0, state_size_per_account=0,
             expected_initial_storage_entry_count=0, expected_final_storage_entry_count=0,
             expected_persistent_storage_reads=0, expected_persistent_storage_writes=0,
@@ -190,23 +192,26 @@ def helpers():
         'spawn_memory.digest': digest, 'spawn_memory.encoded': encoded, 'spawn_memory.write': write}
 
 
-def prepare(output: Path, *, model_id=MODEL):
+def prepare(output: Path, *, model_id=MODEL, linear_regime=False):
     if not isinstance(output, Path): raise ValueError('output must be a Path')
     if type(model_id) is not str or re.fullmatch('[0-9a-f]{64}', model_id) is None: raise ValueError('model_id must be lowercase SHA256')
+    if type(linear_regime) is not bool: raise ValueError('linear_regime must be bool')
+    lengths = LINEAR_LENGTHS if linear_regime else LENGTHS
+    corpus = LINEAR_CORPUS if linear_regime else CORPUS
     output.mkdir(parents=True, exist_ok=False); (output / 'requests').mkdir(); rows = []
     for pattern in PATTERNS:
-        for length in LENGTHS:
+        for length in lengths:
             for level in LEVELS:
                 row = make_case(pattern, length, level); raw = encoded(row.pop('request'))
                 path = f"requests/{row['sample_id']}.json"; write(output / path, raw)
                 rows.append(row | {'request_path': path, 'request_sha256': digest(raw)})
     assert len({r['sample_id'] for r in rows}) == len({r['request_sha256'] for r in rows}) == 18
-    write(output / 'catalog.json', encoded(dict(schema_version=1, corpus_id=CORPUS, frozen_model_id=model_id,
-        purpose='18 finite unique-input SHA256 requests: zero/a5 tails,64/4096/1048576 bytes, own-zero/single/maximal-uniform-full.',
+    write(output / 'catalog.json', encoded(dict(schema_version=1, corpus_id=corpus, frozen_model_id=model_id,
+        purpose=f"18 finite unique-input SHA256 requests: zero/a5 tails,{'/'.join(map(str, lengths))} bytes, own-zero/single/maximal-uniform-full.",
         generator_sha256=digest(Path(__file__).read_bytes()),
         source_sha256={name: digest(Path(module.__file__).read_bytes()) for name, module in source_modules().items()},
         helper_source_sha256={name: digest(inspect.getsource(helper).encode()) for name, helper in helpers().items()},
-        patterns=list(PATTERNS), lengths=list(LENGTHS), levels=list(LEVELS), users=USERS,
+        patterns=list(PATTERNS), lengths=list(lengths), levels=list(LEVELS), users=USERS,
         holdout_only=True, actuals_used_for_fitting=False,
         primary_sources=['https://ethereum.github.io/execution-specs/src/ethereum/forks/berlin/vm/precompiled_contracts/sha256.py.html', 'https://eips.ethereum.org/EIPS/eip-5656'],
         native_gas_source='Frozen revm-precompile41.0.0 src/hash.rs:60+12ceil(input_bytes/32)',
@@ -217,4 +222,5 @@ def prepare(output: Path, *, model_id=MODEL):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output-dir', type=Path, required=True); parser.add_argument('--model-id', default=MODEL)
-    args = parser.parse_args(); print(json.dumps({'prepared': prepare(args.output_dir, model_id=args.model_id)}))
+    parser.add_argument('--linear-regime', action='store_true', help='select 1269664/1269665/2097152-byte input lengths')
+    args = parser.parse_args(); print(json.dumps({'prepared': prepare(args.output_dir, model_id=args.model_id, linear_regime=args.linear_regime)}))

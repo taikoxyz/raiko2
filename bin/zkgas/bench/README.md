@@ -2499,3 +2499,41 @@ quotes separately. This panel stays separate from prior persistent236,
 transient8 and pairing18. No isolated SHA-PGU allocation, price/model fit,
 arbitrary-input/failure/cache/global/IID bound, proof/GPU/production parity,
 Rust/guest/SDK/ELF/pin change or deployment follows.
+
+The same `cases/sha256_bulk.py` supports `--linear-regime`, selecting
+1269664/1269665/2097152-byte inputs in an 18-request matrix with the same two
+patterns and zero/single/full levels. The default remains the original 18
+64/4096/1048576-byte requests, with frozen canonical request hashes checked by
+the focused tests. New lengths use corpus
+`unzen-sha256-linear-regime-20261104`; default rows retain their original corpus.
+`prepare(..., linear_regime=True)` is the strict keyword-only Boolean selector.
+The API accepts only these six named lengths.
+
+For the unaligned 1269665-byte case, output starts at 1269729 and occupies exactly
+32 bytes. Memory therefore uses `3+ceil(L/32)` words; the final MCOPY copies
+221089 bytes, with gas charged on its rounded word count. Per-call native gas is
+476184/476196/786492 for the three selected lengths. In the frozen model's
+`max(20M,42*native_gas)` formula, the first two straddle the floor crossover
+(19999728 and 20000232); 2MiB gives 33032664. These are formula values, with no
+actual PGU or event-attribution claim. The independent oracle checks each input,
+digest, unaligned output, copy bounds, counters, EIP-150 forwarding and full+1.
+
+```sh
+"$PYTHON_BIN" -S bin/zkgas/bench/cases/sha256_bulk.py --linear-regime \
+  --output-dir "$SHA256_LINEAR_CASES_DIR" --model-id "$ZKGAS_MODEL_ID"
+"$PYTHON_BIN" -S -m unittest discover -s bin/zkgas/bench/tests \
+  -p test_sha256_bulk.py -k Sha256LinearRegimeTests -v
+SHA256_BULK_NATIVE_BIN="$NATIVE_BIN" \
+  SHA256_BULK_NATIVE_OUTPUT_DIR="$SHA256_LINEAR_NATIVE_OUTPUT_DIR" \
+  "$PYTHON_BIN" -S -m unittest discover -s bin/zkgas/bench/tests \
+  -p test_sha256_bulk.py -k test_frozen_native_linear_three_specimens -v
+```
+
+The linear native smoke uses the existing guarded runner for exactly
+zero/1269664 single, a5/1269665 full and zero/2097152 single, with a 576MiB disk
+preflight and the same PSS/time/output/log guards. Its fresh output directory
+retains request/intent/row/source and process receipts. Do not rerun the old
+native specimens or reuse old measurements under the new source identity.
+Matching new positives require exact source/request/GuestInput bridges before
+reuse in the canonical panel. The original default panel stays a separate,
+read-only research context; new source and helper hashes must be recorded.

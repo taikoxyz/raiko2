@@ -19,6 +19,31 @@ from unittest.mock import patch
 
 CASES = Path(__file__).resolve().parents[1] / 'cases'
 GRID = tuple(itertools.product(('zero', 'a5'), (64, 4096, 1048576), ('zero', 'single', 'full')))
+
+LINEAR_LENGTHS = (1269664, 1269665, 2097152)
+LINEAR_GRID = tuple(itertools.product(('zero', 'a5'), LINEAR_LENGTHS, ('zero', 'single', 'full')))
+# Frozen published default-panel canonical ProgramRequests; source identities may change.
+DEFAULT_REQUEST_SHA256 = {
+    'sha256-bulk-zero-l64-n0': 'f31c2c3bd56d0570b67084f85beb436ad97b55f5fa51810ca1bdf625a41e253b',
+    'sha256-bulk-zero-l64-n1': '87f9cc5133ebfff9038a7f384d8b5e12e7abf86c393f19c74d7fafae785aede9',
+    'sha256-bulk-zero-l64-n42557': '215a3f340383d299d24838b55397762effe1b4f069b2779e17380212f772f2be',
+    'sha256-bulk-zero-l4096-n0': '9677d6336021affb98c9d08bf002556f2c7f86d5a518dce046d582a81a7f1e9e',
+    'sha256-bulk-zero-l4096-n1': '468c90bdd01fb499bdd2bc324ab7faf2b4330092e30b19464917674559995270',
+    'sha256-bulk-zero-l4096-n7999': 'e01d776b25e277b2d17acb7ad2bc8379efead15ac689be7d5fe9637e93284d36',
+    'sha256-bulk-zero-l1048576-n0': '6a98319aadd1daf123d69080b8c7c187dd95fadd55cb5ce660126bdfd351047a',
+    'sha256-bulk-zero-l1048576-n1': '7a2ea3bdda0832382181bf77ee36a36204d76c6563dc42cd41475d0c7e49c9ce',
+    'sha256-bulk-zero-l1048576-n32': 'eb52d140aaa36c7f90e2283a21844cdc7bc0c1b7aa2cd775e2cc07b513639aad',
+    'sha256-bulk-a5-l64-n0': 'fb26c255ccd9600045a0b0a4affe117ad57a72494fc6d83a7d77327b324cdd0b',
+    'sha256-bulk-a5-l64-n1': '5a56326c73c49f970218b13409eeb3736f95b68613f17a7c82009e1cbf928e1e',
+    'sha256-bulk-a5-l64-n42557': 'be115d1e2df2f6f2dec030dd2fb46600240e5bdd23fb5e3f0839b656ddec1614',
+    'sha256-bulk-a5-l4096-n0': '44705922e2cd8468361d319dee38ec40d7bb6630fcf048f470f442320f19d747',
+    'sha256-bulk-a5-l4096-n1': '8cdd4ff6f5fd2cbc2d3a336740f4a9fed8b73903cbc18a3cba5ee2a0a3468b15',
+    'sha256-bulk-a5-l4096-n7999': 'd2d61f8f44f4f3bdab8cf1bc5e43bf7c08ecb2c939d073a75c946a1525de839e',
+    'sha256-bulk-a5-l1048576-n0': '9383a1a6300309a0f2a1639876978d4170f8e63f09229878d38d1713f0637952',
+    'sha256-bulk-a5-l1048576-n1': '55f36d9e884933f85d49b269e2765ca45dd03bc2cc1c64bb47d3bf500b0b3410',
+    'sha256-bulk-a5-l1048576-n32': 'a277b552b350d1c6c41200ac43fe3f0a84ec56638c9c76f2d2f96b74919a5053',
+}
+
 NATIVE_SHA256 = 'ad0d78dd575228e8685d1f3c0f09f1c4021c76b6d34a9a1341c15e1c4a0e98ec'
 
 
@@ -34,7 +59,7 @@ def producer():
 def qualify(test, row):
     from sha256_bulk_vm import run_users
     p = row['parameters']; program = row['request']['program']
-    test.assertIn((p['pattern'], p['input_bytes'], p['workload_level']), GRID)
+    test.assertIn((p['pattern'], p['input_bytes'], p['workload_level']), GRID + LINEAR_GRID)
     test.assertEqual(p['repetitions'], {'zero': 0, 'single': 1, 'full': p['full_repetitions']}[p['workload_level']])
     contracts = program['prestate_contracts']; owners = [c['address'] for c in contracts]
     test.assertEqual(len(set(owners)), 2)
@@ -53,7 +78,7 @@ def qualify(test, row):
         test.assertEqual(result['attempted_calls'], p['repetitions']); test.assertEqual(result['completed_calls'], p['repetitions'])
         test.assertEqual(result['counter'], p['repetitions']); test.assertEqual(result['accumulator'], int(p['expected_xor_hex'][tag], 16))
         test.assertEqual(result['output'], 2 if not p['repetitions'] else int.from_bytes(result['calls'][-1]['digest'], 'big'))
-        test.assertEqual(len(result['memory']), 32 * (3 + p['input_bytes'] // 32))
+        test.assertEqual(len(result['memory']), 32 * (3 + (p['input_bytes'] + 31) // 32))
         test.assertEqual(result['gas'], p['expected_user_charged_gas'])
         test.assertEqual(result['gas'], p['gas_accounting_per_user']['gross_gas'])
         test.assertEqual(result['mcopy_gas'], p['gas_accounting_per_user']['mcopy_gas'])
@@ -208,6 +233,14 @@ class Sha256BulkTests(unittest.TestCase):
     @unittest.skipUnless(sys.platform.startswith('linux') and os.environ.get('SHA256_BULK_NATIVE_BIN'),
         'set SHA256_BULK_NATIVE_BIN for optional Linux frozen-native smoke')
     def test_frozen_native_three_specimens(self):
+        self._native_three_specimens(linear_regime=False)
+
+    @unittest.skipUnless(sys.platform.startswith('linux') and os.environ.get('SHA256_BULK_NATIVE_BIN'),
+        'set SHA256_BULK_NATIVE_BIN for optional Linux frozen-native smoke')
+    def test_frozen_native_linear_three_specimens(self):
+        self._native_three_specimens(linear_regime=True)
+
+    def _native_three_specimens(self, *, linear_regime):
         m = producer(); binary = Path(os.environ['SHA256_BULK_NATIVE_BIN'])
         self.assertEqual(hashlib.sha256(binary.read_bytes()).hexdigest(), NATIVE_SHA256)
         sys.path.insert(0, str(CASES.parent))
@@ -215,11 +248,16 @@ class Sha256BulkTests(unittest.TestCase):
         from sha256_bulk_vm import run_users
         base = Path(os.environ['SHA256_BULK_NATIVE_OUTPUT_DIR']); base.mkdir(parents=True, exist_ok=False)
         limits = dict(pss_mib=6144, timeout_seconds=180, min_free_mib=256, output_mib=192, log_mib=16)
-        for name, pattern, length, level, mutant in (
+        specimens = (
+            ('zero-l1269664-single', 'zero', 1269664, 'single', False),
+            ('a5-l1269665-full', 'a5', 1269665, 'full', False),
+            ('zero-l2097152-single', 'zero', 2097152, 'single', False),
+        ) if linear_regime else (
             ('a5-l1048576-single', 'a5', 1048576, 'single', False),
             ('zero-l64-full', 'zero', 64, 'full', False),
             ('a5-to-5a-l1048576-intent-mutant', 'a5', 1048576, 'single', True),
-        ):
+        )
+        for name, pattern, length, level, mutant in specimens:
             row = m.make_case(pattern, length, level); qualify(self, row)
             original_request = m.encoded(row['request'])
             if mutant:
@@ -240,13 +278,16 @@ class Sha256BulkTests(unittest.TestCase):
             manifest = dict(command=command, start_utc=datetime.now(timezone.utc).isoformat(), limits=limits,
                 native_sha256=NATIVE_SHA256, request_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
                 requested_intent_request_sha256=hashlib.sha256(original_request).hexdigest(),
-                specimen_role='native-accepted-intent-mutant' if mutant else 'original-positive',
+                specimen_role='native-accepted-intent-mutant' if mutant else 'linear-regime-positive' if linear_regime else 'original-positive',
                 mutation='a5->5a seed and matching real digest XOR guards' if mutant else None,
                 streams='stdout and stderr combined in native.log by existing process_guard',
                 source_sha256={n: hashlib.sha256(path.read_bytes()).hexdigest() for n, path in source_paths.items()},
                 helper_source_sha256={n: hashlib.sha256(inspect.getsource(fn).encode()).hexdigest() for n, fn in m.helpers().items()})
             # Require space for both bounded output and retained log beyond the free floor.
-            self.assertGreaterEqual(shutil.disk_usage(root).free, (256 + 192 + 16) * 1024 * 1024)
+            free = shutil.disk_usage(root).free
+            required_free = (576 if linear_regime else 256 + 192 + 16) * 1024 * 1024
+            manifest['disk_preflight'] = dict(free_bytes=free, required_free_bytes=required_free)
+            self.assertGreaterEqual(free, required_free)
             (root / 'process.json').write_bytes(m.encoded(manifest)); start = time.monotonic()
             try:
                 outcome = process_guard.run(command, root, 'native', limits, growing=growing)
@@ -272,6 +313,112 @@ class Sha256BulkTests(unittest.TestCase):
                 self.assertEqual((entry['initial_storage_entry_count'], entry['final_storage_entry_count']), (0, 0))
                 self.assertEqual(entry['initial_storage_root'], entry['final_storage_root'])
 
+
+class Sha256LinearRegimeTests(unittest.TestCase):
+    def test_linear_selector_and_original_request_hashes(self):
+        m = producer()
+        self.assertIn('linear_regime', inspect.signature(m.prepare).parameters)
+        self.assertEqual(inspect.signature(m.prepare).parameters['linear_regime'].kind, inspect.Parameter.KEYWORD_ONLY)
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary); all_requests = set()
+            for mode, lengths, corpus in ((False, (64, 4096, 1048576), 'unzen-sha256-bulk-20261104'),
+                    (True, LINEAR_LENGTHS, 'unzen-sha256-linear-regime-20261104')):
+                output = base / str(mode); self.assertEqual(m.prepare(output, linear_regime=mode), 18)
+                catalog = json.loads((output / 'catalog.json').read_bytes()); rows = catalog['cases']
+                self.assertEqual((catalog['lengths'], catalog['corpus_id']), (list(lengths), corpus))
+                identities = {row['request_sha256'] for row in rows}
+                self.assertEqual(len(identities), 18); self.assertFalse(all_requests & identities); all_requests.update(identities)
+                self.assertEqual({row['corpus_id'] for row in rows}, {corpus})
+                self.assertEqual(catalog['generator_sha256'], hashlib.sha256(Path(m.__file__).read_bytes()).hexdigest())
+                self.assertEqual(catalog['helper_source_sha256'], {n: hashlib.sha256(inspect.getsource(fn).encode()).hexdigest() for n, fn in m.helpers().items()})
+                if not mode: self.assertEqual({r['sample_id']: r['request_sha256'] for r in rows}, DEFAULT_REQUEST_SHA256)
+                by = {r['sample_id']: r for r in rows}
+                for row in rows:
+                    raw = (output / row['request_path']).read_bytes()
+                    self.assertEqual(hashlib.sha256(raw).hexdigest(), row['request_sha256'])
+                    self.assertEqual(raw, m.encoded(json.loads(raw)))
+                    self.assertEqual(row['parameters']['transaction_gas_limit'], by[row['baseline_sample_id']]['parameters']['transaction_gas_limit'])
+                with self.assertRaises(FileExistsError): m.prepare(output, linear_regime=mode)
+            self.assertEqual(len(all_requests), 36)
+            for invalid in (None, 0, 1, 'true', [], {}):
+                output = base / 'invalid'
+                with self.assertRaises(ValueError): m.prepare(output, linear_regime=invalid)
+                self.assertFalse(output.exists())
+            command = [sys.executable, '-S', str(CASES / 'sha256_bulk.py'), '--linear-regime', '--output-dir', str(base / 'cli')]
+            result = subprocess.run(command, capture_output=True, timeout=60)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout), {'prepared': 18})
+            catalog = json.loads((base / 'cli/catalog.json').read_bytes())
+            self.assertEqual(catalog['lengths'], list(LINEAR_LENGTHS))
+            self.assertEqual(catalog['corpus_id'], 'unzen-sha256-linear-regime-20261104')
+            self.assertNotEqual(subprocess.run(command, capture_output=True, timeout=60).returncode, 0)
+
+    def test_linear_eighteen_actual_bytes_gas_copy_and_output(self):
+        m = producer()
+        for args in LINEAR_GRID:
+            with self.subTest(args=args):
+                row = m.make_case(*args); records = qualify(self, row); p = row['parameters']
+                self.assertEqual(row['corpus_id'], 'unzen-sha256-linear-regime-20261104')
+                words = {1269664: 39680, 1269665: 39681, 2097152: 65539}[args[1]]
+                native = {1269664: 476184, 1269665: 476196, 2097152: 786492}[args[1]]
+                self.assertEqual(p['memory_words'], words)
+                self.assertEqual(p['gas_accounting_per_user']['memory_expansion_gas'], 3 * words + words * words // 512)
+                self.assertEqual(p['gas_accounting_per_user']['native_gas_per_call'], native)
+                for result in records:
+                    self.assertEqual(sum(c['length'] for c in result['copies']) + 32, args[1])
+                    self.assertEqual(result['copies'][-1]['length'], {1269664: 221088, 1269665: 221089, 2097152: 1048576}[args[1]])
+                    self.assertEqual(result['copies'][-1]['destination'] + result['copies'][-1]['length'], 64 + args[1])
+                    self.assertEqual(result['memory'][64 + args[1] + 32:], bytes(32 * words - (96 + args[1])))
+
+    def test_linear_full_plus_one_and_fixed_shape(self):
+        m = producer(); from sha256_bulk_vm import execute, decode
+        with patch.object(m, 'expected_xor', side_effect=AssertionError('digest in sizing')):
+            maxima = {(pattern, length): m.full_repetitions(pattern, length) for pattern, length in itertools.product(('zero', 'a5'), LINEAR_LENGTHS)}
+        for (pattern, length), maximum in maxima.items():
+            self.assertTrue(m.fits(pattern, length, maximum)); self.assertFalse(m.fits(pattern, length, maximum + 1))
+            shapes = set(); sizes = set()
+            for tag, r in itertools.product((0, 1), (0, 1, maximum, maximum + 1)):
+                code, counts = m._runtime(pattern, length, r, tag)
+                shapes.add(tuple(op for _, op, _ in decode(code))); sizes.add(len(code))
+                if r == maximum + 1:
+                    result = execute(code, 50_000_000, pattern=pattern, length=length, tag=tag, repetitions=r)
+                    self.assertEqual((result['terminal'], result['counter']), (0, r))
+                    self.assertEqual(result['counts'], +Counter(counts))
+                    gas = m.gas_accounting(pattern, length, r)
+                    self.assertEqual(result['gas'], gas['gross_gas'])
+                    envelope = gas['gross_gas'] + (gas['native_gas_per_call'] + 62) // 63 + 2301
+                    self.assertTrue(envelope > min(15_000_000, 16_777_216) or
+                        167355 + 2 * gas['gross_gas'] > 30_000_000 or
+                        any(31_000_000 - 167355 - j * gas['gross_gas'] < envelope for j in range(2)))
+            self.assertEqual((len(shapes), len(sizes)), (1, 1))
+            self.assertEqual(m.gas_accounting('zero', length, 1), m.gas_accounting('a5', length, 1))
+        for length in (0, 32, 63, 65, 1269663, 1269666, 2097151, 2097153, True, 1269665.0):
+            with self.assertRaises(ValueError): m.make_case('zero', length, 'zero')
+
+    def test_linear_partial_copy_output_and_return_guards(self):
+        m = producer(); from sha256_bulk_vm import decode, execute
+        length = 1269665; code, _ = m._runtime('a5', length, 2)
+        def run(image=code, **kwargs):
+            return execute(image, 50_000_000, pattern='a5', length=length, tag=0, repetitions=2, **kwargs)
+        self.assertEqual(run()['terminal'], 0)
+        for override in ({'status': 0}, {'return_size': 31}, {'return_size': 33}, {'write_size': 0}, {'write_size': 31}):
+            with self.subTest(override=override): self.assertEqual(run(override=override)['terminal'], 0xfe)
+        with self.assertRaisesRegex(AssertionError, 'per-call returned digest'): run(override={'wrong_digest': True})
+        single, _ = m._runtime('a5', length, 1)
+        with self.assertRaisesRegex(AssertionError, 'forwarded gas'):
+            execute(single, m.gas_accounting('a5', length, 1)['gross_gas'], pattern='a5', length=length, tag=0, repetitions=1)
+        instructions = list(decode(code))
+        last_copy = max(i for i, (_, op, _) in enumerate(instructions) if op == 0x5e)
+        at, op, value = instructions[last_copy - 3]
+        self.assertEqual((op, value), (0x62, 221089))
+        for wrong_size in (221088, 221090):
+            wrong = bytearray(code); wrong[at + 1:at + 4] = wrong_size.to_bytes(3, 'big')
+            with self.assertRaisesRegex(AssertionError, 'MCOPY schedule'): run(bytes(wrong))
+        call = next(i for i, (_, op, _) in enumerate(instructions) if op == 0xfa)
+        at, op, value = instructions[call - 5]
+        self.assertEqual((op, value), (0x62, 64 + length))
+        wrong = bytearray(code); wrong[at + 1:at + 4] = (64 + length - 1).to_bytes(3, 'big')
+        with self.assertRaisesRegex(AssertionError, 'STATICCALL operands'): run(bytes(wrong))
 
 def intent_mutant(row):
     """Native-valid a5→5a intent mutation with matching single-call XOR guards."""

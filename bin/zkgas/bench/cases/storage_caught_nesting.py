@@ -43,38 +43,44 @@ def address(user, level=None):
     return f'0x{BASE_ADDRESS + user + (0 if level is None else 0x10000 + level * 0x100):040x}'
 
 
-def _wrapper(target, expected_status):
+def _call_kind(call_kind):
+    if type(call_kind) is not str or call_kind not in ('call', 'delegatecall'):
+        raise ValueError('call_kind must be call or delegatecall')
+
+
+def _wrapper(target, expected_status, *, call_kind='call'):
+    _call_kind(call_kind)
     asm = _Factory()
-    for _ in range(5): asm.push(0)  # out size/offset, in size/offset, value
-    asm.push(int(target, 16), width=20); asm.push(CHILD_GAS); asm.op(0xf1)
+    for _ in range(5 if call_kind == 'call' else 4): asm.push(0)  # Empty output/input ranges, plus value for CALL only.
+    asm.push(int(target, 16), width=20); asm.push(CHILD_GAS); asm.op(0xf1 if call_kind == 'call' else 0xf4)
     mutation._check(asm, expected_status)
     asm.op(0x3d); mutation._check(asm, 0); asm.op(0)
     asm.label('failure', 0); asm.op(0xfe, 0)
     return asm.finish(), asm.counts
 
 
-def _wrapper_gas():
+def _wrapper_gas(*, call_kind='call'):
     """Derive both ordinary regions from emitted assembly; CALL target is cold."""
-    code, counts = _wrapper(address(0), 1); pc = 0; pre = post = 0; seen_call = False
+    code, counts = _wrapper(address(0), 1, call_kind=call_kind); pc = 0; pre = post = 0; seen_call = False
     costs = {0: 0, 0x14: 3, 0x15: 3, 0x3d: 2, 0x57: 10, 0x5b: 1, 0xfe: 0}
     derived = Counter()
     while pc < len(code):
         op = code[pc]; pc += 1
         if op == 0x5b: break  # failure label is unreachable
         derived[f'opcode:0x{op:02x}'] += 1
-        if op == 0xf1: seen_call = True; continue
+        if op in (0xf1, 0xf4): seen_call = True; continue
         width = op - 0x5f if 0x60 <= op <= 0x7f else 0
         pc += width; cost = 3 if width else costs[op]
         if seen_call: post += cost
         else: pre += cost
-    assert derived == +counts and (pre, post) == (21, 46)
+    assert derived == +counts and (pre, post) == (21 if call_kind == 'call' else 18, 46)
     return pre, 2600, post
 
 
-def gas_accounting(mode, keys, depth, rounds):
+def gas_accounting(mode, keys, depth, rounds, *, call_kind='call'):
     _validate(mode, keys, depth); original.integer(rounds, 0, 65536, 'rounds per key')
     leaf = dirty.gas_accounting(mode, keys, rounds)
-    pre, cold, post = _wrapper_gas(); gross = leaf['gross_gas'] + depth * (pre + cold + post)
+    pre, cold, post = _wrapper_gas(call_kind=call_kind); gross = leaf['gross_gas'] + depth * (pre + cold + post)
     refund = leaf['refund_counter']; applied = min(refund, gross // 5)
     required = leaf['gross_gas'] - 21000 + ENVELOPE_RESERVE; required_by_depth = [required]
     for _ in range(depth):
@@ -90,8 +96,8 @@ def gas_accounting(mode, keys, depth, rounds):
         minimum_frame_envelopes_leaf_to_root=required_by_depth, transaction_envelope=21000+required)
 
 
-def fits(mode, keys, depth, rounds):
-    gas = gas_accounting(mode, keys, depth, rounds); envelope = gas['transaction_envelope']
+def fits(mode, keys, depth, rounds, *, call_kind='call'):
+    gas = gas_accounting(mode, keys, depth, rounds, call_kind=call_kind); envelope = gas['transaction_envelope']
     code, _ = dirty._runtime(mode, keys, rounds)
     return (USERS*(keys+1) <= MAX_DISTINCT_PAIRS and len(code) <= 24576
         and envelope <= min(TRANSACTION_GAS_CAP, EIP7825_GAS_CAP)
@@ -100,42 +106,55 @@ def fits(mode, keys, depth, rounds):
         and all(HEADER_GAS_LIMIT-ANCHOR_GAS-j*gas['charged_gas'] >= envelope for j in range(USERS)))
 
 
-def full_rounds(mode, keys, depth):
-    _validate(mode, keys, depth); low, high = 0, 65536
+def full_rounds(mode, keys, depth, *, call_kind='call'):
+    _validate(mode, keys, depth); _call_kind(call_kind); low, high = 0, 65536
     while low < high:
         middle = (low+high+1)//2
-        if fits(mode, keys, depth, middle): low = middle
+        if fits(mode, keys, depth, middle, call_kind=call_kind): low = middle
         else: high = middle-1
-    assert 0 < low < 65536 and fits(mode, keys, depth, low) and not fits(mode, keys, depth, low+1)
+    assert 0 < low < 65536 and fits(mode, keys, depth, low, call_kind=call_kind) and not fits(mode, keys, depth, low+1, call_kind=call_kind)
     return low
 
 
-def _make_case(mode, keys, depth, rounds, maximum):
+def _make_case(mode, keys, depth, rounds, maximum, *, call_kind='call'):
     """Internal explicit-R construction also supports execution of rejected R+1."""
-    _validate(mode, keys, depth)
+    _validate(mode, keys, depth); _call_kind(call_kind)
     original.integer(rounds, 0, 65536, 'rounds per key'); original.integer(maximum, 0, 65536, 'full rounds')
     # Preserve the original maps and invariant metadata, replacing every R-dependent field.
     row = dirty.make_case(mode, keys, 'zero'); p = row['parameters']; program = row['request']['program']
-    gas = gas_accounting(mode, keys, depth, rounds)
-    envelope = gas_accounting(mode, keys, depth, maximum)['transaction_envelope']
+    gas = gas_accounting(mode, keys, depth, rounds, call_kind=call_kind)
+    envelope = gas_accounting(mode, keys, depth, maximum, call_kind=call_kind)['transaction_envelope']
     code, leaf_counts = dirty._runtime(mode, keys, rounds); routes = Counter({op:0 for op in program['expected_route_counts']})
     routes.update({op:n*USERS for op,n in leaf_counts.items()})
-    contracts = program['prestate_contracts']
+    delegated = call_kind == 'delegatecall'
+    leaf_address = address(0)
+    leaf_contracts = program['prestate_contracts']
+    storage_maps = [c['initial_storage'] for c in leaf_contracts]
+    if delegated: storage_maps = [storage_maps[0].copy() for _ in range(USERS)]
+    contracts = ([dict(address=leaf_address, code_hex='0x'+code.hex(), initial_storage={})]
+                 if delegated else leaf_contracts)
+    program['prestate_contracts'] = contracts
     for c in contracts: c['code_hex'] = '0x'+code.hex()
     roles = [dict(address=c['address'], role='leaf', chain=i, level=depth, next_target=None,
-                  account_proof_required=True, code_proof_required=True, storage_proof_required=True,
+                  account_proof_required=True, code_proof_required=True, storage_proof_required=not delegated,
                   runtime_bytes=len(code), runtime_sha256=digest(code),
-                  storage_targets=[hex(key) for key in range((i+1)*65536+1,(i+1)*65536+1+keys)]+['0x0']) for i,c in enumerate(contracts)]
+                  storage_targets=[] if delegated else [hex(key) for key in range((i+1)*65536+1,(i+1)*65536+1+keys)]+['0x0']) for i,c in enumerate(contracts)]
+    if delegated:
+        roles[0].update(chain=None, code_address=leaf_address,
+                        storage_addresses=[address(i, 0) for i in range(USERS)])
     for level in range(depth):
         for i in range(USERS):
-            target = address(i, level+1) if level+1 < depth else address(i)
+            target = address(i, level+1) if level+1 < depth else leaf_address if delegated else address(i)
             expected = 1 if level+1 < depth or mode == 'stop' else 0
-            wrapper, counts = _wrapper(target, expected); routes.update(counts)
+            wrapper, counts = _wrapper(target, expected, call_kind=call_kind); routes.update(counts)
             owner = address(i, level)
-            contracts.append(dict(address=owner, code_hex='0x'+wrapper.hex(), initial_storage={}))
-            roles.append(dict(address=owner, role='wrapper', chain=i, level=level, next_target=target,
+            state = storage_maps[i] if delegated and level == 0 else {}
+            contracts.append(dict(address=owner, code_hex='0x'+wrapper.hex(), initial_storage=state))
+            role = dict(address=owner, role='wrapper', chain=i, level=level, next_target=target,
                 expected_child_status=expected, account_proof_required=True, code_proof_required=True,
-                storage_proof_required=False, storage_targets=[], runtime_bytes=len(wrapper), runtime_sha256=digest(wrapper)))
+                storage_proof_required=bool(state), storage_targets=list(state), runtime_bytes=len(wrapper), runtime_sha256=digest(wrapper))
+            if delegated: role.update(code_address=owner, storage_address=address(i, 0))
+            roles.append(role)
     program['expected_route_counts'] = dict(routes)
     recipients = [address(i, 0) for i in range(USERS)]
     program['transactions'].update(recipients=recipients, gas_limit=envelope)
@@ -175,20 +194,36 @@ def _make_case(mode, keys, depth, rounds, maximum):
         child_gas_request=CHILD_GAS, envelope_rule='T0=C+2301; Tj=2621+max(ceil(64*Tprev/63),Tprev+46); tx=21000+Tdepth',
         range_rule='Four successful users visit four disjoint guarded CALL chains. Original leaf seed/dirty/cleanup bytes and storage owners unchanged; caught leaf REVERT returns0, ancestors STOP.',
         direct_reference_sample_id=dirty.make_case(mode, keys, level)['sample_id'])
+    if delegated:
+        owners = [address(i, 0) for i in range(USERS)]
+        for field in ('phase_base_by_account', 'initial_phase_by_account',
+                      'expected_final_phase_by_account', 'body_key_schedule_by_account'):
+            previous = p[field]
+            p[field] = {owner: previous[address(0)] for owner in owners}
+        p.update(call_kind=call_kind, account_count=USERS*depth+1, total_account_count=USERS*depth+1,
+            storage_owner_addresses=owners, leaf_owners=[leaf_address], leaf_code_addresses=[leaf_address],
+            start_phase_schedule=[65537]*USERS, final_phase_schedule=[65537]*USERS,
+            initial_storage_rule='Every top wrapper owns the same map: raw phase0=65537; raw body keys65537..65536+K=1; all others absent. Identical own-R0/full maps; code and intermediate accounts empty.',
+            per_account_storage_count_scope='Scalar storage counts describe the four top wrapper storage owners; shared leaf code and intermediate wrappers have empty storage.',
+            wrapper_storage_rule='Top wrappers own phase and body maps; intermediate wrappers and shared leaf code account own explicit empty maps. DELEGATECALL preserves top storage context.',
+            envelope_rule='T0=C+2301; Tj=2618+max(ceil(64*Tprev/63),Tprev+46); tx=21000+Tdepth',
+            range_rule='Four successful users visit disjoint guarded DELEGATECALL chains sharing one leaf code account. Seed/dirty/cleanup operate in four distinct top wrapper storage contexts; caught leaf REVERT returns0, ancestors STOP.')
+        del p['direct_reference_sample_id']
     for field in ('gross_gas','refund_counter_before_terminal','refund_counter','refund_applied','charged_gas'):
         p['expected_user_'+field] = gas[field]
     return row
 
 
-def make_case(mode='stop', keys=16, depth=1, level='full'):
+def make_case(mode='stop', keys=16, depth=1, level='full', *, call_kind='call'):
     _validate(mode, keys, depth)
     if type(level) is not str or level not in LEVELS: raise ValueError('level must be zero or full')
-    maximum = full_rounds(mode, keys, depth)
-    return _make_case(mode, keys, depth, 0 if level == 'zero' else maximum, maximum)
+    maximum = full_rounds(mode, keys, depth, call_kind=call_kind)
+    return _make_case(mode, keys, depth, 0 if level == 'zero' else maximum, maximum, call_kind=call_kind)
 
 
 def helpers():
-    return dirty.helpers() | {'storage_caught_nesting._wrapper':_wrapper,
+    return dirty.helpers() | {'storage_caught_nesting._call_kind':_call_kind,
+        'storage_caught_nesting._wrapper':_wrapper,
         'storage_caught_nesting._wrapper_gas':_wrapper_gas, 'storage_caught_nesting.address':address,
         'storage_caught_nesting._validate':_validate, 'storage_caught_nesting._make_case':_make_case,
         'storage_caught_nesting.gas_accounting':gas_accounting, 'storage_caught_nesting.fits':fits,

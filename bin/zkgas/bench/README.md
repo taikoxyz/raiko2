@@ -2159,3 +2159,82 @@ high priority; smaller deficits remain explicit low-priority TODOs. This finite
 panel makes no price fit, per-operation actual allocation, global/IID/production
 bound, generated-proof or throughput claim. Raw recovery stays private until
 separately packaged as immutable Atlas fixtures.
+
+### Shared-code delegated storage calls
+
+`storage_delegated_nesting.py` adds16 inputs in
+`unzen-storage-delegated-nesting-20261103`: leaf STOP/REVERT × K16/1024 ×
+DELEGATECALL depth1/4 × own R0/full. Four successful signed top users each enter
+one disjoint wrapper chain. The four chains share **one** leaf code account;
+configured account count is `4*depth+1`. Exactly the four top wrappers own
+storage. Every top wrapper starts with the same raw map: phase slot0 contains
+65537, body keys65537 through65536+K contain1. Intermediate wrappers and the
+shared leaf code account have explicit empty storage. The unchanged dirty leaf
+bytes perform seed1→5, R dirty5→7→5 pairs and cleanup5→1 in each top wrapper's
+storage context. All maps restore, including caught leaf REVERT. Equal storage
+roots across owners are expected and do not identify the account domain of a
+storage proof.
+
+The common `storage_caught_nesting` helpers accept keyword-only
+`call_kind='call'|'delegatecall'`. The default preserves all16 prior CALL
+construction requests, runtime identities and full core metadata; tests bind
+immutable identities captured before these helper changes. DELEGATECALL emits
+six arguments, with no value argument, a PUSH20 target and PUSH3 for other
+operands. Empty input/output, a12M request, child-status and empty-returndata
+guards remain explicit. Every target is cold within its transaction; shared
+leaf code across different transactions does not share warmth. Each delegated
+wrapper costs18 ordinary gas before the call,2600 for its target and46 after,
+for2664 gross gas. Child intrinsic gas is removed, successful leaf refunds
+propagate, caught leaf REVERT discards its refund, and the cap applies once to
+the whole user transaction. The effective user counter before terminal is0 on
+caught REVERT; the separately recorded leaf counter is2800K.
+
+For leaf execution `C=leaf_gross-21000`, user gross is
+`21000+C+2664*depth`. The signed envelope follows `T0=C+2301`,
+`Tj=2618+max(ceil(64*Tprev/63),Tprev+46)`, then `21000+Tdepth`.
+Full R is solved afresh under the same31M header,30M charged block including
+167355 Anchor gas, all admission prefixes,15M user/EIP7825,12M child request,
+SSTORE sentry,8192 selected storage targets and24576 code-byte limits. R0 keeps
+its own full case's envelope and initial maps. Both STOP/K1024 full cases remain
+below99% charged occupancy because the next uniform R fails admission; this
+finite selector does not measure arbitrary packing capacity.
+
+| Leaf | K | Depth | Full R | Gross/user | Applied refund | Charged/user | Envelope | Charged block |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| STOP | 16 | 1 | 2107 | 7501396 | 44800 | 7456596 | 7622382 | 29993739 |
+| STOP | 16 | 4 | 2105 | 7502412 | 44800 | 7457612 | 7990680 | 29997803 |
+| STOP | 1024 | 1 | 12 | 8968740 | 1793748 | 7174992 | 9113017 | 28867323 |
+| STOP | 1024 | 4 | 11 | 8753500 | 1750700 | 7002800 | 9323114 | 28178555 |
+| REVERT | 16 | 1 | 2094 | 7456058 | 0 | 7456058 | 7576325 | 29991587 |
+| REVERT | 16 | 4 | 2092 | 7457074 | 0 | 7457074 | 7942394 | 29995651 |
+| REVERT | 1024 | 1 | 5 | 7406122 | 0 | 7406122 | 7525596 | 29791843 |
+| REVERT | 1024 | 4 | 5 | 7414114 | 0 | 7414114 | 7896640 | 29823811 |
+
+The bounded actual-byte interpreter records `code_address` and
+`storage_address` separately. The four owners require `4*(K+1)` distinct
+account/slot access pairs and `4*K` write pairs, even though grouping by the
+shared leaf code address would incorrectly report only `K+1` slots and K writes.
+Catalog roles distinguish top wrappers with storage, intermediate empty
+wrappers and the shared leaf code owner with no storage. Phase/body maps,
+schedules and selected storage targets all name actual top storage owners.
+The catalog includes16 immutable prior CALL references matched by leaf mode,
+K, depth and workload level; those identities are not new measurements.
+Actual account domains, raw key/value maps, code/account/global support and
+signed envelopes can differ from CALL, so that comparison is whole-input
+validation and does not isolate the cost of an opcode substitution.
+
+```sh
+"$PYTHON_BIN" -S bin/zkgas/bench/cases/storage_delegated_nesting.py \
+  --output-dir "$DELEGATED_CASES_DIR" --model-id "$ZKGAS_MODEL_ID"
+"$PYTHON_BIN" -S -m unittest discover -s bin/zkgas/bench/tests \
+  -p test_storage_delegated_nesting.py -v
+```
+
+The optional `STORAGE_DELEGATED_NATIVE_BIN` gate uses an already frozen native
+binary, with retained artifacts under a fresh
+`STORAGE_DELEGATED_NATIVE_OUTPUT` directory. It runs two full positives and two
+native-accepted dirty-value mutants that the intent oracle rejects. All16
+independent native/signature/receipt/world/account-specific storage-root/
+canonical-witness/original-quote/context-counter checks must precede freeze and
+SP1 actuals. This producer changes no prices, model, Rust, guest, SDK, ELF or
+pins, and makes no global, production, proof or throughput claim.

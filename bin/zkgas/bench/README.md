@@ -2775,3 +2775,55 @@ once (nine zero/nine single/nine full). Actual SP1 PGU, literal block-known node
 estimates/sum and complete-proposal estimates remain separate. All previous
 cohorts stay separate; no isolated-op cost, price/model change or proof/production
 claim follows from this generator.
+
+### Full-width modular arithmetic density
+
+`cases/modular_density.py --output-dir <fresh-directory> [--model-id <sha256>]`
+exports16 compiler-free ADDMOD/MULMOD inputs: four moduli (3,2^64+1,2^128+1,
+2^192+1), each own-zero/full. Both operands stay fixed at2^256-2 and2^256-3.
+Their exact257/512-bit intermediate reductions differ from a premature256-bit
+wrap in all eight operation/modulus domains. This finite panel does not assert
+worst-case modular operands or quotient correction behavior.
+
+Each proposal has two successful user calls to distinct tagged code owners with
+empty persistent storage/calldata. A warmup executes even at R0. The64-site body
+uses `DUP3 DUP3 DUP3 ADDMOD|MULMOD POP`, preserving `[modulus,b,a]`; counter, tag
+and all three retained operands are checked before an empty-stack STOP. Tags
+change code identities; target arithmetic inputs are constant. Target count is
+64R+1 per user and each pure site costs19gas. The separately counted loop uses
+ordinary ADD. Gas sizing uses assembled instruction multiplicities without
+replaying full bodies. Uniform full is maximal under15M fixture and16777216
+EIP7825 envelopes,31M header admission prefixes and30M charged block including
+Anchor167355; zero and full share full gross gas plus1000 as their envelope. Full+1 is
+checked for both owners in every domain. These limits do not establish globally
+optimal packing.
+
+Run focused checks with the configured Python interpreter:
+
+```sh
+"$PYTHON_BIN" -S -B -m unittest discover -s bin/zkgas/bench/tests -p test_modular_density.py -v
+```
+
+The separate `tests/modular_density_vm.py` exports `execute` and `run_users`.
+It derives gas/routes from actual decoded bytes and checks ordered operands,
+results, guards and every surrounding instruction. Its optional host cache
+proves the exact64-site pure stack invariant and is compared with direct R0/1/2
+execution. Actual guest execution performs every target. Catalog dependency
+keys are benchmark-relative `cases/...` under `source_root='bin/zkgas/bench'`;
+existing helper sources and source snippets are hash-bound and unchanged.
+
+Optional frozen-native smoke uses `ZKGAS_FIXTURE_BIN` and a fresh
+`MODULAR_DENSITY_NATIVE_OUTPUT_DIR`; run only
+`test_modular_density.ModularDensityTests.test_frozen_native_exact_three_specimens`
+with `bin/zkgas/bench/tests` on `PYTHONPATH`. Exactly three guarded specimens
+launch once: MULMOD/limb3/full, ADDMOD/limb1/zero, and MULMOD/limb1/zero whose
+actual modulus is5 while preserved original intent requests3. Both moduli
+produce the correct result2, so the accepted mutant must fail ordered intent
+validation beyond output equality; it is excluded from canonical measurements.
+Source/helper/request/row/original-intent/build/input/output and process receipts
+are retained under6GiB sampled PSS/180s/576MiB free disk/192MiB output/16MiB log
+limits. Free disk576MiB comprises256MiB runtime plus320MiB retention reserve.
+Native gas/status/routes, full/minimized execution-result equality and same-input
+stage validation do not directly export arithmetic operands, stacks, results or
+per-op PGU. Independent canonical16 qualification, fresh quotes and source/input
+freeze precede actual16. No pricing, model, proof or production claim follows.

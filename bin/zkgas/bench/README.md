@@ -2704,3 +2704,74 @@ Native smoke is opt-in through `DIVISION_DENSITY_NATIVE_BIN` and a fresh
 including a native-accepted divisor 5 mutant rejected by the original divisor 3
 intent. Native gas/status/routes and full/minimized replay binding do not export
 operand stacks. No actual SP1 PGU, isolated-op cost or price change is inferred.
+
+### KECCAK padding and bulk panel
+
+`cases/keccak_bulk.py` exports27 finite inputs: `(0,zero)` and lengths135,
+136,137,65536 with `zero`/`a5`, each at own-zero/single/maximal uniform full.
+Two distinct tagged code owners receive empty-calldata calls with signer nonces0/1
+and empty persistent storage. Every nonempty loop hashes the unique message
+`BE256((tag << 128) | index) || pattern_byte * (L - 32)`. Empty input is explicitly
+not unique; its payload nonce word sits outside the hashed range. The existing
+EVM empty constant shortcut and model feature `0 if L == 0 else L // 136 + 1`
+do not establish actual per-hash PGU. Ethereum Keccak uses suffix0x01/rate136,
+not SHA3 suffix0x06; this panel does not allege missing padding charges.
+
+```bash
+~/.venv/bin/python -S -B bin/zkgas/bench/cases/keccak_bulk.py --output-dir /tmp/keccak-bulk-cases
+~/.venv/bin/python -S -B -m unittest discover -s bin/zkgas/bench/tests -p test_keccak_bulk.py -v
+~/.venv/bin/python -S -B -m unittest discover -s bin/zkgas/bench/tests -p test_ethereum_hash.py -v
+```
+
+Counter0/digest32/input64 use one aligned allocation. Preparation seeds the entire
+extent logarithmically with MCOPY even at R0, restores partial-word padding0xee,
+and preserves the explicit preallocation/seed writes. Each loop writes the actual
+owner/index nonce, executes KECCAK256 over the declared input, stores the digest,
+and advances the counter. Exact final counter, digest, nonce and unique tail-word
+guards lead to STOP. Gas-only binary sizing uses fixed-width placeholder guards;
+selected runtime source guards use exact Ethereum digests. Every user envelope
+is its own full gross gas plus1000, also for zero/single controls. Uniform full
+obeys the independent15M fixture/16777216 EIP7825 caps,31M header and every ordered
+prefix, and30M charged block budget including successful167355-gas Anchor.
+
+The independent byte interpreter imports the unchanged stdlib Ethereum reference
+by an explicit path and a separate module identity. Both producer and oracle
+bypass its input cache. Host validation may defer an unread digest using one
+opaque token containing an immutable concrete input snapshot. Reads, partial
+writes, arithmetic, branching and hash feedback materialize the real reference
+value. A provable immediately following full-word overwrite may discard the old
+unread token; its actual opcodes remain separately interpreted and gas counted.
+The actual EVM program executes every hash. Direct/lazy R0/1/2 differential tests
+cover every domain/owner and feedback, partial writes and later input mutation.
+
+Per-user debug hash sequence is
+`SHA256(concat(owner_address20 || index_BE8 || offset_BE8 || length_BE8 || SHA256(message)32))`;
+R0 commits empty bytes. The loop-entry counter debug sequence is
+`SHA256(concat(counter_BE8 for entries 0..R inclusive))`; other reads are separate.
+Only the distinct sorted first4/last4 hash-index records are retained (at most8),
+with counts and incremental commitments, never every payload or event dictionary.
+These are host intent/debug commitments, not protocol roots or native exports.
+`expected_last_nonce_word_hex` identifies the payload first word, including L0;
+it does not claim that empty hash input contains that nonce or is unique.
+
+Catalogs declare `source_root='bin/zkgas/bench'`; dependency hashes and native
+source snapshots use normalized benchmark-relative `cases/...` and
+`tests/ethereum_hash.py` paths. The maintained reference is a benchmark dependency,
+never guest/production code. Native smoke is opt-in with `KECCAK_BULK_NATIVE_BIN`
+and a fresh `KECCAK_BULK_NATIVE_OUTPUT_DIR`. Exactly three specimens launch once:
+L0/zero/full, L65536/a5/single, and an L136/a5/single nonce-prefix-bit80 variant
+whose exact digest/nonce guards are recomputed. The variant succeeds natively
+but is rejected by unchanged original intent; it is never canonically sampled.
+The unchanged process guard retains source/helper/request/intent/row/build/input/
+output identities and command/start/outcome under6GiB PSS/180s/576MiB disk/
+192MiB output/16MiB log limits. Native gas/status/routes and full/minimized replay
+binding do not export per-call memory/input/digest. Anchor may also hash.
+
+Independent source/behavior gates precede canonical27 qualification and freezing.
+The two exact smoke positives need source/request/input bridges before reuse;
+remaining25 native inputs,27 fresh original quotes and54 signature/authentication/
+world/code/account/empty-root/witness/receipt/byte-intent gates precede actual27
+once (nine zero/nine single/nine full). Actual SP1 PGU, literal block-known node
+estimates/sum and complete-proposal estimates remain separate. All previous
+cohorts stay separate; no isolated-op cost, price/model change or proof/production
+claim follows from this generator.

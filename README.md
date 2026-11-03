@@ -203,6 +203,38 @@ databases are handled externally. The application has no migration or cleanup pa
 - `docker/docker-compose.sgx.regression.yml` starts both SGX remote services and can optionally
   add a dockerized `raiko2` for regression work.
 
+### SGX Compose on kernels without MPTCP
+
+The SGX Compose files disable MPTCP through `net.mptcp.enabled=0` in each provider's network
+namespace. If the Docker daemon's kernel was built without MPTCP support, that sysctl is absent
+and the default configuration cannot start containers. On the **Docker daemon host**, verify
+that `/proc/sys/net/mptcp/enabled` does not exist before selecting the compatibility override.
+For a remote Docker context or `DOCKER_HOST`, check the remote daemon host, not the CLI machine.
+An existing knob with value `0` still requires the default container mitigation.
+
+With Docker Compose v2 supporting `!reset`, render the standalone SGX configuration as follows:
+
+```bash
+docker compose --env-file docker/.env.sgx.sample \
+  -f docker/docker-compose.sgx.yml \
+  -f docker/docker-compose.sgx.no-mptcp.yml config
+```
+
+For the combined regression stack, pair `docker/docker-compose.sgx.regression.yml` with
+`docker/docker-compose.sgx.regression.no-mptcp.yml`; see the
+[regression instructions](scripts/regression/README.md#sgx-regression-stack).
+Use the same pair for **every init and runtime Compose command**, with the compatibility file
+immediately after its base file and before any additional overrides. This order is required:
+Compose versions such as 2.32.4 can retain the original sysctl if `!reset` follows another overlay.
+The compatibility files remove only this sysctl and retain other settings, including gaiko2's
+`GODEBUG=multipathtcp=0`. Keep the default configuration on kernels that support MPTCP.
+
+The daemon-free configuration regression is:
+
+```bash
+python -m unittest discover -s docker/tests -p 'test_*.py'
+```
+
 ## Remote Prover Conformance
 
 The `shasta` spelling in this section's route, schema, and fixture names is a frozen identifier kept

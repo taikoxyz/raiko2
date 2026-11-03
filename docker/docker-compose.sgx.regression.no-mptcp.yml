@@ -1,0 +1,16 @@
+# Apply after docker-compose.sgx.regression.yml only when the Docker daemon's kernel lacks MPTCP.
+# Remove only the unsupported sysctl; retain gaiko2's GODEBUG=multipathtcp=0 and other settings.
+# Place this file immediately after the base file and before any additional overrides.
+services:
+  raiko2-sgx-init:
+    sysctls:
+      net.mptcp.enabled: !reset null
+  raiko2-sgx:
+    sysctls:
+      net.mptcp.enabled: !reset null
+  gaiko2-sgxgeth-init:
+    sysctls:
+      net.mptcp.enabled: !reset null
+  gaiko2-sgxgeth:
+    sysctls:
+      net.mptcp.enabled: !reset null

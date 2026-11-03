@@ -2060,3 +2060,102 @@ with underlying identities retained. Global/account witness differences remain
 separate. Preserve controls, failed attempts and frozen prices/model/SDK/ELF/host/
 guest/pins; no isolated-operation actual allocation, pricing fit, global/production
 bound, generated proof or GPU claim follows from this finite panel.
+
+### Caught nested storage calls
+
+`storage_caught_nesting.py` creates16 **new** inputs in
+`unzen-storage-caught-nesting-20261103`: leaf STOP/REVERT × K16/1024 × CALL
+wrapper depth1/4 × own R0/full. Four signed users each visit one disjoint chain
+once. Depth counts wrappers; total accounts are `4*(depth+1)`, with exactly four
+storage owners. The leaf addresses, raw phase0, initialized body maps and emitted
+leaf bytes come from unchanged `storage_dirty_keys` helpers. Each wrapper owns
+an explicit empty map, encodes its next target using PUSH20, and uses zero-value,
+empty-input/output CALL with a12M gas request. Child gas is actually capped by
+EIP150 at every frame. The innermost wrapper checks leaf status1 for STOP or0
+for REVERT; all other wrappers expect1. Every wrapper also checks empty
+RETURNDATASIZE and then STOPs, so all four top-level user receipts succeed.
+Completed/attempted counters retain leaf work even on caught REVERT. Terminal
+counts include every wrapper STOP plus four leaf STOPs or four leaf REVERTs.
+
+A wrapper executes21 ordinary gas before CALL and46 after it; its cold target
+costs2600, for2667 gross gas. These values are derived from the assembled bytes
+and independently checked by the frame oracle. Let `C=leaf_gross-21000`.
+Transaction gross is `21000+C+2667*depth`. Successful leaf refunds propagate to
+the transaction; leaf REVERT discards its refund. The refund cap is applied once
+at transaction gross/5, without child intrinsic gas or a child-level refund cap.
+The signed envelope is solved from `T0=C+2301` and
+`Tj=2621+max(ceil(64*Tprev/63),Tprev+46)`, then `21000+Tdepth`. The own R0 input
+retains exactly the full input's envelope and initial maps.
+
+| Leaf | K | Depth | Full R | Gross/user | Applied refund | Charged/user | Envelope | Charged block |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| STOP | 16 | 1 | 2107 | 7501399 | 44800 | 7456599 | 7622385 | 29993751 |
+| STOP | 16 | 4 | 2105 | 7502424 | 44800 | 7457624 | 7990692 | 29997851 |
+| STOP | 1024 | 1 | 12 | 8968743 | 1793748 | 7174995 | 9113020 | 28867335 |
+| STOP | 1024 | 4 | 11 | 8753512 | 1750702 | 7002810 | 9323126 | 28178595 |
+| REVERT | 16 | 1 | 2094 | 7456061 | 0 | 7456061 | 7576328 | 29991599 |
+| REVERT | 16 | 4 | 2092 | 7457086 | 0 | 7457086 | 7942407 | 29995699 |
+| REVERT | 1024 | 1 | 5 | 7406125 | 0 | 7406125 | 7525599 | 29791855 |
+| REVERT | 1024 | 4 | 5 | 7414126 | 0 | 7414126 | 7896654 | 29823859 |
+
+Full R is the maximal uniform integer under the unchanged30M charged block
+budget including167355 Anchor gas,31M header and every ordered admission prefix,
+15M user envelope/EIP7825, SSTORE sentry,8192 selected storage targets and24576
+code bytes. Both STOP/K1024 rows stay below99% occupancy because R+1 violates
+the final transaction admission prefix. Their limits are not waived; this is
+not a global packing-capacity result. Every leaf and wrapper map/root restores;
+whole-world user fees/nonces and Anchor still change. Empty wrapper roots
+require authenticated world/account/code proofs but introduce no storage targets.
+Catalog roles distinguish these accounts and retain exact per-account maps,
+wrapper targets, code SHA256s, routes, all-frame terminals and gas/refund details.
+
+```sh
+"$PYTHON_BIN" -S bin/zkgas/bench/cases/storage_caught_nesting.py \
+  --output-dir "$CAUGHT_CASES_DIR" --model-id "$ZKGAS_MODEL_ID"
+"$PYTHON_BIN" -S -m unittest discover -s bin/zkgas/bench/tests \
+  -p test_storage_caught_nesting.py -v
+STORAGE_CAUGHT_NATIVE_BIN="$NATIVE_BIN" \
+  "$PYTHON_BIN" -S -m unittest discover -s bin/zkgas/bench/tests \
+  -p test_storage_caught_nesting.py -k frozen_native -v
+```
+
+Use the existing managed Python environment as `PYTHON_BIN`. The output is
+exclusive and model ID must be a lowercase SHA256. The test-only bounded frame
+interpreter executes actual wrapper bytes, using the unchanged public
+`test_storage_mutation.execute` oracle for leaf frames with the child intrinsic
+offset removed. It checks all16 complete ordered leaf streams, maps, status and
+returndata guards, frame forwarding/returned gas, refunds and literal routes;
+K16 exercises R0/1/63/64/65, and all eight shapes execute full/R+1 under a sufficient
+envelope before checking candidate bounds. K1024/R63 exceeds the fixed12M child
+request and is outside that executable boundary subset. Wrong target, expected
+status, requested gas, CALL value/ranges, leaf values and marker specimens must
+fail intended semantics. The opt-in verifies native SHA256
+`ad0d78dd575228e8685d1f3c0f09f1c4021c76b6d34a9a1341c15e1c4a0e98ec`
+and runs full STOP/K16/depth1 and caught REVERT/K1024/depth4, plus two dirty7->9
+specimens accepted by native execution but rejected by the literal trajectory,
+at180 seconds/specimen. This focused tooling check does not replace the all16
+independent signature/receipt/whole-world/authenticated-root/canonical-witness/
+original-quote/attempted-resource-counter gates required before measurements.
+
+The catalog freezes generator, source/helper identities and eight exact old
+direct references by original request/runtime SHA256. Join their existing
+source/config/input/quote/actual identities; do not rerun or count them as new
+measurements. The32 diagnostics comprise eight own-R0 increments, eight leaf
+terminal contrasts, eight depth contrasts and eight depth1-versus-old-direct
+contrasts. Preserve exact scaled quote differences and explicit same-R/K/gas/
+signed-envelope/per-owner authenticated selected-storage-support flags. Storage
+support compares the four leaf owners only, using canonical selected node hash
+sets/digests. Parent addresses, code hashes and global/account/code support
+differ from old direct references, preventing isolated frame-cost attribution.
+
+Keep c893 model/native/quote/SDK6.3/ELFb76, host/guest and dependency pins fixed;
+freeze all16 inputs/quotes/source/tool/resource policies before sequential actuals.
+Apply6GiB sampled PSS/600s SP1,180s native,1800s quote (max two),16MiB log and192MiB
+output bounds and the576MiB free-space gate. Retain every failed setup/measurement
+and explicit retry. Compare same-proposal SP1 PGU (`SDK gas*10//191`) against the
+literal sum of block node-known PGU ceilings, reporting the complete proposal
+estimate separately. Positive actual-minus-node above2B under30M charged gas is
+high priority; smaller deficits remain explicit low-priority TODOs. This finite
+panel makes no price fit, per-operation actual allocation, global/IID/production
+bound, generated-proof or throughput claim. Raw recovery stays private until
+separately packaged as immutable Atlas fixtures.

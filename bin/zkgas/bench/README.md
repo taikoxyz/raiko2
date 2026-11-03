@@ -2969,3 +2969,74 @@ without retry. No source-author quote, SP1 run or build is part of this smoke.
 Independent signatures, receipts, code/accounts/roots/empty selected persistent
 support, witness and original quote gates precede actuals; source counts alone
 do not establish a PGU deficit, per-operation cost or pricing defect.
+
+### Dense in-bounds word memory
+
+`cases/memory_word_density.py` prepares the finite12-input
+`unzen-memory-word-density-20261104` panel: MSTORE at offsets0/1 in256-byte and
+1MiB arenas, plus MLOAD at offset1 in both arenas, each own-zero/full. Two signed
+empty-calldata CALLs visit distinct tagged predeployed owners with empty persistent
+storage and contiguous signer nonces0/1. Predeployment is outside the measured
+block. The generator assigns no PGU, model coefficient or pricing change.
+
+Each runtime expands exactly once with `MSTORE8(arena_bytes-1,0)`. Counter64 and
+tag96 are disjoint from target bytes0..32 and the final arena word. Store retains
+`[A,B,offset]`, where A=`a5` repeated32 bytes and B=`5a` repeated32 bytes. It warms
+up and checks both values, then executes32 alternating A/B pairs per64-site batch:
+`DUP3 DUP2 MSTORE`, `DUP2 DUP2 MSTORE`. Load seeds B, checks one warmup, retains
+`[offset]` and executes64 `DUP1 MLOAD POP` sites per batch. Final checks bind B,
+zero last word, original retained operands/offset, counter and owner tag before
+empty-stack STOP; failure reaches INVALID. Every actual EVM/SP1 target executes.
+
+Targets cost3 EVM gas each; all DUP/POP/control/setup/guard instructions are counted
+separately from exact memory expansion `3W+floor(W²/512)`, W=`arena_bytes/32`.
+Metadata distinguishes target warmup/body events from counter/setup/guard uses of
+the same opcode. Full is the maximal uniform64-site batch count under30M charged
+block gas, the15M fixture signed-envelope cap,31M ordered header prefixes,
+EIP-7825 and runtime limits; it is not unrestricted packing. Own-zero keeps the
+full signed envelope. Full+1 identifies the failing constraints, and `near_full`
+is derived independently at99 percent.
+
+```bash
+python -S -B bin/zkgas/bench/cases/memory_word_density.py --output-dir artifacts/memory-word-density
+python -S -B -m unittest discover -s bin/zkgas/bench/tests -p test_memory_word_density.py -v
+```
+
+Use the existing managed virtual environment's interpreter. Fresh output paths
+are mandatory. Requests stream to individual files; catalog rows retain metadata
+and hashes. `source_root` is normalized to `bin/zkgas/bench`; unchanged helper
+module/snippet hashes accompany the generator hash.
+
+`tests/memory_word_density_vm.py` imports no producer. It decodes the complete
+bytecode, models a bounded bytearray and checks both owners, exact stack/addresses/
+values, expansion, gas, counter progression and route counts. Its optional host
+body cache first proves the complete decoded stack and ordered read/write
+footprint:64 alternating stores at the actual fixed address ending B, or64 B reads
+with unchanged memory. Each cached application checks live full-stack and target
+memory preconditions and applies that proven stateful transition. No outside
+writes or memory growth are permitted; outer flow, counter, tag and guards execute
+directly. Direct R0/1/2 comparisons and memory-feedback, changed-value/offset,
+omitted-read/write, alias, counter and tag mutations exercise this boundary.
+
+Optional frozen-native smoke uses `ZKGAS_FIXTURE_BIN`, a fresh
+`MEMORY_WORD_DENSITY_NATIVE_OUTPUT_DIR`, and
+`test_memory_word_density.MemoryWordDensityTests.test_frozen_native_exact_three_specimens`
+with `bin/zkgas/bench/tests` on `PYTHONPATH`. It invokes exactly three guarded
+specimens once:1MiB offset1 store-full original,256-byte offset1 load-zero original,
+and the same store-full with one owner's A changed to `aa` repeated32 bytes in
+exactly three decoded contexts (initial retained A, warmup-A expected guard, final
+retained-A guard). Decoded widths and context count are checked before launch.
+The changed-A program remains internally consistent and native-accepted, while
+original A/request/row intent rejects it; B/final memory, gas and routes remain
+unchanged. Only the two originals are eligible for exact canonical bridges.
+
+Each native run retains command/start/outcome, source/helper/native/build/input/
+request/row/original-intent identities, public output, routes, receipts and resource
+records. Unchanged guards enforce6GiB sampled tree PSS,180 seconds,16MiB logs,
+192MiB staged output and576MiB preflight disk reserve. Request32MiB, canonical/native
+128MiB and benchmark-input64MiB caps remain. The1MiB arena is runtime memory, not
+an encoded megabyte payload. First failures remain retained; no hidden retry.
+Native status/gas/routes and whole-input replay do not directly export final memory,
+per-target values, actual pointers or memcpy branches. Selected source/ELF alignment
+classes do not establish per-occurrence execution, an MLOAD8x multiplier, isolated
+word PGU, global bounds, proof/GPU behavior or production readiness.

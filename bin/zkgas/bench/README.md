@@ -1674,3 +1674,76 @@ ELF and model. Compare actual same-proposal SP1 PGU, literal node block estimate
 and sum, and complete-proposal estimate separately, retaining both deficit flags.
 These finite inputs establish no universal storage-trie bound, price refit,
 per-user actual allocation, generated proof or throughput result.
+
+### Storage-root diversity
+
+`storage_root_diversity.py` creates the separate
+`unzen-storage-root-diversity-20261103` corpus: 32 inputs crossing
+`background-values`/`disjoint-keys`, 8/64 accounts, 8192/16384 aggregate entries,
+update/delete, and own-N0/full pairs. It reuses the accepted fanout runtime,
+full-N solver, signed recipient declarations and gas accounting unchanged.
+There are always 64 ordinary CALL users with empty calldata, the same
+round-robin addresses, full N of 84/106, envelopes 466927/582075, a 31M header
+and at most 30M charged gas including Anchor. The existing homogeneous corpus
+is an immutable reference; this panel adds no one-account variant.
+
+Let `A` be the account count, `K=S/A`, `V=64/A`, `F=fullN`, and `i` the
+zero-based declaration-order account index. Each own-N0/full pair has identical
+initialized maps:
+
+- `background-values`: raw slots `0..K-1`, phase slot 0 equal to 1, slots
+  `1..V*F` equal to 1, and untouched slots `V*F+1..K-1` equal to `i+2`.
+  The salt boundary uses full N even for N0. Every accessed value and raw key
+  stays the same as the homogeneous reference.
+- `disjoint-keys`: `B_i=(i+1)*65536`, raw phase slot 0 equal to `B_i+1`, and
+  raw slots `B_i+1..B_i+K-1` equal to 1; all other slots are absent.
+  Actual body keys and phase control values shift; body values remain `1->2`
+  for update or `1->0` for delete. User `j` starts at
+  `B_(j%A)+1+floor(j/A)*N` and commits that start plus N to raw slot 0.
+
+```sh
+~/.venv/bin/python -S bin/zkgas/bench/cases/storage_root_diversity.py \
+  --output-dir "$ROOT_DIVERSITY_CASES_DIR" --model-id "$ZKGAS_MODEL_ID"
+~/.venv/bin/python -S -m unittest discover -s bin/zkgas/bench/tests \
+  -p test_storage_root_diversity.py -v
+STORAGE_ROOT_DIVERSITY_NATIVE_BIN="$NATIVE_BIN" \
+  ~/.venv/bin/python -S -m unittest discover -s bin/zkgas/bench/tests \
+  -p test_storage_root_diversity.py -k frozen_native -v
+```
+
+Output creation is exclusive. The optional `--model-id` defaults to frozen
+c893 and accepts a lowercase SHA256. The canonical catalog records generator,
+imported source and runtime/gas helper hashes, and 32 distinct request hashes.
+Row-level `homogeneous_reference_sample_id` identifies one of 16 existing
+same-A/S/mode/N fanout references; `baseline_sample_id` names the new row's own
+profile/A/S/mode N0. These references are identities, not new measurements.
+Parameters include `profile`, `account_count`, `aggregate_state_size`,
+`state_size_per_account`, and address-keyed `phase_base_by_account`,
+`initial_phase_by_account` and `expected_final_phase_by_account` maps.
+`start_phase_schedule`/`final_phase_schedule` give actual phases in transaction
+order. There are no singular initial/final phase compatibility aliases.
+
+The standard-library suite executes all 32 bytecode trajectories over isolated
+rolling maps. Its literal formula oracle checks complete initial/final maps,
+owner and recipient order, raw reads/writes, transaction originals and warmth,
+refund caps, gas/envelopes, phases, counters/checksums and routes. It rejects
+collapsed or wrong-profile maps, incorrect tail boundaries/salts, shifted phase
+bases, wrong ranges/owners, rotated schedules and successful bytecode with a
+changed body value and matching changed checksum. The optional native smoke
+runs background-values/8-account/update/full and
+disjoint-keys/64-account/delete/full with a 180-second timeout per case,
+checking 65 receipts, charged gas, counts and A distinct diagnostic initial and
+final storage roots. It builds nothing and is not independent qualification.
+
+Before actual measurements, independently review source and qualify all 32
+canonical signed recipient/receipt streams, authenticated whole-account and
+per-account initial/final roots, canonical conservative mutation witnesses,
+exact gas/envelope prefixes and same-input original real quotes. Require A
+distinct initial and final storage roots per row; different roots alone do not
+prove zero shared internal witness nodes. Freeze source/tools, all inputs and
+quotes, and the 16 homogeneous reference identities before sequential bounded
+execute-only measurements. Preserve controls, failures and both deficit flags;
+compare whole-proposal actual SP1 PGU, literal node per-block ceilings/sum, and
+complete proposal estimates separately. This finite validation does not fit
+prices, allocate actual PGU to individual operations, or establish a global
+trie bound, generated proof or throughput result.

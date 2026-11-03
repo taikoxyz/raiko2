@@ -2537,3 +2537,70 @@ native specimens or reuse old measurements under the new source identity.
 Matching new positives require exact source/request/GuestInput bridges before
 reuse in the canonical panel. The original default panel stays a separate,
 read-only research context; new source and helper hashes must be recorded.
+
+### LOG data, topics and receipt-intent bulk probes
+
+`cases/log_receipt_bulk.py` emits30 compiler-free requests in corpus
+`unzen-log-receipt-bulk-20261104`: LOG1/LOG4 × five length/pattern domains
+(L0/zero, L64/zero/a5, L262144/zero/a5) × own-zero/single/maximal uniform full.
+Two users call distinct authenticated, tagged code owners with empty persistent
+storage. Each event's topics are ordered
+`BE256((tag<<128)|(topic_index<<64)|index)`; nonempty data begins with
+`BE256((tag<<128)|index)` and retains the selected tail pattern. Uniqueness is
+within a proposal, not across control/single/full observations. L0/a5 is invalid.
+
+Memory counter0 and last-input32 guard loop completion; payload64 allocates
+`max(32,L)` bytes once, seeds and logarithmically MCOPYs even for R0. No separate
+output buffer, call, precompile, storage access, refund, revert or CREATE occurs.
+All successful users terminate STOP. The independent bounded byte VM checks each
+ordered address/topic/data tuple, exact source range, gas, copy, counter, terminal
+and every opcode count; compact event digests avoid retaining repeated256KiB data.
+Its sequence SHA256 is an intent/debug commitment, not a protocol receipt root.
+
+Complete LOG EVM gas is `375+375*N+8*L`, counting the static375 base once: the
+frozen revm41 host dynamic log cost excludes that separately charged base.
+Memory costs `3*w+w*w//512` for `w=2+max(32,L)/32`; MCOPY costs
+`3+3*ceil(n/32)` per copy. Empty-calldata intrinsic is21000 and refunds are0.
+Full sizing checks the15M fixture transaction cap separately from the16777216
+EIP-7825 cap, every ordered31M header admission prefix, and30M charged block gas
+including167355 successful Anchor gas. Signed gas is full gross+1000 for every
+matched level:1000 is fixture continuation margin, with no CALL/EIP-150 or
+SSTORE-sentry rule. Full+1 is independently executed under sufficient gas and
+must violate a sizing constraint; uniform full is not global optimal packing,
+and near-full>=29.7M is derived per request.
+
+```sh
+"$PYTHON_BIN" -S bin/zkgas/bench/cases/log_receipt_bulk.py \
+  --output-dir "$LOG_RECEIPT_CASES_DIR" --model-id "$ZKGAS_MODEL_ID"
+"$PYTHON_BIN" -S -m unittest discover -s bin/zkgas/bench/tests \
+  -p test_log_receipt_bulk.py -v
+LOG_RECEIPT_BULK_NATIVE_BIN="$NATIVE_BIN" \
+  LOG_RECEIPT_BULK_NATIVE_OUTPUT_DIR="$LOG_RECEIPT_NATIVE_OUTPUT_DIR" \
+  "$PYTHON_BIN" -S -m unittest discover -s bin/zkgas/bench/tests \
+  -p test_log_receipt_bulk.py -k test_frozen_native_exact_three_specimens -v
+```
+
+Use an existing Python virtual environment and fresh output directories. Export
+binds canonical requests, generator, unchanged helper modules and helper source
+hashes. The optional Linux smoke invokes exactly3 specimens once: LOG1/L0/zero
+full positive, LOG4/L262144/a5 single positive, LOG1/L64/a5 single topic-prefix
+intent mutant. The mutant retains gas/routes/loop guards and is natively accepted,
+while the independent intent VM rejects its changed topic. The existing process
+guard enforces6GiB sampled PSS,180s each,192MiB output,16MiB combined log and a
+576MiB disk preflight; retained source/request/intent/row and command/start/caps/
+exit/outcome/elapsed/artifact hashes bind every invocation. Skipped smoke tests
+are not native evidence. Failures stop without implicit retry.
+
+Frozen `ControlledNativeReceipt` exposes status and gas, not per-log data/topics.
+The native constructor compares complete execution results from full and
+minimized replay. Byte intent plus native gas/status/routes/replay and later
+same-proposal quote/SP1 execution supports this finite panel, without claiming
+direct native per-event exports, independently reconstructed receipt roots,
+bloom noncollision, per-event tariff exports or per-op PGU. Fresh independent
+source review and canonical30 native/60-signature/authentication/world/account/
+code/empty-root/witness/byte/receipt/counter/negative/original-quote gates precede
+freeze and actuals. Matching smoke positives need explicit source/request/input
+bridges. Keep actual SP1 PGU, literal node block-known estimates/sum and complete
+proposal estimates separate. Prior236 persistent,8 transient,18 pairing and both
+18-case SHA contexts remain read-only, separate cohorts; no price fit, global
+bound, ordinary-usability certification or production/proof claim follows.

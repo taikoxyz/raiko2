@@ -2898,3 +2898,74 @@ No price, model, SDK, guest, ELF, dependency or build change follows.
 The two dependency wording corrections above identify selected host/declared
 guest sources, not an ELF build attestation. The relevant41/43 function bodies
 and formulas were verified unchanged; historical source hashes and data remain.
+
+### Fixed-operand EXP density and popcount panel
+
+`cases/exp_density.py` exports10 finite holdout inputs: five exponent classes
+`dense2=2^16-1`, `sparse24=2^191`, `dense24=2^192-1`, `dense25=2^200-1`,
+`dense32=2^256-1`, each at own `zero` and `full`. The common base is the odd
+full-width word `0xa5` repeated32bytes. Sparse24 and dense24 have the same
+bit length192,24 exponent bytes and EVM gas, with popcounts1 and192. Dense25
+crosses the selected node floor/curve transition. These finite inputs do not
+establish worst-case bases, compiled carry paths or global bounds.
+
+The maintained APIs are `_operands(exponent_class)`,
+`_runtime(exponent_class, repetitions, tag=0)`,
+`gas_accounting(exponent_class, repetitions)`, `fits`, `full_repetitions`,
+`make_case(exponent_class='dense24', level='full')` and
+`prepare(output: Path, *, model_id=MODEL)`. The CLI accepts only `--output-dir`
+and `--model-id`. Exports stream requests into a fresh directory, pop request
+bodies from catalog rows and retain generator, five source-module and helper
+snippet SHA256 identities under normalized `bin/zkgas/bench` paths.
+
+Two signed user transactions, nonces0/1 from the existing constructor, visit two
+distinct tagged deployed code owners with empty persistent storage. Fixed-width
+PUSH32 exponent then base produces retained stack `[E,B]`: selected revm43 EXP
+pops the top base and exponent below. One guarded warmup remains at R0; each
+loop executes64 `DUP2 DUP2 EXP POP` sites that restore both original operands.
+Final operand, memory-counter and owner-tag guards precede empty-stack STOP;
+failed guards reach INVALID. Every EVM/SP1 site executes normally. There is no
+result chaining, deployment, call, storage, log, calldata or refund work in the
+body. Predeployment setup is outside the measured block and has a lifecycle cost.
+
+The independent `tests/exp_density_vm.py` decodes actual bytes without producer
+imports, checks fixed widths, control targets, ordered operands, modular256
+results and gas, and derives counts/counter/tag/terminal state. Its optional
+pure-body cache proves all64 decoded sites on the complete stack and checks
+that same complete stack at every body entry; outer memory, counter and control
+flow remain direct. Focused tests compare direct and cached R0/1/2 for all five
+classes/both tags and reject feedback, swapped/omitted operands or EXP, malformed
+sites, altered immediates, failure targets, owners and schedules. Semantic
+corners cover exponents0/1/127/128/255/256/511 and bases0/1/2/odd-wide, including0^0.
+No full instruction trace or per-step runtime list is exported.
+
+EXP gas is exactly `10+50*ceil(bit_length(E)/8)`, including static10 once.
+Actual byte execution independently rederives intrinsic21000, memory6 and
+ordinary gas. Full selects maximal uniform64-site batches under30M charged
+block gas including Anchor167355 and two users,15M signed envelopes,16777216
+EIP-7825,31M header ordered-prefix admission and runtime size. The full envelope
+is full user gross+1000 and remains in own-zero. Each full+1 fails the charged
+block budget; this is distinct from unrestricted packing. `near_full` is derived
+at99 percent. Source `h+popcount(E)` wrapping multiplication counts describe the
+selected ruint algorithm, not actual PGU or a node pricing selector.
+
+The opt-in focused native test runs exactly three specimens once: dense32-zero
+and dense24-full originals, then a dense32-zero exponent-intent mutant. For one
+owner only, the mutant changes MASK to MASK-2^254 in exactly two decoded PUSH32
+contexts (initial exponent and final retained-exponent guard). Exact modular
+results, bit length and event gas are equal; native accepts while original byte
+and content intent rejects it. The original row/request remain retained, and
+the mutant is excluded from canonical/actual inputs. Only the two originals
+can bridge to canonical qualification through exact source/helper/request/row/
+input/public-output identities. Native gas/status/routes and full/minimized
+execution-result replay do not export per-EXP operands, results or stacks.
+
+Each native run retains command/start/outcome, immutable requested intent,
+source/helper/build identities, caps, raw report, canonical input and public
+output. Unchanged guards enforce6GiB sampled tree PSS,180 seconds,16MiB logs,
+192MiB growing outputs and576MiB disk headroom (256MiB plus320MiB retention);
+request32MiB, native128MiB and benchmark input64MiB caps remain. Failures stop
+without retry. No source-author quote, SP1 run or build is part of this smoke.
+Independent signatures, receipts, code/accounts/roots/empty selected persistent
+support, witness and original quote gates precede actuals; source counts alone
+do not establish a PGU deficit, per-operation cost or pricing defect.

@@ -2677,3 +2677,30 @@ world/code/account/empty-root/witness/receipt/byte-intent gates before freeze an
 one sequential actual run (four zero, four single, four full). Keep actual SP1 PGU,
 literal node block-known estimates/sum and complete-proposal estimates separate.
 All prior cohorts remain separate; this producer changes no prices or models.
+
+### Integer division density panel
+
+`cases/division_density.py` exports a finite 32 input panel: DIV/SDIV/MOD/SMOD ×
+1/2/3/4-limb divisors × own-zero/maximal uniform full. Each of two distinct tagged
+code owners executes a checked warmup and 64 pure arithmetic sites per outer loop,
+with retained operand, counter and tag checks. R0 still executes the warmup.
+The divisor values are 3, 2^64+1, 2^128+1, 2^192+1; the signed numerator is
+-(2^255-1), and the unsigned numerator is 2^256-1. This panel does not establish
+that those operands maximize every division implementation branch.
+
+```bash
+~/.venv/bin/python -S -B bin/zkgas/bench/cases/division_density.py --output-dir /tmp/division-density-cases
+~/.venv/bin/python -S -B -m unittest discover -s bin/zkgas/bench/tests -p test_division_density.py -v
+```
+
+The actual-byte oracle independently decodes guards, computes signed/unsigned
+math, checks per-PC operands/results and target visits, and accounts every opcode,
+memory expansion and ordered gas prefix. Its bounded pure-body cache first proves
+the actual decoded 64-site straight-line sequence and complete stack invariant;
+it still interprets every outer counter transition. Tests compare direct and
+cached execution at R0/1/2 and independently execute both-owner full+1 programs.
+Native smoke is opt-in through `DIVISION_DENSITY_NATIVE_BIN` and a fresh
+`DIVISION_DENSITY_NATIVE_OUTPUT_DIR`; it launches exactly three guarded specimens,
+including a native-accepted divisor 5 mutant rejected by the original divisor 3
+intent. Native gas/status/routes and full/minimized replay binding do not export
+operand stacks. No actual SP1 PGU, isolated-op cost or price change is inferred.

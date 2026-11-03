@@ -1,0 +1,103 @@
+{
+  "schema_version": 1,
+  "fork": "fulu",
+  "chain_id": 1,
+  "target": {
+    "number": 26294192,
+    "block_hash": "0x953010d1d26d440b970e50a344dcb3c600417007d7dcad86a4b641f99b27db52",
+    "execution_header": {
+      "parentHash": "0x55e442d22ee3f7c1638ea98ffb484770fe4e78222b8104489e05731f17213d44",
+      "sha3Uncles": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
+      "miner": "0xfb74767c1ce1aada0a0e114441173b57f8c1571b",
+      "stateRoot": "0x97fe9e0201f2d34c7ac86b3008efb94d7bc58198c0d3dd92c4da10f13b6f1368",
+      "transactionsRoot": "0xb015a3ce93659dffdaf98b4e4993c91f9cda6cae83949f66d98c52bff5994dc0",
+      "receiptsRoot": "0x9a11fad33aa44459a9c86f4e5ff83dd22393c4464fc02380816fbc48813aaa92",
+      "logsBloom": "0xb1eedffe7dffbff7ff71fe36ef67bdf87bfd4bf6fdfb75bebdfd93faf56dbfd7febd6bfee2df7b7def7fffe75b921ffef7ffedb4ffdf7757d6fb93fe1bee540cbd7e8debbfdfc3edfcc3fdff3d41ff6fdffe5a3f7ffddb7737619fbf92e52c0a7f9b75ffeffe3f7f77b7df874ef7ffa3bbdbf7f7f9f77efdb7d7dfff9b7a46fdc77beadbfee77def48cff6df67f6f9df1fafec5bad7befb8e8f79deefffb1f77ffeecffffdffff767a7a56d6be2bb7f67e7d7a1db8efcb9de66fdeba8fff5b77ef9f8effeff7efeaf7ff1dfbcf7c91ef39b4b7e757be7ffcf5df93bff6eefad9dd7f7fea878938ff2f7fcfef5ffb3f7fdf7ff3dfeffad6fd3d9f3d6fbf1ffabf",
+      "difficulty": "0x0",
+      "number": "0x19137b0",
+      "gasLimit": "0x392a220",
+      "gasUsed": "0x1319850",
+      "timestamp": "0x6ae2759f",
+      "extraData": "0x457572656b612028657572656b616275696c6465722e78797a29",
+      "mixHash": "0x1a4bb46aa33ec4c9a2e08d08d21790a33e020abeaff94e8db653a49bcf207dd1",
+      "nonce": "0x0000000000000000",
+      "baseFeePerGas": "0x2fe4344",
+      "withdrawalsRoot": "0x019d223c61de53dd3f151ec47b7628e4a47a2c41c570ce6146b7b127130ab7fb",
+      "blobGasUsed": "0xc0000",
+      "excessBlobGas": "0xa5078c7",
+      "parentBeaconBlockRoot": "0x3bcf0a1b45cb410bde91b9dfa7a571b4a5514fd1e51ae65a74754070b3b05dec",
+      "requestsHash": "0xe3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "hash": "0x953010d1d26d440b970e50a344dcb3c600417007d7dcad86a4b641f99b27db52"
+    },
+    "rlp_header": "0xf90288a055e442d22ee3f7c1638ea98ffb484770fe4e78222b8104489e05731f17213d44a01dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d4934794fb74767c1ce1aada0a0e114441173b57f8c1571ba097fe9e0201f2d34c7ac86b3008efb94d7bc58198c0d3dd92c4da10f13b6f1368a0b015a3ce93659dffdaf98b4e4993c91f9cda6cae83949f66d98c52bff5994dc0a09a11fad33aa44459a9c86f4e5ff83dd22393c4464fc02380816fbc48813aaa92b90100b1eedffe7dffbff7ff71fe36ef67bdf87bfd4bf6fdfb75bebdfd93faf56dbfd7febd6bfee2df7b7def7fffe75b921ffef7ffedb4ffdf7757d6fb93fe1bee540cbd7e8debbfdfc3edfcc3fdff3d41ff6fdffe5a3f7ffddb7737619fbf92e52c0a7f9b75ffeffe3f7f77b7df874ef7ffa3bbdbf7f7f9f77efdb7d7dfff9b7a46fdc77beadbfee77def48cff6df67f6f9df1fafec5bad7befb8e8f79deefffb1f77ffeecffffdffff767a7a56d6be2bb7f67e7d7a1db8efcb9de66fdeba8fff5b77ef9f8effeff7efeaf7ff1dfbcf7c91ef39b4b7e757be7ffcf5df93bff6eefad9dd7f7fea878938ff2f7fcfef5ffb3f7fdf7ff3dfeffad6fd3d9f3d6fbf1ffabf8084019137b0840392a2208401319850846ae2759f9a457572656b612028657572656b616275696c6465722e78797a29a01a4bb46aa33ec4c9a2e08d08d21790a33e020abeaff94e8db653a49bcf207dd18800000000000000008402fe4344a0019d223c61de53dd3f151ec47b7628e4a47a2c41c570ce6146b7b127130ab7fb830c0000840a5078c7a03bcf0a1b45cb410bde91b9dfa7a571b4a5514fd1e51ae65a74754070b3b05deca0e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "beacon_slot": 15533510,
+    "beacon_root": "0x218171d334225b7c06eee5e136010b91e5c4c7e63822fca9bde710d4ae237538"
+  },
+  "reference": {
+    "window_execution_number_P": 26302384,
+    "cached_execution_number_Q": 26298983,
+    "beacon_root": "0x52bf8fb3cb12528107b660206866a581686713c9c513b1f274ebebc3cb1ab0d4",
+    "beacon_slot": 15538327,
+    "beacon_header": {
+      "slot": "15538327",
+      "proposer_index": "2251869",
+      "parent_root": "0x24f2b6185dae8386787389203a60fdfab924088d4c17392951b6403600b9cf15",
+      "state_root": "0x11ac0bba14dceeed18170118c3c3786d6caf50830db0b9333f3d3f712b7e6048",
+      "body_root": "0xab01380423c9f0e836bb40e4c748a37506e1ba636e03eef7bb02c1840a2aa7ca"
+    },
+    "block_roots_root": "0xbdf633bb9f40628f30db8c1355fa7d46b639ca8c36d47e80a0cb0d9c9754a4d3"
+  },
+  "proof": {
+    "generalized_index": 23796148524,
+    "siblings": [
+      "0x63534b03f73e2f81667267cfb6dc7db12d2e8fd77892347b441b5ffbd1064d8d",
+      "0x7edb2da851c9532b3564e970259fb7fa5387a8120bc1ebd818f8714829037bde",
+      "0x515dc2e90094393c10261f912ffd42a6f837e00b0387994fdd2792fc32676e2b",
+      "0x893a835b299de98ef8890ee89e8f2fd9cf5c33876d8f64b859ca323d4142d210",
+      "0xc48ed958cdec5cd035aff78a371df67492bb53ff7a4daad55acebec8d017f36a",
+      "0xb0fec742f51d87847a51924060a53030de39f1e6bebde691c88d2a4e4d9541c5",
+      "0xe9d34ab07c156b677668bc639c84c973968c732819b70bda650ea3160bf60cfd",
+      "0x6dd3b9955d892d92338b19976fd07084bfe88a76c3063482b7f30ee60feb2a58",
+      "0xd81423f158f039ccbec7a454cc37bb7cddedeaed143e1fbe97511a5a05724c33",
+      "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "0xf5a5fd42d16a20302798ef6ed309979b43003d2320d9f0e8ea9831a92759fb4b",
+      "0x48fdfc795d9e3419cc4051c3b3711eb42d6a3471c4b3a6c5dcb14a507154be8d",
+      "0xad1d084b36badbe0f3b64717cb10f888456fec8a07fdb1ac9ad3c7ae284fc37b",
+      "0x43302004f353de8ca659e90977992aa9acd38b44268418252908ae90b03e5b9a",
+      "0x29e4e6109804cb128fd7b7bf9e386720768d13f87639e29340670cf07d02ef99",
+      "0x0ab94d758129422f0dcb481f7145ae15200afe534b386446ff10e2635c27ddda",
+      "0x4098b73d1e5934df312dff07292dadf46a992711d56ec5386aa9ab9e3af5727c",
+      "0x0a857a9a11f6a96bab53b59b8078d7a874028e44c974544a675048005b5dde12",
+      "0xe0dadd17d4c1c7f51120a9b59a33331b7343f06ba4da1004b0ae44a6e06c2333",
+      "0xdbf755a97f619579c74867ea51b2365dfd5b7bd559fd485ceb7b58163590f191",
+      "0x4972d72a7d24a8babdf7fee918cb5d900a581a59b353c7ee702cfcf8fd22699d",
+      "0xd253bf9fffaacce00d32ec68b5091cff4d03d84d7b2d2316c71738f5fe184732",
+      "0xf4e90dbb202f7acd1b0ac7aaa2cf2a589cd8c53b7ce7b18e2ecf51fabb24ab3e",
+      "0xe9573abaf2bbb5386974752c3027ed9bd9b139ed818d0029b90b7ee185b583cc",
+      "0x788d21c1cf9a3441f3b2ea743dc537e3113529aa3fa35f90226794a470a6a9a2",
+      "0x8996a5b3973378c0fa2bd7ffec5f0f7fc535a5b841cfb43e21469e9c55bfe256",
+      "0x0a48a741db797250bb6589f0a7f0e97b68c840757a972e96d285d79666ca6634",
+      "0x2073f1563f1c49a2d342d444c4ae0b85f873a21f857b1ca574d68f7840f56edb",
+      "0x5bc559dceafeef1a67557c7d99c4cfe8f5e3ce5277cea89416ed95ad38da3ab1",
+      "0x14df529e5596511f7d3f8183adf00859a3af975ea388cf784863d09606faf32a",
+      "0x433d6469e5f99f5eb59f3e288bad3bf3d15224623e3b5b8c65eebb2dcb306c49",
+      "0x24f2b6185dae8386787389203a60fdfab924088d4c17392951b6403600b9cf15",
+      "0x7f73caa6abc933b60dc4227cf2591093cb734a7b52b84d60e1563442326d6f87",
+      "0x03c5b99035948e466a48546032ca4eb783c1d717a6099aa23ade413d4e0277ec"
+    ]
+  },
+  "segments": {
+    "execution_to_target_beacon": 12,
+    "target_beacon_to_block_roots": 13,
+    "block_roots_to_state": 6,
+    "state_to_recent_beacon": 3
+  },
+  "validation": {
+    "full_target_beacon_ssz_root_checked": true,
+    "full_state_hash_previously_checked": true,
+    "cached_field_roots_reconstruct_authenticated_state": true,
+    "vector_root_checked_against_state_field": true,
+    "state_source_sha256": "f3cb82d42b1e8f1407acd94628693c4ce9e501157f166ead2dc8132a2915c706",
+    "recent_root_authentication": "separate parent experiment; verifier receives root as external trusted input"
+  }
+}

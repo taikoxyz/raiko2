@@ -1,0 +1,176 @@
+{
+  "schema_version": 1,
+  "chain_id": 1,
+  "observed_date": "2026-10-30",
+  "rpc": "https://ethereum-rpc.publicnode.com",
+  "reference": {
+    "number": 26302384,
+    "hash": "0xdd59f16aeda059297ccb04c2c6653d55285058b669dec49d242ac01e19e00411",
+    "timestamp": 1793324915
+  },
+  "blockhash_probe": "creation-context eth_call returning 0x00 || BLOCKHASH(target), no transaction or state override",
+  "cases": [
+    {
+      "distance": 0,
+      "target_number": 26302384,
+      "expected_hash": "0xdd59f16aeda059297ccb04c2c6653d55285058b669dec49d242ac01e19e00411",
+      "blockhash_response": {
+        "jsonrpc": "2.0",
+        "id": "blockhash-0",
+        "result": "0x000000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "eip2935_response": {
+        "jsonrpc": "2.0",
+        "id": "history-0",
+        "error": {
+          "code": 3,
+          "message": "execution reverted",
+          "data": "0x"
+        }
+      }
+    },
+    {
+      "distance": 1,
+      "target_number": 26302383,
+      "expected_hash": "0x72e3f434da87987d54cc5909c5bd2385e95214111b09260c2d211821e6b684b9",
+      "blockhash_response": {
+        "jsonrpc": "2.0",
+        "id": "blockhash-1",
+        "result": "0x0072e3f434da87987d54cc5909c5bd2385e95214111b09260c2d211821e6b684b9"
+      },
+      "eip2935_response": {
+        "jsonrpc": "2.0",
+        "id": "history-1",
+        "result": "0x72e3f434da87987d54cc5909c5bd2385e95214111b09260c2d211821e6b684b9"
+      }
+    },
+    {
+      "distance": 255,
+      "target_number": 26302129,
+      "expected_hash": "0x5040277101bd5acd6cbf3d4b58f94b7ccfec0fd8adcff463d1c442852d9a4959",
+      "blockhash_response": {
+        "jsonrpc": "2.0",
+        "id": "blockhash-255",
+        "result": "0x005040277101bd5acd6cbf3d4b58f94b7ccfec0fd8adcff463d1c442852d9a4959"
+      },
+      "eip2935_response": {
+        "jsonrpc": "2.0",
+        "id": "history-255",
+        "result": "0x5040277101bd5acd6cbf3d4b58f94b7ccfec0fd8adcff463d1c442852d9a4959"
+      }
+    },
+    {
+      "distance": 256,
+      "target_number": 26302128,
+      "expected_hash": "0xf674a633bdde0cc15d3302928ca65c70df2649773ec5b8555c255fb85b7d7e62",
+      "blockhash_response": {
+        "jsonrpc": "2.0",
+        "id": "blockhash-256",
+        "result": "0x00f674a633bdde0cc15d3302928ca65c70df2649773ec5b8555c255fb85b7d7e62"
+      },
+      "eip2935_response": {
+        "jsonrpc": "2.0",
+        "id": "history-256",
+        "result": "0xf674a633bdde0cc15d3302928ca65c70df2649773ec5b8555c255fb85b7d7e62"
+      }
+    },
+    {
+      "distance": 257,
+      "target_number": 26302127,
+      "expected_hash": "0x5259b365862b3451df6fa38a6c9b36b20d20de02b2c4513d689e1a66ec1accb7",
+      "blockhash_response": {
+        "jsonrpc": "2.0",
+        "id": "blockhash-257",
+        "result": "0x000000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "eip2935_response": {
+        "jsonrpc": "2.0",
+        "id": "history-257",
+        "result": "0x5259b365862b3451df6fa38a6c9b36b20d20de02b2c4513d689e1a66ec1accb7"
+      }
+    },
+    {
+      "distance": 4096,
+      "target_number": 26298288,
+      "expected_hash": "0xff2b91fa4ada45f13738987be9f4df33bb174820d21d1e3aa6cd044861192370",
+      "blockhash_response": {
+        "jsonrpc": "2.0",
+        "id": "blockhash-4096",
+        "result": "0x000000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "eip2935_response": {
+        "jsonrpc": "2.0",
+        "id": "history-4096",
+        "result": "0xff2b91fa4ada45f13738987be9f4df33bb174820d21d1e3aa6cd044861192370"
+      }
+    },
+    {
+      "distance": 8190,
+      "target_number": 26294194,
+      "expected_hash": "0xb20d2c5cfc2c2457eedd6dc478a28e491975c51d6e3d601a9d3006d6b1660789",
+      "blockhash_response": {
+        "jsonrpc": "2.0",
+        "id": "blockhash-8190",
+        "result": "0x000000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "eip2935_response": {
+        "jsonrpc": "2.0",
+        "id": "history-8190",
+        "result": "0xb20d2c5cfc2c2457eedd6dc478a28e491975c51d6e3d601a9d3006d6b1660789"
+      }
+    },
+    {
+      "distance": 8191,
+      "target_number": 26294193,
+      "expected_hash": "0x3c616121e512d3c2395a57bf34d2ca47e8eee40cf84f452f49cbeb5984f4ceb3",
+      "blockhash_response": {
+        "jsonrpc": "2.0",
+        "id": "blockhash-8191",
+        "result": "0x000000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "eip2935_response": {
+        "jsonrpc": "2.0",
+        "id": "history-8191",
+        "result": "0x3c616121e512d3c2395a57bf34d2ca47e8eee40cf84f452f49cbeb5984f4ceb3"
+      }
+    },
+    {
+      "distance": 8192,
+      "target_number": 26294192,
+      "expected_hash": "0x953010d1d26d440b970e50a344dcb3c600417007d7dcad86a4b641f99b27db52",
+      "blockhash_response": {
+        "jsonrpc": "2.0",
+        "id": "blockhash-8192",
+        "result": "0x000000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "eip2935_response": {
+        "jsonrpc": "2.0",
+        "id": "history-8192",
+        "error": {
+          "code": 3,
+          "message": "execution reverted",
+          "data": "0x"
+        }
+      }
+    },
+    {
+      "distance": 8193,
+      "target_number": 26294191,
+      "expected_hash": "0x55e442d22ee3f7c1638ea98ffb484770fe4e78222b8104489e05731f17213d44",
+      "blockhash_response": {
+        "jsonrpc": "2.0",
+        "id": "blockhash-8193",
+        "result": "0x000000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "eip2935_response": {
+        "jsonrpc": "2.0",
+        "id": "history-8193",
+        "error": {
+          "code": 3,
+          "message": "execution reverted",
+          "data": "0x"
+        }
+      }
+    }
+  ]
+}

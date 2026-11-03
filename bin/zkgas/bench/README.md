@@ -1747,3 +1747,92 @@ compare whole-proposal actual SP1 PGU, literal node per-block ceilings/sum, and
 complete proposal estimates separately. This finite validation does not fit
 prices, allocate actual PGU to individual operations, or establish a global
 trie bound, generated proof or throughput result.
+
+### Heterogeneous storage restore and root rollback
+
+`storage_root_journal.py` creates the separate 36-input
+`unzen-storage-root-journal-20261103` corpus: `restore-stop`, `update-revert`,
+`restore-revert` × 8/64 declared accounts × 8192/16384 aggregate initialized
+entries × own-N0/small32/full. It reuses the disjoint-key request/map builder
+and assembler/guards, and leaves the older producers unchanged. Each input
+has one 31M-header block, 64 signed ordinary CALL users with empty calldata,
+a STOP-only unused primary contract, and at most 30M charged block gas
+including Anchor 167355. Each fixed 64-user full program uses maximal N;
+this does not optimize arbitrary transaction compositions.
+
+For account index `i`, `B_i=(i+1)*65536`, `K=S/A`, and `V=64/A`.
+Raw phase slot0 starts at `B_i+1`; raw keys `B_i+1..B_i+K-1` contain1.
+The complete initialized maps and signed gas envelopes match within each
+own-N0/small/full triple. Every body iteration checks1, stores2 and reads2
+into the checksum. Restore modes also store1 and read1 into the checksum.
+The runtime checks counter N, checksum `3N` (restore) or `2N` (update), and
+writes/read-checks phase+N before STOP or zero-range root REVERT.
+
+- `restore-stop` advances ranges across visits. User `j` starts at
+  `B_(j%A)+1+floor(j/A)*N`; committed final phase is `B_i+1+V*N`.
+  All main values finish1. Distinct targets total `64*N+A`.
+- Root REVERT repeats `B_i+1..B_i+N` on every visit, restoring the complete
+  original map and each account's original storage root. Distinct targets
+  total `A*(N+1)`. User receipts are legitimately included failures; Anchor
+  succeeds. Whole-world state still changes through fees, nonces and Anchor.
+
+| Mode | Full N | User gross | Refund before terminal | Effective refund | Charged/user | Shared envelope | Charged block |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| restore-stop | 101 | 578135 | 282800 | 282800 | 462508 | 580436 | 29767867 |
+| update-revert | 84 | 465933 | 0 | 0 | 465933 | 468234 | 29987067 |
+| restore-revert | 80 | 463397 | 224000 | 0 | 463397 | 465698 | 29824763 |
+
+These full values apply to both A and S choices. The solver derives gas from
+assembled executed counts, cold/warm reads and EIP-2200 writes. Dirty
+`1->2->1` earns2800 per key before terminal. STOP applies the one-fifth cap;
+root REVERT discards the refund. Each shared envelope reserves2301 above
+full gross; the solver checks initialized ranges, at most8192 distinct
+(account,rawslot) targets, the 15M/user cap, EIP-7825 and every admission
+prefix. All full points exceed99% charged-budget occupancy; `near_full`
+records occupancy independently from maximal N.
+
+```sh
+"$PYTHON_BIN" -S bin/zkgas/bench/cases/storage_root_journal.py \
+  --output-dir "$ROOT_JOURNAL_CASES_DIR" --model-id "$ZKGAS_MODEL_ID"
+"$PYTHON_BIN" -S -m unittest discover -s bin/zkgas/bench/tests \
+  -p test_storage_root_journal.py -v
+STORAGE_ROOT_JOURNAL_NATIVE_BIN="$NATIVE_BIN" \
+  "$PYTHON_BIN" -S -m unittest discover -s bin/zkgas/bench/tests \
+  -p test_storage_root_journal.py -k frozen_native -v
+```
+
+Use the existing managed Python environment as `PYTHON_BIN`. Output creation
+is exclusive; `--model-id` defaults to frozen c893 and accepts only a lowercase
+SHA256. The catalog records generator, imported source and helper hashes,
+36 distinct canonical request hashes, and own-N0 identities. Address-keyed
+`phase_base_by_account`, `initial_phase_by_account` and
+`expected_final_phase_by_account` separate committed phases from ordered
+`start_phase_schedule`/`attempted_final_phase_schedule`. Effective
+`expected_user_refund_counter` and `expected_user_refund_counter_before_terminal`
+are separate. Storage and route event counts include attempted work discarded
+by REVERT; distinct-body-key/visit/repeated-visit counts expose range reuse.
+
+The stdlib oracle executes all36 actual byte streams over64 isolated rolling
+maps each. It checks complete maps, exact owner/range/value/original/warmth
+traces, memory, terminal, gas, refunds, routes and independently executed N+1
+maximality. The shared bounded test VM adds only zero-offset/zero-length root
+REVERT, retaining attempted traces and preterminal refunds while restoring the
+caller's state dictionary in place; nonzero ranges are explicitly unsupported.
+Existing STOP results are unchanged. Negatives include matching-terminal but
+wrong values/checksums, recipients, phases, owner, warmth, refund and maps.
+The optional native smoke checks the frozen binary SHA256
+`ad0d78dd575228e8685d1f3c0f09f1c4021c76b6d34a9a1341c15e1c4a0e98ec`,
+then runs restore-stop/A8/full and restore-revert/A64/full plus corresponding
+wrong-value/checksum mutants, with180 seconds per specimen. It checks65
+receipts, charged gas and A distinct diagnostic initial/final roots, including
+per-account equality after rollback. Mutants pass native execution with the
+expected receipts but fail the literal semantic oracle. No rebuild is used.
+
+Independent source review and all36 native/signature/authenticated-root,
+canonical conservative mutation-witness and original real-quote gates precede
+source/tool/input/quote freeze and actuals. Keep the same frozen pricing,
+SDK6.3, workload ELF and host/guest; preserve all controls and failures.
+Compare actual same-proposal SP1 PGU, literal node block estimates/sum and
+complete-proposal estimate separately. This finite panel establishes no global
+coverage percentage, trie bound, price refit, per-operation actual allocation,
+generated proof or throughput claim.

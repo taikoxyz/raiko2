@@ -86,6 +86,14 @@ def execute(code, state, envelope):
                 assert target in boundaries, 'invalid jump destination'
                 pc = target
         elif op == 0x5b: gas += 1
+        elif op == 0xfd:
+            offset, length = stack.pop(), stack.pop()
+            assert offset == length == 0, 'unsupported nonzero REVERT range'
+            assert gas <= envelope, 'out of gas'
+            state.clear(); state.update(original)
+            return dict(terminal=op, gas=gas, refund=0, applied=0, charged=gas,
+                        refund_before_revert=refund, reads=reads, writes=writes,
+                        counts=counts, memory=memory, stack=stack)
         elif op in (0, 0xfe):
             assert gas <= envelope, 'out of gas'
             return dict(terminal=op, gas=gas, refund=refund, applied=min(refund, gas // 5),

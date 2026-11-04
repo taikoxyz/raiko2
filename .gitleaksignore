@@ -5,3 +5,6 @@
 ebd59aa36d11374b6903e53d8e92dac1b15d2a3b:crates/runtime/src/lib.rs:generic-api-key:503
 7e0b264fb2f4e3609df9b8f2e4663e9c62ff92c0:bin/raiko2/src/server/state/runtime_observer.rs:generic-api-key:376
 7e0b264fb2f4e3609df9b8f2e4663e9c62ff92c0:crates/runtime/src/lib.rs:generic-api-key:464
+
+# Historical warm-read planning prose about calldata and signature allocation, not a credential.
+ccad5d955dcf9a51d7db1ce7bb6243a75ff08424:docs/superpowers/plans/2026-11-04-warm-read-catalogs.md:generic-api-key:15

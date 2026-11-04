@@ -3040,3 +3040,40 @@ Native status/gas/routes and whole-input replay do not directly export final mem
 per-target values, actual pointers or memcpy branches. Selected source/ELF alignment
 classes do not establish per-occurrence execution, an MLOAD8x multiplier, isolated
 word PGU, global bounds, proof/GPU behavior or production readiness.
+
+### Empty-storage warm-read calldata catalogs
+
+`cases/warm_read_catalogs.py --output-dir <fresh-directory>` exports four finite
+inputs: deterministic ordered and SplitMix64 catalogs, each with its own zero and
+maximal single-user full level. Each catalog has512 unique keys, zero low192 bits,
+nonzero bytes in high64, and fixed final query `0x1122334455667788 << 192`.
+The runtime depends only on the repetition count; keys are the existing native
+`program.input_hex` calldata. The default primary has empty persistent storage.
+There are512 cold zero reads followed by a guarded warm query and64 warm reads
+per batch. The independent byte oracle checks calldata order, complete stack,
+warmness, zero values, counters, sentinel, gas and empty-stack STOP. Its proven
+pure-read body cache is test-only; actual EVM execution performs every read.
+
+The16384-byte calldata contains12288 zero and4096 nonzero bytes. Ordinary
+intrinsic135688 and EIP-7623 floor307720 are separate; the floor is inactive after
+the cold reads. Full is maximal uniform R under a15M single-user envelope, with
+EIP-7825,31M header prefix and30M charged block limits checked separately. This
+single-user pilot does not certify a full30M block or equal guest hash-map seeds.
+Signatures and input-dependent earlier allocation can differ across catalogs.
+
+Optional `--catalog-file <json-file>` exports only two custom development probes.
+The bounded128KiB JSON must contain exactly `schema_version: 1` and512 canonical
+lowercase U256 strings in `keys`, satisfying the same constraints and query-last
+rule. Custom IDs use the full canonical calldata SHA256; JSON, source and calldata
+hashes are retained without local filenames or paths. Keep data-only catalogs in
+Atlas. No model fitting, pricing, seed search or collision claim is performed.
+
+Focused validation uses the managed Python environment:
+`python -S -B -m unittest discover -s bin/zkgas/bench/tests -p test_warm_read_catalogs.py -v`.
+The optional frozen native gate requires `ZKGAS_FIXTURE_BIN` and a fresh
+`WARM_READ_CATALOGS_NATIVE_OUTPUT_DIR`; it runs exactly three specimens: ordered
+full, mixed zero, and a same-gas first-two-key order mutant. The mutant retains
+original catalog intent, fails that intent gate, and is excluded from canonical
+inputs. Native reports status/gas/routes and replay output, not per-read keys or
+values; primary empty-root/code support is authenticated separately from the
+configured extra-contract list.

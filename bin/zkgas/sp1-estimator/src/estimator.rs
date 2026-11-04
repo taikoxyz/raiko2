@@ -32,7 +32,12 @@ pub(crate) fn execute_sp1_gas_estimator_with_opts(
     stdin: SP1Stdin,
     opts: SP1CoreOpts,
     resource_output: Option<std::fs::File>,
-) -> Result<(sp1_sdk::SP1PublicValues, ExecutionReport)> {
+    mut observation: Option<crate::observation::Observation>,
+) -> Result<(
+    sp1_sdk::SP1PublicValues,
+    ExecutionReport,
+    Option<serde_json::Value>,
+)> {
     let before = resource_output
         .as_ref()
         .map(|_| crate::resources::baseline())
@@ -60,7 +65,14 @@ pub(crate) fn execute_sp1_gas_estimator_with_opts(
         report += vm
             .execute()
             .map_err(|err| anyhow::anyhow!("estimate SP1 guest gas: {err:?}"))?;
+        drop(vm);
+        if let Some(observer) = observation.as_mut().filter(|observer| observer.active()) {
+            observer.consume_chunk(&chunk, program.clone(), opts.clone());
+        }
     }
     let public_values = sp1_sdk::SP1PublicValues::from(runner.public_values_stream());
-    Ok((public_values, report))
+    let observation = observation
+        .map(crate::observation::Observation::finish)
+        .transpose()?;
+    Ok((public_values, report, observation))
 }

@@ -3077,3 +3077,19 @@ original catalog intent, fails that intent gate, and is excluded from canonical
 inputs. Native reports status/gas/routes and replay output, not per-read keys or
 values; primary empty-root/code support is authenticated separately from the
 configured extra-contract list.
+
+## Selected-PC historical register diagnostics
+
+The standalone estimator optionally accepts `--observation-plan plan.json`; see its
+[plan and report contract](../sp1-estimator/README.md). Omission preserves the ordinary
+measurement contract. Observation plans are ELF-bound, strict and bounded; no storage PC,
+seed or map assumption is built into the tool. Run diagnostics separately from original
+pricing actuals and retain their new source/executable identity. Diagnostic wall time
+includes public SDK instruction replay and must not be treated as prover time.
+
+The canonical producer, GasVM, two raw slots, memory-entry chunk threshold, stdin framing,
+resource receipt and gas/public-value fields remain authoritative. Sample truncation and
+instruction-limit/error status remain explicit. An observed register is an actually
+accessed historical value, not an arbitrary RAM or whole-table snapshot. Qualify the tool
+against frozen default/observed controls and source-expected PC counts under the existing
+PSS/time/log/staging/disk guards before using values to identify a hasher or map.

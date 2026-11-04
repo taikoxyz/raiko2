@@ -1,6 +1,7 @@
 //! Execute one opaque bincode buffer against an explicit program. Never prove or fetch inputs.
 mod estimator;
 mod io;
+mod observation;
 mod resources;
 
 use std::{path::PathBuf, sync::Arc, time::Instant};
@@ -29,6 +30,9 @@ struct Args {
     /// Publish exact newly owned Linux SDK shared-memory identities before execution.
     #[arg(long)]
     resource_receipt: Option<PathBuf>,
+    /// Optional ELF-bound selected-PC historical register diagnostics.
+    #[arg(long)]
+    observation_plan: Option<PathBuf>,
 }
 
 #[derive(serde::Deserialize)]
@@ -99,6 +103,15 @@ fn main() -> Result<()> {
     let program = Program::from(&elf)
         .map(Arc::new)
         .map_err(|error| anyhow::anyhow!("parse explicit SP1 ELF: {error:?}"))?;
+    // All diagnostic validation precedes output/resource reservation and runner creation.
+    let observation = args
+        .observation_plan
+        .as_deref()
+        .map(|path| {
+            let bytes = io::read_regular(path, observation::PLAN_LIMIT)?;
+            observation::Observation::parse(&bytes, &elf_sha256, &program)
+        })
+        .transpose()?;
     let output = io::reserve(&args.output)?;
     let resource_output = args
         .resource_receipt
@@ -108,11 +121,12 @@ fn main() -> Result<()> {
     let opts = estimator::canonical_sp1_core_opts();
     let opts_report = serde_json::to_value(&opts).context("serialize executor options")?;
     let started = Instant::now();
-    let (public_values, report) = estimator::execute_sp1_gas_estimator_with_opts(
+    let (public_values, report, observation) = estimator::execute_sp1_gas_estimator_with_opts(
         program,
         opaque_stdin(input),
         opts,
         resource_output,
+        observation,
     )?;
     ensure!(
         report.exit_code == 0,
@@ -151,6 +165,9 @@ fn main() -> Result<()> {
         report["execution_profile"] = serde_json::json!(manifest.execution_profile);
         report["program_manifest_sha256"] = serde_json::json!(manifest.sha256);
     }
+    if let Some(observation) = observation {
+        report["observation"] = observation;
+    }
     io::write_json(output, &report)
 }
 
@@ -170,6 +187,24 @@ mod tests {
     }
 
     #[test]
+    fn observation_plan_is_an_optional_argument() {
+        assert!(
+            Args::try_parse_from([
+                "estimator",
+                "--input-bincode",
+                "input.bin",
+                "--elf",
+                "program.elf",
+                "--output",
+                "report.json",
+                "--observation-plan",
+                "plan.json"
+            ])
+            .is_ok()
+        );
+    }
+
+    #[test]
     fn optional_program_manifest_does_not_change_opaque_input_arguments() {
         let mut argv = vec![
             "estimator",
@@ -182,6 +217,7 @@ mod tests {
         ];
         let bare = Args::try_parse_from(&argv).unwrap();
         assert!(bare.program_manifest.is_none());
+        assert!(bare.observation_plan.is_none());
         argv.extend(["--program-manifest", "program-manifest.json"]);
         let declared = Args::try_parse_from(&argv).unwrap();
         assert_eq!(

@@ -121,10 +121,18 @@ def full_repetitions():
     return low
 
 
-def _make_case(keys, catalog_id, level, *, custom):
+def _make_case(keys, catalog_id, level, *, custom, repetitions=None):
     keys = _validate_keys(keys)
-    if type(level) is not str or level not in LEVELS: raise ValueError('level must be zero or full')
-    maximum = full_repetitions(); r = 0 if level == 'zero' else maximum; gas = gas_accounting(r)
+    if type(level) is not str or level not in (*LEVELS, 'probe'): raise ValueError('level must be zero, probe or full')
+    maximum = full_repetitions()
+    if level == 'probe':
+        if not custom: raise ValueError('probe requires an external catalog')
+        original.integer(repetitions, 1, maximum - 1, 'probe repetitions')
+        r = repetitions
+    else:
+        if repetitions is not None: raise ValueError('repetitions override requires probe level')
+        r = 0 if level == 'zero' else maximum
+    gas = gas_accounting(r)
     envelope = gas_accounting(maximum)['gross_gas'] + 1000; code, counts = _runtime(r)
     data = b''.join(bytes.fromhex(k[2:]) for k in keys); data_sha = digest(data)
     request = original.make_case('call', 'stop', count=1, gas_limit=envelope)['request']; program = request['program']
@@ -153,7 +161,8 @@ def _make_case(keys, catalog_id, level, *, custom):
             expected_user_refund_counter=0, expected_user_refund_applied=0, expected_block_charged_gas=block_gas,
             near_full=block_gas >= 29_700_000, transaction_occupancy_numerator=gas['charged_gas'], transaction_occupancy_denominator=envelope,
             header_prefix_remaining_gas=[HEADER_GAS_LIMIT - ANCHOR_GAS], full_plus_one_constraint_failures=_constraint_failures(gas_accounting(maximum + 1)),
-            fullness_scope='Maximal uniform single-user R within15M fixture envelope; not a30M full-block certificate.',
+            fullness_scope=('Intermediate development probe within original full signed envelope; no maximal-gas claim.' if level == 'probe'
+                else 'Maximal uniform single-user R within15M fixture envelope; not a30M full-block certificate.'),
             expected_terminal='STOP', expected_user_success=True, expected_user_receipt_statuses=[True], expected_anchor_success=True, expected_exceptional_instructions=0,
             execution_profile='evm-gas-only', preload_created_accounts_or_code=False, shared_runtime=True, runtime_bytes=len(code), runtime_sha256=digest(code),
             initial_storage_rule='Default primary empty persistent storage, no extra prestate contracts, all reads zero; no per-key MPT witness padding.',
@@ -168,6 +177,11 @@ def make_custom_case(keys, level='full'):
     return _make_case(keys, 'custom-' + digest(data), level, custom=True)
 
 
+def make_probe_case(keys, repetitions):
+    keys = _validate_keys(keys); data = b''.join(bytes.fromhex(k[2:]) for k in keys)
+    return _make_case(keys, 'custom-' + digest(data), 'probe', custom=True, repetitions=repetitions)
+
+
 def source_modules():
     return {'cases/initcode_preparation.py': initcode_preparation, 'cases/spawn_memory.py': spawn_memory,
         'cases/storage_fanout.py': storage_fanout, 'cases/storage_mutation.py': mutation, 'cases/top_level_create.py': original}
@@ -176,7 +190,7 @@ def source_modules():
 def helpers():
     return {'_Factory': _Factory, 'storage_mutation._require': mutation._require,
         'top_level_create.make_case': original.make_case, 'top_level_create.integer': original.integer,
-        **{f'warm_read_catalogs.{fn.__name__}': fn for fn in (_validate_keys, _catalog, _runtime, gas_accounting, _constraint_failures, fits, full_repetitions, _make_case, make_case, make_custom_case)},
+        **{f'warm_read_catalogs.{fn.__name__}': fn for fn in (_validate_keys, _catalog, _runtime, gas_accounting, _constraint_failures, fits, full_repetitions, _make_case, make_case, make_custom_case, make_probe_case)},
         'spawn_memory.digest': digest, 'spawn_memory.encoded': encoded, 'spawn_memory.write': write}
 
 
@@ -196,16 +210,20 @@ def _read_catalog(path):
     return _validate_keys(obj['keys']), digest(raw)
 
 
-def prepare(output: Path, *, model_id=MODEL, catalog_file: Path | None = None):
+def prepare(output: Path, *, model_id=MODEL, catalog_file: Path | None = None, probe_repetitions=None):
     if not isinstance(output, Path): raise ValueError('output must be a Path')
     if type(model_id) is not str or re.fullmatch('[0-9a-f]{64}', model_id) is None: raise ValueError('model_id must be lowercase SHA256')
     if output.exists() or output.is_symlink(): raise FileExistsError(output)
     external = None
+    if probe_repetitions is not None:
+        if catalog_file is None: raise ValueError('probe repetitions require an external catalog')
+        original.integer(probe_repetitions, 1, full_repetitions() - 1, 'probe repetitions')
     if catalog_file is not None: keys, external = _read_catalog(catalog_file)
+    levels = ('zero', 'probe', 'full') if probe_repetitions is not None else LEVELS
     output.mkdir(parents=True, exist_ok=False); (output / 'requests').mkdir(); rows = []
     for catalog in ((None,) if external else CATALOGS):
-        for level in LEVELS:
-            row = make_custom_case(keys, level) if external else make_case(catalog, level)
+        for level in levels:
+            row = make_probe_case(keys, probe_repetitions) if level == 'probe' else (make_custom_case(keys, level) if external else make_case(catalog, level))
             raw = encoded(row.pop('request')); path = f"requests/{row['sample_id']}.json"
             write(output / path, raw); rows.append(row | {'request_path': path, 'request_sha256': digest(raw)})
     write(output / 'catalog.json', encoded(dict(schema_version=1, corpus_id=rows[0]['corpus_id'], frozen_model_id=model_id,
@@ -214,7 +232,7 @@ def prepare(output: Path, *, model_id=MODEL, catalog_file: Path | None = None):
         source_sha256={name: digest(Path(module.__file__).read_bytes()) for name, module in source_modules().items()},
         helper_source_sha256={name: digest(inspect.getsource(fn).encode()) for name, fn in helpers().items()},
         external_catalog_json_sha256=external, external_catalog_source_sha256=external,
-        holdout_only=external is None, actuals_used_for_fitting=False, levels=list(LEVELS), users=1,
+        holdout_only=external is None, actuals_used_for_fitting=False, levels=list(levels), users=1,
         native_observability='Status/gas/routes and whole execution_result replay; no per-read native key/value export.', cases=rows)))
     return len(rows)
 
@@ -223,4 +241,5 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output-dir', type=Path, required=True); parser.add_argument('--model-id', default=MODEL)
     parser.add_argument('--catalog-file', type=Path)
-    args = parser.parse_args(); print(json.dumps({'prepared': prepare(args.output_dir, model_id=args.model_id, catalog_file=args.catalog_file)}))
+    parser.add_argument('--probe-repetitions', type=int)
+    args = parser.parse_args(); print(json.dumps({'prepared': prepare(args.output_dir, model_id=args.model_id, catalog_file=args.catalog_file, probe_repetitions=args.probe_repetitions)}))

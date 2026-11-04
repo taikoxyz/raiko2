@@ -43,6 +43,61 @@ def qualify(test, row):
 
 
 class WarmReadCatalogTests(unittest.TestCase):
+    def test_default_rows_and_custom_pair_preserve_frozen_bytes(self):
+        # Complete canonical row hashes include requests, gas, runtime and envelope.
+        # Frozen before adding the probe option; generator/helper provenance is separate.
+        m = producer()
+        frozen = {
+            ('ordered', 'zero'): '14a0fa70f97d2edbac542feaf9623a354b06075e71c0db3f1a8e5d0227f85520',
+            ('ordered', 'full'): 'bc1234627a48b88df5045e4b502d636a56a34e2d5740ecc908171851220c8d7d',
+            ('mixed', 'zero'): 'b06a5c809c05c80a74c89ca56b12f5648c3f1b1dfc492c036623c246b8d86720',
+            ('mixed', 'full'): '37b8a41c7071ad1f31a1e0386ad93b0c608a252ce6d15f83aff70252f0d178ee',
+        }
+        for (catalog, level), sha in frozen.items():
+            self.assertEqual(m.digest(m.encoded(m.make_case(catalog, level))), sha)
+        keys = m._catalog('mixed')
+        for level, sha in (('zero', 'e4eab90686d4372b15318c2c46c966e9f773c4088c3d52dc21857cd232056283'),
+                           ('full', '23060a317db643e166c8b4c84c6e90f1a513e26366ccbdf665d0e2c58def14fb')):
+            self.assertEqual(m.digest(m.encoded(m.make_custom_case(keys, level))), sha)
+
+    def test_probe_factory_actual_bytes_and_export(self):
+        m = producer(); self.assertTrue(hasattr(m, 'make_probe_case'), 'intermediate probe factory missing')
+        keys = list(m._catalog('mixed')); full = m.make_custom_case(keys); maximum = m.full_repetitions()
+        for r in (1, 2, 512, maximum - 1):
+            row = m.make_probe_case(keys, r); qualify(self, row); p = row['parameters']
+            self.assertEqual((p['repetitions'], p['expected_counter'], p['workload_level']), (r, r, 'probe'))
+            self.assertEqual(row['sample_id'], full['sample_id'].rsplit('-n', 1)[0] + f'-n{64 * r}')
+            self.assertEqual(row['baseline_sample_id'], m.make_custom_case(keys, 'zero')['sample_id'])
+            self.assertEqual(p['transaction_gas_limit'], full['parameters']['transaction_gas_limit'])
+            self.assertEqual(p['full_plus_one_constraint_failures'], ['transaction_fixture_cap'])
+            self.assertEqual(row['data_role'], 'development_probe'); self.assertFalse(row['holdout_only'])
+            self.assertIn('intermediate', p['fullness_scope'].lower())
+        for r in (True, None, 0, -1, 1.0, maximum, maximum + 1):
+            with self.assertRaises(ValueError): m.make_probe_case(keys, r)
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp); external = base / 'keys.json'; external.write_bytes(m.encoded(dict(schema_version=1, keys=keys)))
+            for r in (True, 0, -1, 1.0, maximum, maximum + 1):
+                with self.assertRaises(ValueError): m.prepare(base / 'invalid', catalog_file=external, probe_repetitions=r)
+                self.assertFalse((base / 'invalid').exists())
+            with self.assertRaises(ValueError): m.prepare(base / 'invalid', probe_repetitions=512)
+            self.assertFalse((base / 'invalid').exists())
+            output = base / 'probe'; self.assertEqual(m.prepare(output, catalog_file=external, probe_repetitions=512), 3)
+            obj = json.loads((output / 'catalog.json').read_bytes()); self.assertEqual(obj['levels'], ['zero', 'probe', 'full'])
+            self.assertEqual(len({row['sample_id'] for row in obj['cases']}), 3)
+            self.assertEqual([row['parameters']['repetitions'] for row in obj['cases']], [0, 512, maximum])
+            self.assertEqual(len({row['parameters']['transaction_gas_limit'] for row in obj['cases']}), 1)
+            command = [sys.executable, '-S', '-B', str(CASES / 'warm_read_catalogs.py'), '--output-dir', str(base / 'cli-probe'), '--catalog-file', str(external), '--probe-repetitions', '512']
+            result = subprocess.run(command, capture_output=True, timeout=60)
+            self.assertEqual(result.returncode, 0, result.stderr); self.assertEqual(json.loads(result.stdout), {'prepared': 3})
+            for r in ('0', str(maximum), str(maximum + 1)):
+                bad = command.copy(); bad[bad.index('--output-dir') + 1] = str(base / 'invalid-cli'); bad[-1] = r
+                self.assertNotEqual(subprocess.run(bad, capture_output=True, timeout=60).returncode, 0)
+                self.assertFalse((base / 'invalid-cli').exists())
+            bad = command.copy(); bad[bad.index('--output-dir') + 1] = str(base / 'no-catalog-cli')
+            del bad[bad.index('--catalog-file'):bad.index('--catalog-file') + 2]
+            self.assertNotEqual(subprocess.run(bad, capture_output=True, timeout=60).returncode, 0)
+            self.assertFalse((base / 'no-catalog-cli').exists())
+
     def test_a_default_catalogs_and_full_packing(self):
         m = producer(); rows = [m.make_case(c, level) for c in ('ordered', 'mixed') for level in ('zero', 'full')]
         for row in rows:

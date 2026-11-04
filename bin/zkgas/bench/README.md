@@ -3068,8 +3068,61 @@ rule. Custom IDs use the full canonical calldata SHA256; JSON, source and callda
 hashes are retained without local filenames or paths. Keep data-only catalogs in
 Atlas. No model fitting, pricing, seed search or collision claim is performed.
 
+With an external catalog, optional `--probe-repetitions 512` exports three rows in
+zero/probe/full order. The probe must satisfy `1 <= R < full_repetitions`; zero,
+the duplicate full endpoint and use without `--catalog-file` fail before output
+creation. `make_probe_case(keys, repetitions)` exposes the same constructor API.
+All three retain the original full transaction gas envelope; the probe's code,
+gas, counters, occupancy and actual64R sample ID describe its own execution. It is
+a development probe with its own zero baseline, with no maximal-gas claim.
+
+`hash_probe_catalog.rs` is a standalone std-only data generator. Build it directly:
+
+```bash
+rustc --edition=2024 -O bin/zkgas/bench/hash_probe_catalog.rs -o experiment/hash-probe-catalog
+experiment/hash-probe-catalog hash --seed 0x0000000000000000 \
+  --shared 0x0000000000000000 \
+  --key 0x1122334455667788000000000000000000000000000000000000000000000000
+```
+
+Hash accepts1..1024 repeated `--key` arguments, returns canonical keys and full
+U64 hashes in input order, and treats k0 as the least significant U64 limb of the
+canonical U256. Scalars use lowercase `0x` plus16 hex digits; keys use64 digits.
+It computes `F(x,y)=low64(x*y) XOR high64(x*y)` with a full U128 product,
+`A=F(k0 XOR S,k1 XOR G)`, then `H=F(k2 XOR A,k3 XOR G)`.
+
+For a bounded search, supply explicit hypothesized `--seed` and `--shared` plus
+`--query <canonical-U256> --bucket-mask <mask> --max-trials <N> --max-seconds <N>
+--output <fresh-file>` after `search`. The query requires zero low192 bits and
+eight nonzero high64 bytes. A deterministic U32 permutation varies only its high32
+bits, retains511 unique keys matching both `H & mask` and `H >> 57`, and appends
+the query last. The warm-read constructor requires its documented fixed query.
+Masks are positive powers of two minus one through65535; bounds are1..268435456
+trials and1..120 seconds. A monotonic deadline is checked every1024 trials and at
+completion. Callers must also use the existing external process/resource guard.
+
+Exit0 atomically installs the strict data-only catalog without replacing a file
+or symlink, including concurrent creation. Exit2 reports an incomplete search and
+creates no catalog; exit1 reports invalid input or an installation/I/O error.
+Search stdout is bounded metadata with exact trials, integer elapsed nanoseconds,
+parameters and status; `found` includes the fixed query, while
+`retained_candidates` excludes it. Metadata contains no output path. Hash JSON,
+search metadata and catalog limits are256KiB,16KiB and128KiB respectively.
+Same-directory owned temporary files are cleaned on ordinary error/exit; a killed
+process can leave a bounded temporary file, so retain and inspect its outcome.
+Freeze source, compiler, executable, arguments and output SHA256 identities.
+
+Synthetic tests do not establish actual hash agreement or new-input seed
+stability. Independently validate all512 captured hashes before real search,
+then observe the new signed zero input's own seed and cold hashes before larger
+actuals. Concentrating a bucket/control tag does not assert full-hash collisions,
+occupancy, underpricing, or proof/production parity.
+
 Focused validation uses the managed Python environment:
-`python -S -B -m unittest discover -s bin/zkgas/bench/tests -p test_warm_read_catalogs.py -v`.
+`python -S -B -m unittest discover -s bin/zkgas/bench/tests -p 'test_*catalog*.py' -v`.
+This builds the standalone helper directly with rustc and uses synthetic hash
+operands plus the independent byte oracle. Its Rust unit tests can also run via
+`rustc --edition=2024 --test bin/zkgas/bench/hash_probe_catalog.rs -o <temporary-test-binary>`.
 The optional frozen native gate requires `ZKGAS_FIXTURE_BIN` and a fresh
 `WARM_READ_CATALOGS_NATIVE_OUTPUT_DIR`; it runs exactly three specimens: ordered
 full, mixed zero, and a same-gas first-two-key order mutant. The mutant retains

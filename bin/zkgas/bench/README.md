@@ -3246,3 +3246,42 @@ Preserve source/binary/input/options identities and all rejected/unrealized pres
 native signatures, account absence, roots, route counts, receipt gas and canonical output before
 comparing node-known quote, completed-proposal quote and same-input SP1 PGU. This family changes
 neither prices nor deployment policy; any subsequent price decision requires actual deficit evidence.
+
+### Explicit storage-catalog capacity probes
+
+`warm_read_catalogs.py` accepts `--key-count K`, an integer from1 through1024
+(default512). The Python factories `make_case`, `make_custom_case`,
+`make_probe_case`, gas helpers and `prepare` accept the same keyword-only
+`key_count=512`. Existing default512 requests, IDs, runtime and envelopes retain
+their original bytes. Nondefault rows carry `parameters.key_count` and `-kK-`
+in their sample IDs; the byte oracle authenticates K against calldata, decoded
+runtime, executed reads and metadata. Missing new-count metadata uses the legacy
+512 shape and therefore cannot silently accept another calldata length.
+
+For an external data-only catalog containing exactly K canonical unique U256
+keys (eight nonzero bytes each, unchanged query last), export to a fresh directory:
+
+```bash
+"$PYTHON_BIN" -S -B bin/zkgas/bench/cases/warm_read_catalogs.py \
+  --output-dir experiment/storage-capacity-k449 \
+  --catalog-file experiment/catalog-k449.json --key-count 449 \
+  --probe-repetitions 512 \
+  --model-id 5f93909ea1372eb6e10fa2b599c6087aafd4ec493ba28eb1cea4c4abb3708a11
+```
+
+The existing export contract produces zero/probe/full rows; select zero and probe
+for a fixed-R panel, retaining the same K-specific full envelope. Catalog JSON
+remains capped at128KiB and existing output paths are rejected. The four selected
+K448/449/896/897 controls do not establish a capacity transition: observe the exact
+guest table mask before making that claim. Use deterministic low32-diverse
+external catalogs to isolate growth from prefix concentration, without hash seed,
+bucket or tag search. Default ordered/mixed catalogs retain zero low192 bits and
+are not that baseline. No pricing or account-journal correction is performed.
+
+For this finite zero-state workload, calldata is32K bytes (24K zero,8K nonzero),
+intrinsic gas is21000+224K, the EIP-7623 floor is21000+560K, and cold/warm SLOAD
+fees are2100K and100(64R+1). Including guarded-loop ordinary gas and12 memory gas,
+gross gas is21359+2416K+6775R; charged gas is the larger of gross and the floor.
+There are no SSTOREs or refunds. Existing15M fixture envelope, EIP-7825,31M header
+prefix and30M charged-block checks still apply. Rollback/refill and a30M full-block
+packing experiment are separate follow-ups.

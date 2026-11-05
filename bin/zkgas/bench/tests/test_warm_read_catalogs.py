@@ -43,6 +43,94 @@ def qualify(test, row):
 
 
 class WarmReadCatalogTests(unittest.TestCase):
+    @staticmethod
+    def capacity_keys(count):
+        # Deterministic raw values, no hashing/search against a guest table.
+        keys = []; low = 0x01010101
+        while len(keys) < count - 1:
+            if all(low.to_bytes(4, 'big')):
+                keys.append(f'0x{(0x11223344 << 224) | low:064x}')
+            low += 1
+        return keys + [f'0x{QUERY:064x}']
+
+    def test_capacity_boundaries_and_independent_byte_execution(self):
+        m = producer()
+        self.assertIn('key_count', inspect.signature(m.make_probe_case).parameters)
+        from warm_read_catalogs_vm import execute, run_users
+        for k in (1, 448, 449, 896, 897, 1024):
+            keys = self.capacity_keys(k)
+            zero = m.make_custom_case(keys, 'zero', key_count=k)
+            row = m.make_probe_case(keys, 512, key_count=k)
+            self.assertEqual(row['parameters']['key_count'], k)
+            self.assertIn(f'-k{k}-', row['sample_id'])
+            self.assertEqual(row['baseline_sample_id'], zero['sample_id'])
+            self.assertEqual(row['parameters']['transaction_gas_limit'], zero['parameters']['transaction_gas_limit'])
+            for candidate, r in ((zero, 0), (row, 512)):
+                p = candidate['parameters']; result = run_users(candidate)[0]
+                self.assertEqual((result['cold_reads'], result['warm_reads']), (k, 64*r+1))
+                self.assertEqual(result['seed_keys'], keys)
+                self.assertEqual(result['gas'], p['expected_user_charged_gas'])
+                self.assertEqual(result['counts'], +Counter(candidate['request']['program']['expected_route_counts']))
+                self.assertEqual(p['outer_calldata_bytes'], 32*k)
+                self.assertEqual(p['gas_accounting_per_user']['intrinsic_gas'], 21000+224*k)
+                self.assertEqual(p['gas_accounting_per_user']['eip7623_floor_gas'], 21000+560*k)
+                self.assertEqual(p['expected_persistent_storage_reads'], k+1+64*r)
+                self.assertEqual(result['gas'], 21359 + 2416*k + 6775*r)
+            small = m.make_probe_case(keys, 2, key_count=k); program = small['request']['program']
+            args = (bytes.fromhex(program['code_hex'][2:]), bytes.fromhex(program['input_hex'][2:]), small['parameters']['transaction_gas_limit'])
+            self.assertEqual(execute(*args, repetitions=2, key_count=k, cache=False), execute(*args, repetitions=2, key_count=k))
+            self.assertEqual(m.make_case('mixed', 'zero', key_count=k)['parameters']['accessed_unique'], k)
+
+    def test_capacity_invalid_counts_export_cli_and_metadata_tampering(self):
+        m = producer()
+        self.assertIn('key_count', inspect.signature(m.prepare).parameters)
+        from warm_read_catalogs_vm import run_users
+        keys = self.capacity_keys(449)
+        for k in (True, False, None, 1.0, '449', 0, -1, 1025):
+            with self.subTest(k=k), self.assertRaises(ValueError): m.make_probe_case(keys, 2, key_count=k)
+            with self.subTest(gas_k=k), self.assertRaises(ValueError): m.gas_accounting(2, key_count=k)
+        with self.assertRaises(ValueError): m.make_custom_case(keys, key_count=448)
+        row = m.make_probe_case(keys, 2, key_count=449)
+        for field, value in (('key_count', 448), ('key_count', True), ('seed_reads', 448),
+                             ('accessed_unique_keys', 448), ('outer_calldata_bytes', 14336),
+                             ('expected_user_charged_gas', 1), ('expected_persistent_storage_reads', 1)):
+            bad = copy.deepcopy(row); bad['parameters'][field] = value
+            with self.subTest(field=field), self.assertRaises(AssertionError): run_users(bad)
+        bad = copy.deepcopy(row); del bad['parameters']['key_count']
+        with self.assertRaises(AssertionError): run_users(bad)
+        bad = copy.deepcopy(row); bad['parameters']['gas_accounting_per_user']['cold_sload_count'] = 448
+        with self.assertRaises(AssertionError): run_users(bad)
+        bad = copy.deepcopy(row); bad['request']['program']['input_hex'] = bad['request']['program']['input_hex'][:-64]
+        with self.assertRaises(AssertionError): run_users(bad)
+        bad = copy.deepcopy(row); bad['parameters']['gas_accounting_per_user']['intrinsic_gas'] = float(bad['parameters']['gas_accounting_per_user']['intrinsic_gas'])
+        with self.subTest(gas_type='float'), self.assertRaises(AssertionError): run_users(bad)
+        bad = copy.deepcopy(row); bad['parameters']['initial_state_size'] = 1
+        with self.subTest(initial_state_size=1), self.assertRaises(AssertionError): run_users(bad)
+        bad = copy.deepcopy(row)
+        bad['request']['program']['code_hex'] = m.make_probe_case(self.capacity_keys(448), 2, key_count=448)['request']['program']['code_hex']
+        bad['parameters']['runtime_sha256'] = m.digest(bytes.fromhex(bad['request']['program']['code_hex'][2:]))
+        with self.assertRaises(AssertionError): run_users(bad)
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp); external = base/'keys.json'
+            external.write_bytes(m.encoded(dict(schema_version=1, keys=keys)))
+            for k in (True, 1.0, 0, 1025, 448):
+                with self.subTest(export_k=k), self.assertRaises(ValueError):
+                    m.prepare(base/'bad', catalog_file=external, key_count=k, probe_repetitions=512)
+                self.assertFalse((base/'bad').exists())
+            target = base/'out'
+            self.assertEqual(m.prepare(target, catalog_file=external, key_count=449, probe_repetitions=512), 3)
+            with self.assertRaises(FileExistsError): m.prepare(target, catalog_file=external, key_count=449)
+            rows = json.loads((target/'catalog.json').read_bytes())['cases']
+            self.assertEqual([r['parameters']['key_count'] for r in rows], [449]*3)
+            command = [sys.executable, '-S', '-B', str(CASES/'warm_read_catalogs.py'), '--output-dir', str(base/'cli'), '--catalog-file', str(external), '--key-count', '449', '--probe-repetitions', '512']
+            completed = subprocess.run(command, capture_output=True, timeout=60)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(json.loads(completed.stdout), {'prepared': 3})
+            command[command.index('--output-dir')+1] = str(base/'cli-bad')
+            command[command.index('--key-count')+1] = '448'
+            self.assertNotEqual(subprocess.run(command, capture_output=True, timeout=60).returncode, 0)
+            self.assertFalse((base/'cli-bad').exists())
+
     def test_custom_short_comparison_prefix_preserves_runtime_and_evm_work(self):
         m = producer()
         original_keys = m._catalog('mixed')
@@ -66,8 +154,17 @@ class WarmReadCatalogTests(unittest.TestCase):
             ('mixed', 'zero'): 'b06a5c809c05c80a74c89ca56b12f5648c3f1b1dfc492c036623c246b8d86720',
             ('mixed', 'full'): '37b8a41c7071ad1f31a1e0386ad93b0c608a252ce6d15f83aff70252f0d178ee',
         }
+        request_hashes = {
+            ('ordered', 'zero'): '56328b2b146535a8ac1b3f4b052e422b610265271f5f3edb49854241738add74',
+            ('ordered', 'full'): '00bf96ae968cb34900d2bb602989d89c3d732c8a47da7fd4a993f6560c9544fb',
+            ('mixed', 'zero'): 'e82617cfcb428b07687740443482f7275b5ab9c8af544c25816e4fed61101bf7',
+            ('mixed', 'full'): '0cc8a5de1d00fa5845e76c84537eaca02ee43a4b6b6f5a3cb28f1e09cc854283',
+        }
         for (catalog, level), sha in frozen.items():
-            self.assertEqual(m.digest(m.encoded(m.make_case(catalog, level))), sha)
+            row = m.make_case(catalog, level)
+            self.assertEqual(m.digest(m.encoded(row)), sha)
+            self.assertEqual(m.digest(m.encoded(row['request'])), request_hashes[catalog, level])
+            self.assertEqual(row, m.make_case(catalog, level, key_count=512))
         keys = m._catalog('mixed')
         for level, sha in (('zero', 'e4eab90686d4372b15318c2c46c966e9f773c4088c3d52dc21857cd232056283'),
                            ('full', '23060a317db643e166c8b4c84c6e90f1a513e26366ccbdf665d0e2c58def14fb')):

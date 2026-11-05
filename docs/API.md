@@ -65,8 +65,9 @@ lifecycle and authoritative-store coherence, the in-memory queue, the hosted pro
 the responsiveness of any enabled GPU/accelerator (SGX/SGXGETH TEE) proving backend via its
 health endpoint (`/health` for SGX, `/healthz` for SGXGETH), and the liveness of the proving worker pool.
 In binaries built with the `cuda` feature, `accelerator` also requires `nvidia-smi` to report enough
-NVIDIA devices for local GPU proving: one when non-mock `risc0/local` is enabled, and
-`prover.sp1.cuda_device_id + 1` (default 1) when `sp1.prover=local` is enabled. It also fails while
+NVIDIA devices for local GPU proving: at least one device left after `CUDA_VISIBLE_DEVICES` when
+non-mock `risc0/local` is enabled, and host device `prover.sp1.cuda_device_id` (default 0) when
+`sp1.prover=local` with `sp1.mode=prove` is enabled. It also fails while
 an SP1 `sp1-gpu-server` that failed to start or died has not been restarted. Each check is reported as an
 individual field (`reth`, `runtime`, `queue`, `prover`, `accelerator`, `workers`) with an `ok` flag
 and an optional `error` string. The endpoint returns HTTP `200` only when every check passes;
@@ -1246,7 +1247,7 @@ set both SGX lane timeouts. Use the independent `prover.sgx.timeout_ms` and
   `prover.sp1.proposal_cycle_limit` and `prover.sp1.aggregation_cycle_limit` override it per
   stage; request-scoped `prover_args.sp1.cycle_limit` still takes precedence for compatibility.
 - `prover.sp1.cuda_device_id` selects the CUDA device for `sp1.prover=local` in binaries built with
-  the `cuda` feature (default `0`). Other builds reject the key at startup. It is operator
+  the `cuda` feature (default `0`, at most `255`). Other builds reject the key at startup. It is operator
   configuration only and is not accepted as a request override.
 - `prover.sp1.network_request_max_attempts` bounds the full SP1 network lifecycle, including a
   request resumed after restart. Exhausting the budget fails the task instead of submitting

@@ -5,10 +5,17 @@
 //! so the client (which owns the server process) and each program's key are cached instead of
 //! being rebuilt per proof.
 //!
-//! The pinned `sp1-cuda` client never reconnects or restarts its server. When a request fails at
-//! the transport level (server exited, socket closed), the cached client is retired: new proofs
-//! fail fast while in-flight users drain, then a background task starts a fresh server. Until that
-//! succeeds the device is reported by [`cuda_device_failures`], which `/ready` surfaces.
+//! Client lifecycle, per device:
+//! - Starts are single-flight: the first proof starts the server while concurrent first users wait.
+//! - The pinned `sp1-cuda` client never reconnects or restarts its server, and it shares one
+//!   process-wide connection per device for as long as anything (including asynchronous key
+//!   cleanup tasks) still references it. On a transport failure the client is retired, the device
+//!   is reported by [`cuda_device_failures`] (surfaced by `/ready`), and proofs on it fail fast.
+//! - A supervisor thread then restarts it with exponential backoff, independent of proof traffic.
+//!   A replacement is installed only after it set up every program the device has served, which
+//!   both warms the keys and proves it talks to a live server: a replacement that silently reused
+//!   the dead connection fails that setup and is discarded, and the next attempt retries.
+//! - A failed first start is retried by the same supervisor.
 //!
 //! `sp1-gpu-server` does not receive the SP1 cycle limit (its protocol carries only the proof
 //! nonce), so every GPU proof is preceded by a cycle-bounded CPU execution of the same input.
@@ -20,7 +27,7 @@
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use raiko2_primitives::{RaikoError, RaikoResult};
@@ -31,16 +38,15 @@ use sp1_sdk::{
         ProverClient as BlockingProverClient,
     },
 };
+use tokio::runtime::Handle;
 use tracing::{info, warn};
 
 use super::sp1_vk_digest;
 
 type CudaProvingKey = <BlockingCudaProver as sp1_sdk::blocking::Prover>::ProvingKey;
 
-/// How long recovery waits for in-flight users of a retired client to drop it. While any user
-/// still holds it, `sp1-cuda` would hand the same broken connection to a new client.
-const RETIRED_DRAIN_TIMEOUT: Duration = Duration::from_mins(10);
-const RETIRED_DRAIN_POLL: Duration = Duration::from_secs(1);
+const RESTART_BACKOFF_INITIAL: Duration = Duration::from_secs(2);
+const RESTART_BACKOFF_MAX: Duration = Duration::from_mins(1);
 
 /// One CUDA device: the `sp1-gpu-server` client plus the proving keys already set up on it.
 pub(super) struct Sp1CudaDevice {
@@ -54,24 +60,23 @@ pub(super) struct Sp1CudaDevice {
 #[derive(Default)]
 struct DeviceSlot {
     current: Option<Arc<Sp1CudaDevice>>,
-    /// Client retired after a transport failure; recovery waits until nothing references it.
-    retired: Option<Weak<Sp1CudaDevice>>,
-    /// Last start or transport failure; cleared once a fresh client is installed.
+    /// Start or transport failure; set while no healthy client is installed.
     failure: Option<String>,
-    recovering: bool,
+    supervising: bool,
+    /// Programs requested on this device, set up again on every replacement client.
+    programs: HashMap<String, SP1ProvingKey>,
 }
 
-static DEVICES: OnceLock<Mutex<HashMap<u32, DeviceSlot>>> = OnceLock::new();
+static SLOTS: LazyLock<Mutex<HashMap<u32, DeviceSlot>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static START_LOCKS: LazyLock<Mutex<HashMap<u32, Arc<Mutex<()>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 static GENERATION: AtomicU64 = AtomicU64::new(0);
-
-fn devices() -> &'static Mutex<HashMap<u32, DeviceSlot>> {
-    DEVICES.get_or_init(|| Mutex::new(HashMap::new()))
-}
 
 /// CUDA devices whose `sp1-gpu-server` failed to start or died and has not been replaced yet.
 #[must_use]
 pub fn cuda_device_failures() -> Vec<(u32, String)> {
-    let mut failures: Vec<(u32, String)> = lock(devices())
+    let mut failures: Vec<(u32, String)> = lock(&SLOTS)
         .iter()
         .filter(|(_, slot)| slot.current.is_none())
         .filter_map(|(id, slot)| slot.failure.clone().map(|failure| (*id, failure)))
@@ -86,59 +91,143 @@ pub fn cuda_device_failures() -> Vec<(u32, String)> {
 /// its own runtime (and panics inside an async context), while dropping a client or key spawns a
 /// cleanup task on the current runtime.
 pub(super) fn device(device_id: u32) -> RaikoResult<Arc<Sp1CudaDevice>> {
-    {
-        let devices = lock(devices());
-        if let Some(slot) = devices.get(&device_id) {
-            if let Some(device) = &slot.current {
-                return Ok(Arc::clone(device));
-            }
-            if slot
-                .retired
-                .as_ref()
-                .is_some_and(|old| old.strong_count() > 0)
-            {
-                return Err(RaikoError::Guest(format!(
-                    "SP1 CUDA device {device_id} is recovering after a server failure ({}); retry later",
-                    slot.failure.as_deref().unwrap_or("unknown failure")
-                )));
-            }
-        }
+    if let Some(device) = installed(device_id)? {
+        return Ok(device);
     }
 
-    // Start outside the lock: server start can take seconds and `sp1-sdk` panics on failure.
+    let start_lock = start_lock(device_id);
+    let _start = lock(&start_lock);
+    if let Some(device) = installed(device_id)? {
+        return Ok(device);
+    }
+    match start_device(device_id) {
+        Ok(device) => {
+            let mut slots = lock(&SLOTS);
+            let slot = slots.entry(device_id).or_default();
+            slot.current = Some(Arc::clone(&device));
+            slot.failure = None;
+            Ok(device)
+        }
+        Err(failure) => {
+            fail_and_supervise(device_id, failure.clone());
+            Err(RaikoError::Guest(failure))
+        }
+    }
+}
+
+/// The installed client, an error while the device is down, or `None` before its first start.
+fn installed(device_id: u32) -> RaikoResult<Option<Arc<Sp1CudaDevice>>> {
+    let slots = lock(&SLOTS);
+    let Some(slot) = slots.get(&device_id) else {
+        return Ok(None);
+    };
+    if let Some(device) = &slot.current {
+        return Ok(Some(Arc::clone(device)));
+    }
+    slot.failure.as_ref().map_or(Ok(None), |failure| {
+        Err(RaikoError::Guest(format!(
+            "SP1 CUDA device {device_id} is unavailable and restarting in the background: {failure}"
+        )))
+    })
+}
+
+fn start_lock(device_id: u32) -> Arc<Mutex<()>> {
+    Arc::clone(lock(&START_LOCKS).entry(device_id).or_default())
+}
+
+/// Starts a client and sets up every program the device has served. Call with the start lock.
+fn start_device(device_id: u32) -> Result<Arc<Sp1CudaDevice>, String> {
     info!(device_id, "Starting SP1 CUDA prover (sp1-gpu-server)");
-    let started = catch_unwind(AssertUnwindSafe(|| {
+    // `sp1-sdk` panics when the server cannot be started or reached.
+    let prover = catch_unwind(AssertUnwindSafe(|| {
         BlockingProverClient::builder()
             .cuda()
             .with_device_id(device_id)
             .build()
-    }));
+    }))
+    .map_err(|panic| {
+        format!(
+            "failed to start sp1-gpu-server on CUDA device {device_id}: {}",
+            panic_message(panic.as_ref())
+        )
+    })?;
+    let device = Arc::new(Sp1CudaDevice {
+        device_id,
+        generation: GENERATION.fetch_add(1, Ordering::Relaxed),
+        prover,
+        keys: Mutex::new(HashMap::new()),
+    });
 
-    let mut devices = lock(devices());
-    let slot = devices.entry(device_id).or_default();
-    match started {
-        Ok(prover) => {
-            if let Some(existing) = &slot.current {
-                return Ok(Arc::clone(existing));
-            }
-            let device = Arc::new(Sp1CudaDevice {
-                device_id,
-                generation: GENERATION.fetch_add(1, Ordering::Relaxed),
-                prover,
-                keys: Mutex::new(HashMap::new()),
-            });
-            slot.current = Some(Arc::clone(&device));
-            slot.retired = None;
-            slot.failure = None;
-            Ok(device)
+    let programs: Vec<SP1ProvingKey> = lock(&SLOTS)
+        .get(&device_id)
+        .map(|slot| slot.programs.values().cloned().collect())
+        .unwrap_or_default();
+    for pk in &programs {
+        device.setup_key(pk).map_err(|err| {
+            format!("replacement sp1-gpu-server on CUDA device {device_id} is not usable: {err}")
+        })?;
+    }
+    Ok(device)
+}
+
+/// Records a failure and makes sure a supervisor is restarting the device.
+fn fail_and_supervise(device_id: u32, failure: String) {
+    let mut slots = lock(&SLOTS);
+    let slot = slots.entry(device_id).or_default();
+    slot.failure = Some(failure);
+    if slot.supervising {
+        return;
+    }
+    // The supervisor drops failed clients, whose cleanup spawns onto the Tokio runtime.
+    let Ok(handle) = Handle::try_current() else {
+        warn!(
+            device_id,
+            "No Tokio runtime to restart sp1-gpu-server; the device stays unavailable"
+        );
+        return;
+    };
+    let spawned = std::thread::Builder::new()
+        .name(format!("sp1-cuda-supervisor-{device_id}"))
+        .spawn(move || supervise(device_id, &handle));
+    match spawned {
+        Ok(_) => slot.supervising = true,
+        Err(err) => warn!(device_id, %err, "Failed to spawn the SP1 CUDA supervisor"),
+    }
+}
+
+/// Restarts the device with exponential backoff until a usable client is installed.
+///
+/// Runs on a detached thread so it never blocks runtime shutdown. The first delay also gives
+/// in-flight users of a retired client time to release it.
+fn supervise(device_id: u32, handle: &Handle) {
+    let _runtime = handle.enter();
+    let mut backoff = RESTART_BACKOFF_INITIAL;
+    loop {
+        std::thread::sleep(backoff);
+        let start_lock = start_lock(device_id);
+        let _start = lock(&start_lock);
+        let result = start_device(device_id);
+
+        let mut slots = lock(&SLOTS);
+        let slot = slots.entry(device_id).or_default();
+        if slot.current.is_some() {
+            slot.supervising = false;
+            return;
         }
-        Err(panic) => {
-            let message = format!(
-                "failed to start sp1-gpu-server on CUDA device {device_id}: {}",
-                panic_message(panic.as_ref())
-            );
-            slot.failure = Some(message.clone());
-            Err(RaikoError::Guest(message))
+        match result {
+            Ok(device) => {
+                info!(device_id, "Restarted SP1 CUDA prover");
+                slot.current = Some(device);
+                slot.failure = None;
+                // Cleared together with the install, so a later retirement starts a new supervisor.
+                slot.supervising = false;
+                return;
+            }
+            Err(failure) => {
+                warn!(device_id, %failure, retry_in = ?backoff, "SP1 CUDA restart failed");
+                slot.failure = Some(failure);
+                backoff = (backoff * 2).min(RESTART_BACKOFF_MAX);
+            }
         }
     }
 }
@@ -172,10 +261,26 @@ impl Sp1CudaDevice {
     }
 
     /// Returns the GPU-resident proving key for `pk`, running SP1 setup on first use.
+    fn proving_key(&self, pk: &SP1ProvingKey) -> Result<CudaProvingKey, String> {
+        let vk = sp1_vk_digest(pk.verifying_key());
+        if let Some(key) = lock(&self.keys).get(&vk) {
+            return Ok(key.clone());
+        }
+        lock(&SLOTS)
+            .entry(self.device_id)
+            .or_default()
+            .programs
+            .entry(vk)
+            .or_insert_with(|| pk.clone());
+        self.setup_key(pk)
+            .map_err(|err| self.client_error("setup", &err))
+    }
+
+    /// Sets up `pk` on the GPU server and caches the key. Does not retire the client.
     ///
     /// The key is derived from the ELF on the GPU server; its verifying key must match the
     /// checked-in verifying key that raiko2 registers and verifies against.
-    fn proving_key(&self, pk: &SP1ProvingKey) -> Result<CudaProvingKey, String> {
+    fn setup_key(&self, pk: &SP1ProvingKey) -> Result<CudaProvingKey, String> {
         let expected_vk = sp1_vk_digest(pk.verifying_key());
         let mut keys = lock(&self.keys);
         if let Some(key) = keys.get(&expected_vk) {
@@ -190,7 +295,7 @@ impl Sp1CudaDevice {
         let key = self
             .prover
             .setup(pk.elf().clone())
-            .map_err(|err| self.client_error("setup", &err.to_string()))?;
+            .map_err(|err| err.to_string())?;
         let actual_vk = sp1_vk_digest(key.verifying_key());
         if actual_vk != expected_vk {
             return Err(format!(
@@ -236,63 +341,24 @@ impl Sp1CudaDevice {
     }
 
     fn retire(&self, reason: &str) {
-        let mut devices = lock(devices());
-        let slot = devices.entry(self.device_id).or_default();
-        let Some(current) = slot
-            .current
-            .take_if(|current| current.generation == self.generation)
-        else {
-            return;
-        };
+        {
+            let mut slots = lock(&SLOTS);
+            let slot = slots.entry(self.device_id).or_default();
+            let Some(retired) = slot
+                .current
+                .take_if(|current| current.generation == self.generation)
+            else {
+                return;
+            };
+            // The caller still holds this client, so releasing the slot's reference here never
+            // drops it while the lock is held.
+            drop(retired);
+        }
         warn!(
             device_id = self.device_id,
-            reason, "Retiring SP1 CUDA client; a fresh sp1-gpu-server will be started"
+            reason, "Retiring SP1 CUDA client; restarting sp1-gpu-server in the background"
         );
-        slot.retired = Some(Arc::downgrade(&current));
-        slot.failure = Some(reason.to_string());
-        if !slot.recovering {
-            if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                slot.recovering = true;
-                let device_id = self.device_id;
-                drop(handle.spawn_blocking(move || recover(device_id)));
-            } else {
-                warn!(
-                    device_id = self.device_id,
-                    "No Tokio runtime to recover the SP1 CUDA client; the next proof retries"
-                );
-            }
-        }
-        // `current` is one of several strong references (the caller holds another), so this
-        // never drops the client itself.
-        drop(current);
-    }
-}
-
-/// Waits for the retired client to be released, then starts a fresh `sp1-gpu-server`.
-fn recover(device_id: u32) {
-    let mut waited = Duration::ZERO;
-    loop {
-        let drained = lock(devices())
-            .get(&device_id)
-            .and_then(|slot| slot.retired.as_ref())
-            .is_none_or(|old| old.strong_count() == 0);
-        if drained || waited >= RETIRED_DRAIN_TIMEOUT {
-            break;
-        }
-        std::thread::sleep(RETIRED_DRAIN_POLL);
-        waited += RETIRED_DRAIN_POLL;
-    }
-
-    match device(device_id) {
-        Ok(_) => info!(device_id, "Recovered SP1 CUDA client"),
-        Err(err) => warn!(
-            device_id,
-            %err,
-            "SP1 CUDA recovery failed; the next proof retries"
-        ),
-    }
-    if let Some(slot) = lock(devices()).get_mut(&device_id) {
-        slot.recovering = false;
+        fail_and_supervise(self.device_id, reason.to_string());
     }
 }
 

@@ -113,10 +113,13 @@ CPU-only and unchanged.
 - `sp1-gpu-server` does not enforce the SP1 cycle limit, so each GPU proof (proposal and
   aggregation) first executes the same input on the CPU with the stage's cycle limit and fails
   before using the GPU if the limit is exceeded.
-- If `sp1-gpu-server` exits or its socket breaks, raiko2 retires that client: proofs on the
-  device fail fast while in-flight users finish, then a fresh server starts in the background. The
-  device is reported unready until the restart succeeds. Errors the live server reports itself
-  (prover or internal errors) keep the client.
+- The first SP1 proof on a device starts its server; concurrent first proofs wait for that one
+  start. If the start fails, or `sp1-gpu-server` later exits or its socket breaks, raiko2 retires
+  the client, fails proofs on that device fast, and restarts the server in the background with
+  exponential backoff (2 s up to 1 min), independent of proof traffic. A replacement is installed
+  only after it has set up every program the device served before, which also proves it is not
+  reusing the dead connection. The device is reported unready until then. Errors the live server
+  reports itself (prover or internal errors) keep the client.
 - Mock and network modes are unaffected.
 
 ### GPU Image
@@ -214,10 +217,16 @@ Pin the image by digest. `--gpus all` exposes every GPU; device placement is the
 
 ### GPU Health
 
-In `cuda` builds, the `/ready` `accelerator` check runs `nvidia-smi` and fails when fewer devices
-are visible than the enabled local runners need. That covers a container started without
-`--gpus` or a driver/toolkit mismatch. It also fails while an `sp1-gpu-server` that could not start
-or died has not been replaced yet. It does not track GPU utilization, memory, ECC errors, or a
+In `cuda` builds, the `/ready` `accelerator` check runs `nvidia-smi` and fails when:
+
+- non-mock `risc0/local` is enabled but no device is left after applying `CUDA_VISIBLE_DEVICES`
+  (CUDA rules: indices or `GPU-` UUIDs, stopping at the first invalid entry);
+- SP1 `prover = "local"`, `mode = "prove"` is enabled and host device `cuda_device_id` does not
+  exist (the SP1 server sets its own `CUDA_VISIBLE_DEVICES`, so the id indexes host devices);
+- an `sp1-gpu-server` that could not start or died has not been replaced yet.
+
+Execute-only SP1 and mock RISC0 need no GPU. That covers a container started without `--gpus`, a
+driver/toolkit mismatch, and wrong device placement. It does not track GPU utilization, memory, ECC errors, or a
 server that is alive but hung. Keep the host-level `prover-health` probe (`nvidia-smi` plus `/ready`) as the
 VM health signal.
 

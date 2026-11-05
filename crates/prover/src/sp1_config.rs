@@ -31,6 +31,7 @@ pub enum Sp1ConfigError {
     MainnetRequiresAuction(Sp1FulfillmentStrategy),
     ReservedRequiresReservedOrHosted(Sp1FulfillmentStrategy),
     CudaDeviceRequiresCudaBuild,
+    CudaDeviceIdOutOfRange(u32),
 }
 
 impl std::fmt::Display for Sp1ConfigError {
@@ -95,6 +96,10 @@ impl std::fmt::Display for Sp1ConfigError {
             Self::CudaDeviceRequiresCudaBuild => f.write_str(
                 "sp1.cuda_device_id requires a raiko2 binary built with the `cuda` feature",
             ),
+            Self::CudaDeviceIdOutOfRange(device_id) => write!(
+                f,
+                "sp1.cuda_device_id must be at most {MAX_CUDA_DEVICE_ID}, got {device_id}"
+            ),
         }
     }
 }
@@ -158,6 +163,9 @@ pub struct Sp1Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cuda_device_id: Option<u32>,
 }
+
+/// Highest accepted `sp1.cuda_device_id`; far above any real host's GPU count.
+pub const MAX_CUDA_DEVICE_ID: u32 = 255;
 
 const fn default_true() -> bool {
     true
@@ -375,8 +383,13 @@ impl Sp1Config {
         if self.mode == ExecutionMode::Execute && self.prover == ProverMode::Network {
             return Err(Sp1ConfigError::ExecuteModeDoesNotSupportNetworkProver);
         }
-        if self.cuda_device_id.is_some() && !cfg!(feature = "cuda") {
-            return Err(Sp1ConfigError::CudaDeviceRequiresCudaBuild);
+        if let Some(device_id) = self.cuda_device_id {
+            if !cfg!(feature = "cuda") {
+                return Err(Sp1ConfigError::CudaDeviceRequiresCudaBuild);
+            }
+            if device_id > MAX_CUDA_DEVICE_ID {
+                return Err(Sp1ConfigError::CudaDeviceIdOutOfRange(device_id));
+            }
         }
         if self.prover == ProverMode::Network {
             match (self.network_mode, self.fulfillment_strategy) {
@@ -642,6 +655,22 @@ mod tests {
         } else {
             assert_eq!(result, Err(Sp1ConfigError::CudaDeviceRequiresCudaBuild));
         }
+    }
+
+    #[test]
+    fn sp1_cuda_device_id_is_bounded_in_cuda_builds() {
+        let config = Sp1Config {
+            prover: ProverMode::Local,
+            cuda_device_id: Some(u32::MAX),
+            ..Sp1Config::default()
+        };
+
+        let expected = if cfg!(feature = "cuda") {
+            Sp1ConfigError::CudaDeviceIdOutOfRange(u32::MAX)
+        } else {
+            Sp1ConfigError::CudaDeviceRequiresCudaBuild
+        };
+        assert_eq!(config.validate(), Err(expected));
     }
 
     #[test]

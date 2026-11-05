@@ -124,3 +124,14 @@ Model identity remains
 `923c8f916f6e8603677b61adb60d92d2cd4355e02030c8fafa6ec549d10525f8`.
 Opened development inputs are not IID/holdout samples, proofs or current-production
 certification. Caught rollback and implicit removal remain separate compositions.
+
+The [published Atlas fixture](https://github.com/taikoxyz/raiko2-atlas/releases/tag/fixture-unzen-transient-delete-miss-v1)
+retains all four native/quote inputs, three actuals and the explicitly unmeasured
+probe. Its56 safe regular members contain49 byte-identical originals, four
+explicit portable projections and three generated metadata/checksum files.
+The386,297-byte compressed asset has SHA256
+`cca519a3057b4acae671802ef33dbf3692f4287707160463870578e132df7ba8`.
+Real draft downloads passed the existing integrity assertions and literal README
+unpack/checksum flow; a fresh published download matched compressed and decoded
+hashes. These checks establish data retention, not additional workload measurements
+or a claim that the entire remote CI matrix passed.

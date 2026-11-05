@@ -97,6 +97,9 @@ target directory while a build, test, or editor process may still be using it.
 - Image release:
   - `just release-image <backend> <tag>`
   - `cargo run -r -p xtask -- release-image <backend> --tag <tag> --repository us-docker.pkg.dev/evmchain/images/raiko2`
+- NVIDIA GPU image release (`Dockerfile.cuda`, default repository `us-docker.pkg.dev/evmchain/images/raiko2-cuda`):
+  - `just release-image-cuda <backend> <tag>`
+  - `cargo run -r -p xtask -- release-image <backend> --cuda --tag <tag>`
 - Do not invent `make` targets or use outdated `TARGET=... make test` workflows in this repo.
 
 ## Project Skill Rule

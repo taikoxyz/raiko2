@@ -45,6 +45,7 @@ Before running `release-image`:
 Default repository:
 
 - `us-docker.pkg.dev/evmchain/images/raiko2`
+- `us-docker.pkg.dev/evmchain/images/raiko2-cuda` with `--cuda`
 
 ## Canonical Flow
 
@@ -57,6 +58,15 @@ Default repository:
 4. Capture the pushed digest from the output line:
    `[INFO] Image pushed: <repository>@sha256:...`
 5. Report the exact digest back to the user.
+
+For the NVIDIA GPU image, add `--cuda` to the same flow. It builds `Dockerfile.cuda` (raiko2 with
+`--features cuda`) and defaults the repository to `us-docker.pkg.dev/evmchain/images/raiko2-cuda`.
+The `host` backend is rejected because it has no local provers.
+
+- Preferred wrapper: `just release-image-cuda <backend> <tag>`
+- Direct `xtask`: `cargo run -r -p xtask -- release-image <backend> --cuda --tag <tag>`
+
+Guest refresh, the clean-tree checks, and digest capture are the same as for the CPU image.
 
 For TEE-backed provider image attestation capture, use the dedicated TEE provider release flow
 instead:

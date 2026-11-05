@@ -325,6 +325,8 @@ impl Args {
             auction_timeout_secs: None,
             rpc_url: None,
             remote_verify: None,
+            cuda_device_id: None,
+            cuda_timeout_secs: None,
         };
         config
             .validate()

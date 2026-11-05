@@ -8,6 +8,7 @@ Real native/SP1 execution never uses this cache and performs every instruction.
 from collections import Counter
 import hashlib
 import json
+import re
 
 QUERY=0x1122334455667788 << 192
 PRIMARY='0x'+'66'*20
@@ -23,8 +24,9 @@ def decode(code):
         yield at,op,int.from_bytes(code[pc:pc+width],'big');pc+=width
 
 
-def structure(instructions,repetitions,*,key_count=512):
+def structure(instructions,repetitions,*,key_count=512,query_key=QUERY):
     """Check literal full-program intent, including unreachable R0 body/guards."""
+    assert type(query_key) is int and 0<=query_key<=MASK,'query domain'
     index=0;failures=[]
     def take(opcode,value=0):
         nonlocal index
@@ -37,7 +39,7 @@ def structure(instructions,repetitions,*,key_count=512):
     def guard(value):
         push(value,32);take(0x14);take(0x15);failures.append(take(0x61,None)[1]);take(0x57)
     take(0x36);guard(32*key_count)
-    push(QUERY,32);initial_read=take(0x5c)[0];guard(0)
+    push(query_key,32);initial_read=take(0x5c)[0];guard(0)
     for offset,value in ((0,0),(64,0),(96,SENTINEL)):push(value);push(offset);take(0x52)
     seed,_=take(0x5b);load(0);push(key_count);take(0x14);_,seed_done_target=take(0x61,None);take(0x57)
     seed_value=push(1)[0];load(0);push(5);take(0x1b);seed_load=take(0x35)[0];seed_write=take(0x5d)[0]
@@ -50,7 +52,7 @@ def structure(instructions,repetitions,*,key_count=512):
     body_end=instructions[index][0]
     load(64);push(1);take(1);push(64);take(0x52);take(0x61,loop);take(0x56)
     done,_=take(0x5b);assert done_target==done,'done target'
-    take(0x80);guard(QUERY);take(0x50)
+    take(0x80);guard(query_key);take(0x50)
     for offset,value in ((0,key_count),(64,repetitions),(96,SENTINEL)):load(offset);guard(value)
     take(0);failure,_=take(0x5b);take(0xfe)
     assert index==len(instructions) and failures==[failure]*7,'failure targets/extra bytes'
@@ -60,7 +62,7 @@ def structure(instructions,repetitions,*,key_count=512):
 
 
 def _entry(stack,transient,memory,query,expected,*,key_count):
-    assert list(stack)==[query] and type(query) is int and query==QUERY,'complete query stack precondition'
+    assert list(stack)==[query] and type(query) is int and 0<=query<=MASK,'complete query stack precondition'
     assert type(transient) is dict and query in transient and len(transient)==key_count and tuple(sorted(transient.items()))==expected,'complete transient-map feedback'
     assert all(type(k) is int and type(v) is int and v==1 for k,v in transient.items()),'transient key/value types'
     assert type(memory) is bytearray and len(memory)==128,'complete memory footprint'
@@ -88,32 +90,34 @@ def apply_body(proof,stack,transient,memory):
     # for every current loop counter. Outer flow independently checks that counter.
 
 
-def _keys(data,*,key_count):
+def _keys(data,*,key_count,query_key=QUERY,raw_keys=False):
     assert type(key_count) is int and 1<=key_count<=1024,'key_count domain'
+    assert type(query_key) is int and 0<=query_key<=MASK and type(raw_keys) is bool,'query/raw policy domain'
     assert type(data) is bytes and len(data)==32*key_count,'calldata length'
     keys=[int.from_bytes(data[i:i+32],'big') for i in range(0,len(data),32)]
-    assert len(set(keys))==key_count and keys[-1]==QUERY,'unique catalog/query last'
-    assert all(sum(b!=0 for b in k.to_bytes(32,'big'))==8 for k in keys),'fixed calldata byte cost'
+    assert len(set(keys))==key_count and keys[-1]==query_key,'unique catalog/query last'
+    if not raw_keys:
+        assert query_key==QUERY and all(sum(b!=0 for b in k.to_bytes(32,'big'))==8 for k in keys),'strict query/calldata byte cost'
     return keys
 
 
-def execute(code,data,envelope,*,repetitions,cache=True,key_count=512):
+def execute(code,data,envelope,*,repetitions,cache=True,key_count=512,query_key=QUERY,raw_keys=False):
     assert type(repetitions) is int and 0<=repetitions<=1000000 and type(cache) is bool,'R/cache domain'
     assert type(code) is bytes and len(code)<=24576 and type(envelope) is int and envelope>=21000,'code/envelope domain'
-    keys=_keys(data,key_count=key_count);instructions=list(decode(code));shape=structure(instructions,repetitions,key_count=key_count)
+    keys=_keys(data,key_count=key_count,query_key=query_key,raw_keys=raw_keys);instructions=list(decode(code));shape=structure(instructions,repetitions,key_count=key_count,query_key=query_key)
     by_pc={at:(op,value) for at,op,value in instructions};jumps={at for at,op,_ in instructions if op==0x5b}
     proof_memory=bytearray(128);proof_memory[:32]=key_count.to_bytes(32,'big');proof_memory[96:128]=SENTINEL.to_bytes(32,'big')
     body=[i for i in instructions if shape['body']<=i[0]<shape['body_end']]
-    proof=prove_body(body,[QUERY],dict.fromkeys(keys,1),proof_memory,QUERY,key_count=key_count)
+    proof=prove_body(body,[query_key],dict.fromkeys(keys,1),proof_memory,query_key,key_count=key_count)
     stack=[];memory=bytearray();transient={};counts=Counter();pc_counts=Counter();seed_keys=[];query_values=[]
-    intrinsic=21000+data.count(0)*4+(len(data)-data.count(0))*16;gross=intrinsic;pc=0;expansion=0;reads=0;writes=0;iterations=0;loop_visits=0
+    zero=data.count(0);nonzero=len(data)-zero;intrinsic=21000+zero*4+nonzero*16;floor=21000+10*(zero+4*nonzero);gross=intrinsic;pc=0;expansion=0;reads=0;writes=0;iterations=0;loop_visits=0
     def word(offset):return int.from_bytes(memory[offset:offset+32],'big')
     for _ in range(2000000):
         assert pc in by_pc,'invalid PC'
         if pc==shape['seed']:assert stack==[] and word(0)==len(seed_keys),'seed counter/stack'
         if pc==shape['loop']:
             assert word(64)==loop_visits and word(0)==key_count and word(96)==SENTINEL,'loop counter/sentinel'
-            _entry(stack,transient,memory,QUERY,proof['transient'],key_count=key_count);loop_visits+=1
+            _entry(stack,transient,memory,query_key,proof['transient'],key_count=key_count);loop_visits+=1
         if pc==shape['body']:
             assert word(64)==iterations<repetitions,'body counter';iterations+=1
             if cache:
@@ -139,7 +143,7 @@ def execute(code,data,envelope,*,repetitions,cache=True,key_count=512):
             if op==0x51:stack.append(word(offset))
             else:memory[offset:offset+32]=stack.pop().to_bytes(32,'big')
         elif op==0x5c:
-            key=stack.pop();value=transient.get(key,0);assert key==QUERY,'read query'
+            key=stack.pop();value=transient.get(key,0);assert key==query_key,'read query'
             if at==shape['initial_read']:assert transient=={} and reads==0 and value==0,'initial empty transient query';query_values.append(value)
             else:
                 assert len(transient)==key_count and value==1,'seeded query value'
@@ -158,9 +162,9 @@ def execute(code,data,envelope,*,repetitions,cache=True,key_count=512):
             assert (word(0),word(64),word(96),len(memory))==(key_count,repetitions,SENTINEL,128),'final counter/memory'
             assert iterations==repetitions and loop_visits==repetitions+1 and reads==2+64*repetitions and writes==key_count and seed_keys==keys,'complete read/write footprint'
             assert tuple(sorted(transient.items()))==proof['transient'] and query_values==[0,1],'complete terminal transient state'
-            charged=max(gross,21000+560*key_count);assert charged<=envelope,'charged floor exceeds envelope'
+            charged=max(gross,floor);assert charged<=envelope,'charged floor exceeds envelope'
             grouped={str(k):v for k,v in sorted(pc_counts.items())};hex_keys=[f'0x{k:064x}' for k in seed_keys]
-            commitment=hashlib.sha256(json.dumps(dict(keys=hex_keys,query=f'0x{QUERY:064x}',pc_counts=grouped),sort_keys=True,separators=(',',':')).encode()).hexdigest()
+            commitment=hashlib.sha256(json.dumps(dict(keys=hex_keys,query=f'0x{query_key:064x}',pc_counts=grouped),sort_keys=True,separators=(',',':')).encode()).hexdigest()
             return dict(terminal=op,stack=stack,counter=repetitions,gross_gas=gross,charged_gas=charged,counts=counts,
                 tload_count=reads,tstore_count=writes,seed_keys=hex_keys,query_values=query_values,
                 transient_state_at_stop=dict.fromkeys(hex_keys,1),peak_memory_bytes=len(memory),memory_expansion_gas=expansion,
@@ -172,6 +176,9 @@ def execute(code,data,envelope,*,repetitions,cache=True,key_count=512):
 
 def run_users(row):
     p=row['parameters'];request=row['request'];program=request['program'];tx=program['transactions'];k=p['key_count'];r=p['repetitions']
+    raw_keys=p.get('raw_keys',False);assert type(raw_keys) is bool and ('raw_keys' not in p or raw_keys is True),'explicit raw-key metadata policy'
+    text=p['query_key'];assert type(text) is str and re.fullmatch(r'0x[0-9a-f]{64}',text),'canonical query metadata'
+    query_key=int(text,16)
     assert type(k) is int and 1<=k<=1024 and type(r) is int and 0<=r<=1000000,'typed K/R metadata'
     assert set(request)=={'schema_version','expected_user_success','program'} and type(request['schema_version']) is int and request['schema_version']==1 and request['expected_user_success'] is True,'request domain'
     assert set(program)=={'code_hex','input_hex','block_count','expected_route_counts','transactions'},'empty persistent/no extra code domain'
@@ -179,12 +186,12 @@ def run_users(row):
     assert type(program['block_count']) is int and program['block_count']==1,'one block'
     assert type(tx['gas_limit']) is int and tx['gas_limit']==p['transaction_gas_limit'] and 21000<=tx['gas_limit']<=15000000 and tx['gas_limit']<=16777216,'typed envelope/caps'
     assert p['primary_code_owner']==PRIMARY and type(p['transaction_nonce']) is int and p['transaction_nonce']==0 and p['recipient_schedule']==[PRIMARY],'owner/nonce'
-    code=bytes.fromhex(program['code_hex'][2:]);data=bytes.fromhex(program['input_hex'][2:]);keys=_keys(data,key_count=k)
+    code=bytes.fromhex(program['code_hex'][2:]);data=bytes.fromhex(program['input_hex'][2:]);keys=_keys(data,key_count=k,query_key=query_key,raw_keys=raw_keys)
     assert [f'0x{key:064x}' for key in keys]==p['ordered_keys'],'literal ordered keys'
     assert hashlib.sha256(data).hexdigest()==p['calldata_sha256']==p['raw_key_sha256'] and hashlib.sha256(code).hexdigest()==p['runtime_sha256'],'raw data/code hashes'
-    assert p['query_key']==f'0x{QUERY:064x}','fixed query'
-    result=execute(code,data,tx['gas_limit'],repetitions=r,key_count=k)
-    gross=result['gross_gas'];charged=result['charged_gas'];intrinsic=21000+224*k;floor=21000+560*k
+    result=execute(code,data,tx['gas_limit'],repetitions=r,key_count=k,query_key=query_key,raw_keys=raw_keys)
+    zero=data.count(0);nonzero=len(data)-zero
+    gross=result['gross_gas'];charged=result['charged_gas'];intrinsic=21000+4*zero+16*nonzero;floor=21000+10*(zero+4*nonzero)
     # Byte-authenticated loop head26 + tail29, plus64*(DUP1 3+TLOAD100+POP2).
     # K affects only the directly executed seed, so its actual base is retained.
     slope=64*105+26+29;base=gross-slope*r;maximum=(15000000-1000-base)//slope
@@ -199,7 +206,7 @@ def run_users(row):
         expected_initial_storage_entry_count=0,expected_final_storage_entry_count=0,peak_transient_state_entries_per_transaction=k,
         expected_final_transient_entry_count=0,primary_code_owner_count=1,account_count=1,seed_counter_memory_offset=0,
         counter_memory_offset=64,protected_memory_offset=96,expected_counter=r,sentinel=SENTINEL,peak_memory_bytes=128,memory_words=4,
-        outer_calldata_bytes=32*k,calldata_zero_bytes=24*k,calldata_nonzero_bytes=8*k,
+        outer_calldata_bytes=32*k,calldata_zero_bytes=zero,calldata_nonzero_bytes=nonzero,
         all_user_transactions=1,user_transactions_per_block=1,all_transactions_including_anchor=2,block_count=1,visits_per_account=1,
         transaction_envelope_reserve=1000,header_gas_limit=31000000,charged_gas_budget=30000000,expected_anchor_gas=167355,
         unroll_factor=64,bulk_operations=64*r,expected_user_gross_gas=gross,expected_user_charged_gas=charged,

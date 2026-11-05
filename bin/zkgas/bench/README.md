@@ -3406,3 +3406,61 @@ semantic key/state checks do not establish capacity, collision or per-read PGU
 bounds. Optional incomplete diagnostics remain separate from canonical actual
 success. This tool alone makes no tariff, guest/SDK, production, proof or deployment
 change; immutable measured data belongs in Atlas.
+
+### Raw transient keys and byte-prefix controls
+
+`transient_read_catalogs.make_raw_case(keys, level='full', *, query_key,
+repetitions=None, key_count=512)` is an explicit opt-in factory for arbitrary raw
+U256 keys. `query_key` is a strict integer in0..2^256-1, including zero; keys are
+bounded unique canonical lowercase32-byte hex and the supplied query must be
+last. `level` is zero/probe/full, with a positive intermediate `repetitions`
+required only for probe. It returns the existing row/ProgramRequest shape and
+marks only its new row parameters with `raw_keys=true`. No new schema, CLI,
+runner, interpreter or pricing path is introduced.
+
+The existing `make_case`, `make_custom_case`, `make_probe_case` and `prepare` CLI
+retain their fixed query/eight-nonzero-byte policy. Their complete row/request
+bytes remain unchanged; source and helper provenance fingerprints naturally
+change when implementation source changes. Both modes use the same guarded
+kernel and literal VM. In raw mode the query is explicit in code, calldata,
+full-state body proof and metadata. The VM still validates the complete transient
+mapping, memory and stack on every cached iteration, independently from producer
+gas/assembler code.
+
+`zero_hash_catalog(shared_seed, byte_offset, *, key_count=512)` creates a finite
+no-search recipe: `query=shared_seed<<64`, candidates
+`query | (i<<(8*byte_offset))` for i1..K-1, then query last. Shared seed is a
+strict64-bit integer; byte_offset is0..4. Under the observed guest specialization
+`H=F(k2^F(k0^S,k1^G),k3^G)`, this recipe gives H0 **only when the guest's actual
+shared G equals the supplied value**. It does not qualify a new input, prove its
+physical map placements or assert that all candidates are visited. Each actual
+input still needs its own seed/mask/hash/owner/value evidence. Full hash0 and
+tag0 are valid values and must not be treated as absent diagnostics.
+
+```python
+from transient_read_catalogs import make_raw_case, zero_hash_catalog
+
+def prefix_probe(shared_seed, byte_offset):
+    keys = zero_hash_catalog(shared_seed, byte_offset)
+    return make_raw_case(keys, 'probe', query_key=shared_seed << 64,
+                         repetitions=512)
+```
+
+For K512 the five offsets have largest low32 groups1/1/1/2/512 and comparison
+envelopes C65/65/65/66/512. These are key-shape facts, not measured PGU or
+hash-table scan counts. Raw gas uses actual calldata bytes: with n nonzero bytes
+and D=32K, intrinsic is21000+4(D-n)+16n, EIP7623floor is21000+10(D-n+4n),
+and gross is21484+301K+12n+6775R. Charged gas is max(gross,floor), with no refund.
+The shared maximal envelope and full+1 checks are recomputed for that exact
+calldata. Lower-level gas helpers require actual calldata when the query differs
+from the strict default, preventing silent reuse of the old byte-cost assumption. Code remains fixed-width and identical across offsets at the same
+shared seed/K/R.
+
+For a shared seed with eight nonzero bytes, K512 yields4862 nonzero calldata
+bytes, intrinsic144880, floor330700 and gross233940+6775R. Ownzero charges330700;
+R512 charges3702740 (block3870095 including Anchor). Full is now R2179 with
+signed envelope14997665; the old strict-mode R2180/envelope14995248 must not be
+reused. Other shared seeds, including zero, have different byte costs and their
+own computed full envelope. All unchanged15M transaction, EIP7825, header-prefix,
+30M charged-block and24KiB code constraints still apply. This single-user recipe
+is not a full30M workload certificate or a measured pricing validation.

@@ -31,6 +31,11 @@ coverage. Revisit the correction if ordinary/historical inputs reproduce it or a
 extension materially increases the ratio. No coefficient, runtime counter or price is changed
 as part of this triage update.
 
+Deferred prerequisite TODO: sample real Ethereum L1 blocks to examine whether account-set size,
+shared address prefixes and repeated account queries naturally combine in this way. Use that
+evidence when deciding whether to reopen the pricing TODO. This sampling is future work; the
+seven synthetic cases do not establish L1 occurrence frequency.
+
 ## Frozen program and measurement
 
 | Identity | Value |

@@ -158,3 +158,11 @@ remain incomplete: standalone drain markers were unhit, and prewarm lacks a matc
 same-map seed. Those diagnostic gaps are retained without rerunning or discarding valid PGU.
 These finite cohorts do not create a global coverage percentage, a new historical union or a
 current-production SDK certificate. Full packing and other compositions remain follow-ups.
+
+A separate [repricing of32 retained synthetic warm-rollback inputs](2026-11-05-storage-warm-repricing.md)
+adds32 current5f quotes and zero new actuals. Original1998-estimator reports retain their identity;
+ELF/SDK/options match the historical program context. All16 full-R cases at29.782M–29.998M gas
+are node-covered, all32 complete-proposal estimates cover actuals, and eight K16/R0 node gaps
+remain, maximum127,894,499PGU. Changes from prior new-model snapshotc893 are exactly the journal
+reserve; c893 is not Unzen. These are previously measured fixtures, not32 additional inputs or
+an onchain historical-block survey, and no global union or workload bound follows.

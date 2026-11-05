@@ -3155,3 +3155,94 @@ instruction-limit/error status remain explicit. An observed register is an actua
 accessed historical value, not an arbitrary RAM or whole-table snapshot. Qualify the tool
 against frozen default/observed controls and source-expected PC counts under the existing
 PSS/time/log/staging/disk guards before using values to identify a hasher or map.
+
+### Absent-account journal catalogs
+
+`cases/account_read_catalogs.py` is a separate Address20 family. It does not change the existing
+storage catalogs, U256 hash-helper defaults, guest, or pricing. The initial export is one BALANCE
+own-zero plus one 512-repetition probe; `make_case(operation='extcodesize', ...)` exposes the same
+explicit byte/gas contract without expanding the default experiment matrix. Both are opened
+**development probes**, not IID/holdout data or actual PGU evidence. Model
+`5f93909ea1372eb6e10fa2b599c6087aafd4ec493ba28eb1cea4c4abb3708a11` and 384 storage PGU/unit remain
+frozen. The generator records an intended model identity; the separately selected quote executable
+must independently report that exact model.
+
+```sh
+~/.venv/bin/python -S -B bin/zkgas/bench/cases/account_read_catalogs.py \
+  --output-dir experiment/account-default --probe-repetitions 512
+~/.venv/bin/python -S -B bin/zkgas/bench/cases/account_read_catalogs.py \
+  --output-dir experiment/account-custom --catalog-file account-keys.json --probe-repetitions 512
+~/.venv/bin/python -S -B -m unittest discover -s bin/zkgas/bench/tests \
+  -p 'test_account_read_catalogs.py' -v
+```
+
+An external data-only catalog has exactly `{"schema_version":1,"keys":[...]}`. It must contain 512
+unique canonical lowercase 20-byte `0x` addresses, each with eight nonzero bytes, with fixed query
+`0x1122334400000000000000000000000055667788` last. Reserved fixture/system addresses and the low
+precompile address range are excluded. Calldata contains left-zero-padded 32-byte ABI words, not
+U256 storage keys or packed 20-byte records: 16,384 bytes, including 4096 nonzero bytes. The default
+catalog uses deterministic mixed nonzero four-byte suffixes after `11223344` plus twelve zero bytes.
+A shared raw prefix alone does not establish actual hash-table concentration; external short-prefix
+catalogs preserve calldata byte cost and runtime at the same operation/repetition count.
+
+The standalone helper defaults to U256; select `--key-kind address20` explicitly for this family.
+Using the helper built above, hash an address or search a fresh catalog with the **observed**
+account map's seed, shared word and mask:
+
+```sh
+experiment/hash-probe-catalog hash --key-kind address20 \
+  --seed "$ACCOUNT_SEED" --shared "$ACCOUNT_SHARED" \
+  --key 0x1122334400000000000000000000000055667788
+experiment/hash-probe-catalog search --key-kind address20 --domain low32 \
+  --seed "$ACCOUNT_SEED" --shared "$ACCOUNT_SHARED" --bucket-mask "$ACCOUNT_MASK" \
+  --query 0x1122334400000000000000000000000055667788 \
+  --max-trials 268435456 --max-seconds 120 --output experiment/account-keys.json
+```
+
+Seed/shared scalars require `0x` plus 16 lowercase hex digits. For Address20, `low32` varies the
+last four network-order address bytes and keeps the first 16 identical; `high32` varies the first
+four bytes and keeps the last 16 identical. Address comparison starts at network byte zero, so
+these are long- and short-comparison-prefix controls respectively. This differs from U256's
+little-endian limb layout. A search match remains conditional on its supplied profile; independently
+observe the new input's actual map, seed, hash, mask and coverage before claiming concentration.
+
+The fixed bytecode performs 512 ordered cold account reads, one warm query read, and 64 warm query
+reads per repetition. Zero-result, exact calldata length, counter, sentinel, query and empty-stack
+checks guard successful STOP. The decoded-byte oracle independently computes execution, addresses,
+cold/warm state and gas without calling producer runtime/gas functions. It is authored alongside
+the generator and does not itself constitute independent authorship or authenticated account absence.
+Native GuestInput/root/proof checks remain required before actual measurements.
+
+Targets are absent accounts with no provisioned code or storage. Requests omit `prestate_contracts`,
+`storage_state`, access lists and authorizations, using one CALL to the normal primary runtime.
+The existing constructor's complete tiny base-state trie proves these absences without adding 512
+accounts or dummy target code. Its canonical honest witness is not claimed to be a globally minimal
+node subset; the native-read multiproof minimizer is not invoked on this constructor path.
+
+For BALANCE and EXTCODESIZE under the fixed post-Unzen profile, cold reads cost 2600 gas and warm
+reads 100. The R512 probe predicts 4,983,151 user receipt gas plus 167,355 Anchor gas (5,150,506 block
+gas); own-zero predicts 1,514,351 user gas. Both retain the common 14,997,601 transaction gas envelope,
+which derives from the single-user maximum R1990 plus 1000 headroom, below the 15M fixture cap and
+EIP7825 cap. The header remains 31M, with 30,832,645 gas remaining after Anchor. The additional 30M
+charged-block experiment budget is separate. A single-user 15M envelope is not a full 30M block packing
+certificate. Calldata intrinsic gas is 135,688; the 307,720 EIP7623 floor is retained separately.
+
+`catalog.json` binds generator/imported assembler source hashes, helper source hashes, exact request
+hashes and external catalog hash, while excluding local catalog filenames. `make_case` supports
+`zero` and intermediate `probe` levels; `prepare` exports exactly those two BALANCE rows. Invalid
+catalogs/repetitions/model IDs fail before creating the output directory, and existing outputs are
+never replaced. External catalog input is bounded to 128KiB and distinguishes Address20 from U256.
+
+A frozen constructor can consume a selected emitted request without new Rust/guest construction.
+Set `ZKGAS_FIXTURE_BIN` to the independently verified executable, and use distinct fresh paths:
+
+```sh
+"$ZKGAS_FIXTURE_BIN" --execution-profile evm-gas-only \
+  --input selected-request.json --output experiment/input.json \
+  --output-bincode experiment/input.bin --report experiment/native.json
+```
+
+Preserve source/binary/input/options identities and all rejected/unrealized pressure cases. Confirm
+native signatures, account absence, roots, route counts, receipt gas and canonical output before
+comparing node-known quote, completed-proposal quote and same-input SP1 PGU. This family changes
+neither prices nor deployment policy; any subsequent price decision requires actual deficit evidence.

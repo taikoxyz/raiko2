@@ -18,6 +18,17 @@ def independent_hash(key, seed, shared):
     return fold(limbs[2] ^ fold(limbs[0] ^ seed, limbs[1] ^ shared), limbs[3] ^ shared)
 
 
+def independent_address_hash(value, seed, shared):
+    raw = bytes.fromhex(value[2:])
+    if len(raw) != 20:
+        raise ValueError('Address20 length')
+    def product_fold(left, right):
+        product = left * right
+        return (product & ((1 << 64) - 1)) ^ (product >> 64)
+    words = [int.from_bytes(raw[:8], 'little'), int.from_bytes(raw[8:16], 'little'), int.from_bytes(raw[16:], 'little')]
+    return product_fold(product_fold(seed ^ words[0], shared ^ words[1]) ^ words[2], shared)
+
+
 class HashProbeCatalogTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -35,6 +46,54 @@ class HashProbeCatalogTests(unittest.TestCase):
 
     def search_args(self, output, trials=1000):
         return ['search', '--seed', ZERO, '--shared', ZERO, '--query', QUERY, '--bucket-mask', '1', '--max-trials', str(trials), '--max-seconds', '1', '--output', str(output)]
+
+    def test_address20_hash_uses_raw_bytes_and_independent_fold_formula(self):
+        keys = ['0x' + '00' * 20, '0x' + 'ff' * 20,
+                '0x0123456789abcdef102030405060708090a0b0c0',
+                '0x11223344' + '00' * 12 + '55667788']
+        for seed, shared in [(0, 0), (17, 29), (0x0123456789abcdef, 0xfedcba9876543210)]:
+            args = ['hash', '--seed', f'0x{seed:016x}', '--shared', f'0x{shared:016x}']
+            for key in keys:
+                args += ['--key', key]
+            result = self.cli(*args, '--key-kind', 'address20')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout)['hashes'], [
+                {'key': key, 'hash': f'0x{independent_address_hash(key, seed, shared):016x}'} for key in keys])
+
+    def test_address20_search_long_and_short_prefix_preserve_catalog_domain(self):
+        query = '0x11223344' + '00' * 12 + '55667788'
+        with tempfile.TemporaryDirectory() as tmp:
+            for domain in ('low32', 'high32'):
+                out = Path(tmp) / (domain + '.json')
+                args = self.search_args(out)
+                args[args.index('--query') + 1] = query
+                result = self.cli(*args, '--key-kind', 'address20', '--domain', domain)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                meta = json.loads(result.stdout)
+                self.assertEqual(meta['key_kind'], 'address20')
+                keys = json.loads(out.read_text())['keys']
+                self.assertEqual((len(keys), len(set(keys)), keys[-1]), (512, 512, query))
+                for key in keys:
+                    raw = bytes.fromhex(key[2:])
+                    self.assertEqual(len(raw), 20)
+                    self.assertEqual(sum(byte != 0 for byte in raw), 8)
+                    self.assertEqual(independent_address_hash(key, 0, 0), 0)
+                    if domain == 'low32':
+                        self.assertEqual(raw[:16], bytes.fromhex(query[2:])[:16])
+                    else:
+                        self.assertEqual(raw[4:], bytes.fromhex(query[2:])[4:])
+
+    def test_key_kind_preserves_strict_encoding_and_default_u256(self):
+        args = ['hash', '--seed', ZERO, '--shared', ZERO, '--key', QUERY]
+        implicit = self.cli(*args)
+        explicit = self.cli(*args, '--key-kind', 'u256')
+        self.assertEqual(explicit.returncode, 0, explicit.stderr)
+        self.assertEqual(implicit.stdout, explicit.stdout)
+        address = '0x11223344' + '00' * 12 + '55667788'
+        for kind, key in [('address20', QUERY), ('u256', address), ('address20', address.upper()), ('other', QUERY)]:
+            result = self.cli('hash', '--seed', ZERO, '--shared', ZERO, '--key', key, '--key-kind', kind)
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(result.stdout, b'')
 
     def test_hash_batch_full_limbs_overflow_and_1024_bound(self):
         keys = ['0x' + '00' * 32, '0x' + 'ff' * 32, '0x' + '0123456789abcdef' * 4, QUERY]

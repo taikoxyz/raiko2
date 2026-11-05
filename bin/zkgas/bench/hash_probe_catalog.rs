@@ -20,6 +20,114 @@ const DEADLINE_INTERVAL: u64 = 1024;
 type Key = [u64; 4];
 type Result<T> = std::result::Result<T, String>;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum KeyKind {
+    U256,
+    Address20,
+}
+
+impl KeyKind {
+    fn parse(value: Option<&str>) -> Result<Self> {
+        match value {
+            None | Some("u256") => Ok(Self::U256),
+            Some("address20") => Ok(Self::Address20),
+            Some(_) => Err("key kind must be u256 or address20".into()),
+        }
+    }
+
+    fn read(self, value: &str) -> Result<Key> {
+        match self {
+            Self::U256 => key(value),
+            Self::Address20 => key(&format!("0x{:0>64}", hex(value, 40)?)),
+        }
+    }
+
+    fn canonical(self, value: Key) -> String {
+        match self {
+            Self::U256 => canonical(value),
+            Self::Address20 => format!("0x{:08x}{:016x}{:016x}", value[2], value[1], value[0]),
+        }
+    }
+
+    fn hash(self, value: Key, seed: u64, shared: u64) -> u64 {
+        match self {
+            Self::U256 => hash(value, seed, shared),
+            Self::Address20 => {
+                // Address bytes are big-endian numeric bytes. The pinned guest hash reads
+                // them as little-endian 8/8/4-byte chunks, unlike the U256 specialization.
+                let first = u64::from((value[2] as u32).swap_bytes())
+                    | (u64::from(((value[1] >> 32) as u32).swap_bytes()) << 32);
+                let second = u64::from((value[1] as u32).swap_bytes())
+                    | (u64::from(((value[0] >> 32) as u32).swap_bytes()) << 32);
+                let tail = u64::from((value[0] as u32).swap_bytes());
+                fold(fold(seed ^ first, shared ^ second) ^ tail, shared)
+            }
+        }
+    }
+
+    fn validate_query(self, query: Key) -> Result<()> {
+        let valid = match self {
+            Self::U256 => query[..3] == [0, 0, 0] && !query[3].to_be_bytes().contains(&0),
+            Self::Address20 => {
+                query[3] == 0
+                    && query[1] == 0
+                    && query[2] <= u64::from(u32::MAX)
+                    && query[0] <= u64::from(u32::MAX)
+                    && !(query[2] as u32).to_be_bytes().contains(&0)
+                    && !(query[0] as u32).to_be_bytes().contains(&0)
+            }
+        };
+        if valid {
+            Ok(())
+        } else {
+            Err(match self {
+                Self::U256 => "query requires zero low192 bits and eight nonzero high64 bytes",
+                Self::Address20 => {
+                    "address query requires nonzero high/low32 and zero middle96 bits"
+                }
+            }
+            .into())
+        }
+    }
+
+    fn candidate(self, query: Key, varying: u32, domain: &str) -> Option<Key> {
+        match self {
+            Self::U256 => {
+                let word = if domain == "high32" {
+                    (u64::from(varying) << 32) | (query[3] & 0xffffffff)
+                } else {
+                    (query[3] & 0xffffffff00000000) | u64::from(varying)
+                };
+                if word.to_be_bytes().contains(&0) {
+                    return None;
+                }
+                Some(if domain == "high32" {
+                    [0, 0, 0, word]
+                } else {
+                    [word, 0, 0, 0]
+                })
+            }
+            Self::Address20 => {
+                if varying.to_be_bytes().contains(&0) {
+                    return None;
+                }
+                Some(if domain == "high32" {
+                    [query[0], 0, u64::from(varying), 0]
+                } else {
+                    [u64::from(varying), 0, query[2], 0]
+                })
+            }
+        }
+    }
+
+    fn metadata(self) -> &'static str {
+        match self {
+            Self::U256 => "",
+            Self::Address20 => ",\"key_kind\":\"address20\"",
+        }
+    }
+}
+
 fn fold(x: u64, y: u64) -> u64 {
     let product = u128::from(x) * u128::from(y);
     product as u64 ^ (product >> 64) as u64
@@ -80,7 +188,7 @@ fn bounded_decimal(value: &str, maximum: u64) -> Result<u64> {
 struct Arguments {
     mode: String,
     fields: BTreeMap<String, String>,
-    keys: Vec<Key>,
+    keys: Vec<String>,
 }
 
 impl Arguments {
@@ -98,6 +206,7 @@ impl Arguments {
             };
             let allowed = flag == "--seed"
                 || flag == "--shared"
+                || flag == "--key-kind"
                 || (mode == "hash" && flag == "--key")
                 || (mode == "search"
                     && matches!(
@@ -117,7 +226,7 @@ impl Arguments {
                 if keys.len() == MAX_KEYS {
                     return Err("hash accepts at most 1024 keys".into());
                 }
-                keys.push(key(&value)?);
+                keys.push(value);
             } else if fields.insert(flag, value).is_some() {
                 return Err("duplicate scalar flag".into());
             }
@@ -141,6 +250,7 @@ fn permutation(counter: u32) -> u32 {
 }
 
 struct Search {
+    kind: KeyKind,
     seed: u64,
     shared: u64,
     query: Key,
@@ -160,10 +270,9 @@ struct Outcome {
 
 impl Search {
     fn parse(args: &Arguments, seed: u64, shared: u64) -> Result<Self> {
-        let query = key(args.get("--query")?)?;
-        if query[..3] != [0, 0, 0] || query[3].to_be_bytes().contains(&0) {
-            return Err("query requires zero low192 bits and eight nonzero high64 bytes".into());
-        }
+        let kind = KeyKind::parse(args.fields.get("--key-kind").map(String::as_str))?;
+        let query = kind.read(args.get("--query")?)?;
+        kind.validate_query(query)?;
         let mask = bounded_decimal(args.get("--bucket-mask")?, 65535)?;
         if !(mask + 1).is_power_of_two() {
             return Err("bucket mask must be a positive power-of-two-minus-one".into());
@@ -174,6 +283,7 @@ impl Search {
             Some(_) => return Err("domain must be high32 or low32".into()),
         };
         Ok(Self {
+            kind,
             seed,
             shared,
             query,
@@ -189,7 +299,7 @@ impl Search {
     }
 
     fn run_with_clock(&self, start: Instant) -> Outcome {
-        let target = hash(self.query, self.seed, self.shared);
+        let target = self.kind.hash(self.query, self.seed, self.shared);
         let deadline = Duration::from_secs(self.max_seconds);
         let mut keys = Vec::with_capacity(CATALOG_KEYS);
         let mut trials = 0;
@@ -200,22 +310,15 @@ impl Search {
                 break;
             }
             // The permutation is bijective on u32; the bounded counter cannot wrap.
-            let varying = u64::from(permutation(trials as u32));
-            let word = if self.domain == "high32" {
-                (varying << 32) | (self.query[3] & 0xffffffff)
-            } else {
-                (self.query[3] & 0xffffffff00000000) | varying
-            };
-            let candidate = if self.domain == "high32" {
-                [0, 0, 0, word]
-            } else {
-                [word, 0, 0, 0]
-            };
+            let candidate =
+                self.kind
+                    .candidate(self.query, permutation(trials as u32), self.domain);
             trials += 1;
-            if candidate == self.query || word.to_be_bytes().contains(&0) {
+            let Some(candidate) = candidate else { continue };
+            if candidate == self.query {
                 continue;
             }
-            let h = hash(candidate, self.seed, self.shared);
+            let h = self.kind.hash(candidate, self.seed, self.shared);
             if h & self.mask == target & self.mask && h >> 57 == target >> 57 {
                 keys.push(candidate);
             }
@@ -237,9 +340,9 @@ impl Search {
     }
 
     fn metadata(&self, result: &Outcome) -> String {
-        let target = hash(self.query, self.seed, self.shared);
+        let target = self.kind.hash(self.query, self.seed, self.shared);
         format!(
-            "{{\"schema_version\":1,\"status\":\"{}\",\"trials\":{},\"found\":{},\"retained_candidates\":{},\"elapsed_ns\":{},\"seed\":\"0x{:016x}\",\"shared\":\"0x{:016x}\",\"query\":\"{}\",\"query_hash\":\"0x{:016x}\",\"bucket_mask\":{},\"target_bucket\":{},\"target_tag\":{},\"max_trials\":{},\"max_seconds\":{},\"deadline_check_interval\":{},\"candidate_domain\":\"{}\"}}\n",
+            "{{\"schema_version\":1,\"status\":\"{}\",\"trials\":{},\"found\":{},\"retained_candidates\":{},\"elapsed_ns\":{},\"seed\":\"0x{:016x}\",\"shared\":\"0x{:016x}\",\"query\":\"{}\",\"query_hash\":\"0x{:016x}\",\"bucket_mask\":{},\"target_bucket\":{},\"target_tag\":{},\"max_trials\":{},\"max_seconds\":{},\"deadline_check_interval\":{},\"candidate_domain\":\"{}\"{}}}\n",
             result.status,
             result.trials,
             result.keys.len(),
@@ -247,7 +350,7 @@ impl Search {
             result.elapsed.as_nanos(),
             self.seed,
             self.shared,
-            canonical(self.query),
+            self.kind.canonical(self.query),
             target,
             self.mask,
             target & self.mask,
@@ -255,18 +358,19 @@ impl Search {
             self.max_trials,
             self.max_seconds,
             DEADLINE_INTERVAL,
-            self.domain
+            self.domain,
+            self.kind.metadata()
         )
     }
 }
 
-fn catalog(keys: &[Key]) -> Result<String> {
+fn catalog(keys: &[Key], kind: KeyKind) -> Result<String> {
     if keys.len() != CATALOG_KEYS {
         return Err("incomplete catalog".into());
     }
     let list = keys
         .iter()
-        .map(|k| format!("\"{}\"", canonical(*k)))
+        .map(|k| format!("\"{}\"", kind.canonical(*k)))
         .collect::<Vec<_>>()
         .join(",");
     let result = format!("{{\"schema_version\":1,\"keys\":[{list}]}}\n");
@@ -329,6 +433,7 @@ fn emit(data: &str, cap: usize) -> Result<()> {
 }
 
 fn run(args: Arguments) -> Result<bool> {
+    let kind = KeyKind::parse(args.fields.get("--key-kind").map(String::as_str))?;
     let seed = scalar(args.get("--seed")?)?;
     let shared = scalar(args.get("--shared")?)?;
     if args.mode == "hash" {
@@ -338,14 +443,15 @@ fn run(args: Arguments) -> Result<bool> {
         let rows = args
             .keys
             .iter()
-            .map(|k| {
-                format!(
+            .map(|value| {
+                let k = kind.read(value)?;
+                Ok(format!(
                     "{{\"key\":\"{}\",\"hash\":\"0x{:016x}\"}}",
-                    canonical(*k),
-                    hash(*k, seed, shared)
-                )
+                    kind.canonical(k),
+                    kind.hash(k, seed, shared)
+                ))
             })
-            .collect::<Vec<_>>()
+            .collect::<Result<Vec<_>>>()?
             .join(",");
         emit(
             &format!(
@@ -370,7 +476,7 @@ fn run(args: Arguments) -> Result<bool> {
         return Err("search metadata size cap".into());
     }
     if outcome.status == "complete" {
-        install(output, catalog(&outcome.keys)?.as_bytes())?;
+        install(output, catalog(&outcome.keys, kind)?.as_bytes())?;
     }
     emit(&metadata, METADATA_CAP)?;
     Ok(outcome.status == "complete")
@@ -416,6 +522,7 @@ mod tests {
     #[test]
     fn expired_monotonic_budget_cannot_produce_catalog() {
         let search = Search {
+            kind: KeyKind::U256,
             seed: 0,
             shared: 0,
             query: [0, 0, 0, 0x1122334455667788],
@@ -429,7 +536,7 @@ mod tests {
             (result.status, result.trials, result.keys.len()),
             ("time_limit", 0, 1)
         );
-        assert!(catalog(&result.keys).is_err());
+        assert!(catalog(&result.keys, KeyKind::U256).is_err());
     }
 
     #[test]

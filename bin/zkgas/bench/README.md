@@ -3464,3 +3464,37 @@ reused. Other shared seeds, including zero, have different byte costs and their
 own computed full envelope. All unchanged15M transaction, EIP7825, header-prefix,
 30M charged-block and24KiB code constraints still apply. This single-user recipe
 is not a full30M workload certificate or a measured pricing validation.
+
+### Transient deletion before repeated reads
+
+`transient_read_catalogs.make_raw_case(..., clear_before_reads=True)` opts into
+one direct deletion phase in the existing kernel. It requires a strict boolean,
+an explicit raw query, and at least two unique query-last keys. The default
+`False` preserves the existing rows, requests, IDs and execution behavior. This
+option is intentionally not added to the strict factories or export CLI.
+
+The program guards an initially absent query, seeds all keys to one, and guards
+the seeded query. It then stores zero to calldata indices `1..N-1`, retaining
+index zero as a live key in the same owner's transient map. Native EVM guards
+verify the retained value is one and the deleted query is zero before the
+existing `64R` TLOAD/POP loop. The deletion counter at memory offset 32 is checked
+at termination; memory remains 128 bytes. No persistent slots or extra code are
+introduced. Deletion history does not imply a specific physical tombstone layout.
+
+The literal VM checks every seed and deletion in order, keeps the complete live
+state, and verifies both direct and cached read-body transitions. In this mode,
+`seed_keys` contains all initial keys, `clear_keys` contains `ordered_keys[1:]`,
+`query_values` is `[0, 1, 1, 0]`, and `transient_state_at_stop` contains only the
+first key with value one. `transient_state_after_tx` is empty. There are `2N-1`
+TSTOREs and `4+64R` TLOADs. For the frozen transient ledger this implies
+`A=2N+3+64R`, `J=2N-1`, and `U=C*(5N+2+64R)`; `N/M/C` retain the original
+materialized footprint after deletion. This is formula bookkeeping, not an
+actual-PGU or physical probe-count bound.
+
+Gas, calldata floor, maximal full reference and signed envelope are derived
+from the emitted instructions and actual calldata. An R0 control still performs
+seeding, deletion and guards. Changed code or input must qualify its own guest
+seed/mask and missing-return path before a pressure claim; a previous input's
+seed remains only a hypothesis. The existing success-only observer reader is
+not a validator for this missing-query phase. Use the existing native/quote/SP1
+tools and separately reviewed diagnostics; no new runner is required.

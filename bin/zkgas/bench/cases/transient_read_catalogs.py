@@ -51,8 +51,10 @@ def zero_hash_catalog(shared_seed, byte_offset, *, key_count=KEY_COUNT):
     return tuple(f'0x{query | (i << (8 * byte_offset)):064x}' for i in range(1, key_count)) + (f'0x{query:064x}',)
 
 
-def _runtime(repetitions, *, key_count=KEY_COUNT, query_key=QUERY):
+def _runtime(repetitions, *, key_count=KEY_COUNT, query_key=QUERY, clear_before_reads=False):
     catalogs._key_count(key_count); original.integer(repetitions, 0, MAX_REPETITIONS, 'repetitions'); _query_key(query_key)
+    if type(clear_before_reads) is not bool: raise ValueError('clear_before_reads must be bool')
+    if clear_before_reads and key_count < 2: raise ValueError('clearing requires at least two keys')
     asm = _Factory()
     def store(offset, value): asm.push(value); asm.push(offset); asm.op(0x52)
     def load(offset, times=1): asm.push(offset, times=times); asm.op(0x51, times)
@@ -66,6 +68,14 @@ def _runtime(repetitions, *, key_count=KEY_COUNT, query_key=QUERY):
     asm.push(1, times=key_count); load(0, key_count); asm.push(5, times=key_count); asm.op(0x1b, key_count); asm.op(0x35, key_count); asm.op(0x5d, key_count)
     load(0, key_count); asm.push(1, times=key_count); asm.op(1, key_count); asm.push(0, times=key_count); asm.op(0x52, key_count); asm.target('seed', key_count); asm.op(0x56, key_count)
     asm.label('seed_done'); asm.push(32 * (key_count - 1)); asm.op(0x35); asm.op(0x80); asm.op(0x5c); guard(1)
+    if clear_before_reads:
+        # Keep calldata index0 physically live; remove indices1..N-1 including QUERY.
+        store(32, 1); deletes = key_count - 1; visits = deletes + 1
+        asm.label('clear', visits); load(32, visits); asm.push(key_count, times=visits); asm.op(0x14, visits); asm.target('clear_done', visits); asm.op(0x57, visits)
+        asm.push(0, times=deletes); load(32, deletes); asm.push(5, times=deletes); asm.op(0x1b, deletes); asm.op(0x35, deletes); asm.op(0x5d, deletes)
+        load(32, deletes); asm.push(1, times=deletes); asm.op(1, deletes); asm.push(32, times=deletes); asm.op(0x52, deletes); asm.target('clear', deletes); asm.op(0x56, deletes)
+        asm.label('clear_done'); asm.push(0); asm.op(0x35); asm.op(0x5c); guard(1)
+        asm.op(0x80); asm.op(0x5c); guard(0)
     visits = repetitions + 1; asm.label('loop', visits)
     load(64, visits); asm.push(repetitions, 32, visits); asm.op(0x14, visits); asm.target('done', visits); asm.op(0x57, visits)
     for _ in range(UNROLL): asm.op(0x80, repetitions); asm.op(0x5c, repetitions); asm.op(0x50, repetitions)
@@ -73,12 +83,13 @@ def _runtime(repetitions, *, key_count=KEY_COUNT, query_key=QUERY):
     asm.target('loop', repetitions); asm.op(0x56, repetitions)
     asm.label('done'); asm.op(0x80); guard(query_key); asm.op(0x50)
     for offset, value in ((0, key_count), (64, repetitions), (96, SENTINEL)): load(offset); guard(value)
+    if clear_before_reads: load(32); guard(key_count)
     asm.op(0); asm.label('failure', 0); asm.op(0xfe, 0)
     return asm.finish(), asm.counts
 
 
-def gas_accounting(repetitions, *, key_count=KEY_COUNT, calldata=None, query_key=QUERY):
-    code, counts = _runtime(repetitions, key_count=key_count, query_key=query_key)
+def gas_accounting(repetitions, *, key_count=KEY_COUNT, calldata=None, query_key=QUERY, clear_before_reads=False):
+    code, counts = _runtime(repetitions, key_count=key_count, query_key=query_key, clear_before_reads=clear_before_reads)
     if calldata is None:
         if query_key != QUERY: raise ValueError('a nondefault query requires actual calldata')
         nonzero = 8 * key_count  # The unchanged strict catalog API guarantees this shape.
@@ -91,11 +102,13 @@ def gas_accounting(repetitions, *, key_count=KEY_COUNT, calldata=None, query_key
     ordinary = sum(n * (3 if 0x60 <= (op := int(key[-2:], 16)) <= 0x7f else costs[op]) for key, n in counts.items())
     zero = 32 * key_count - nonzero
     intrinsic = 21000 + 4 * zero + 16 * nonzero; floor = 21000 + 10 * (zero + 4 * nonzero)
-    reads = 100 * (2 + UNROLL * repetitions); stores = 100 * key_count
+    read_count = 2 + 2 * clear_before_reads + UNROLL * repetitions
+    store_count = key_count + (key_count - 1 if clear_before_reads else 0)
+    reads = 100 * read_count; stores = 100 * store_count
     gross = intrinsic + ordinary + 12 + reads + stores
     return dict(intrinsic_gas=intrinsic, eip7623_floor_gas=floor, eip7623_floor_active=gross < floor,
         ordinary_opcode_gas=ordinary, memory_expansion_gas=12, transient_load_gas=reads,
-        transient_store_gas=stores, transient_load_count=2 + UNROLL * repetitions, transient_store_count=key_count,
+        transient_store_gas=stores, transient_load_count=read_count, transient_store_count=store_count,
         body_gas_per_repetition=UNROLL * 105, gross_gas=gross, charged_gas=max(gross, floor),
         refund_counter=0, refund_applied=0, runtime_bytes=len(code))
 
@@ -110,13 +123,13 @@ def _constraint_failures(gas):
         ('runtime_size', gas['runtime_bytes'] > 24576)) if failed]
 
 
-def fits(repetitions, *, key_count=KEY_COUNT, calldata=None, query_key=QUERY):
-    return not _constraint_failures(gas_accounting(repetitions, key_count=key_count, calldata=calldata, query_key=query_key))
+def fits(repetitions, *, key_count=KEY_COUNT, calldata=None, query_key=QUERY, clear_before_reads=False):
+    return not _constraint_failures(gas_accounting(repetitions, key_count=key_count, calldata=calldata, query_key=query_key, clear_before_reads=clear_before_reads))
 
 
-def full_repetitions(*, key_count=KEY_COUNT, calldata=None, query_key=QUERY):
+def full_repetitions(*, key_count=KEY_COUNT, calldata=None, query_key=QUERY, clear_before_reads=False):
     catalogs._key_count(key_count); low, high = 0, MAX_REPETITIONS
-    def accepted(repetitions): return fits(repetitions, key_count=key_count, calldata=calldata, query_key=query_key)
+    def accepted(repetitions): return fits(repetitions, key_count=key_count, calldata=calldata, query_key=query_key, clear_before_reads=clear_before_reads)
     if not accepted(0): raise ValueError('zero control cannot fit')
     while low < high:
         middle = (low + high + 1) // 2
@@ -126,37 +139,39 @@ def full_repetitions(*, key_count=KEY_COUNT, calldata=None, query_key=QUERY):
     return low
 
 
-def _make_case(keys, catalog_id, level, *, repetitions=None, key_count=KEY_COUNT, external=False, query_key=QUERY, raw_keys=False):
+def _make_case(keys, catalog_id, level, *, repetitions=None, key_count=KEY_COUNT, external=False, query_key=QUERY, raw_keys=False, clear_before_reads=False):
     if type(raw_keys) is not bool: raise ValueError('raw_keys must be bool')
+    if type(clear_before_reads) is not bool: raise ValueError('clear_before_reads must be bool')
+    if clear_before_reads and (not raw_keys or key_count < 2): raise ValueError('clearing requires an explicit raw catalog with at least two keys')
     _query_key(query_key)
     if not raw_keys and query_key != QUERY: raise ValueError('strict catalog requires the fixed query')
     keys = _raw_keys(keys, query_key=query_key, key_count=key_count) if raw_keys else catalogs._validate_keys(keys, key_count=key_count)
     data = b''.join(bytes.fromhex(k[2:]) for k in keys); data_sha = digest(data)
     if type(level) is not str or level not in (*LEVELS, 'probe'): raise ValueError('level must be zero, probe or full')
-    maximum = full_repetitions(key_count=key_count, calldata=data, query_key=query_key)
+    maximum = full_repetitions(key_count=key_count, calldata=data, query_key=query_key, clear_before_reads=clear_before_reads)
     if level == 'probe':
         original.integer(repetitions, 1, maximum - 1, 'probe repetitions'); r = repetitions
     else:
         if repetitions is not None: raise ValueError('repetitions override requires probe level')
         r = 0 if level == 'zero' else maximum
-    code, counts = _runtime(r, key_count=key_count, query_key=query_key)
-    gas = gas_accounting(r, key_count=key_count, calldata=data, query_key=query_key)
-    envelope = gas_accounting(maximum, key_count=key_count, calldata=data, query_key=query_key)['charged_gas'] + 1000
+    code, counts = _runtime(r, key_count=key_count, query_key=query_key, clear_before_reads=clear_before_reads)
+    gas = gas_accounting(r, key_count=key_count, calldata=data, query_key=query_key, clear_before_reads=clear_before_reads)
+    envelope = gas_accounting(maximum, key_count=key_count, calldata=data, query_key=query_key, clear_before_reads=clear_before_reads)['charged_gas'] + 1000
     request = original.make_case('call', 'stop', count=1, gas_limit=envelope)['request']; program = request['program']
     routes = dict.fromkeys(program['expected_route_counts'], 0); routes.update(counts)
     program.update(code_hex='0x' + code.hex(), input_hex='0x' + data.hex(), expected_route_counts=routes)
-    prefix = f'transient-read-{catalog_id}-k{key_count}'
+    prefix = f'transient-read-{catalog_id}-k{key_count}' + ('-clear' if clear_before_reads else '')
     row = dict(sample_id=f'{prefix}-n{UNROLL*r}', baseline_sample_id=f'{prefix}-n0', family='transient-read-catalogs',
-        corpus_id=CORPUS + ('-raw-' + data_sha if raw_keys else '-custom-' + data_sha if external else ''), role='control' if r == 0 else 'candidate',
+        corpus_id=CORPUS + ('-raw-' + data_sha if raw_keys else '-custom-' + data_sha if external else '') + ('-clear' if clear_before_reads else ''), role='control' if r == 0 else 'candidate',
         data_role='development_probe', holdout_only=False, actuals_used_for_fitting=False,
         completion_gate='Independent literal byte/calldata/transient-state/floor-gas/signature/account/root/witness and current original quote gates before actuals.',
         scope='Finite development controls, not IID/holdout or a global/per-read PGU bound. Actual same-proposal SP1 PGU, node-known and full-proposal quotes remain separate; no fit or pricing change.',
         parameters=dict(key_count=key_count, catalog_id=catalog_id, catalog_source='external-data' if external else 'deterministic-recipe',
             workload_level=level, ordered_keys=list(keys), raw_key_sha256=data_sha, calldata_sha256=data_sha, query_key=f'0x{query_key:064x}',
             repetitions=r, full_repetitions=maximum, unroll_factor=UNROLL, bulk_operations=UNROLL*r,
-            seed_writes=key_count, expected_transient_reads=2+UNROLL*r, expected_transient_writes=key_count,
+            seed_writes=key_count, expected_transient_reads=2+2*clear_before_reads+UNROLL*r, expected_transient_writes=key_count+(key_count-1 if clear_before_reads else 0),
             initial_query_reads=1, seeded_query_reads=1, body_target_operations_per_user=UNROLL*r,
-            target_query_reads=2+UNROLL*r, expected_persistent_storage_reads=0, expected_persistent_storage_writes=0,
+            target_query_reads=2+clear_before_reads+UNROLL*r, expected_persistent_storage_reads=0, expected_persistent_storage_writes=0,
             initial_storage_entries=0, initial_state_size=0, aggregate_state_size=0, state_size_per_account=0,
             expected_initial_storage_entry_count=0, expected_final_storage_entry_count=0,
             peak_transient_state_entries_per_transaction=key_count, expected_final_transient_entry_count=0,
@@ -170,7 +185,7 @@ def _make_case(keys, catalog_id, level, *, repetitions=None, key_count=KEY_COUNT
             gas_accounting_per_user=gas, expected_user_gross_gas=gas['gross_gas'], expected_user_charged_gas=gas['charged_gas'],
             expected_user_refund_counter=0, expected_user_refund_applied=0, expected_block_charged_gas=catalogs.ANCHOR_GAS+gas['charged_gas'],
             near_full=catalogs.ANCHOR_GAS+gas['charged_gas'] >= 29_700_000,
-            full_plus_one_constraint_failures=_constraint_failures(gas_accounting(maximum+1, key_count=key_count, calldata=data, query_key=query_key)),
+            full_plus_one_constraint_failures=_constraint_failures(gas_accounting(maximum+1, key_count=key_count, calldata=data, query_key=query_key, clear_before_reads=clear_before_reads)),
             fullness_scope='Maximal uniform single-user full envelope within15M; an intermediate probe or ownzero is not a30M full-block certificate.',
             expected_terminal='STOP', expected_user_success=True, expected_user_receipt_statuses=[True], expected_anchor_success=True,
             expected_exceptional_instructions=0, execution_profile='evm-gas-only', preload_created_accounts_or_code=False,
@@ -178,6 +193,11 @@ def _make_case(keys, catalog_id, level, *, repetitions=None, key_count=KEY_COUNT
             initial_storage_rule='Primary empty persistent state, no extra prestate code/accounts. Transient state starts empty and resets after the transaction.',
             range_rule='Guard QUERY0; direct TSTORE1 for each ordered calldata key, QUERY last; guard QUERY1;64 pure TLOAD/pop sites per R; guard counters/sentinel/query and STOP with empty stack.'), request=request)
     if raw_keys: row['parameters']['raw_keys'] = True
+    if clear_before_reads:
+        row['parameters'].update(clear_before_reads=True, clear_writes=key_count-1,
+            clear_counter_memory_offset=32, retained_transient_key=keys[0], transient_entries_before_reads=1,
+            cleared_query_reads=1, retained_sentinel_reads=1,
+            range_rule='Guard QUERY0; seed all ordered raw keys1 with QUERY last; guard QUERY1; clear indices1..N-1; guard retained first-key1 and QUERY0;64 pure missing-query TLOAD/pop sites per R; verify counters/sentinel/query/empty stack and STOP.')
     return row
 
 
@@ -195,7 +215,7 @@ def make_probe_case(keys, repetitions, *, key_count=KEY_COUNT):
     return _make_case(keys, 'custom-'+digest(data), 'probe', repetitions=repetitions, key_count=key_count, external=True)
 
 
-def make_raw_case(keys, level='full', *, query_key, repetitions=None, key_count=KEY_COUNT):
+def make_raw_case(keys, level='full', *, query_key, repetitions=None, key_count=KEY_COUNT, clear_before_reads=False):
     """Use the same guarded kernel with arbitrary raw keys and byte-authenticated calldata gas.
 
     Existing strict factories remain fixed-query/eight-nonzero-byte interfaces. This opt-in
@@ -204,7 +224,7 @@ def make_raw_case(keys, level='full', *, query_key, repetitions=None, key_count=
     keys = _raw_keys(keys, query_key=query_key, key_count=key_count)
     data = b''.join(bytes.fromhex(k[2:]) for k in keys)
     return _make_case(keys, 'raw-'+digest(data), level, repetitions=repetitions, key_count=key_count,
-        external=True, query_key=query_key, raw_keys=True)
+        external=True, query_key=query_key, raw_keys=True, clear_before_reads=clear_before_reads)
 
 
 def source_modules():

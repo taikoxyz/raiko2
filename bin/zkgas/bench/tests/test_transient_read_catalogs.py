@@ -25,6 +25,70 @@ def producer():
 
 
 class TransientReadCatalogTests(unittest.TestCase):
+    def test_raw_clear_keeps_live_key_and_reads_deleted_query(self):
+        m=producer()
+        from transient_read_catalogs_vm import execute,run_users
+        for k in (2,16,512,1024):
+            keys=m.zero_hash_catalog(0xd2b5ccfd88cdb855,2,key_count=k);query=0xd2b5ccfd88cdb855<<64
+            for level,r in (('zero',0),('probe',2),('probe',512),('full',None)):
+                row=m.make_raw_case(keys,level,query_key=query,key_count=k,repetitions=r if level=='probe' else None,clear_before_reads=True)
+                p=row['parameters'];result=run_users(row)[0];program=row['request']['program']
+                direct=execute(bytes.fromhex(program['code_hex'][2:]),bytes.fromhex(program['input_hex'][2:]),p['transaction_gas_limit'],repetitions=p['repetitions'],cache=False,key_count=k,query_key=query,raw_keys=True,clear_before_reads=True)
+                self.assertEqual(result,{**direct,'transient_state_after_tx':{}})
+                self.assertEqual(result['seed_keys'],list(keys));self.assertEqual(result['clear_keys'],list(keys[1:]))
+                self.assertEqual(result['query_values'],[0,1,1,0]);self.assertEqual(result['transient_state_at_stop'],{keys[0]:1})
+                self.assertEqual(result['transient_state_after_tx'],{});self.assertEqual(result['stack'],[])
+                self.assertEqual((result['tload_count'],result['tstore_count']),(4+64*p['repetitions'],2*k-1))
+                self.assertEqual(result['peak_memory_bytes'],128)
+                self.assertTrue(p['clear_before_reads']);self.assertEqual(p['clear_writes'],k-1)
+                self.assertNotIn('prestate_contracts',program);self.assertNotIn('storage_state',program)
+                self.assertEqual(p['expected_persistent_storage_reads'],0);self.assertEqual(p['expected_persistent_storage_writes'],0)
+
+    def test_raw_clear_domains_gas_metadata_and_byte_failures(self):
+        m=producer()
+        from transient_read_catalogs_vm import run_users
+        keys=m.zero_hash_catalog(0xd2b5ccfd88cdb855,2,key_count=1024);query=0xd2b5ccfd88cdb855<<64
+        for bad in (None,0,1,'true',[],{}):
+            with self.assertRaises(ValueError):m.make_raw_case(keys,'zero',query_key=query,key_count=1024,clear_before_reads=bad)
+        with self.assertRaises(ValueError):m.make_raw_case([f'0x{query:064x}'],'zero',query_key=query,key_count=1,clear_before_reads=True)
+        old=m.make_raw_case(keys,'zero',query_key=query,key_count=1024)
+        self.assertEqual(old,m.make_raw_case(keys,'zero',query_key=query,key_count=1024,clear_before_reads=False))
+        self.assertNotIn('clear_before_reads',old['parameters'])
+        row=m.make_raw_case(keys,'probe',query_key=query,key_count=1024,repetitions=512,clear_before_reads=True)
+        self.assertNotEqual(old['corpus_id'],row['corpus_id']);self.assertNotEqual(old['baseline_sample_id'],row['baseline_sample_id'])
+        for name,bad in [('clear_before_reads',1),('clear_writes',1024),('expected_transient_reads',3+64*512),('expected_transient_writes',1024),('transient_entries_before_reads',0),('clear_counter_memory_offset',0)]:
+            mutant=copy.deepcopy(row);mutant['parameters'][name]=bad
+            with self.assertRaises(AssertionError,msg=name):run_users(mutant)
+        for op in ('opcode:0x5c','opcode:0x5d'):
+            mutant=copy.deepcopy(row);mutant['request']['program']['expected_route_counts'][op]-=1
+            with self.assertRaises(AssertionError):run_users(mutant)
+        # Rehashed valid EVM bytes with changed clear value or an absent live guard
+        # must fail intent validation even when outer checksums are consistent.
+        from transient_read_catalogs_vm import decode,structure
+        code=bytes.fromhex(row['request']['program']['code_hex'][2:]);shape=structure(list(decode(code)),512,key_count=1024,query_key=query,clear_before_reads=True)
+        for pc in (shape['clear_value']+3,shape['retained_guard_value']+32):
+            mutant=copy.deepcopy(row);data=bytearray(code);data[pc]^=1
+            mutant['request']['program']['code_hex']='0x'+data.hex();mutant['parameters']['runtime_sha256']=hashlib.sha256(data).hexdigest()
+            with self.assertRaises(AssertionError):run_users(mutant)
+
+    def test_raw_clear_extreme_queries_and_complete_cache_feedback(self):
+        m=producer()
+        from transient_read_catalogs_vm import decode,structure,prove_body,apply_body,run_users
+        for query in (0,(1<<256)-1):
+            first=1 if query==0 else 0;keys=[f'0x{first:064x}',f'0x{query:064x}']
+            row=m.make_raw_case(keys,'probe',query_key=query,key_count=2,repetitions=1,clear_before_reads=True)
+            result=run_users(row)[0];self.assertEqual(result['query_values'],[0,1,1,0]);self.assertEqual(result['transient_state_at_stop'],{keys[0]:1})
+            code=bytes.fromhex(row['request']['program']['code_hex'][2:]);instructions=list(decode(code));shape=structure(instructions,1,key_count=2,query_key=query,clear_before_reads=True)
+            body=[i for i in instructions if shape['body']<=i[0]<shape['body_end']]
+            memory=bytearray(128);memory[:32]=(2).to_bytes(32,'big');memory[32:64]=(2).to_bytes(32,'big');memory[96:128]=(0xa55a).to_bytes(32,'big')
+            state={first:1};proof=prove_body(body,[query],state,memory,query,key_count=2,clear_before_reads=True)
+            apply_body(proof,[query],state,memory)
+            for bad in ({first:1,query:0},{},{query:1},{first:0}):
+                with self.assertRaises(AssertionError):apply_body(proof,[query],bad,memory)
+            bad=memory.copy();bad[32:64]=bytes(32)
+            with self.assertRaises(AssertionError):apply_body(proof,[query],state,bad)
+            with self.assertRaises(AssertionError):apply_body(dict(proof,clear_before_reads=1),[query],state,memory)
+
     def test_default_zero_probes_full_and_floor(self):
         m = producer()
         from transient_read_catalogs_vm import run_users

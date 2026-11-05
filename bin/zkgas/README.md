@@ -438,15 +438,21 @@ execution; a real packaged-SP1 measurement is a separate external-producer valid
 
 The quote consumer follows the reviewed maintained Alethia shadow-pricing branch.
 Its current explicit dependency revision is
-`e01c43ff2e79ef75ac9089bb8692093e9c5cbda3`, exporting model
-`c8936124c1b074b57abf36873e1c37e01f9bc49fa6c9bb161a92542f1e6551ef`.
+`e33b26d7ae8fc104c20d030f6accf1c079a2e686`, exporting model
+`5f93909ea1372eb6e10fa2b599c6087aafd4ec493ba28eb1cea4c4abb3708a11`.
 The authoritative formulas, coefficients and empirical limits remain in
-[Alethia's pricing documentation](https://github.com/taikoxyz/alethia-reth/blob/e01c43ff2e79ef75ac9089bb8692093e9c5cbda3/docs/zk-gas-pricing-model.md).
+[Alethia's pricing documentation](https://github.com/taikoxyz/alethia-reth/blob/e33b26d7ae8fc104c20d030f6accf1c079a2e686/docs/zk-gas-pricing-model.md).
 This source synchronization does not activate the model for consensus admission
 or replace Unzen difficulty.
 
 Both quote surfaces preserve these selectors and contributions:
 
+- `storage_journal_work_units` and `storage_journal_scaled`: conservative per-transaction,
+  per-owner raw-slot comparison work and its independent normalized PGU price. The
+  node report keeps committed scopes; prove keeps all attempted scopes. This is
+  added once outside `operations_scaled`, with zero contribution in proposal-once
+  pricing. See [the calibration record](../../docs/research/2026-11-05-storage-journal-prefix.md)
+  for the guest layout evidence, simple formula, negative control and limits.
 - `authorization_validations` and `authorization_scaled`: raw authorization-list
   entries, including duplicates, stale entries and unsuccessful recovery. The
   prove block counts attempted entries; the node block counts committed entries.

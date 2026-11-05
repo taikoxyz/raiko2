@@ -104,6 +104,10 @@ pub struct PricingBreakdownSnapshot {
     /// Per-occurrence accepted code preparation, including work later reverted.
     pub code_preparation_scaled: i128,
     pub operations_scaled: i128,
+    /// Conservative raw-slot journal comparison work observed during execution.
+    pub storage_journal_work_units: u64,
+    /// Independent normalized contribution; add once, outside operations.
+    pub storage_journal_scaled: i128,
     /// Normally priced opcode/confirmed-spawn events in this observation prefix.
     pub normal_dispatch_count: u64,
     /// Dispatch reserve already included in `operations_scaled`; never add it again.
@@ -164,6 +168,10 @@ pub struct NodePricingBreakdownSnapshot {
     /// Per-occurrence accepted code preparation, including work later reverted.
     pub code_preparation_scaled: i128,
     pub operations_scaled: i128,
+    /// Conservative raw-slot journal comparison work observed during execution.
+    pub storage_journal_work_units: u64,
+    /// Independent normalized contribution; add once, outside operations.
+    pub storage_journal_scaled: i128,
     /// Normally priced opcode/confirmed-spawn events visible to the node.
     pub normal_dispatch_count: u64,
     /// Dispatch reserve already included in `operations_scaled`; never add it again.
@@ -190,6 +198,8 @@ impl From<ZkGasKnownBlockBreakdown> for NodePricingBreakdownSnapshot {
             access_list_items: value.access_list_items(),
             access_list_scaled: value.access_list_scaled(),
             operations_scaled: value.operations_scaled(),
+            storage_journal_work_units: value.storage_journal_work_units(),
+            storage_journal_scaled: value.storage_journal_scaled(),
             normal_dispatch_count: value.normal_dispatch_count(),
             normal_dispatch_scaled: value.normal_dispatch_scaled(),
             feature_error_scaled: value.feature_error_scaled(),
@@ -213,6 +223,8 @@ impl TryFrom<PricingBreakdown> for PricingBreakdownSnapshot {
             access_list_scaled: value.access_list_scaled,
             code_preparation_scaled: value.code_preparation_scaled,
             operations_scaled: value.operations_scaled,
+            storage_journal_work_units: value.storage_journal_work_units,
+            storage_journal_scaled: value.storage_journal_scaled,
             normal_dispatch_count: value.normal_dispatch_count,
             normal_dispatch_scaled: value.normal_dispatch_scaled,
             feature_error_scaled: value.feature_error_scaled,
@@ -463,6 +475,7 @@ fn complete_block_pricing(
         attempted_priced.access_list_scaled,
         attempted_priced.code_preparation_scaled,
         attempted_priced.operations_scaled,
+        attempted_priced.storage_journal_scaled,
         committed_priced.resources_scaled,
         committed_priced.mpt_scaled,
         committed_priced.transaction_payload_scaled,
@@ -475,6 +488,8 @@ fn complete_block_pricing(
         access_list_scaled: attempted_priced.access_list_scaled,
         code_preparation_scaled: attempted_priced.code_preparation_scaled,
         operations_scaled: attempted_priced.operations_scaled,
+        storage_journal_work_units: attempted_priced.storage_journal_work_units,
+        storage_journal_scaled: attempted_priced.storage_journal_scaled,
         normal_dispatch_count: attempted_priced.normal_dispatch_count,
         normal_dispatch_scaled: attempted_priced.normal_dispatch_scaled,
         feature_error_scaled: attempted_priced.feature_error_scaled,
@@ -889,6 +904,22 @@ mod tests {
     }
 
     #[test]
+    fn storage_journal_report_fields_are_required_without_zero_fallback() {
+        let node = serde_json::to_value(NodePricingBreakdownSnapshot::default()).unwrap();
+        let prove = serde_json::to_value(PricingBreakdownSnapshot::default()).unwrap();
+        for field in ["storage_journal_work_units", "storage_journal_scaled"] {
+            assert!(node.get(field).is_some(), "node must expose {field}");
+            assert!(prove.get(field).is_some(), "prove must expose {field}");
+            let mut missing = node.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<NodePricingBreakdownSnapshot>(missing).is_err());
+            let mut missing = prove.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<PricingBreakdownSnapshot>(missing).is_err());
+        }
+    }
+
+    #[test]
     fn normal_dispatch_report_fields_are_required_without_zero_fallback() {
         let node = serde_json::to_value(NodePricingBreakdownSnapshot::default()).unwrap();
         let prove = serde_json::to_value(PricingBreakdownSnapshot::default()).unwrap();
@@ -1004,6 +1035,7 @@ mod tests {
                 + block.node.pricing.access_list_scaled
                 + block.node.pricing.code_preparation_scaled
                 + block.node.pricing.operations_scaled
+                + block.node.pricing.storage_journal_scaled
                 + block.node.pricing.evm_local_resources_scaled
                 + block.node.pricing.transaction_payload_scaled,
         );
@@ -1014,6 +1046,7 @@ mod tests {
                 + block.prove.pricing.access_list_scaled
                 + block.prove.pricing.code_preparation_scaled
                 + block.prove.pricing.operations_scaled
+                + block.prove.pricing.storage_journal_scaled
                 + block.prove.pricing.resources_scaled
                 + block.prove.pricing.mpt_scaled
                 + block.prove.pricing.transaction_payload_scaled,
@@ -1194,6 +1227,10 @@ mod tests {
             ..Default::default()
         };
         let committed = ZkGasBlockSnapshot {
+            storage_journal: alethia_reth_evm::zk_gas::pricing::StorageJournalDiagnostics {
+                comparison_work_units_upper: 3,
+                ..Default::default()
+            },
             authorization_validations: 4,
             access_list_items: 3,
             code_preparation: CodePreparationSelectors {
@@ -1210,6 +1247,10 @@ mod tests {
         }
         .shadow_report();
         let attempted = ZkGasBlockSnapshot {
+            storage_journal: alethia_reth_evm::zk_gas::pricing::StorageJournalDiagnostics {
+                comparison_work_units_upper: 7,
+                ..Default::default()
+            },
             authorization_validations: 16,
             access_list_items: 7,
             code_preparation: CodePreparationSelectors {
@@ -1265,9 +1306,14 @@ mod tests {
                 + node.access_list_scaled
                 + node.code_preparation_scaled
                 + node.operations_scaled
+                + node.storage_journal_scaled
                 + node.evm_local_resources_scaled
                 + node.transaction_payload_scaled
         );
+        assert_eq!(node.storage_journal_work_units, 3);
+        assert_eq!(prove.storage_journal_work_units, 7);
+        assert_eq!(node.storage_journal_scaled, 3 * 384 * FIXED_POINT_SCALE);
+        assert_eq!(prove.storage_journal_scaled, 7 * 384 * FIXED_POINT_SCALE);
         assert_eq!(node.access_list_items, 3);
         assert_eq!(access_list_items, 7);
         assert_eq!(node.access_list_scaled, 3 * 8192 * FIXED_POINT_SCALE);
@@ -1306,6 +1352,7 @@ mod tests {
                 + prove.access_list_scaled
                 + prove.code_preparation_scaled
                 + prove.operations_scaled
+                + prove.storage_journal_scaled
                 + prove.resources_scaled
                 + prove.transaction_payload_scaled
         );
@@ -1457,6 +1504,24 @@ mod tests {
             + (700 * FIXED_POINT_SCALE - 32_117_684_584_888_432_025) * i128::from(blockhash)
             + 64 * FIXED_POINT_SCALE * i128::from(normal);
         let expected_operations = 3_187_806_573_010_541_525_400_160_675 + operation_uplift;
+        let journal_scaled = quote
+            .blocks
+            .iter()
+            .map(|block| {
+                assert_eq!(
+                    block.node.pricing.storage_journal_work_units,
+                    block.prove.pricing.storage_journal_work_units
+                );
+                let expected = ZkGasModel
+                    .price_storage_journal_work(block.node.pricing.storage_journal_work_units)
+                    .unwrap();
+                assert_eq!(block.node.pricing.storage_journal_scaled, expected);
+                assert_eq!(block.prove.pricing.storage_journal_scaled, expected);
+                expected
+            })
+            .sum::<i128>();
+        let journal_pgu = u128::try_from(journal_scaled / FIXED_POINT_SCALE).unwrap();
+
         assert_eq!(
             quote
                 .blocks
@@ -1585,12 +1650,14 @@ mod tests {
             quote.node,
             NodeProposalWorkloadQuote {
                 unzen_zkgas_sum: 259_514_910,
-                block_local_known_scaled: 3_579_273_824_904_407_953_889_126_534 + operation_uplift,
+                block_local_known_scaled: 3_579_273_824_904_407_953_889_126_534
+                    + operation_uplift
+                    + journal_scaled,
                 block_local_known_pgu: ceil_scaled(
-                    3_579_273_824_904_407_953_889_126_534 + operation_uplift
+                    3_579_273_824_904_407_953_889_126_534 + operation_uplift + journal_scaled
                 )
                 .unwrap(),
-                sum_of_block_known_pgu: 3_765_339_140,
+                sum_of_block_known_pgu: 3_765_339_140 + journal_pgu,
             }
         );
         assert_eq!(
@@ -1628,6 +1695,8 @@ mod tests {
                 access_list_scaled: 0,
                 code_preparation_scaled: 0,
                 operations_scaled: 0,
+                storage_journal_work_units: 0,
+                storage_journal_scaled: 0,
                 normal_dispatch_count: 0,
                 normal_dispatch_scaled: 0,
                 feature_error_scaled: 0,
@@ -1643,21 +1712,26 @@ mod tests {
         );
         assert_eq!(
             quote.prove.block_local_scaled,
-            4_764_457_136_904_407_953_889_126_534 + operation_uplift
+            4_764_457_136_904_407_953_889_126_534 + operation_uplift + journal_scaled
         );
         assert_eq!(
             quote.prove.block_local_pgu,
-            ceil_scaled(4_764_457_136_904_407_953_889_126_534 + operation_uplift).unwrap()
+            ceil_scaled(4_764_457_136_904_407_953_889_126_534 + operation_uplift + journal_scaled)
+                .unwrap()
         );
-        assert_eq!(quote.prove.sum_of_block_local_pgu, 4_950_522_452);
+        assert_eq!(
+            quote.prove.sum_of_block_local_pgu,
+            4_950_522_452 + journal_pgu
+        );
         assert_eq!(quote.prove.proposal_once_pgu, 160_621_711);
         assert_eq!(
             quote.prove.total_scaled,
-            4_925_078_847_639_888_356_009_085_400 + operation_uplift
+            4_925_078_847_639_888_356_009_085_400 + operation_uplift + journal_scaled
         );
         assert_eq!(
             quote.prove.total_pgu,
-            ceil_scaled(4_925_078_847_639_888_356_009_085_400 + operation_uplift).unwrap()
+            ceil_scaled(4_925_078_847_639_888_356_009_085_400 + operation_uplift + journal_scaled)
+                .unwrap()
         );
         quote.blocks.iter().for_each(assert_block_formula_closes);
         assert_proposal_formula_closes(&quote);

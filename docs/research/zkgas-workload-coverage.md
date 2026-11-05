@@ -136,3 +136,25 @@ The observed 512-key/seed/hash association is conditional data for future separa
 The [hash-probe catalog follow-up](2026-11-04-hash-probe-catalog.md) separately qualifies three canonical inputs and measures exactly two once: own-zero and probeR512. All512 own cold-key/full-hash observations in each measured input realize the chosen initial bucket plus seven-bit tag (17 selected bits, not full-hash collisions), with first-warm mask1023. Probe actual3,378,306,245PGU at4,894,506 charged block gas exceeds literal node159,815,076 by3,218,491,169 and complete proposal314,887,979 by3,063,418,266. This meets the >2B/<=30M priority rule and establishes serious underpricing in the historical b76/SDK6.3 local profile. The model is not closed; missing block-observable accounting and a separately validated correction take priority over the qualified, unmeasured fullR2028. No price/model change is made here.
 
 Signed probe-minus-own-zero actual/node/proposal increments are+3,183,111,547/+138,982,569/+138,982,569PGU, distinct from absolute gaps. Equal signed transactions/calldata/primary EMPTY storage do not establish equal runtime/code/genesis/final root/complete input, so these are aggregate conditional diagnostics rather than causal per-lookup costs. Canonical GasVM completes4,279,435,409 probe instructions while the observer honestly stops at a400M instruction-limit prefix with zero completed chunks. Reviewed source197, one export/native3/original quote3, immutable qualification167/final195 manifests and device-matched original-host eight-name closure retain the evidence. The V1 R512 seed-guard oracle failure and additive V2 PUSH3 memory64 correction remain explicit, with no producer/native/quote/actual retries. This development probe was not used for fitting and is not an unopened holdout, full-gas bound, IID sample, proof, production/GPU parity or practical network claim. All fourteen previous pricing contexts remain separate and unchanged; no new union is asserted.
+
+## Model5f follow-ups on 2026-11-05
+
+The preceding concentrated-probe section is a historical pre-correction snapshot. The current
+[storage-journal record](2026-11-05-storage-journal-prefix.md) explains the independently priced
+comparison reserve and384 tariff in model5f, including retained conservative controls and
+historical native repricing. The separate [account-journal case](2026-11-05-account-journal.md)
+remains a crafted-input underpricing TODO; correction and future L1 frequency sampling are deferred.
+
+The [pure capacity panel](2026-11-05-storage-capacity-boundaries.md) adds eight selected new inputs
+at K448/449/896/897 × R0/R512. Own-input first-warm masks511/1023/1023/2047 are observed. R512
+node quotes and all eight complete-proposal quotes cover actuals; four literal R0 node gaps,
+maximum119,862,744PGU, remain visible. There is no pricing change or full30M/global bound.
+
+The [rollback-capacity panel](2026-11-05-storage-rollback-capacity.md) separately adds eight F2
+leaf-REVERT/reaccess R0 inputs, with bodyK447/448/895/896 plus phase0 and caller prewarm on/off.
+Node/full estimates cover all212.06M–268.40M actuals; model5f remains unchanged. Its canonical
+measurements and independent byte/state/quote checks pass, while all strict register phase profiles
+remain incomplete: standalone drain markers were unhit, and prewarm lacks a matching early
+same-map seed. Those diagnostic gaps are retained without rerunning or discarding valid PGU.
+These finite cohorts do not create a global coverage percentage, a new historical union or a
+current-production SDK certificate. Full packing and other compositions remain follow-ups.

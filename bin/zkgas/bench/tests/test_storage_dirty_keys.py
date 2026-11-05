@@ -142,6 +142,93 @@ def qualify(test, row, execution=None):
 
 
 class StorageDirtyKeysTests(unittest.TestCase):
+    def test_capacity_explicit_keys_are_bounded_and_defaults_stay_finite(self):
+        m = self.load()
+        try: m._validate('stop', 2)
+        except ValueError: self.fail('strict explicit keys1..1024 extension is missing')
+        self.assertEqual(m.KEY_COUNTS, (1,16,256,1024))
+        for k in (1,2,447,448,895,896,1024):
+            code, counts = m._runtime('revert', k, 0)
+            state = {0:65537} | dict.fromkeys(range(65537,65537+k), 1)
+            result = execute(code, state, 15_000_000)
+            self.assertEqual(trajectory(self,result,state,keys=k,rounds=0,mode='revert'), m.gas_accounting('revert',k,0))
+            self.assertEqual(result['counts'], +Counter(counts))
+        for k in (True,False,0,-1,1025,1.0,None,'447'):
+            with self.subTest(k=k), self.assertRaises(ValueError): m._validate('stop',k)
+
+    def test_frozen_default_whole_rows_and_requests(self):
+        m = self.load()
+        frozen = {
+            "storage-dirty-keys-revert-k1-r0": {
+                "request_sha256": "6025cb1f648f24f081d9e5558a7c1bdbf2a33b198050b2b453d85ac67eeadb40",
+                "row_sha256": "25ae71e308a7a7bd045c3c3a8d21afc4f26d62daae253792e93dc354d5b6b8de"
+            },
+            "storage-dirty-keys-revert-k1-r33942": {
+                "request_sha256": "d2614024221157529055d2291a36e62edae8366d6156b55d4397530344d5fe08",
+                "row_sha256": "0d5068a3df81a4eb6b9214bc9cdd4c4ede587e8bd4c0e9abc962c17dafb4021a"
+            },
+            "storage-dirty-keys-revert-k1024-r0": {
+                "request_sha256": "1d0d48bf5eee62d777569e1871c674603f0945de62cbc22f6e88b1e69c73b9c7",
+                "row_sha256": "60e4b1bf4f3ecc3687df7e87c7e4083c8f75b3685ce7fa875788b7c99e5f2513"
+            },
+            "storage-dirty-keys-revert-k1024-r5": {
+                "request_sha256": "79aa27ecd2ddc4b192fabec2cca62e4e9043f6218e5cd9180e4a707a6610dd87",
+                "row_sha256": "4ab734b7fb150041cae1fefc87cc62ae9d51647da61035448003670b03838abf"
+            },
+            "storage-dirty-keys-revert-k16-r0": {
+                "request_sha256": "7542e2b2d582af5bd5fd6ec1231d73e17b312ac727c148433bece47412f0196c",
+                "row_sha256": "0f70c99f5d9e2630fa4dffc5099bea29755e35716b6af663a5792dffb2f6db61"
+            },
+            "storage-dirty-keys-revert-k16-r2095": {
+                "request_sha256": "f1f1bd24f8f33bcfef1e61d8371efd81753a49daf82ee15e54dd98557212e246",
+                "row_sha256": "935afd59f1a9a0a925fa67639409b9844f844b42d821bc7a011a88b42dc7a166"
+            },
+            "storage-dirty-keys-revert-k256-r0": {
+                "request_sha256": "9aa951643b54638df7965b91ac0d91860a6bb505ecf408b25cb73aeb94585635",
+                "row_sha256": "8695f37f4ad6423dd26caf831953942d991e2034bc03a820a23e22a341f91e51"
+            },
+            "storage-dirty-keys-revert-k256-r104": {
+                "request_sha256": "0bf14b43f351379144d384e33b0cedbd4641a35a250ca73ec14789185023a025",
+                "row_sha256": "822a17159e6e12159ea69ff07ae06799821cc5936dfafaef7eac37d5d391d9d7"
+            },
+            "storage-dirty-keys-stop-k1-r0": {
+                "request_sha256": "651e27507ef347d491d5ecf67e8527773e0562f4d41a9205ee65049126a2d31c",
+                "row_sha256": "d047127e57c5f1fb3f25c8f69a59db9e643955d4f0bf579b3f87eb9e045190d3"
+            },
+            "storage-dirty-keys-stop-k1-r33955": {
+                "request_sha256": "8544d9542c87c2fb0ddbe307f9ca8373d8aafaab6951fab56a4a1003aeac9cda",
+                "row_sha256": "09b4a3cc28bef4bd68d81a15d1afd674a1eb05d24eecf90c68ed412617eb8d6f"
+            },
+            "storage-dirty-keys-stop-k1024-r0": {
+                "request_sha256": "bb75eb4d586b82c89ba157d4608e314fe6a7e2c3e66856c078177400c417949c",
+                "row_sha256": "1f29f9a10f4cbe80002493993c29306f2bfc1a75947d3924c2ee41d293c1be4c"
+            },
+            "storage-dirty-keys-stop-k1024-r12": {
+                "request_sha256": "db07ca79e7bbdb09c082e91440c81ace5cb005922fe165a1a952a6c5f684a6ee",
+                "row_sha256": "4ae2fb43d18498c7b7ab1e158f628696bfd748acb45e117d160f4d6d68210290"
+            },
+            "storage-dirty-keys-stop-k16-r0": {
+                "request_sha256": "14d2bcdc7a26691cd8278bc366064eb1e69d7ba597829753e9206c6de4eb2fc3",
+                "row_sha256": "2885bb6d09c71180300be3a27858e822d0006eb8120fad05a6434fcd9e91c87f"
+            },
+            "storage-dirty-keys-stop-k16-r2108": {
+                "request_sha256": "1618e14e2cbec2b7dbadad9e907b924dd798dbd7e3be068ade71e99e2dedc0d7",
+                "row_sha256": "68d9945dee4f11bb52d34ec20eb4e1a726b548761cb1ae4d0cf81b21d74deb12"
+            },
+            "storage-dirty-keys-stop-k256-r0": {
+                "request_sha256": "a74899e324cc0f882ef30895785a5d4e1900309bd81bc5803acbdd15a65ee77f",
+                "row_sha256": "8d0faa382a9543622af7dbb0ea1622833edd41ac1cf1b6185f466861a2acd34b"
+            },
+            "storage-dirty-keys-stop-k256-r117": {
+                "request_sha256": "76c10aa9fb55bd41c7c8430108aff2e4879e75c8adf6b62820b892cdebe5baa6",
+                "row_sha256": "2b931510a713911724f89d3cc6dd3375dd681b5a9b4e77cd0dc2af72fec11efd"
+            }
+        }
+        for args in GRID:
+            row = m.make_case(*args); expected = frozen[row['sample_id']]
+            self.assertEqual(m.digest(m.encoded(row)), expected['row_sha256'])
+            self.assertEqual(m.digest(m.encoded(row['request'])), expected['request_sha256'])
+
     def load(self):
         path = CASES / 'storage_dirty_keys.py'
         self.assertTrue(path.is_file(), 'many-key dirty-storage producer is missing')
@@ -198,14 +285,14 @@ class StorageDirtyKeysTests(unittest.TestCase):
 
     def test_strict_inputs(self):
         m = self.load()
-        for args in ((None,), (True,), ('STOP',), ('stop', True), ('stop', 1.0), ('stop', 2), ('stop', 1, True), ('stop', 1, 'small')):
+        for args in ((None,), (True,), ('STOP',), ('stop', True), ('stop', 1.0), ('stop', 1025), ('stop', 1, True), ('stop', 1, 'small')):
             with self.subTest(args=args), self.assertRaises(ValueError): m.make_case(*args)
         for function in (m.gas_accounting, m.fits, m._runtime):
             for r in (True, -1, 1.0, 65537, None):
                 with self.assertRaises(ValueError): function('stop', 1, r)
-            for mode, k in ((None, 1), ('STOP', 1), ('stop', True), ('stop', 2)):
+            for mode, k in ((None, 1), ('STOP', 1), ('stop', True), ('stop', 1025)):
                 with self.assertRaises(ValueError): function(mode, k, 0)
-        for mode, k in ((None, 1), ('revert', True), ('stop', 2)):
+        for mode, k in ((None, 1), ('revert', True), ('stop', 1025)):
             with self.assertRaises(ValueError): m.full_rounds(mode, k)
         self.assertEqual(m.make_case(), m.make_case('stop', 1, 'full'))
         self.assertIsInstance(m.fits('stop', 1, 65536), bool)

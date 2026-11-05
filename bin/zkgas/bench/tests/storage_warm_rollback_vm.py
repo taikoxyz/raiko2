@@ -8,11 +8,52 @@ from collections import Counter
 
 from test_storage_mutation import decode, execute
 
-WRAPPER_STEP_CAP = 20_000
+WRAPPER_STEP_CAP = 65_536
 
 
-def run_users(row, *, limit=4):
-    program=row['request']['program']; contracts={c['address']:c for c in program['prestate_contracts']}
+def run_users(row, *, limit=4, enforce_bounds=True):
+    program=row['request']['program']; p=row['parameters']; tx=program['transactions']
+    users=p.get('user_count',4); keys=p['keys_per_account']; depth=p['depth']; warm=p['prewarm']; rounds=p['rounds_per_key']; mode=p['exit_mode']
+    assert type(users) is int and 1<=users<=4, 'user_count metadata domain'
+    assert type(keys) is int and 1<=keys<=1024 and type(depth) is int and depth in (2,4), 'key/depth metadata domain'
+    assert type(warm) is bool and type(rounds) is int and 0<=rounds<=65536 and mode in ('leaf','ancestor'), 'workload metadata domain'
+    assert type(limit) is int and 1<=limit<=4, 'explicit partial execution limit'
+    assert type(enforce_bounds) is bool, 'bounds-check mode'
+    assert type(tx['count_per_block']) is int and tx['count_per_block']==users, 'transaction count metadata'
+    recipients=tx['recipients']; assert type(recipients) is list and len(recipients)==len(set(recipients))==users, 'recipient count/identity'
+    assert set(row['request'])=={'schema_version','expected_user_success','program'} and row['request']['schema_version']==1 and row['request']['expected_user_success'] is True, 'request domain'
+    assert set(program)=={'code_hex','input_hex','block_count','expected_route_counts','transactions','prestate_contracts'}, 'program domain'
+    assert tx==dict(kind='call',count_per_block=users,gas_limit=p['transaction_gas_limit'],recipients=recipients), 'transaction descriptor schedule'
+    assert program['code_hex']=='0x00' and program['input_hex']=='0x' and program['block_count']==1, 'base runtime/input/block domain'
+    assert type(tx['gas_limit']) is int and 0<tx['gas_limit']<=15000000 and tx['gas_limit']<=16777216, 'transaction gas caps'
+    expected=dict(aggregate_state_size=users*(keys+1),user_transactions_per_block=users,all_user_transactions=users,
+        all_transactions_including_anchor=users+1,account_count=users*depth+1,total_account_count=users*depth+1,
+        storage_owner_count=users,wrapper_account_count=users*depth,expected_distinct_account_slot_pairs=users*(keys+1),
+        expected_distinct_write_pairs=users*keys,expected_seed_storage_writes=users*keys,expected_cleanup_storage_writes=users*keys,
+        expected_initial_storage_entry_count=users*(keys+1),expected_final_storage_entry_count=users*(keys+1),
+        expected_storage_reads=users*(2+6*keys+(1+int(warm))*(keys+1)),expected_storage_writes=users*keys*(2+2*rounds),
+        expected_dirty_storage_writes=2*users*keys*rounds,expected_main_storage_writes=users*keys*(2+2*rounds),
+        expected_storage_writes_per_account=keys*(2+2*rounds),expected_call_count=users*depth,
+        expected_wrapper_stops=users*(depth-int(mode=='ancestor')),expected_leaf_stops=users*int(mode=='ancestor'),
+        expected_leaf_reverts=users*int(mode=='leaf'),expected_ancestor_reverts=users*int(mode=='ancestor'),
+        expected_user_refund_counter_before_terminal=0,expected_user_refund_counter=0,expected_user_refund_applied=0)
+    for name,value in expected.items(): assert type(p[name]) is int and p[name]==value, 'count metadata: '+name
+    assert p['recipient_schedule']==p['storage_owner_addresses']==recipients, 'owner/recipient schedule metadata'
+    assert p['expected_user_receipt_statuses']==[True]*users, 'receipt status metadata'
+    assert p['start_phase_schedule']==p['final_phase_schedule']==[65537]*users, 'phase schedule metadata'
+    assert p['expected_all_frame_terminal_counts']==dict(STOP=users*depth,REVERT=users), 'terminal counts metadata'
+    contracts={c['address']:c for c in program['prestate_contracts']}
+    assert len(contracts)==users*depth+1, 'only selected reachable configured accounts'
+    assert set(contracts)=={a['address'] for a in p['account_roles']}, 'account roles metadata'
+    assert p['wrapper_levels'][0]==recipients and len(p['wrapper_levels'])==depth and all(len(level)==users for level in p['wrapper_levels']), 'wrapper levels metadata'
+    assert set(contracts)==set(sum(p['wrapper_levels'],[]))|set(p['leaf_code_addresses']), 'configured graph metadata'
+    assert len(p['leaf_code_addresses'])==1 and p['leaf_code_addresses']==p['leaf_owners'], 'shared leaf metadata'
+    state={0:65537}|dict.fromkeys(range(65537,65537+keys),1)
+    for owner,contract in contracts.items():
+        assert set(contract)=={'address','code_hex','initial_storage'}, 'contract descriptor domain'
+        actual={int(k,16):int(v,16) for k,v in contract['initial_storage'].items()}
+        assert actual==(state if owner in recipients else {}), 'selected-owner initial storage'
+    assert p['storage_entry_count_by_account']=={a:(keys+1 if a in recipients else 0) for a in contracts}, 'storage counts by owner metadata'
     assert len(contracts)==len(program['prestate_contracts']), 'duplicate account'
     states={owner:{int(k,16):int(v,16) for k,v in c['initial_storage'].items()} for owner,c in contracts.items()}
     records=[]
@@ -119,4 +160,27 @@ def run_users(row, *, limit=4):
         result['applied']=min(result['refund'],result['gas']//5); result['charged']=result['gas']-result['applied']
         records.append(dict(recipient=recipient,result=result,frames=frames,state=states[recipient].copy(),
             warm_accounts=warm_accounts.copy(),warm_slots=warm_slots.copy()))
+    assert records, 'at least one explicit selected user must execute'
+    gross=records[0]['result']['gas']; charged=records[0]['result']['charged']
+    for record in records:
+        assert record['result']['gas']==gross and record['result']['charged']==charged, 'uniform user gas'
+        assert record['result']['refund']==record['result']['applied']==0, 'rollback removes effective refund'
+        frames=record['frames']; assert len(frames)==depth+1, 'concrete frame depth'
+        required=frames[-1]['result']['gas']-21000+2301; requirements=[required]
+        for frame_record in reversed(frames[:-1]):
+            required=frame_record['pre_gas']+max((64*required+62)//63,required+frame_record['post_gas']); requirements.append(required)
+        assert p['gas_accounting_per_user']['minimum_frame_envelopes_leaf_to_root']==requirements, 'executed EIP150 envelope metadata'
+        assert p['gas_accounting_per_user']['required_transaction_envelope']==21000+required, 'required envelope metadata'
+    total=167355+users*charged; prefixes=[31000000-167355-i*charged for i in range(users)]
+    for name,value in dict(expected_user_gross_gas=gross,expected_user_charged_gas=charged,expected_block_charged_gas=total).items():
+        assert type(p[name]) is int and p[name]==value, 'gas metadata: '+name
+    assert p['gas_accounting_per_user']['gross_gas']==p['gas_accounting_per_user']['charged_gas']==gross, 'per-user gas metadata'
+    assert p['header_prefix_remaining_gas']==prefixes, 'header prefix metadata'
+    if enforce_bounds:
+        assert all(value>=tx['gas_limit'] for value in prefixes) and total<=30000000, 'block/header prefix budgets'
+    if len(records)==users:
+        counts=Counter()
+        for record in records: counts.update(record['result']['counts'])
+        assert counts==+Counter(program['expected_route_counts']), 'concrete aggregate route counts'
+        assert {frame_record['owner'] for record in records for frame_record in record['frames']}==set(contracts), 'all configured code accounts reached'
     return records,states

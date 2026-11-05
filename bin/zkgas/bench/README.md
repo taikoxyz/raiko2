@@ -3285,3 +3285,55 @@ gross gas is21359+2416K+6775R; charged gas is the larger of gross and the floor.
 There are no SSTOREs or refunds. Existing15M fixture envelope, EIP-7825,31M header
 prefix and30M charged-block checks still apply. Rollback/refill and a30M full-block
 packing experiment are separate follow-ups.
+
+### Explicit rollback-capacity keys and user counts
+
+`storage_dirty_keys` and `storage_warm_rollback` accept explicit strict integer
+body keys1..1024; their historical default export grids remain1/16/256/1024 and
+16/256. The warm family adds keyword-only `user_count=4` (strict1..4) to
+`make_case`, `fits`, `full_rounds` and `prepare`. Dirty keeps its fixed four-user
+API. Existing default warm32 and dirty16 complete rows and requests retain their
+original bytes. Nondefault warm F adds `parameters.user_count` and `-uF-` to IDs.
+
+Only selected owners/chains are provisioned: F top storage owners, F wrappers at
+each delegated level and one shared leaf code account. Depth2/F2 therefore has
+five reachable configured contracts and two signed user CALLs. Their phase slot0
+plus K body slots means logical map sizes K+1; no discarded F4 chain/code/storage
+or aggregate statistic is retained. Full-R selection and signed full envelope
+are recomputed for F, including every ordered header prefix. Per-user EIP-150,
+12M child request,2301 leaf reserve,15M fixture and EIP-7825 limits are unchanged.
+
+For a finite R0 matrix, use the existing factory directly:
+
+```python
+from storage_warm_rollback import make_case
+
+rows = [make_case("leaf", keys, 2, prewarm, "zero", user_count=2)
+        for keys in (447, 448, 895, 896) for prewarm in (False, True)]
+```
+
+R0 executes real seed1→5, cleanup5→1, lower REVERT and parent postchecks; it is
+not empty execution. Top transactions succeed, effective/applied refunds are0,
+and original values are restored. Caller prewarm survives the lower checkpoint;
+without it, child-added warmth is rolled back before the cold parent postcheck.
+Loaded physical journal entries are a separate observation: this family does not
+claim that rollback clears/rebuilds the physical table or covers clear/refill.
+
+`prepare(..., key_counts=(447, 448, 895, 896), user_count=2)` selects1..4 unique
+explicit K values. CLI equivalents are `--user-count 2 --key-counts 447 448 895
+896`. This exports the existing exit/depth/warmth/zero/full grid for that selection
+(up to64 requests); it does not run or count any measurement. Select the eight
+leaf/depth2/R0 requests above for the fixed pilot. Invalid K/F, duplicates,
+packing failure, lack of a positive full-R endpoint, or existing output paths
+fail before new files are written. Default32 grid, IDs and export order stay
+unchanged. The independent byte/frame oracle validates F and inherited totals,
+reachable contracts, concrete gas/refunds/routes and EIP-150 metadata; its finite
+wrapper bound is65,536 instructions. A partial `limit=1` check is not an all-F run.
+The oracle defaults to full packing checks; its explicit `enforce_bounds=False`
+mode is reserved for out-of-policy R+1 byte-flow tests, never qualification.
+
+F2 keeps all eight R0 controls within30M block gas: cold large-K cases use about
+15.1M rather than discarding them because the old F4 campaign packing exceeded
+30M. This is not a full30M packing certificate. Sequential raw slots require no
+hash search; actual own-input map/mask and late reaccess observations still need
+qualification. No model, tariff, guest, SDK or account-journal correction changes.

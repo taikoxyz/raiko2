@@ -31,8 +31,7 @@ SOURCES = ('storage_fanout.py', 'storage_mutation.py', 'initcode_preparation.py'
 def _validate(mode, keys):
     if type(mode) is not str or mode not in MODES:
         raise ValueError('mode must be stop or revert')
-    if type(keys) is not int or keys not in KEY_COUNTS:
-        raise ValueError('keys must be 1, 16, 256 or 1024')
+    original.integer(keys, 1, 1024, 'keys')
 
 
 def _slot_shift(value):

@@ -102,7 +102,12 @@ impl Arguments {
                 || (mode == "search"
                     && matches!(
                         flag.as_str(),
-                        "--query" | "--bucket-mask" | "--max-trials" | "--max-seconds" | "--output"
+                        "--query"
+                            | "--bucket-mask"
+                            | "--max-trials"
+                            | "--max-seconds"
+                            | "--output"
+                            | "--domain"
                     ));
             if !allowed {
                 return Err("unknown flag".into());
@@ -142,6 +147,8 @@ struct Search {
     mask: u64,
     max_trials: u64,
     max_seconds: u64,
+    /// Candidate limb/bit placement; the fixed query remains the final catalog key.
+    domain: &'static str,
 }
 
 struct Outcome {
@@ -161,6 +168,11 @@ impl Search {
         if !(mask + 1).is_power_of_two() {
             return Err("bucket mask must be a positive power-of-two-minus-one".into());
         }
+        let domain = match args.fields.get("--domain").map(String::as_str) {
+            None | Some("high32") => "high32",
+            Some("low32") => "low32",
+            Some(_) => return Err("domain must be high32 or low32".into()),
+        };
         Ok(Self {
             seed,
             shared,
@@ -168,6 +180,7 @@ impl Search {
             mask,
             max_trials: bounded_decimal(args.get("--max-trials")?, 268435456)?,
             max_seconds: bounded_decimal(args.get("--max-seconds")?, 120)?,
+            domain,
         })
     }
 
@@ -187,12 +200,21 @@ impl Search {
                 break;
             }
             // The permutation is bijective on u32; the bounded counter cannot wrap.
-            let high = (u64::from(permutation(trials as u32)) << 32) | (self.query[3] & 0xffffffff);
+            let varying = u64::from(permutation(trials as u32));
+            let word = if self.domain == "high32" {
+                (varying << 32) | (self.query[3] & 0xffffffff)
+            } else {
+                (self.query[3] & 0xffffffff00000000) | varying
+            };
+            let candidate = if self.domain == "high32" {
+                [0, 0, 0, word]
+            } else {
+                [word, 0, 0, 0]
+            };
             trials += 1;
-            if high == self.query[3] || high.to_be_bytes().contains(&0) {
+            if candidate == self.query || word.to_be_bytes().contains(&0) {
                 continue;
             }
-            let candidate = [0, 0, 0, high];
             let h = hash(candidate, self.seed, self.shared);
             if h & self.mask == target & self.mask && h >> 57 == target >> 57 {
                 keys.push(candidate);
@@ -217,7 +239,7 @@ impl Search {
     fn metadata(&self, result: &Outcome) -> String {
         let target = hash(self.query, self.seed, self.shared);
         format!(
-            "{{\"schema_version\":1,\"status\":\"{}\",\"trials\":{},\"found\":{},\"retained_candidates\":{},\"elapsed_ns\":{},\"seed\":\"0x{:016x}\",\"shared\":\"0x{:016x}\",\"query\":\"{}\",\"query_hash\":\"0x{:016x}\",\"bucket_mask\":{},\"target_bucket\":{},\"target_tag\":{},\"max_trials\":{},\"max_seconds\":{},\"deadline_check_interval\":{}}}\n",
+            "{{\"schema_version\":1,\"status\":\"{}\",\"trials\":{},\"found\":{},\"retained_candidates\":{},\"elapsed_ns\":{},\"seed\":\"0x{:016x}\",\"shared\":\"0x{:016x}\",\"query\":\"{}\",\"query_hash\":\"0x{:016x}\",\"bucket_mask\":{},\"target_bucket\":{},\"target_tag\":{},\"max_trials\":{},\"max_seconds\":{},\"deadline_check_interval\":{},\"candidate_domain\":\"{}\"}}\n",
             result.status,
             result.trials,
             result.keys.len(),
@@ -232,7 +254,8 @@ impl Search {
             target >> 57,
             self.max_trials,
             self.max_seconds,
-            DEADLINE_INTERVAL
+            DEADLINE_INTERVAL,
+            self.domain
         )
     }
 }
@@ -399,6 +422,7 @@ mod tests {
             mask: 1,
             max_trials: 1000,
             max_seconds: 1,
+            domain: "high32",
         };
         let result = search.run_with_clock(Instant::now() - Duration::from_secs(2));
         assert_eq!(

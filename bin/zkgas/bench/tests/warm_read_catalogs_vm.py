@@ -89,7 +89,7 @@ def _keys(data):
     assert type(data) is bytes and len(data) == 16384, 'calldata length'
     keys = [int.from_bytes(data[i:i + 32], 'big') for i in range(0, 16384, 32)]
     assert len(set(keys)) == 512 and keys[-1] == QUERY, 'unique catalog/query last'
-    assert all(k & ((1 << 192) - 1) == 0 and all(k.to_bytes(32, 'big')[:8]) for k in keys), 'key domain'
+    assert all(sum(byte != 0 for byte in k.to_bytes(32, 'big')) == 8 for k in keys), 'fixed calldata byte cost'
     return keys
 
 

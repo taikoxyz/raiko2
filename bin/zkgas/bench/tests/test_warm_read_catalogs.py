@@ -43,6 +43,19 @@ def qualify(test, row):
 
 
 class WarmReadCatalogTests(unittest.TestCase):
+    def test_custom_short_comparison_prefix_preserves_runtime_and_evm_work(self):
+        m = producer()
+        original_keys = m._catalog('mixed')
+        keys = [f'0x{(int(k, 16) >> 192):064x}' for k in original_keys[:-1]] + [f'0x{QUERY:064x}']
+        row = m.make_probe_case(keys, 2)
+        old = m.make_probe_case(original_keys, 2)
+        self.assertEqual(row['request']['program']['code_hex'], old['request']['program']['code_hex'])
+        self.assertEqual(row['parameters']['gas_accounting_per_user'], old['parameters']['gas_accounting_per_user'])
+        from warm_read_catalogs_vm import run_users
+        executed = run_users(row)[0]
+        self.assertEqual(executed['seed_keys'], keys)
+        self.assertEqual((executed['cold_reads'], executed['warm_reads']), (512, 129))
+
     def test_default_rows_and_custom_pair_preserve_frozen_bytes(self):
         # Complete canonical row hashes include requests, gas, runtime and envelope.
         # Frozen before adding the probe option; generator/helper provenance is separate.

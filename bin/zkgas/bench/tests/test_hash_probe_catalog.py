@@ -63,6 +63,23 @@ class HashProbeCatalogTests(unittest.TestCase):
                 changed = args.copy(); changed[changed.index(flag) + 1] = value
                 result = self.cli(*changed); self.assertEqual(result.returncode, 1, (flag, value)); self.assertFalse(out.exists()); self.assertEqual(result.stdout, b'')
 
+    def test_low32_domain_varies_comparison_prefix_and_preserves_byte_cost(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / 'short-prefix.json'
+            result = self.cli(*self.search_args(out), '--domain', 'low32')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            meta = json.loads(result.stdout)
+            self.assertEqual(meta['candidate_domain'], 'low32')
+            keys = json.loads(out.read_bytes())['keys']
+            self.assertEqual((len(keys), len(set(keys)), keys[-1]), (512, 512, QUERY))
+            self.assertEqual(len({int(k, 16) & 0xffffffff for k in keys}), 512)
+            self.assertTrue(all(sum(b != 0 for b in bytes.fromhex(k[2:])) == 8 for k in keys))
+            self.assertTrue(all(independent_hash(k, 0, 0) == 0 for k in keys))
+            invalid = Path(tmp) / 'invalid.json'
+            bad = self.cli(*self.search_args(invalid), '--domain', 'other')
+            self.assertEqual(bad.returncode, 1)
+            self.assertFalse(invalid.exists())
+
     def test_synthetic_search_catalog_permutation_and_exhaustion(self):
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / 'catalog.json'

@@ -3063,8 +3063,11 @@ Signatures and input-dependent earlier allocation can differ across catalogs.
 
 Optional `--catalog-file <json-file>` exports only two custom development probes.
 The bounded128KiB JSON must contain exactly `schema_version: 1` and512 canonical
-lowercase U256 strings in `keys`, satisfying the same constraints and query-last
-rule. Custom IDs use the full canonical calldata SHA256; JSON, source and calldata
+lowercase U256 strings in `keys`, with512 unique values and the same fixed query
+last. Each custom key must contain exactly eight nonzero bytes; their positions
+may vary. This preserves calldata gas while permitting short comparison prefixes.
+Default ordered/mixed catalogs retain their original high64 placement and bytes.
+Custom IDs use the full canonical calldata SHA256; JSON, source and calldata
 hashes are retained without local filenames or paths. Keep data-only catalogs in
 Atlas. No model fitting, pricing, seed search or collision claim is performed.
 
@@ -3095,8 +3098,14 @@ For a bounded search, supply explicit hypothesized `--seed` and `--shared` plus
 `--query <canonical-U256> --bucket-mask <mask> --max-trials <N> --max-seconds <N>
 --output <fresh-file>` after `search`. The query requires zero low192 bits and
 eight nonzero high64 bytes. A deterministic U32 permutation varies only its high32
-bits, retains511 unique keys matching both `H & mask` and `H >> 57`, and appends
-the query last. The warm-read constructor requires its documented fixed query.
+bits by default (`--domain high32`). With `--domain low32`, candidate words are
+placed in the least-significant limb and their low32 bits vary; the query keeps
+its original high64 placement. Both domains retain exactly eight nonzero bytes
+per key,511 unique candidates matching both `H & mask` and `H >> 57`, and the
+fixed query last. The low32 domain probes short key-comparison prefixes without
+changing runtime or calldata gas. Matching this hypothesized profile does not
+establish the actual guest seed or workload; verify realization during replay.
+The warm-read constructor requires its documented fixed query.
 Masks are positive powers of two minus one through65535; bounds are1..268435456
 trials and1..120 seconds. A monotonic deadline is checked every1024 trials and at
 completion. Callers must also use the existing external process/resource guard.

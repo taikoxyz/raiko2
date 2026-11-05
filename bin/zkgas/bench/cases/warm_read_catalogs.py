@@ -39,8 +39,8 @@ def _validate_keys(keys):
         if type(key) is not str or re.fullmatch(r'0x[0-9a-f]{64}', key) is None:
             raise ValueError('keys must be canonical lowercase U256 hex')
         raw = bytes.fromhex(key[2:])
-        if not all(raw[:8]) or raw[8:] != bytes(24):
-            raise ValueError('keys require nonzero high64 bytes and zero low192 bits')
+        if sum(byte != 0 for byte in raw) != 8:
+            raise ValueError('keys require exactly eight nonzero bytes to preserve calldata gas')
     if len(set(keys)) != KEY_COUNT or int(keys[-1], 16) != QUERY:
         raise ValueError('keys must be unique with fixed query last')
     return tuple(keys)
@@ -139,13 +139,16 @@ def _make_case(keys, catalog_id, level, *, custom, repetitions=None):
     routes = dict.fromkeys(program['expected_route_counts'], 0); routes.update(counts)
     program.update(code_hex='0x' + code.hex(), input_hex='0x' + data.hex(), expected_route_counts=routes)
     prefix = f'warm-read-{catalog_id}'; block_gas = ANCHOR_GAS + gas['charged_gas']
+    key_rule = ({'high_tail_rule': 'low192 bits zero; all eight high64 bytes nonzero;512 unique; fixed query last'}
+        if all(int(key, 16) & ((1 << 192) - 1) == 0 for key in keys)
+        else {'raw_key_shape_rule': 'exactly eight nonzero bytes per U256;512 unique; fixed query last'})
     return dict(sample_id=f'{prefix}-n{64 * r}', baseline_sample_id=f'{prefix}-n0', family='warm-read-catalogs',
         corpus_id=CORPUS + ('-custom-' + data_sha if custom else ''), role='control' if r == 0 else 'candidate',
         data_role='development_probe' if custom else 'unfitted_warm_read_catalog_validation', holdout_only=not custom, actuals_used_for_fitting=False,
         completion_gate='Independent byte/calldata order, cold/warm, zero-state, stack, gas, signature/account/root/witness and original quote gates before actuals.',
         scope='Finite whole-input single-user pilot; seeds/layout equality unmeasured, no collision, per-lookup, global bound or pricing claim.',
         parameters=dict(catalog_id=catalog_id, workload_level=level, ordered_keys=list(keys), raw_key_sha256=data_sha, calldata_sha256=data_sha,
-            query_key=f'0x{QUERY:064x}', high_tail_rule='low192 bits zero; all eight high64 bytes nonzero;512 unique; fixed query last',
+            query_key=f'0x{QUERY:064x}', **key_rule,
             catalog_source='external-data' if custom else 'deterministic-recipe', repetitions=r, full_repetitions=maximum, unroll_factor=64,
             bulk_operations=64 * r, seed_reads=512, target_query_reads=64 * r + 1, target_operations_per_user=64 * r + 1,
             warmup_target_operations_per_user=1, body_target_operations_per_user=64 * r, expected_persistent_storage_reads=513 + 64 * r,

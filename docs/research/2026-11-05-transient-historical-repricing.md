@@ -130,11 +130,17 @@ It ran no producer gate, native, quote, SP1 or build command. Retained evidence 
 | Independent `REPORT.md` | `3c1cc6c641b6784fc3176e1b3fce4aa381094d364390ee4fdbe3da9c569dfdc0` |
 | Independent `readback.json` | `65a6115e15274093c06f306b34d710604d941b581a1147473703ebcf259f4999` |
 
-Canonical inputs, original raw/native reports, both quote snapshots and their per-file
-hashes remain retained locally. The Atlas supplement for this repricing has **not been
-published**. The hashes above identify evidence, not public download locations; without the
-retained inputs they do not provide turnkey public reproduction. Tool source remains in
-Raiko, immutable data belongs in Atlas, and no private controller paths are exported here.
+Canonical inputs, original raw/native reports and both quote snapshots are distributed in
+the [Atlas fixture](https://github.com/taikoxyz/raiko2-atlas/tree/a37008dfcb56eada2e100b15af30961e1adf79f5/fixtures/benchmarks/unzen-transient-reprice-v1)
+and its [immutable release](https://github.com/taikoxyz/raiko2-atlas/releases/tag/fixture-unzen-transient-reprice-v1).
+The archive is517,750 bytes, SHA256
+`8f14d520eef2e2ef435016bfcb7c7e3a32c73219365fa842c088c4cff3e51094`:
+71 regular members preserve70 original files plus internal checksums. Real remote
+download, the existing CI integrity assertions and the literal README unpack workflow
+passed. These checks establish retained-data integrity, not candidate software correctness
+or current production parity. The local audit identities above remain separate from the
+portable fixture mapping. Tool and executable sources remain outside Atlas; no private
+controller paths or runner binaries are exported.
 
 The original eight observations remain one opened synthetic cohort, not IID/unopened holdouts
 or a new combined coverage denominator. No model/guest/SDK/pin change, new price fit, current

@@ -119,9 +119,10 @@ CPU-only and unchanged.
   - the start fails, or a request fails at the transport level (server exited, socket closed);
   - the server reports errors on three requests in a row;
   - a watchdog (every 5 s) finds the server process gone between proofs;
-  - a setup or proof runs longer than `prover.sp1.cuda_timeout_secs` (default 7200). The
-    watchdog then kills the hung server so the blocked request returns. Set this above the
-    longest expected proof.
+  - a setup or proof runs longer than `prover.sp1.cuda_timeout_secs` (default 7200) at the
+    server. GPU requests on a device take turns, and time spent waiting for a turn does not
+    count. The watchdog then kills the hung server so the blocked request returns. Set this
+    above the longest expected single proof.
 
   A replacement is installed only after it has set up every program the device served before,
   which warms the keys and proves it is not reusing the dead connection; a program whose setup
@@ -241,14 +242,15 @@ In `cuda` builds, the `/ready` `accelerator` check runs `nvidia-smi` and fails w
 
 - non-mock `risc0/local` is enabled but no device is left after applying `CUDA_VISIBLE_DEVICES`
   (CUDA rules: indices or `GPU-` UUIDs, stopping at the first invalid entry);
-- SP1 `prover = "local"`, `mode = "prove"` is enabled and host device `cuda_device_id` does not
-  exist (the SP1 server sets its own `CUDA_VISIBLE_DEVICES`, so the id indexes host devices);
+- the SP1 local runner is enabled (`prover = "local"` or `"mock"`, any `mode`, since requests may
+  override both) and host device `cuda_device_id` does not exist (the SP1 server sets its own
+  `CUDA_VISIBLE_DEVICES`, so the id indexes host devices);
 - RISC0 and SP1 resolve to the same host GPU (CUDA's default device order matches `nvidia-smi`'s
   on hosts with identical GPUs, such as 2× L4);
 - an `sp1-gpu-server` that could not start, died, hung past `cuda_timeout_secs`, or kept failing
   has not been replaced yet.
 
-Execute-only SP1 and mock RISC0 need no GPU. The `nvidia-smi` result is cached for 5 seconds. This
+Mock RISC0 and network SP1 need no GPU. The `nvidia-smi` result is cached for 5 seconds. This
 covers wrong device placement and lost GPUs; it does not track GPU utilization, memory, or ECC
 errors, and a hung server is reported only once its request passes `cuda_timeout_secs`. Keep a
 host-level health probe (for example `nvidia-smi` plus `/ready`) as the VM health signal.

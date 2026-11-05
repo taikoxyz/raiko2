@@ -249,9 +249,10 @@ async fn check_accelerator_health(config: &Config) -> Result<()> {
 /// NVIDIA devices the enabled local GPU provers need. Default when no local GPU proving is enabled.
 ///
 /// In `cuda` builds RISC0 local proving runs in-process on the first device CUDA exposes to raiko2
-/// (after `CUDA_VISIBLE_DEVICES`). SP1 `prover = "local"` with `mode = "prove"` runs
-/// `sp1-gpu-server` with `CUDA_VISIBLE_DEVICES=<sp1.cuda_device_id>` (default 0), which overrides
-/// the parent's setting, so that id indexes the host's devices. Execute-only SP1 stays on the CPU.
+/// (after `CUDA_VISIBLE_DEVICES`). SP1 local proving runs `sp1-gpu-server` with
+/// `CUDA_VISIBLE_DEVICES=<sp1.cuda_device_id>` (default 0), which overrides the parent's setting,
+/// so that id indexes the host's devices. Any enabled SP1 local runner counts, whatever the
+/// configured `prover`/`mode`: request overrides may switch mock to local and execute to prove.
 #[derive(Debug, Default, PartialEq, Eq)]
 #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
 struct GpuRequirements {
@@ -265,13 +266,13 @@ fn gpu_requirements(config: &Config) -> GpuRequirements {
         config.prover.runner(ProofType::Risc0),
         Some(RunnerKind::Local)
     ) && !config.prover.risc0.mock;
-    let sp1 = &config.prover.sp1;
-    let sp1_gpu = config.prover.is_enabled(ProofType::Sp1)
-        && sp1.prover == raiko2_prover::sp1_config::ProverMode::Local
-        && matches!(sp1.mode, Sp1ExecutionMode::Prove);
+    let sp1_gpu = matches!(
+        config.prover.runner(ProofType::Sp1),
+        Some(RunnerKind::Local)
+    );
     GpuRequirements {
         risc0,
-        sp1_device: sp1_gpu.then(|| sp1.cuda_device_id.unwrap_or(0)),
+        sp1_device: sp1_gpu.then(|| config.prover.sp1.cuda_device_id.unwrap_or(0)),
     }
 }
 
@@ -431,9 +432,7 @@ async fn check_local_cuda_devices(config: &Config) -> Result<()> {
     let cuda_visible_devices_env = std::env::var("CUDA_VISIBLE_DEVICES").ok();
     check_gpu_requirements(&requirements, &gpus, cuda_visible_devices_env.as_deref())?;
     // An sp1-gpu-server that failed, hung, or died stays unready until it is replaced.
-    if requirements.sp1_device.is_some()
-        && let Some(message) = describe_cuda_failures(&raiko2_prover::sp1::cuda_device_failures())
-    {
+    if let Some(message) = describe_cuda_failures(&raiko2_prover::sp1::cuda_device_failures()) {
         bail!(message);
     }
     Ok(())
@@ -696,15 +695,39 @@ mod tests {
     }
 
     #[test]
-    fn gpus_not_required_for_mock_risc0_or_execute_only_sp1() {
+    fn gpus_not_required_for_mock_risc0_or_network_sp1() {
         let mut config = Config::default();
-        set_routes(&mut config, "risc0/local,sp1/local");
+        set_routes(&mut config, "risc0/local,sp1/network");
         config.prover.risc0.mock = true;
-        config.prover.sp1.prover = Sp1ProverMode::Local;
-        config.prover.sp1.mode = Sp1ExecutionMode::Execute;
-        config.prover.sp1.cuda_device_id = Some(1);
 
         assert_eq!(gpu_requirements(&config), GpuRequirements::default());
+    }
+
+    #[test]
+    fn sp1_local_runner_needs_a_gpu_even_when_configured_for_execute_or_mock() {
+        // Request overrides may switch a local SP1 runner from execute to prove, or mock to local.
+        for (prover, mode) in [
+            (Sp1ProverMode::Local, Sp1ExecutionMode::Execute),
+            (Sp1ProverMode::Mock, Sp1ExecutionMode::Prove),
+        ] {
+            let mut config = Config::default();
+            set_routes(&mut config, "risc0/local,sp1/local");
+            config.prover.risc0.mock = false;
+            config.prover.sp1.prover = prover;
+            config.prover.sp1.mode = mode;
+
+            assert_eq!(
+                gpu_requirements(&config),
+                GpuRequirements {
+                    risc0: true,
+                    sp1_device: Some(0),
+                },
+                "{prover:?}/{mode:?}"
+            );
+            // Default placement puts both on device 0, which readiness rejects.
+            let requirements = gpu_requirements(&config);
+            assert!(check_gpu_requirements(&requirements, &gpus(2), None).is_err());
+        }
     }
 
     #[test]

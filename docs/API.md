@@ -67,7 +67,8 @@ health endpoint (`/health` for SGX, `/healthz` for SGXGETH), and the liveness of
 In binaries built with the `cuda` feature, `accelerator` also requires `nvidia-smi` to report enough
 NVIDIA devices for local GPU proving: at least one device left after `CUDA_VISIBLE_DEVICES` when
 non-mock `risc0/local` is enabled, and host device `prover.sp1.cuda_device_id` (default 0) when
-`sp1.prover=local` with `sp1.mode=prove` is enabled, and fails when both resolve to the same GPU.
+the SP1 local runner is enabled (`sp1.prover=local` or `mock`, any `sp1.mode`, because request
+overrides may switch to GPU proving), and fails when both resolve to the same GPU.
 It also fails while an SP1 `sp1-gpu-server` that failed to start, died, hung past
 `prover.sp1.cuda_timeout_secs`, or kept failing has not been restarted. Each check is reported as an
 individual field (`reth`, `runtime`, `queue`, `prover`, `accelerator`, `workers`) with an `ok` flag

@@ -66,6 +66,10 @@ pub(super) struct Sp1CudaDevice {
     prover: BlockingCudaProver,
     /// Proving keys keyed by SP1 verifying-key digest.
     keys: Mutex<HashMap<String, CudaProvingKey>>,
+    /// One GPU request at a time. sp1-cuda serializes requests on its connection anyway; taking
+    /// the turn here first lets the watchdog deadline cover only time spent at the server, never
+    /// time spent queued behind other proofs.
+    gpu_turn: Mutex<()>,
     consecutive_server_errors: AtomicU32,
     /// Whether the watchdog has seen this client's server process. A server is only reported as
     /// exited after it was seen, so a process the `/proc` lookup cannot match never causes a
@@ -189,6 +193,7 @@ fn start_device(device_id: u32, timeout: Duration) -> Result<Arc<Sp1CudaDevice>,
         timeout,
         prover,
         keys: Mutex::new(HashMap::new()),
+        gpu_turn: Mutex::new(()),
         consecutive_server_errors: AtomicU32::new(0),
         server_seen: AtomicBool::new(false),
     });
@@ -449,6 +454,7 @@ impl Sp1CudaDevice {
 
         let cuda_pk = self.proving_key(pk)?;
         let proof = {
+            let _turn = lock(&self.gpu_turn);
             let _watched = WatchedRequest::new(self, "prove");
             self.prover.prove(&cuda_pk, stdin).mode(proof_mode).run()
         };
@@ -501,6 +507,7 @@ impl Sp1CudaDevice {
             "Setting up SP1 program on CUDA device"
         );
         let key = {
+            let _turn = lock(&self.gpu_turn);
             let _watched = WatchedRequest::new(self, "setup");
             self.prover.setup(pk.elf().clone())
         }

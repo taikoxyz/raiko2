@@ -146,3 +146,14 @@ identities and source context are recorded in the preceding correction report.
 No pricing coefficient, model, guest or SDK changed for this round. These opened
 development controls are not IID/holdout data, production SDK parity, a proof or a
 universal30M-gas bound. Changed guest/backend programs require new measurements.
+
+The [immutable Atlas fixture](https://github.com/taikoxyz/raiko2-atlas/releases/tag/fixture-unzen-transient-prefix-boundaries-v1)
+retains all18 native/quote inputs, nine actuals, nine explicitly unmeasured cases and
+the unrealized control. Its204 regular archive members include192 byte-identical raw
+originals and ten explicitly identified portable projections. The compressed archive
+is1,474,326 bytes with SHA256
+`8c92a04063ef96db82923d4f129d44bf6d98f2d1e5e1a0fa75c4f34eb114bfdb`.
+Real GitHub downloads passed the existing fixture-integrity assertions and the literal
+README unpack/checksum instructions before publication; a fresh published download
+also matched compressed and decoded checksums. These are retention checks, not new
+measurements or a claim about remote CI completion.

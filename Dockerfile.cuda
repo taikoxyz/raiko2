@@ -8,9 +8,15 @@
 # - CUDA 12.8: `sp1-gpu-server` v6.8.1 links libcudart.so.12 and ships sm_80..sm_120 kernels;
 #   RISC0 3.0 kernels are compiled here for CUDA_ARCHS. The host driver must support CUDA 12.8
 #   (R570 or newer).
-# - CUDA_ARCHS defaults to 89 (Ada, NVIDIA L4). Space-separate several, e.g. "89 90".
-# - SP1_VERSION must equal the `sp1-sdk` crate version: sp1-sdk checks `sp1-gpu-server --version`
-#   and re-downloads the server from GitHub at runtime on a mismatch.
+# - CUDA_ARCHS defaults to 89 (Ada, NVIDIA L4). Space-separate several, e.g. "89 90". Each arch
+#   embeds SASS plus PTX, so newer GPUs can JIT the kernels; the list is recorded as a label.
+# - SP1_VERSION must equal the `sp1-primitives` / `sp1-cuda` versions in Cargo.lock: sp1-cuda
+#   compares `sp1-gpu-server --version` with sp1-primitives' crate version. On a mismatch it runs
+#   `systemctl --user stop` and downloads a server from GitHub, which fails in this image (no
+#   systemd), so SP1 GPU proving would not start. The builder stage checks this.
+# - The SP1 Plonk wrap (default `recursion = "plonk"`) downloads its circuit artifacts from
+#   SP1's S3 bucket into `/root/.sp1/circuits` on first use, as the CPU image does. Do not mount
+#   a volume over `/root/.sp1`: it would hide the pinned server binary.
 
 ARG CUDA_VERSION=12.8.1
 ARG UBUNTU_VERSION=24.04
@@ -50,6 +56,7 @@ FROM toolchain AS builder
 ARG BIN_FEATURES="--features cuda"
 ARG CUDA_ARCHS="89"
 ARG RUSTFLAGS="-C link-arg=-fuse-ld=mold"
+ARG SP1_VERSION=6.8.1
 
 ENV RUSTFLAGS="${RUSTFLAGS}"
 
@@ -61,6 +68,15 @@ COPY config ./config
 COPY config.example.toml ./
 COPY test/guest_inputs ./test/guest_inputs
 
+# The pinned sp1-gpu-server must match the version sp1-cuda checks at runtime.
+RUN set -eu; \
+    for crate in sp1-primitives sp1-cuda; do \
+    locked="$(awk -v name="$crate" '$0 == "name = \"" name "\"" { getline; gsub(/version = |"/, ""); print; exit }' Cargo.lock)"; \
+    if [ "$locked" != "${SP1_VERSION}" ]; then \
+    echo "Cargo.lock has $crate $locked, but SP1_VERSION is ${SP1_VERSION}" >&2; exit 1; \
+    fi; \
+    done
+
 # RISC0's kernel build defaults to `nvcc -arch=native`, which needs a GPU at build time. Setting
 # NVCC_APPEND_FLAGS replaces that with explicit SASS targets, so the image builds on GPU-less CI.
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
@@ -69,7 +85,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     set -eu; \
     NVCC_APPEND_FLAGS=""; \
     for arch in ${CUDA_ARCHS}; do \
-    NVCC_APPEND_FLAGS="${NVCC_APPEND_FLAGS} --generate-code=arch=compute_${arch},code=sm_${arch}"; \
+    NVCC_APPEND_FLAGS="${NVCC_APPEND_FLAGS} --generate-code=arch=compute_${arch},code=[sm_${arch},compute_${arch}]"; \
     done; \
     export NVCC_APPEND_FLAGS; \
     cargo +1.95.0 build --release --locked -p raiko2 ${BIN_FEATURES}; \
@@ -86,8 +102,10 @@ ENV RISC0_HOME=/opt/risc0
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
-    cargo +1.95.0 install --locked rzup --version ${RZUP_VERSION} --root /opt/rzup && \
-    /opt/rzup/bin/rzup install risc0-groth16 ${RISC0_GROTH16_VERSION} && \
+    cargo +1.95.0 install --locked rzup --version ${RZUP_VERSION} --root /opt/rzup
+
+# Outside the registry cache mount, so the long download does not stall the builder stage.
+RUN /opt/rzup/bin/rzup install risc0-groth16 ${RISC0_GROTH16_VERSION} && \
     test -d "${RISC0_HOME}/extensions"
 
 FROM toolchain AS sp1-gpu-server
@@ -107,8 +125,10 @@ RUN set -eu; \
 FROM nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu${UBUNTU_VERSION} AS runtime
 
 ARG SP1_VERSION=6.8.1
+ARG CUDA_ARCHS="89"
 ARG VCS_REF=unknown
 LABEL org.opencontainers.image.revision=$VCS_REF
+LABEL xyz.taiko.raiko2.cuda-archs="${CUDA_ARCHS}"
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -124,7 +144,7 @@ WORKDIR /app
 RUN mkdir -p /etc/raiko2
 
 # sp1-sdk starts `$HOME/.sp1/bin/sp1-gpu-server` per CUDA device; pre-installing the pinned binary
-# keeps the runtime from downloading it. Fail the build if its version would trigger a download.
+# keeps the runtime from fetching one. Fail the build if its version would not be accepted.
 ENV HOME=/root
 COPY --from=sp1-gpu-server /opt/sp1/bin/sp1-gpu-server /root/.sp1/bin/sp1-gpu-server
 RUN test "$(/root/.sp1/bin/sp1-gpu-server --version)" = "${SP1_VERSION}"

@@ -276,7 +276,7 @@ fn gpu_requirements(config: &Config) -> GpuRequirements {
 }
 
 /// One `nvidia-smi --query-gpu=index,uuid --format=csv,noheader` row.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
 struct NvidiaGpu {
     index: u32,
@@ -304,87 +304,133 @@ fn parse_nvidia_gpus(stdout: &str) -> Result<Vec<NvidiaGpu>> {
         .collect()
 }
 
-/// Devices CUDA exposes to this process after `CUDA_VISIBLE_DEVICES`.
+/// Host device indices CUDA exposes to this process after `CUDA_VISIBLE_DEVICES`, in CUDA order.
 ///
-/// Follows CUDA's rules: unset exposes every device; entries are indices or (prefixes of)
-/// `GPU-`/`MIG-` UUIDs; the first invalid or repeated entry hides it and every later entry, so
-/// `-1` or an empty value exposes none.
+/// Follows CUDA's rules: unset exposes every device; entries are indices or unique prefixes of
+/// `GPU-`/`MIG-` UUIDs; the first invalid, ambiguous, or repeated entry hides it and every later
+/// entry, so `-1` or an empty value exposes none.
 #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
-fn cuda_visible_device_count(gpus: &[NvidiaGpu], cuda_visible_devices: Option<&str>) -> usize {
+fn cuda_visible_devices(gpus: &[NvidiaGpu], cuda_visible_devices: Option<&str>) -> Vec<u32> {
     let Some(visible) = cuda_visible_devices else {
-        return gpus.len();
+        return gpus.iter().map(|gpu| gpu.index).collect();
     };
     let mut selected: Vec<u32> = Vec::new();
     for entry in visible.split(',').map(str::trim) {
-        let gpu = if entry.starts_with("GPU-") || entry.starts_with("MIG-") {
-            gpus.iter().find(|gpu| gpu.uuid.starts_with(entry))
+        let index = if entry.starts_with("GPU-") || entry.starts_with("MIG-") {
+            let mut matches = gpus.iter().filter(|gpu| gpu.uuid.starts_with(entry));
+            match (matches.next(), matches.next()) {
+                (Some(gpu), None) => Some(gpu.index),
+                _ => None,
+            }
         } else {
             entry
                 .parse::<u32>()
                 .ok()
-                .and_then(|index| gpus.iter().find(|gpu| gpu.index == index))
+                .filter(|index| gpus.iter().any(|gpu| gpu.index == *index))
         };
-        match gpu {
-            Some(gpu) if !selected.contains(&gpu.index) => selected.push(gpu.index),
+        match index {
+            Some(index) if !selected.contains(&index) => selected.push(index),
             _ => break,
         }
     }
-    selected.len()
+    selected
 }
 
 #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
 fn check_gpu_requirements(
     requirements: &GpuRequirements,
     gpus: &[NvidiaGpu],
-    cuda_visible_devices: Option<&str>,
+    cuda_visible_devices_env: Option<&str>,
 ) -> Result<()> {
-    if requirements.risc0 && cuda_visible_device_count(gpus, cuda_visible_devices) == 0 {
-        bail!(
-            "RISC0 local GPU proving sees no CUDA device ({} on the host, CUDA_VISIBLE_DEVICES={})",
-            gpus.len(),
-            cuda_visible_devices.unwrap_or("<unset>")
-        );
-    }
-    if let Some(device_id) = requirements.sp1_device
-        && !gpus.iter().any(|gpu| gpu.index == device_id)
-    {
-        bail!(
-            "SP1 local GPU proving uses CUDA device {device_id}, but nvidia-smi reports {} device(s)",
-            gpus.len()
-        );
+    // RISC0 runs in-process on the first device CUDA exposes to raiko2.
+    let risc0_device = if requirements.risc0 {
+        let Some(device) = cuda_visible_devices(gpus, cuda_visible_devices_env)
+            .first()
+            .copied()
+        else {
+            bail!(
+                "RISC0 local GPU proving sees no CUDA device ({} on the host, CUDA_VISIBLE_DEVICES={})",
+                gpus.len(),
+                cuda_visible_devices_env.unwrap_or("<unset>")
+            );
+        };
+        Some(device)
+    } else {
+        None
+    };
+    if let Some(device_id) = requirements.sp1_device {
+        if !gpus.iter().any(|gpu| gpu.index == device_id) {
+            bail!(
+                "SP1 local GPU proving uses CUDA device {device_id}, but nvidia-smi reports {} device(s)",
+                gpus.len()
+            );
+        }
+        // sp1-gpu-server's memory pool never returns memory, so sharing a GPU with RISC0 runs
+        // RISC0 out of memory after the first SP1 proof.
+        if risc0_device == Some(device_id) {
+            bail!(
+                "RISC0 and SP1 local GPU proving both use CUDA device {device_id}; set \
+                 prover.sp1.cuda_device_id to another device or move RISC0 with CUDA_VISIBLE_DEVICES"
+            );
+        }
     }
     Ok(())
 }
 
+/// `nvidia-smi` devices, cached briefly so frequent `/ready` probes do not spawn a process each.
+#[cfg(feature = "cuda")]
+async fn nvidia_gpus() -> Result<Vec<NvidiaGpu>> {
+    use std::sync::LazyLock;
+    use std::time::{Duration, Instant};
+
+    const NVIDIA_SMI_TIMEOUT: Duration = Duration::from_secs(10);
+    const CACHE_TTL: Duration = Duration::from_secs(5);
+    type Cached = Option<(Instant, std::result::Result<Vec<NvidiaGpu>, String>)>;
+    static CACHE: LazyLock<tokio::sync::Mutex<Cached>> =
+        LazyLock::new(|| tokio::sync::Mutex::new(None));
+
+    let mut cache = CACHE.lock().await;
+    if let Some((at, result)) = cache.as_ref()
+        && at.elapsed() < CACHE_TTL
+    {
+        return result.clone().map_err(|err| anyhow!(err));
+    }
+    let result = async {
+        let output = tokio::time::timeout(
+            NVIDIA_SMI_TIMEOUT,
+            tokio::process::Command::new("nvidia-smi")
+                .args(["--query-gpu=index,uuid", "--format=csv,noheader"])
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .context("nvidia-smi timed out")?
+        .context("failed to run nvidia-smi")?;
+        if !output.status.success() {
+            bail!(
+                "nvidia-smi exited with {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        parse_nvidia_gpus(&String::from_utf8_lossy(&output.stdout))
+    }
+    .await
+    .map_err(|err| format_error_chain(&err));
+    *cache = Some((Instant::now(), result.clone()));
+    result.map_err(|err| anyhow!(err))
+}
+
 #[cfg(feature = "cuda")]
 async fn check_local_cuda_devices(config: &Config) -> Result<()> {
-    const NVIDIA_SMI_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-
     let requirements = gpu_requirements(config);
     if requirements == GpuRequirements::default() {
         return Ok(());
     }
-    let output = tokio::time::timeout(
-        NVIDIA_SMI_TIMEOUT,
-        tokio::process::Command::new("nvidia-smi")
-            .args(["--query-gpu=index,uuid", "--format=csv,noheader"])
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await
-    .context("nvidia-smi timed out")?
-    .context("failed to run nvidia-smi; is the container started with `--gpus all`?")?;
-    if !output.status.success() {
-        bail!(
-            "nvidia-smi exited with {}: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    let gpus = parse_nvidia_gpus(&String::from_utf8_lossy(&output.stdout))?;
-    let cuda_visible_devices = std::env::var("CUDA_VISIBLE_DEVICES").ok();
-    check_gpu_requirements(&requirements, &gpus, cuda_visible_devices.as_deref())?;
-    // An sp1-gpu-server that failed to start or died stays unready until it is replaced.
+    let gpus = nvidia_gpus().await?;
+    let cuda_visible_devices_env = std::env::var("CUDA_VISIBLE_DEVICES").ok();
+    check_gpu_requirements(&requirements, &gpus, cuda_visible_devices_env.as_deref())?;
+    // An sp1-gpu-server that failed, hung, or died stays unready until it is replaced.
     if requirements.sp1_device.is_some()
         && let Some(message) = describe_cuda_failures(&raiko2_prover::sp1::cuda_device_failures())
     {
@@ -472,7 +518,7 @@ fn sp1_effective_pair_config(
 mod tests {
     use super::{
         GpuRequirements, NvidiaGpu, ReadyCheck, Sp1RemoteVerifyConfig, check_gpu_requirements,
-        check_prover, cuda_visible_device_count, describe_cuda_failures, format_error_chain,
+        check_prover, cuda_visible_devices, describe_cuda_failures, format_error_chain,
         gpu_requirements, parse_nvidia_gpus, readiness_response, sp1_effective_pair_config,
         sp1_network_credentials_required,
     };
@@ -703,19 +749,36 @@ mod tests {
     fn cuda_visible_devices_follow_cuda_rules() {
         let host = gpus(2);
 
-        assert_eq!(cuda_visible_device_count(&host, None), 2);
-        assert_eq!(cuda_visible_device_count(&host, Some("1")), 1);
-        assert_eq!(cuda_visible_device_count(&host, Some("1,0")), 2);
-        assert_eq!(cuda_visible_device_count(&host, Some("GPU-1aaa")), 1);
-        assert_eq!(cuda_visible_device_count(&host, Some("-1")), 0);
-        assert_eq!(cuda_visible_device_count(&host, Some("")), 0);
-        assert_eq!(cuda_visible_device_count(&host, Some("2,0")), 0);
-        assert_eq!(cuda_visible_device_count(&host, Some("0,7,1")), 1);
-        assert_eq!(cuda_visible_device_count(&host, Some("0,0")), 1);
+        assert_eq!(cuda_visible_devices(&host, None), vec![0, 1]);
+        assert_eq!(cuda_visible_devices(&host, Some("1")), vec![1]);
+        assert_eq!(cuda_visible_devices(&host, Some("1,0")), vec![1, 0]);
+        assert_eq!(cuda_visible_devices(&host, Some("GPU-1aaa")), vec![1]);
+        assert!(cuda_visible_devices(&host, Some("-1")).is_empty());
+        assert!(cuda_visible_devices(&host, Some("")).is_empty());
+        assert!(cuda_visible_devices(&host, Some("2,0")).is_empty());
+        assert_eq!(cuda_visible_devices(&host, Some("0,7,1")), vec![0]);
+        assert_eq!(cuda_visible_devices(&host, Some("0,0")), vec![0]);
     }
 
     #[test]
-    fn gpu_check_rejects_hidden_risc0_and_missing_sp1_device() {
+    fn ambiguous_uuid_prefix_hides_the_entry() {
+        let host = vec![
+            NvidiaGpu {
+                index: 0,
+                uuid: "GPU-aaaa1111".to_string(),
+            },
+            NvidiaGpu {
+                index: 1,
+                uuid: "GPU-aaaa2222".to_string(),
+            },
+        ];
+
+        assert!(cuda_visible_devices(&host, Some("GPU-aaaa")).is_empty());
+        assert_eq!(cuda_visible_devices(&host, Some("GPU-aaaa2")), vec![1]);
+    }
+
+    #[test]
+    fn gpu_check_rejects_hidden_missing_or_shared_devices() {
         let both = GpuRequirements {
             risc0: true,
             sp1_device: Some(1),
@@ -730,6 +793,16 @@ mod tests {
             .expect_err("SP1 device 1 needs two devices")
             .to_string();
         assert!(missing.contains("SP1"), "{missing}");
+        // RISC0 moved onto device 1 collides with SP1.
+        let shared = check_gpu_requirements(&both, &gpus(2), Some("1"))
+            .expect_err("RISC0 and SP1 must not share a GPU")
+            .to_string();
+        assert!(shared.contains("both use CUDA device 1"), "{shared}");
+        let default_ids = GpuRequirements {
+            risc0: true,
+            sp1_device: Some(0),
+        };
+        assert!(check_gpu_requirements(&default_ids, &gpus(2), None).is_err());
         // SP1's server ignores the parent's CUDA_VISIBLE_DEVICES, so only RISC0 is affected.
         let sp1_only = GpuRequirements {
             risc0: false,

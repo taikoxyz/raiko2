@@ -1102,6 +1102,9 @@ struct LocalSp1Target {
     /// CUDA device for `prover = "local"`; only read in `cuda` builds.
     #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
     cuda_device_id: Option<u32>,
+    /// Per-request deadline for GPU setup/proofs; only read in `cuda` builds.
+    #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+    cuda_timeout_secs: Option<u64>,
 }
 
 impl LocalSp1Target {
@@ -1109,6 +1112,7 @@ impl LocalSp1Target {
         Self {
             prover_mode: config.prover,
             cuda_device_id: config.cuda_device_id,
+            cuda_timeout_secs: config.cuda_timeout_secs,
         }
     }
 }
@@ -1136,7 +1140,15 @@ impl LocalSp1Client {
     fn for_proving(target: LocalSp1Target) -> RaikoResult<Self> {
         match target.prover_mode {
             #[cfg(feature = "cuda")]
-            ProverMode::Local => cuda::device(target.cuda_device_id.unwrap_or(0)).map(Self::Cuda),
+            ProverMode::Local => cuda::device(
+                target.cuda_device_id.unwrap_or(0),
+                std::time::Duration::from_secs(
+                    target
+                        .cuda_timeout_secs
+                        .unwrap_or(crate::sp1_config::DEFAULT_CUDA_TIMEOUT_SECS),
+                ),
+            )
+            .map(Self::Cuda),
             prover_mode => Ok(Self::new(prover_mode)),
         }
     }

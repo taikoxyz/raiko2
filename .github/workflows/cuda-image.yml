@@ -11,8 +11,13 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
-      - 'crates/prover/**'
-      - 'bin/raiko2/**'
+      # The image compiles every crate raiko2 depends on, and `cuda`-gated code is compiled
+      # nowhere else.
+      - 'crates/**'
+      - '!crates/guests/elf/**'
+      - 'bin/**'
+      - 'xtask/**'
+      - 'config/**'
       - '.github/workflows/cuda-image.yml'
   push:
     branches:
@@ -22,8 +27,13 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
-      - 'crates/prover/**'
-      - 'bin/raiko2/**'
+      # The image compiles every crate raiko2 depends on, and `cuda`-gated code is compiled
+      # nowhere else.
+      - 'crates/**'
+      - '!crates/guests/elf/**'
+      - 'bin/**'
+      - 'xtask/**'
+      - 'config/**'
       - '.github/workflows/cuda-image.yml'
   workflow_dispatch:
 
@@ -32,7 +42,8 @@ permissions:
 
 concurrency:
   group: cuda-image-${{ github.ref }}
-  cancel-in-progress: true
+  # Supersede stale PR builds, but let every main build finish.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build:
@@ -65,6 +76,14 @@ jobs:
       - name: inspect image
         run: |
           docker run --rm --entrypoint /root/.sp1/bin/sp1-gpu-server raiko2-cuda:ci --version
-          # raiko2 itself links libcuda.so.1, which only the host driver provides (`--gpus all`),
-          # so it cannot start on this GPU-less runner; list its shared-library needs instead.
-          docker run --rm --entrypoint sh raiko2-cuda:ci -c 'ls "$RISC0_HOME/extensions" && ldd /usr/local/bin/raiko2'
+          # raiko2 links libcuda.so.1, which only the host driver provides (`--gpus all`), so it
+          # cannot start on this GPU-less runner. Fail on any other unresolved shared library.
+          docker run --rm --entrypoint sh raiko2-cuda:ci -c '
+            set -eu
+            ldd /usr/local/bin/raiko2
+            missing="$(ldd /usr/local/bin/raiko2 | grep "not found" | grep -v "libcuda.so.1" || true)"
+            if [ -n "$missing" ]; then
+              echo "raiko2 has unresolved shared libraries:" >&2
+              echo "$missing" >&2
+              exit 1
+            fi'

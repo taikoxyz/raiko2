@@ -107,19 +107,26 @@ CPU-only and unchanged.
   `CUDA_VISIBLE_DEVICES`. With `snark = true`, the Groth16 wrap also runs on the GPU and needs the
   `risc0-groth16` rzup component under `RISC0_HOME`.
 - SP1 `prover = "local"` proves through `sp1-gpu-server`. `sp1-sdk` starts one server per CUDA
-  device (socket `/tmp/sp1-cuda-<id>.sock`) and keeps it for the life of the raiko2 process. The
+  device (socket `/tmp/sp1-cuda-<id>.sock`) and keeps it running between proofs. The
   first proof of each guest program pays a one-time GPU key setup. `prover.sp1.cuda_device_id`
   selects the device (default `0`). Execute-only runs (`mode = "execute"`) stay on the CPU.
 - `sp1-gpu-server` does not enforce the SP1 cycle limit, so each GPU proof (proposal and
   aggregation) first executes the same input on the CPU with the stage's cycle limit and fails
   before using the GPU if the limit is exceeded.
 - The first SP1 proof on a device starts its server; concurrent first proofs wait for that one
-  start. If the start fails, or `sp1-gpu-server` later exits or its socket breaks, raiko2 retires
-  the client, fails proofs on that device fast, and restarts the server in the background with
-  exponential backoff (2 s up to 1 min), independent of proof traffic. A replacement is installed
-  only after it has set up every program the device served before, which also proves it is not
-  reusing the dead connection. The device is reported unready until then. Errors the live server
-  reports itself (prover or internal errors) keep the client.
+  start. raiko2 retires a device's client, fails proofs on it fast, and restarts the server in the
+  background with exponential backoff (2 s up to 1 min), independent of proof traffic, when:
+  - the start fails, or a request fails at the transport level (server exited, socket closed);
+  - the server reports errors on three requests in a row;
+  - a watchdog (every 5 s) finds the server process gone between proofs;
+  - a setup or proof runs longer than `prover.sp1.cuda_timeout_secs` (default 7200). The
+    watchdog then kills the hung server so the blocked request returns. Set this above the
+    longest expected proof.
+
+  A replacement is installed only after it has set up every program the device served before,
+  which warms the keys and proves it is not reusing the dead connection; a program whose setup
+  fails on its own (for example an ELF/VK mismatch) is dropped from that set instead of blocking
+  the device. The device is reported unready until a replacement is installed.
 - Mock and network modes are unaffected.
 
 ### GPU Image
@@ -127,9 +134,16 @@ CPU-only and unchanged.
 `Dockerfile.cuda` builds the `raiko2-cuda` image: a CUDA 12.8 Ubuntu 24.04 runtime with raiko2
 built with `--features cuda`, the pinned `sp1-gpu-server` binary at `/root/.sp1/bin`, and the
 `risc0-groth16` component at `RISC0_HOME=/opt/risc0`. RISC0 kernels are compiled for
-`CUDA_ARCHS` (default `89`, NVIDIA L4); pass `--build-arg CUDA_ARCHS="89 90"` for other GPUs.
-`SP1_VERSION` must equal the workspace `sp1-sdk` version (an `xtask` unit test enforces it).
-Otherwise `sp1-sdk` tries to download a matching server from GitHub at runtime.
+`CUDA_ARCHS` (default `89`, NVIDIA L4, recorded in the `xyz.taiko.raiko2.cuda-archs` label) as
+SASS plus PTX; pass `--build-arg CUDA_ARCHS="89 90"` for other GPUs. `SP1_VERSION` must equal the
+locked `sp1-primitives`/`sp1-cuda` version, which sp1-cuda compares with
+`sp1-gpu-server --version`; the image build and an `xtask` test check it. On a mismatch sp1-cuda
+would call `systemctl` and download a server from GitHub, which fails in the image, so SP1 GPU
+proving would not start.
+
+The image does not pre-install SP1's Plonk circuit artifacts: like the CPU image, the first Plonk
+wrap (aggregation) downloads them from SP1's S3 bucket into `/root/.sp1/circuits`. Do not mount a
+volume over `/root/.sp1` to keep them; it would hide the pinned `sp1-gpu-server`.
 
 Host requirements: x86_64, an NVIDIA driver that supports CUDA 12.8 (R570 or newer), and
 nvidia-container-toolkit. The image needs no GPU to build; the `cuda-image` workflow builds it
@@ -174,11 +188,16 @@ enabled = true
 prover = "local"
 mode = "prove"
 verify = true
-# RISC0 uses device 0; put SP1 on the second GPU of a two-GPU host.
+# RISC0 uses device 0; put SP1 on the second GPU of a two-GPU host. `/ready` fails if both
+# resolve to the same GPU: sp1-gpu-server never returns pooled memory, so RISC0 would run out.
 cuda_device_id = 1
+# Per-request deadline before a hung sp1-gpu-server is killed and restarted.
+cuda_timeout_secs = 7200
 ```
 
-`RAIKO2_PROVER_ROUTES=risc0/local,sp1/local` selects the same routes over a mounted config.
+`RAIKO2_PROVER_ROUTES=risc0/local,sp1/local` enables exactly these two routes over a mounted
+config; unlike the snippet alone, it also disables `[prover.native]` and the SGX lanes, which are
+enabled by default.
 
 - **Runtime store:** production must use `runtime.store.backend = "gcs"`. The memory store is
   process-local, loses every task on restart, and is rejected outside `development`, `local`, and
@@ -213,7 +232,8 @@ docker run -d --name raiko2 --gpus all --restart unless-stopped \
 ```
 
 Pin the image by digest. `--gpus all` exposes every GPU; device placement is then set by
-`CUDA_VISIBLE_DEVICES` (RISC0) and `prover.sp1.cuda_device_id` (SP1).
+`CUDA_VISIBLE_DEVICES` (RISC0) and `prover.sp1.cuda_device_id` (SP1). The image links
+`libcuda.so.1`, which only the host driver provides, so it does not start at all without `--gpus`.
 
 ### GPU Health
 
@@ -223,12 +243,15 @@ In `cuda` builds, the `/ready` `accelerator` check runs `nvidia-smi` and fails w
   (CUDA rules: indices or `GPU-` UUIDs, stopping at the first invalid entry);
 - SP1 `prover = "local"`, `mode = "prove"` is enabled and host device `cuda_device_id` does not
   exist (the SP1 server sets its own `CUDA_VISIBLE_DEVICES`, so the id indexes host devices);
-- an `sp1-gpu-server` that could not start or died has not been replaced yet.
+- RISC0 and SP1 resolve to the same host GPU (CUDA's default device order matches `nvidia-smi`'s
+  on hosts with identical GPUs, such as 2× L4);
+- an `sp1-gpu-server` that could not start, died, hung past `cuda_timeout_secs`, or kept failing
+  has not been replaced yet.
 
-Execute-only SP1 and mock RISC0 need no GPU. That covers a container started without `--gpus`, a
-driver/toolkit mismatch, and wrong device placement. It does not track GPU utilization, memory, ECC errors, or a
-server that is alive but hung. Keep the host-level `prover-health` probe (`nvidia-smi` plus `/ready`) as the
-VM health signal.
+Execute-only SP1 and mock RISC0 need no GPU. The `nvidia-smi` result is cached for 5 seconds. This
+covers wrong device placement and lost GPUs; it does not track GPU utilization, memory, or ECC
+errors, and a hung server is reported only once its request passes `cuda_timeout_secs`. Keep a
+host-level health probe (for example `nvidia-smi` plus `/ready`) as the VM health signal.
 
 ## Hosted Aggregate Route
 

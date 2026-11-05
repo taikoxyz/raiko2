@@ -40,6 +40,9 @@ risc0-ethereum-contracts = { workspace = true, optional = true }
 
 # SP1 dependencies (optional)
 sp1-sdk = { workspace = true, optional = true }
+# CUDA watchdog: kill a hung `sp1-gpu-server`; real client errors for classification tests.
+rustix = { version = "1", default-features = false, features = ["std", "process"], optional = true }
+sp1-cuda = { version = "=6.8.1", optional = true }
 
 [features]
 default = ["chain-spec-json", "risc0", "sp1"]
@@ -48,7 +51,7 @@ risc0 = ["dep:risc0-zkvm", "dep:risc0-ethereum-contracts"]
 sp1 = ["dep:sp1-sdk"]
 # Local NVIDIA GPU proving for RISC0 (in-process CUDA kernels; needs nvcc at build time) and SP1
 # (`sp1-gpu-server` sidecar process). Opt-in: the default build stays CPU-only.
-cuda = ["risc0", "sp1", "risc0-zkvm/cuda", "sp1-sdk/cuda"]
+cuda = ["risc0", "sp1", "risc0-zkvm/cuda", "sp1-sdk/cuda", "dep:rustix", "dep:sp1-cuda"]
 [dev-dependencies]
 alloy-signer-local.workspace = true
 httpmock = "0.7"

@@ -137,7 +137,12 @@ pub(crate) fn run(root: &std::path::Path, args: ReleaseImageArgs) -> Result<()> 
             "type=local,dest={},mode=max",
             buildx_cache_next.display()
         ))
-        .args(build_image_flags(args.backend, args.cuda, &source_revision))
+        .args(build_image_flags(
+            root,
+            args.backend,
+            args.cuda,
+            &source_revision,
+        ))
         .arg("-t")
         .arg(&image_ref)
         .arg(root);
@@ -276,14 +281,19 @@ fn resolve_repository(repository: Option<&str>, cuda: bool) -> String {
 }
 
 fn build_image_flags(
+    root: &Path,
     image_backend: ImageBackend,
     cuda: bool,
     source_revision: &str,
 ) -> Vec<String> {
     let mut flags = build_metadata_flags(source_revision);
     if cuda {
-        // Dockerfile.cuda selects `--features cuda` by default.
-        flags.extend(["--file".to_string(), CUDA_DOCKERFILE.to_string()]);
+        // Dockerfile.cuda selects `--features cuda` by default. Docker resolves `--file` against
+        // the caller's working directory, not the build context, so anchor it to the repo root.
+        flags.extend([
+            "--file".to_string(),
+            root.join(CUDA_DOCKERFILE).display().to_string(),
+        ]);
     } else if matches!(image_backend, ImageBackend::Host) {
         flags.extend([
             "--build-arg".to_string(),
@@ -400,7 +410,7 @@ fn promote_local_cache(current: &Path, next: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -437,7 +447,7 @@ mod tests {
 
     #[test]
     fn host_image_flags_select_host_features() {
-        let flags = build_image_flags(ImageBackend::Host, false, "26eff23");
+        let flags = build_image_flags(Path::new("/repo"), ImageBackend::Host, false, "26eff23");
 
         assert_eq!(
             flags,
@@ -452,7 +462,7 @@ mod tests {
 
     #[test]
     fn non_host_image_flags_keep_default_release_profile() {
-        let flags = build_image_flags(ImageBackend::Risc0, false, "26eff23");
+        let flags = build_image_flags(Path::new("/repo"), ImageBackend::Risc0, false, "26eff23");
 
         assert_eq!(
             flags,
@@ -462,7 +472,7 @@ mod tests {
 
     #[test]
     fn cuda_image_flags_select_cuda_dockerfile() {
-        let flags = build_image_flags(ImageBackend::All, true, "26eff23");
+        let flags = build_image_flags(Path::new("/repo"), ImageBackend::All, true, "26eff23");
 
         assert_eq!(
             flags,
@@ -470,7 +480,7 @@ mod tests {
                 "--build-arg".to_string(),
                 "VCS_REF=26eff23".to_string(),
                 "--file".to_string(),
-                "Dockerfile.cuda".to_string(),
+                "/repo/Dockerfile.cuda".to_string(),
             ]
         );
     }
@@ -492,32 +502,38 @@ mod tests {
     }
 
     #[test]
-    fn cuda_dockerfile_pins_match_workspace_sp1_sdk() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+    fn cuda_dockerfile_sp1_version_matches_locked_sp1_cuda() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("xtask lives in the workspace root");
-        let manifest =
-            fs::read_to_string(root.join("Cargo.toml")).expect("workspace Cargo.toml is readable");
+        let lock = fs::read_to_string(root.join("Cargo.lock")).expect("Cargo.lock is readable");
         let dockerfile =
             fs::read_to_string(root.join("Dockerfile.cuda")).expect("Dockerfile.cuda is readable");
-        let sp1_version = manifest
-            .lines()
-            .find_map(|line| {
-                line.strip_prefix("sp1-sdk = { version = \"=")
-                    .and_then(|rest| rest.split('"').next())
-            })
-            .expect("workspace pins sp1-sdk with an exact version");
+        let locked_version = |name: &str| {
+            let mut lines = lock.lines();
+            lines
+                .by_ref()
+                .find(|line| *line == format!("name = \"{name}\""))
+                .and_then(|_| lines.next())
+                .and_then(|line| line.strip_prefix("version = \""))
+                .and_then(|rest| rest.strip_suffix('"'))
+                .map(str::to_string)
+                .unwrap_or_else(|| panic!("Cargo.lock has no {name} package"))
+        };
 
         let pins: Vec<&str> = dockerfile
             .lines()
             .filter_map(|line| line.trim().strip_prefix("ARG SP1_VERSION="))
             .collect();
         assert!(!pins.is_empty(), "Dockerfile.cuda must pin SP1_VERSION");
-        assert!(
-            pins.iter().all(|pin| *pin == sp1_version),
-            "Dockerfile.cuda SP1_VERSION {pins:?} must match sp1-sdk {sp1_version}; sp1-sdk \
-             downloads sp1-gpu-server at runtime on a version mismatch"
-        );
+        // sp1-cuda compares `sp1-gpu-server --version` with sp1-primitives' crate version.
+        for crate_name in ["sp1-primitives", "sp1-cuda"] {
+            let locked = locked_version(crate_name);
+            assert!(
+                pins.iter().all(|pin| *pin == locked),
+                "Dockerfile.cuda SP1_VERSION {pins:?} must match locked {crate_name} {locked}"
+            );
+        }
     }
 
     #[test]

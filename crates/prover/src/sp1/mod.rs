@@ -5,6 +5,7 @@
 
 #[cfg(feature = "cuda")]
 mod cuda;
+mod cuda_support;
 mod types;
 
 pub use crate::sp1_config::{
@@ -1121,7 +1122,7 @@ enum LocalSp1Client {
     Mock(BlockingMockProver),
     Cpu(BlockingCpuProver),
     #[cfg(feature = "cuda")]
-    Cuda(Arc<cuda::Sp1CudaDevice>),
+    Cuda(cuda::CudaTarget),
 }
 
 impl LocalSp1Client {
@@ -1140,15 +1141,14 @@ impl LocalSp1Client {
     fn for_proving(target: LocalSp1Target) -> RaikoResult<Self> {
         match target.prover_mode {
             #[cfg(feature = "cuda")]
-            ProverMode::Local => cuda::device(
+            ProverMode::Local => Ok(Self::Cuda(cuda::CudaTarget::new(
                 target.cuda_device_id.unwrap_or(0),
                 std::time::Duration::from_secs(
                     target
                         .cuda_timeout_secs
                         .unwrap_or(crate::sp1_config::DEFAULT_CUDA_TIMEOUT_SECS),
                 ),
-            )
-            .map(Self::Cuda),
+            ))),
             prover_mode => Ok(Self::new(prover_mode)),
         }
     }
@@ -1168,7 +1168,7 @@ impl LocalSp1Client {
                 .run()
                 .map_err(|err| err.to_string()),
             #[cfg(feature = "cuda")]
-            Self::Cuda(device) => device.execute(elf, stdin),
+            Self::Cuda(_) => cuda::execute(elf, stdin),
         }
     }
 
@@ -1193,7 +1193,7 @@ impl LocalSp1Client {
                 .run()
                 .map_err(|err| err.to_string()),
             #[cfg(feature = "cuda")]
-            Self::Cuda(device) => device.prove(pk, stdin, proof_mode, cycle_limit),
+            Self::Cuda(target) => target.prove(pk, stdin, proof_mode, cycle_limit),
         }
     }
 
@@ -1206,7 +1206,7 @@ impl LocalSp1Client {
                 .verify(proof, vk, None)
                 .map_err(|err| err.to_string()),
             #[cfg(feature = "cuda")]
-            Self::Cuda(device) => device.verify(proof, vk),
+            Self::Cuda(_) => cuda::verify(proof, vk),
         }
     }
 }

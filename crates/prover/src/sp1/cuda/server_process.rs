@@ -1,22 +1,88 @@
-//! Finds and kills this process's `sp1-gpu-server` children through `/proc` (Linux).
+//! Finds, checks, and kills this process's `sp1-gpu-server` children through `/proc` (Linux).
 //!
 //! `sp1-sdk` spawns one `sp1-gpu-server` child per CUDA device with
 //! `CUDA_VISIBLE_DEVICES=<device id>` and does not expose its PID. The watchdog uses this to tell
-//! whether a device's server is still running and to kill one that stopped answering.
+//! whether a device's server is still running and to kill one that stopped answering. The pure
+//! parsing lives in [`super::super::cuda_support`] so CI tests it without CUDA.
 
 use std::fs;
-use std::path::Path;
+use std::io::Read as _;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use rustix::process::{Pid, Signal, kill_process};
 use tracing::warn;
 
+use super::super::cuda_support::{
+    environ_selects_device, has_exited, is_binary_cmdline, parse_stat,
+};
+
 const SERVER_BINARY: &str = "sp1-gpu-server";
+const POLL: Duration = Duration::from_millis(100);
 
 /// Whether `/proc` is available to inspect child processes.
 pub(super) fn supported() -> bool {
     Path::new("/proc/self/stat").exists()
+}
+
+/// Checks that the `sp1-gpu-server` binary sp1-sdk will start exists and reports exactly
+/// `expected_version`, within `timeout`.
+///
+/// sp1-sdk otherwise downloads a server from GitHub with no timeout (and needs `systemctl` on a
+/// version mismatch), which would leave a start blocked with nothing for the watchdog to kill.
+pub(super) fn check_server_binary(expected_version: &str, timeout: Duration) -> Result<(), String> {
+    let path = server_binary_path()?;
+    if !path.is_file() {
+        return Err(format!(
+            "{} is missing; install the pinned sp1-gpu-server {expected_version} (Dockerfile.cuda \
+             does) instead of letting sp1-sdk download one",
+            path.display()
+        ));
+    }
+    let mut child = Command::new(&path)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|err| format!("failed to run {} --version: {err}", path.display()))?;
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(POLL),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "{} --version did not finish within {timeout:?}",
+                    path.display()
+                ));
+            }
+            Err(err) => return Err(format!("failed to wait for {}: {err}", path.display())),
+        }
+    };
+    let mut version = String::new();
+    if let Some(mut stdout) = child.stdout.take() {
+        let _ = stdout.read_to_string(&mut version);
+    }
+    if !status.success() || version.trim() != expected_version {
+        return Err(format!(
+            "{} --version reported {:?} ({status}); sp1-sdk needs exactly {expected_version}",
+            path.display(),
+            version.trim()
+        ));
+    }
+    Ok(())
+}
+
+/// Where sp1-sdk 6.8.1 starts the server from: `$HOME/.sp1/bin/sp1-gpu-server`.
+fn server_binary_path() -> Result<PathBuf, String> {
+    std::env::var_os("HOME")
+        .map(|home| PathBuf::from(home).join(".sp1/bin").join(SERVER_BINARY))
+        .ok_or_else(|| "HOME is not set; sp1-sdk cannot locate sp1-gpu-server".to_string())
 }
 
 /// Live (non-zombie) `sp1-gpu-server` children of this process serving `device_id`.
@@ -42,7 +108,6 @@ pub(super) fn kill_servers(device_id: u32) -> Vec<i32> {
 /// Waits until every PID in `pids` has exited (zombie or gone), so its socket listener and GPU
 /// memory are released. Returns the PIDs still running after `timeout`.
 pub(super) fn wait_exited(pids: &[i32], timeout: Duration) -> Vec<i32> {
-    const POLL: Duration = Duration::from_millis(100);
     let deadline = Instant::now() + timeout;
     loop {
         let running: Vec<i32> = pids
@@ -57,14 +122,6 @@ pub(super) fn wait_exited(pids: &[i32], timeout: Duration) -> Vec<i32> {
     }
 }
 
-/// Whether `pid` exists and has not exited yet (zombies have exited).
-fn is_running(pid: i32) -> bool {
-    fs::read_to_string(format!("/proc/{pid}/stat"))
-        .ok()
-        .and_then(|stat| parse_stat(&stat))
-        .is_some_and(|(state, _)| !matches!(state, 'Z' | 'X' | 'x'))
-}
-
 /// Whether `pid` is still a live `sp1-gpu-server` child of this process serving `device_id`.
 pub(super) fn is_server(pid: i32, device_id: u32) -> bool {
     is_server_for_device(pid, std::process::id(), device_id)
@@ -77,6 +134,14 @@ pub(super) fn kill_server(pid: i32, device_id: u32) -> bool {
         && Pid::from_raw(pid).is_some_and(|pid| kill_process(pid, Signal::KILL).is_ok())
 }
 
+/// Whether `pid` exists and has not exited yet (zombies have exited).
+fn is_running(pid: i32) -> bool {
+    fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|stat| parse_stat(&stat))
+        .is_some_and(|(state, _)| !has_exited(state))
+}
+
 fn is_server_for_device(pid: i32, parent: u32, device_id: u32) -> bool {
     let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) else {
         return false;
@@ -84,13 +149,13 @@ fn is_server_for_device(pid: i32, parent: u32, device_id: u32) -> bool {
     let Some((state, parent_of_process)) = parse_stat(&stat) else {
         return false;
     };
-    if state == 'Z' || parent_of_process != parent {
+    if has_exited(state) || parent_of_process != parent {
         return false;
     }
     let Ok(cmdline) = fs::read(format!("/proc/{pid}/cmdline")) else {
         return false;
     };
-    if !is_server_cmdline(&cmdline) {
+    if !is_binary_cmdline(&cmdline, SERVER_BINARY) {
         return false;
     }
     match fs::read(format!("/proc/{pid}/environ")) {
@@ -108,67 +173,5 @@ fn is_server_for_device(pid: i32, parent: u32, device_id: u32) -> bool {
             }
             true
         }
-    }
-}
-
-/// Process state and parent PID from `/proc/<pid>/stat`. The command name may contain spaces
-/// and parentheses, so fields are read after its closing parenthesis.
-fn parse_stat(stat: &str) -> Option<(char, u32)> {
-    let rest = stat.get(stat.rfind(')')? + 1..)?;
-    let mut fields = rest.split_whitespace();
-    let state = fields.next()?.chars().next()?;
-    let ppid = fields.next()?.parse().ok()?;
-    Some((state, ppid))
-}
-
-fn is_server_cmdline(cmdline: &[u8]) -> bool {
-    cmdline
-        .split(|byte| *byte == 0)
-        .next()
-        .map(String::from_utf8_lossy)
-        .is_some_and(|argv0| {
-            Path::new(argv0.as_ref())
-                .file_name()
-                .is_some_and(|name| name == SERVER_BINARY)
-        })
-}
-
-fn environ_selects_device(environ: &[u8], device_id: u32) -> bool {
-    let expected = format!("CUDA_VISIBLE_DEVICES={device_id}");
-    environ
-        .split(|byte| *byte == 0)
-        .any(|entry| entry == expected.as_bytes())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{environ_selects_device, is_server_cmdline, parse_stat};
-
-    #[test]
-    fn stat_fields_follow_the_command_name() {
-        assert_eq!(
-            parse_stat("4242 (sp1-gpu-server) S 17 4242 4242 0 -1"),
-            Some(('S', 17))
-        );
-        assert_eq!(parse_stat("7 (odd name) (x)) Z 1 7 7 0 -1"), Some(('Z', 1)));
-        assert_eq!(parse_stat("garbage"), None);
-    }
-
-    #[test]
-    fn server_cmdline_matches_the_binary_name() {
-        assert!(is_server_cmdline(b"/root/.sp1/bin/sp1-gpu-server\0"));
-        assert!(is_server_cmdline(b"sp1-gpu-server\0--flag\0"));
-        assert!(!is_server_cmdline(b"/usr/local/bin/raiko2\0"));
-        assert!(!is_server_cmdline(b"/tmp/sp1-gpu-server-old\0"));
-        assert!(!is_server_cmdline(b""));
-    }
-
-    #[test]
-    fn environ_selects_exact_device() {
-        let environ = b"HOME=/root\0CUDA_VISIBLE_DEVICES=1\0PATH=/bin\0";
-
-        assert!(environ_selects_device(environ, 1));
-        assert!(!environ_selects_device(environ, 0));
-        assert!(!environ_selects_device(b"CUDA_VISIBLE_DEVICES=10\0", 1));
     }
 }

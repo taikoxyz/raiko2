@@ -8649,6 +8649,7 @@ dependencies = [
  "serde_json",
  "serde_with",
  "sp1-cuda",
+ "sp1-primitives",
  "sp1-sdk",
  "thiserror 2.0.18",
  "tokio",

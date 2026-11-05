@@ -309,8 +309,9 @@ fn parse_nvidia_gpus(stdout: &str) -> Result<Vec<NvidiaGpu>> {
 /// `Dockerfile.cuda` sets `CUDA_DEVICE_ORDER=PCI_BUS_ID`, so CUDA indices equal `nvidia-smi`'s.
 ///
 /// Follows CUDA's rules: unset exposes every device; entries are indices or unique prefixes of
-/// `GPU-`/`MIG-` UUIDs; the first invalid, ambiguous, or repeated entry hides it and every later
-/// entry, so `-1` or an empty value exposes none.
+/// `GPU-` UUIDs; the first invalid, ambiguous, or repeated entry hides it and every later entry,
+/// so `-1` or an empty value exposes none. MIG instances are not supported: `nvidia-smi` lists
+/// only parent GPU UUIDs here, so a `MIG-` entry counts as invalid and readiness fails closed.
 #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
 fn cuda_visible_devices(gpus: &[NvidiaGpu], cuda_visible_devices: Option<&str>) -> Vec<u32> {
     let Some(visible) = cuda_visible_devices else {
@@ -318,7 +319,7 @@ fn cuda_visible_devices(gpus: &[NvidiaGpu], cuda_visible_devices: Option<&str>) 
     };
     let mut selected: Vec<u32> = Vec::new();
     for entry in visible.split(',').map(str::trim) {
-        let index = if entry.starts_with("GPU-") || entry.starts_with("MIG-") {
+        let index = if entry.starts_with("GPU-") {
             let mut matches = gpus.iter().filter(|gpu| gpu.uuid.starts_with(entry));
             match (matches.next(), matches.next()) {
                 (Some(gpu), None) => Some(gpu.index),

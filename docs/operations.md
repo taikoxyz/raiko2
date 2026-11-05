@@ -111,28 +111,38 @@ CPU-only and unchanged.
   first proof of each guest program pays a one-time GPU key setup. `prover.sp1.cuda_device_id`
   selects the device (default `0`). Execute-only runs (`mode = "execute"`) stay on the CPU.
 - `sp1-gpu-server` does not enforce the SP1 cycle limit, so each GPU proof (proposal and
-  aggregation) first executes the same input on the CPU with the stage's cycle limit and fails
+  aggregation) first executes the same input on the CPU with the stage's cycle limit, and fails
   before using the GPU if the limit is exceeded. That execution also verifies aggregation
-  sub-proofs, so an invalid sub-proof fails there rather than as a server error.
+  sub-proofs, so an invalid sub-proof fails there rather than as a server error. It runs on a
+  shared CPU-only prover before the proof takes the device's GPU client, so long CPU work never
+  holds up a server restart.
 - The first SP1 proof on a device starts its server; concurrent first proofs wait for that one
-  start. raiko2 retires a device's client, fails proofs on it fast, and restarts the server in the
-  background with exponential backoff (2 s up to 1 min), independent of proof traffic, when:
-  - the start fails, or a request fails at the transport level (server exited, socket closed);
-  - the server reports errors on three requests in a row;
+  start. Before starting, raiko2 checks that `/root/.sp1/bin/sp1-gpu-server` exists and reports
+  the exact version sp1-cuda requires; otherwise the start fails instead of sp1-sdk trying to
+  download a server. raiko2 retires a device's client, kills its server, fails proofs on the
+  device fast, and restarts the server in the background with exponential backoff (2 s up to
+  1 min), independent of proof traffic, when:
+  - the start fails or takes longer than 5 minutes, or a request fails at the transport level
+    (server exited, socket closed);
+  - the server reports errors for three different inputs in a row (one input retried alone
+    does not count more than once);
   - a watchdog (every 5 s) finds the server process gone between proofs;
   - a setup or proof runs longer than `prover.sp1.cuda_timeout_secs` (default 7200, at most
-    604800) at the server, or a server start takes longer than 5 minutes. GPU requests on a device take turns, and time spent waiting for a turn does not
-    count. The watchdog then kills the hung server so the blocked request returns. Set this
-    above the longest expected single proof.
+    604800) at the server. GPU requests on a device take turns, and time spent waiting for a turn
+    does not count. The watchdog kills the server so the blocked request returns.
+
+  The protocol has no progress signal, so a proof that is merely slow looks like a hung server.
+  Its input is remembered, and retries of that input fail without using the GPU instead of
+  taking the device down again. Size `cuda_timeout_secs` well above the GPU time of a proof at
+  the stage cycle limits (`proposal_cycle_limit`, `aggregation_cycle_limit`).
 
   Each client records the `sp1-gpu-server` process it started. Before a restart the previous
   server is killed and must exit within 30 s, and a replacement counts only if a new server
-  process actually started (so it
-  cannot be the dead connection reused). It is installed after it has set up every program the
-  device served before. A program whose setup fails on its own (an ELF/VK mismatch) is dropped
-  from that set; any server failure keeps the device restarting. The watchdog only kills and
-  checks the exact server process of the request or client in question. The device is reported
-  unready until a replacement is installed.
+  process actually started (so it cannot be the dead connection reused). It is installed after
+  it has set up every program the device served before. A program whose setup fails on its own
+  (an ELF/VK mismatch) is dropped from that set; any server failure keeps the device restarting.
+  The watchdog only kills and checks the exact server process of the request or client in
+  question. The device is reported unready until a replacement is installed.
 - On shutdown, after workers stop, raiko2 kills the `sp1-gpu-server` processes it started, so
   they and their pooled GPU memory do not outlive it on a plain Linux host.
 - Mock and network modes are unaffected.
@@ -204,8 +214,13 @@ cuda_timeout_secs = 7200
 ```
 
 `RAIKO2_PROVER_ROUTES=risc0/local,sp1/local` enables exactly these two routes over a mounted
-config; unlike the snippet alone, it also disables `[prover.native]` and the SGX lanes, which are
-enabled by default.
+config; unlike the snippet alone, it also disables `[prover.native]` (enabled by default) and any
+other lane the mounted config enables.
+
+Readiness treats any enabled SP1 local runner as using a GPU, even with `prover = "mock"` or
+`mode = "execute"`, because request overrides can switch both to GPU proving. A single-GPU host
+therefore cannot run non-mock `risc0/local` together with `sp1/local`: `/ready` reports both on
+the same GPU. Use `sp1/network`, mock RISC0, or a second GPU.
 
 - **Runtime store:** production must use `runtime.store.backend = "gcs"`. The memory store is
   process-local, loses every task on restart, and is rejected outside `development`, `local`, and

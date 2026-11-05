@@ -5,74 +5,83 @@
 //! so the client (which owns the server process) and each program's key are cached instead of
 //! being rebuilt per proof.
 //!
+//! A proof first runs a cycle-bounded CPU execution of its input on a shared light prover
+//! (`sp1-gpu-server` never receives the cycle limit), and only then takes the device's client.
+//! Holding the client during that CPU work would keep a retired connection alive and block
+//! restarts.
+//!
 //! Client lifecycle, per device:
-//! - Starts are single-flight: the first proof starts the server while concurrent first users wait.
+//! - Starts are single-flight. Before sp1-sdk is asked to start a server, the pinned
+//!   `sp1-gpu-server` binary must exist and report the exact version sp1-cuda requires, so sp1-sdk
+//!   never tries to download one (with no timeout). Starts have their own watchdog deadline.
 //! - The pinned `sp1-cuda` client never reconnects or restarts its server, has no request
 //!   timeout, and hands out its existing per-device connection while anything (including
 //!   asynchronous key cleanup tasks) still references it. Each client therefore records the
 //!   server process it started (via `/proc` on Linux). A start must produce a new server process;
 //!   otherwise sp1-cuda reused an old connection and the client is discarded. Before a restart
-//!   the previous server is killed, so stale users of the old connection fail fast and release it.
-//! - A client is retired when: a request fails at the transport level; the server reports errors
-//!   on [`MAX_CONSECUTIVE_SERVER_ERRORS`] requests in a row; its server process exits; or a
-//!   setup/proof exceeds `sp1.cuda_timeout_secs` at the server, in which case the watchdog kills
-//!   that exact server process so the blocked request returns. GPU requests take turns per device
-//!   and the deadline starts only once a request has its turn.
+//!   the previous server is killed and waited on (bounded).
+//! - A client is retired, and its server killed, when: a request fails at the transport level;
+//!   the server reports errors for [`MAX_DISTINCT_FAILING_INPUTS`] different inputs in a row; its
+//!   server process exits; or a setup/proof exceeds `sp1.cuda_timeout_secs` at the server. GPU
+//!   requests take turns per device and the deadline starts only once a request has its turn. An
+//!   input whose proof timed out is remembered and its retries fail without using the GPU.
 //! - A retired or failed device is reported by [`cuda_device_failures`] (surfaced by `/ready`),
 //!   proofs on it fail fast, and a supervisor thread restarts it with exponential backoff,
 //!   independent of proof traffic. A replacement is installed only after it set up every program
 //!   the device has served. A program whose setup fails for its own reasons (a verifying-key
 //!   mismatch) is dropped from that set; any server failure keeps the device restarting.
-//! - Before a restart the previous server is killed and waited on (bounded), so the new client
-//!   cannot reach the old listener and the old GPU memory is released. Server starts have their
-//!   own watchdog deadline.
 //! - [`shutdown_cuda_devices`] stops the supervisors and watchdog, kills the servers, and releases
 //!   the cached clients at process shutdown; a start still running then is not installed.
-//!
-//! `sp1-gpu-server` does not receive the SP1 cycle limit (its protocol carries only the proof
-//! nonce), so every GPU proof is preceded by a cycle-bounded CPU execution of the same input.
-//!
-//! `sp1-sdk` resolves the server binary at `$HOME/.sp1/bin/sp1-gpu-server`. `Dockerfile.cuda`
-//! pre-installs the pinned binary; a missing or mismatched binary would make `sp1-sdk` try to
-//! stop servers through `systemctl` and download one, which fails in the image.
 
 mod server_process;
 
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock, Mutex, MutexGuard, OnceLock, PoisonError};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use raiko2_primitives::{RaikoError, RaikoResult};
 use sp1_sdk::{
     ProvingKey as _, SP1ProofMode, SP1ProofWithPublicValues, SP1ProvingKey, SP1Stdin,
     blocking::{
-        CudaProver as BlockingCudaProver, ProveRequest as _, Prover as _,
+        CudaProver as BlockingCudaProver, LightProver, ProveRequest as _, Prover as _,
         ProverClient as BlockingProverClient,
     },
 };
 use tokio::runtime::Handle;
 use tracing::{error, info, warn};
 
+use super::cuda_support::{
+    FailingInputs, InFlight, InFlightRequests, MAX_DISTINCT_FAILING_INPUTS, TimedOutInputs,
+    deadline_after, execute_within_cycle_limit, input_key, is_server_connection_failure, lock,
+    panic_message, single_new_server,
+};
 use super::sp1_vk_digest;
-use crate::sp1_config::{DEFAULT_CUDA_TIMEOUT_SECS, MAX_CUDA_TIMEOUT_SECS};
+use crate::sp1_config::DEFAULT_CUDA_TIMEOUT_SECS;
 
 type CudaProvingKey = <BlockingCudaProver as sp1_sdk::blocking::Prover>::ProvingKey;
 
 const RESTART_BACKOFF_INITIAL: Duration = Duration::from_secs(2);
 const RESTART_BACKOFF_MAX: Duration = Duration::from_mins(1);
 const WATCHDOG_INTERVAL: Duration = Duration::from_secs(5);
-/// Server-reported errors in a row after which the client is treated as broken.
-const MAX_CONSECUTIVE_SERVER_ERRORS: u32 = 3;
 const SHUTTING_DOWN: &str = "SP1 CUDA proving is shutting down";
 /// How long a restart waits for killed servers to exit (releasing their socket and GPU memory).
 const PREVIOUS_SERVER_EXIT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Deadline for starting `sp1-gpu-server` and connecting to it.
 const START_TIMEOUT: Duration = Duration::from_mins(5);
+/// Deadline for the pre-start `sp1-gpu-server --version` check.
+const BINARY_CHECK_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Where local SP1 GPU proofs run: a CUDA device and the per-request deadline on its server.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct CudaTarget {
+    device_id: u32,
+    timeout: Duration,
+}
 
 /// One CUDA device: the `sp1-gpu-server` client plus the proving keys already set up on it.
-pub(super) struct Sp1CudaDevice {
+struct Sp1CudaDevice {
     device_id: u32,
     generation: u64,
     timeout: Duration,
@@ -85,7 +94,7 @@ pub(super) struct Sp1CudaDevice {
     /// the turn here first lets the watchdog deadline cover only time spent at the server, never
     /// time spent queued behind other proofs.
     gpu_turn: Mutex<()>,
-    consecutive_server_errors: AtomicU32,
+    failing_inputs: Mutex<FailingInputs>,
 }
 
 #[derive(Default)]
@@ -100,35 +109,40 @@ struct DeviceSlot {
     timeout: Option<Duration>,
 }
 
-/// A server start, or a setup or proof request currently being served by a server.
-struct InFlight {
-    device_id: u32,
-    /// Client generation; `None` for a server start, which has no client yet.
-    generation: Option<u64>,
-    server_pid: Option<i32>,
-    operation: &'static str,
-    deadline: Instant,
-}
-
 static SLOTS: LazyLock<Mutex<HashMap<u32, DeviceSlot>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static START_LOCKS: LazyLock<Mutex<HashMap<u32, Arc<Mutex<()>>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
-static IN_FLIGHT: LazyLock<Mutex<HashMap<u64, InFlight>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+static IN_FLIGHT: LazyLock<Mutex<InFlightRequests>> =
+    LazyLock::new(|| Mutex::new(InFlightRequests::default()));
+static TIMED_OUT_INPUTS: LazyLock<Mutex<TimedOutInputs>> =
+    LazyLock::new(|| Mutex::new(TimedOutInputs::default()));
+static LIGHT_PROVER: OnceLock<LightProver> = OnceLock::new();
 static WATCHDOG: OnceLock<()> = OnceLock::new();
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 static GENERATION: AtomicU64 = AtomicU64::new(0);
 static REQUEST_ID: AtomicU64 = AtomicU64::new(0);
 
 /// CUDA devices whose `sp1-gpu-server` failed, hung, or died and has not been replaced yet.
+///
+/// Also starts a supervisor for any such device that has none (it panicked or could not be
+/// spawned), so readiness probes alone keep recovery going without proof traffic.
 #[must_use]
 pub fn cuda_device_failures() -> Vec<(u32, String)> {
-    let mut failures: Vec<(u32, String)> = lock(&SLOTS)
-        .iter()
-        .filter(|(_, slot)| slot.current.is_none())
-        .filter_map(|(id, slot)| slot.failure.clone().map(|failure| (*id, failure)))
-        .collect();
+    let mut slots = lock(&SLOTS);
+    let mut failures = Vec::new();
+    for (device_id, slot) in slots.iter_mut() {
+        if slot.current.is_some() {
+            continue;
+        }
+        let Some(failure) = slot.failure.clone() else {
+            continue;
+        };
+        if !slot.supervising {
+            mark_failed(slot, *device_id, failure.clone());
+        }
+        failures.push((*device_id, failure));
+    }
     failures.sort_unstable_by_key(|(id, _)| *id);
     failures
 }
@@ -162,12 +176,71 @@ pub fn shutdown_cuda_devices() {
     drop(devices);
 }
 
+impl CudaTarget {
+    pub(super) const fn new(device_id: u32, timeout: Duration) -> Self {
+        Self { device_id, timeout }
+    }
+
+    /// Proves `stdin` on the GPU after a cycle-bounded CPU execution of the same input.
+    ///
+    /// Must run on a blocking thread inside the Tokio runtime: `sp1-sdk` drives the server
+    /// through its own runtime (and panics inside an async context), while dropping a client or
+    /// key spawns a cleanup task on the current runtime.
+    pub(super) fn prove(
+        self,
+        pk: &SP1ProvingKey,
+        stdin: SP1Stdin,
+        proof_mode: SP1ProofMode,
+        cycle_limit: u64,
+    ) -> Result<SP1ProofWithPublicValues, String> {
+        let vk = sp1_vk_digest(pk.verifying_key());
+        let input = input_key(&vk, &stdin);
+        if lock(&TIMED_OUT_INPUTS).contains(input) {
+            return Err(format!(
+                "SP1 CUDA proof of this input already exceeded sp1.cuda_timeout_secs ({:?}) on \
+                 device {}; not retrying it on the GPU",
+                self.timeout, self.device_id
+            ));
+        }
+        // Fail fast while the device is down, before spending CPU time.
+        drop(installed(self.device_id).map_err(|err| err.to_string())?);
+        // Runs without holding the device's client, so a restart is never blocked by it.
+        execute_within_cycle_limit(light_prover(), pk.elf().clone(), stdin.clone(), cycle_limit)
+            .map_err(|err| format!("{err}; not proving on the GPU"))?;
+
+        let device = device(self.device_id, self.timeout).map_err(|err| err.to_string())?;
+        device.prove(pk, stdin, proof_mode, input)
+    }
+}
+
+/// Executes on the shared CPU-only prover; `mode = "execute"` never needs the GPU.
+pub(super) fn execute(
+    elf: Vec<u8>,
+    stdin: SP1Stdin,
+) -> Result<(sp1_sdk::SP1PublicValues, sp1_sdk::ExecutionReport), String> {
+    light_prover()
+        .execute(elf.into(), stdin)
+        .run()
+        .map_err(|err| err.to_string())
+}
+
+/// Verifies on the shared CPU-only prover.
+pub(super) fn verify(
+    proof: &SP1ProofWithPublicValues,
+    vk: &sp1_sdk::SP1VerifyingKey,
+) -> Result<(), String> {
+    light_prover()
+        .verify(proof, vk, None)
+        .map_err(|err| err.to_string())
+}
+
+/// CPU-only prover for execution and verification, shared by every request.
+fn light_prover() -> &'static LightProver {
+    LIGHT_PROVER.get_or_init(LightProver::new)
+}
+
 /// Returns the client for `device_id`, starting `sp1-gpu-server` on first use.
-///
-/// Must run on a blocking thread inside the Tokio runtime: `sp1-sdk` drives the server through
-/// its own runtime (and panics inside an async context), while dropping a client or key spawns a
-/// cleanup task on the current runtime.
-pub(super) fn device(device_id: u32, timeout: Duration) -> RaikoResult<Arc<Sp1CudaDevice>> {
+fn device(device_id: u32, timeout: Duration) -> RaikoResult<Arc<Sp1CudaDevice>> {
     if SHUTDOWN.load(Ordering::SeqCst) {
         return Err(RaikoError::Guest(SHUTTING_DOWN.to_string()));
     }
@@ -206,19 +279,26 @@ pub(super) fn device(device_id: u32, timeout: Duration) -> RaikoResult<Arc<Sp1Cu
 }
 
 /// The installed client, an error while the device is down, or `None` before its first start.
+///
+/// A down device without a running supervisor (it panicked, or could not be spawned) gets a new
+/// one here, so it never stays down for good.
 fn installed(device_id: u32) -> RaikoResult<Option<Arc<Sp1CudaDevice>>> {
-    let slots = lock(&SLOTS);
-    let Some(slot) = slots.get(&device_id) else {
+    let mut slots = lock(&SLOTS);
+    let Some(slot) = slots.get_mut(&device_id) else {
         return Ok(None);
     };
     if let Some(device) = &slot.current {
         return Ok(Some(Arc::clone(device)));
     }
-    slot.failure.as_ref().map_or(Ok(None), |failure| {
-        Err(RaikoError::Guest(format!(
-            "SP1 CUDA device {device_id} is unavailable and restarting in the background: {failure}"
-        )))
-    })
+    let Some(failure) = slot.failure.clone() else {
+        return Ok(None);
+    };
+    if !slot.supervising {
+        mark_failed(slot, device_id, failure.clone());
+    }
+    Err(RaikoError::Guest(format!(
+        "SP1 CUDA device {device_id} is unavailable and restarting in the background: {failure}"
+    )))
 }
 
 fn start_lock(device_id: u32) -> Arc<Mutex<()>> {
@@ -228,6 +308,8 @@ fn start_lock(device_id: u32) -> Arc<Mutex<()>> {
 /// Starts a fresh `sp1-gpu-server` client and sets up every program the device has served.
 /// Call with the device's start lock held.
 fn start_device(device_id: u32, timeout: Duration) -> Result<Arc<Sp1CudaDevice>, String> {
+    // Without the exact pinned binary sp1-sdk would download one with no timeout.
+    server_process::check_server_binary(sp1_primitives::SP1_CRATE_VERSION, BINARY_CHECK_TIMEOUT)?;
     let tracking = server_process::supported();
     let previous = if tracking {
         // A previous server is dead, hung, or being replaced. Killing it makes stale users of its
@@ -282,7 +364,7 @@ fn start_device(device_id: u32, timeout: Duration) -> Result<Arc<Sp1CudaDevice>,
         prover,
         keys: Mutex::new(HashMap::new()),
         gpu_turn: Mutex::new(()),
-        consecutive_server_errors: AtomicU32::new(0),
+        failing_inputs: Mutex::new(FailingInputs::default()),
     });
 
     let programs: Vec<(String, SP1ProvingKey)> = lock(&SLOTS)
@@ -320,21 +402,6 @@ fn start_device(device_id: u32, timeout: Duration) -> Result<Arc<Sp1CudaDevice>,
     Ok(device)
 }
 
-/// The one `sp1-gpu-server` process a start produced. None means sp1-cuda handed back a
-/// connection that was still referenced instead of starting a server.
-fn single_new_server(device_id: u32, started: &[i32]) -> Result<i32, String> {
-    match started {
-        [pid] => Ok(*pid),
-        [] => Err(format!(
-            "no new sp1-gpu-server started on CUDA device {device_id}; sp1-cuda reused a previous \
-             connection that is still referenced"
-        )),
-        pids => Err(format!(
-            "found several new sp1-gpu-server processes for CUDA device {device_id}: {pids:?}"
-        )),
-    }
-}
-
 /// Records a failure and makes sure a supervisor is restarting the device. Call with the slot's
 /// `SLOTS` lock held, so the failure is visible in the same step that removed the client.
 fn mark_failed(slot: &mut DeviceSlot, device_id: u32, failure: String) {
@@ -346,7 +413,7 @@ fn mark_failed(slot: &mut DeviceSlot, device_id: u32, failure: String) {
     let Ok(handle) = Handle::try_current() else {
         warn!(
             device_id,
-            "No Tokio runtime to restart sp1-gpu-server; the device stays unavailable"
+            "No Tokio runtime to restart sp1-gpu-server; the next SP1 proof retries"
         );
         return;
     };
@@ -355,7 +422,11 @@ fn mark_failed(slot: &mut DeviceSlot, device_id: u32, failure: String) {
         .spawn(move || supervise(device_id, &handle));
     match spawned {
         Ok(_) => slot.supervising = true,
-        Err(err) => warn!(device_id, %err, "Failed to spawn the SP1 CUDA supervisor"),
+        Err(err) => warn!(
+            device_id,
+            %err,
+            "Failed to spawn the SP1 CUDA supervisor; the next SP1 proof retries"
+        ),
     }
 }
 
@@ -369,16 +440,29 @@ fn supervise(device_id: u32, handle: &Handle) {
     let mut backoff = RESTART_BACKOFF_INITIAL;
     loop {
         std::thread::sleep(backoff);
-        if SHUTDOWN.load(Ordering::SeqCst) {
-            return;
-        }
         let start_lock = start_lock(device_id);
         let _start = lock(&start_lock);
+        // Shutdown, or a start in `device()` succeeded meanwhile (for example after its
+        // deadline): stop without killing a healthy installed server.
+        {
+            let mut slots = lock(&SLOTS);
+            let slot = slots.entry(device_id).or_default();
+            if slot.current.is_some() || SHUTDOWN.load(Ordering::SeqCst) {
+                slot.supervising = false;
+                return;
+            }
+        }
         let timeout = lock(&SLOTS)
             .get(&device_id)
             .and_then(|slot| slot.timeout)
             .unwrap_or(Duration::from_secs(DEFAULT_CUDA_TIMEOUT_SECS));
-        let result = start_device(device_id, timeout);
+        let result = catch_unwind(AssertUnwindSafe(|| start_device(device_id, timeout)))
+            .unwrap_or_else(|panic| {
+                Err(format!(
+                    "SP1 CUDA restart panicked: {}",
+                    panic_message(panic.as_ref())
+                ))
+            });
 
         let mut slots = lock(&SLOTS);
         let slot = slots.entry(device_id).or_default();
@@ -404,7 +488,8 @@ fn supervise(device_id: u32, handle: &Handle) {
     }
 }
 
-/// Clears `supervising` if a supervisor panics, so a later failure starts a new one.
+/// Clears `supervising` if a supervisor panics, so the next proof or readiness probe starts a
+/// new one. Normal exits clear it under the same lock that installs or abandons the client.
 struct SupervisorGuard(u32);
 
 impl Drop for SupervisorGuard {
@@ -417,7 +502,8 @@ impl Drop for SupervisorGuard {
     }
 }
 
-/// Retires `generation` of `device_id` if it is still installed, and starts a restart.
+/// Retires `generation` of `device_id` if it is still installed, kills its server, and starts a
+/// restart. Killing it stops queued work from starting real proofs on a server presumed broken.
 fn retire_generation(device_id: u32, generation: u64, reason: &str) {
     let retired = {
         let mut slots = lock(&SLOTS);
@@ -435,6 +521,9 @@ fn retire_generation(device_id: u32, generation: u64, reason: &str) {
         mark_failed(slot, device_id, reason.to_string());
         retired
     };
+    if let Some(pid) = retired.server_pid {
+        server_process::kill_server(pid, device_id);
+    }
     // Released outside the lock; callers run inside the runtime, as the SDK cleanup requires.
     drop(retired);
 }
@@ -462,7 +551,8 @@ fn watchdog(handle: &Handle) {
     let _runtime = handle.enter();
     while !SHUTDOWN.load(Ordering::SeqCst) {
         std::thread::sleep(WATCHDOG_INTERVAL);
-        for request in take_expired_requests(Instant::now()) {
+        let expired = lock(&IN_FLIGHT).take_expired(Instant::now());
+        for request in expired {
             handle_expired(&request);
         }
         for device in installed_devices() {
@@ -501,36 +591,28 @@ fn handle_expired(request: &InFlight) {
         server_process::kill_servers(device_id);
         return;
     };
+    if let Some(input) = request.input {
+        // The protocol has no progress signal, so a slow proof looks like a hung server. Retries
+        // of this input fail without the GPU instead of taking the device down again.
+        lock(&TIMED_OUT_INPUTS).record(input);
+    }
     let reason = format!(
         "SP1 CUDA {} on device {device_id} exceeded sp1.cuda_timeout_secs; killed the hung sp1-gpu-server",
         request.operation
     );
     error!(device_id, "{reason}");
+    // Kill exactly the server that request was waiting on (retirement does too while its client
+    // is still installed). Its socket closes, so the blocked request returns; a replacement
+    // server is never touched.
     retire_generation(device_id, generation, &reason);
-    // Kill exactly the server that request was waiting on. Its socket closes, so the blocked
-    // request returns; a replacement server is never touched.
-    let killed = request
-        .server_pid
-        .is_some_and(|pid| server_process::kill_server(pid, device_id));
-    if !killed {
+    if let Some(pid) = request.server_pid {
+        server_process::kill_server(pid, device_id);
+    } else {
         warn!(
             device_id,
-            "Hung sp1-gpu-server process not found; the request may stay blocked"
+            "Hung sp1-gpu-server process unknown; the request may stay blocked"
         );
     }
-}
-
-fn take_expired_requests(now: Instant) -> Vec<InFlight> {
-    let mut in_flight = lock(&IN_FLIGHT);
-    let expired: Vec<u64> = in_flight
-        .iter()
-        .filter(|(_, request)| request.deadline <= now)
-        .map(|(id, _)| *id)
-        .collect();
-    expired
-        .into_iter()
-        .filter_map(|id| in_flight.remove(&id))
-        .collect()
 }
 
 fn installed_devices() -> Vec<Arc<Sp1CudaDevice>> {
@@ -544,11 +626,12 @@ fn installed_devices() -> Vec<Arc<Sp1CudaDevice>> {
 struct WatchedRequest(u64);
 
 impl WatchedRequest {
-    fn new(device: &Sp1CudaDevice, operation: &'static str) -> Self {
+    fn new(device: &Sp1CudaDevice, operation: &'static str, input: Option<u64>) -> Self {
         Self::register(InFlight {
             device_id: device.device_id,
             generation: Some(device.generation),
             server_pid: device.server_pid,
+            input,
             operation,
             deadline: deadline_after(device.timeout),
         })
@@ -559,6 +642,7 @@ impl WatchedRequest {
             device_id,
             generation: None,
             server_pid: None,
+            input: None,
             operation: "start",
             deadline: deadline_after(START_TIMEOUT),
         })
@@ -571,17 +655,9 @@ impl WatchedRequest {
     }
 }
 
-/// `now + timeout`, capped so an oversized timeout can never overflow `Instant`.
-fn deadline_after(timeout: Duration) -> Instant {
-    let now = Instant::now();
-    now.checked_add(timeout)
-        .or_else(|| now.checked_add(Duration::from_secs(MAX_CUDA_TIMEOUT_SECS)))
-        .unwrap_or(now)
-}
-
 impl Drop for WatchedRequest {
     fn drop(&mut self) {
-        lock(&IN_FLIGHT).remove(&self.0);
+        lock(&IN_FLIGHT).remove(self.0);
     }
 }
 
@@ -594,41 +670,26 @@ enum SetupError {
 }
 
 impl Sp1CudaDevice {
-    /// Proves `stdin` on this GPU after a cycle-bounded CPU execution of the same input.
-    pub(super) fn prove(
+    /// Proves an input that already passed the cycle-bounded CPU execution.
+    fn prove(
         &self,
         pk: &SP1ProvingKey,
         stdin: SP1Stdin,
         proof_mode: SP1ProofMode,
-        cycle_limit: u64,
+        input: u64,
     ) -> Result<SP1ProofWithPublicValues, String> {
-        // sp1-gpu-server ignores the request cycle limit, so enforce it before using the GPU.
-        // Gas does not affect the cycle count. Deferred-proof verification stays on: invalid
-        // aggregation sub-proofs must fail here, not as server errors that count toward
-        // retiring the device.
-        self.prover
-            .execute(pk.elf().clone(), stdin.clone())
-            .cycle_limit(cycle_limit)
-            .calculate_gas(false)
-            .run()
-            .map_err(|err| {
-                format!(
-                    "SP1 execution before CUDA proving failed (cycle limit {cycle_limit}): {err}"
-                )
-            })?;
-
         let cuda_pk = self.proving_key(pk)?;
         let proof = {
             let _turn = lock(&self.gpu_turn);
-            let _watched = WatchedRequest::new(self, "prove");
+            let _watched = WatchedRequest::new(self, "prove", Some(input));
             self.prover.prove(&cuda_pk, stdin).mode(proof_mode).run()
         };
         match proof {
             Ok(proof) => {
-                self.consecutive_server_errors.store(0, Ordering::Relaxed);
+                lock(&self.failing_inputs).record_success();
                 Ok(proof)
             }
-            Err(err) => Err(self.client_error("prove", &err.to_string())),
+            Err(err) => Err(self.client_error("prove", &err.to_string(), input)),
         }
     }
 
@@ -640,7 +701,7 @@ impl Sp1CudaDevice {
         }
         match self.setup_key(pk) {
             Ok(key) => {
-                self.consecutive_server_errors.store(0, Ordering::Relaxed);
+                lock(&self.failing_inputs).record_success();
                 // Only programs that set up successfully join the warm set used on restart.
                 lock(&SLOTS)
                     .entry(self.device_id)
@@ -650,7 +711,10 @@ impl Sp1CudaDevice {
                     .or_insert_with(|| pk.clone());
                 Ok(key)
             }
-            Err(SetupError::Client(err)) => Err(self.client_error("setup", &err)),
+            Err(SetupError::Client(err)) => {
+                let input = input_key(&vk, &SP1Stdin::new());
+                Err(self.client_error("setup", &err, input))
+            }
             // A local verifying-key check, not a server failure: fail only this proof.
             Err(SetupError::Program(err)) => Err(err),
         }
@@ -674,7 +738,7 @@ impl Sp1CudaDevice {
         );
         let key = {
             let _turn = lock(&self.gpu_turn);
-            let _watched = WatchedRequest::new(self, "setup");
+            let _watched = WatchedRequest::new(self, "setup", None);
             self.prover.setup(pk.elf().clone())
         }
         .map_err(|err| SetupError::Client(err.to_string()))?;
@@ -689,29 +753,8 @@ impl Sp1CudaDevice {
         Ok(key)
     }
 
-    pub(super) fn execute(
-        &self,
-        elf: Vec<u8>,
-        stdin: SP1Stdin,
-    ) -> Result<(sp1_sdk::SP1PublicValues, sp1_sdk::ExecutionReport), String> {
-        self.prover
-            .execute(elf.into(), stdin)
-            .run()
-            .map_err(|err| err.to_string())
-    }
-
-    pub(super) fn verify(
-        &self,
-        proof: &SP1ProofWithPublicValues,
-        vk: &sp1_sdk::SP1VerifyingKey,
-    ) -> Result<(), String> {
-        self.prover
-            .verify(proof, vk, None)
-            .map_err(|err| err.to_string())
-    }
-
     /// Formats a client error and retires this client when the server looks broken.
-    fn client_error(&self, operation: &str, error: &str) -> String {
+    fn client_error(&self, operation: &str, error: &str, input: u64) -> String {
         let message = format!(
             "SP1 CUDA {operation} failed on device {}: {error}",
             self.device_id
@@ -719,15 +762,16 @@ impl Sp1CudaDevice {
         if is_server_connection_failure(error) {
             retire_generation(self.device_id, self.generation, &message);
         } else {
-            let in_a_row = self
-                .consecutive_server_errors
-                .fetch_add(1, Ordering::Relaxed)
-                + 1;
-            if in_a_row >= MAX_CONSECUTIVE_SERVER_ERRORS {
+            // Count distinct inputs, so one input that fails deterministically and is retried
+            // alone cannot retire the device by itself.
+            let failing = lock(&self.failing_inputs).record_failure(input);
+            if failing >= MAX_DISTINCT_FAILING_INPUTS {
                 retire_generation(
                     self.device_id,
                     self.generation,
-                    &format!("{in_a_row} consecutive server errors, last: {message}"),
+                    &format!(
+                        "server errors on {failing} different inputs in a row, last: {message}"
+                    ),
                 );
             }
         }
@@ -735,55 +779,17 @@ impl Sp1CudaDevice {
     }
 }
 
-/// Whether an `sp1-cuda` client error means the server connection is unusable.
-///
-/// `CudaClientError` does not expose its variant, so this matches its 6.8.1 `Display` text.
-/// sp1-cuda reports both server `InternalError` and `ProverError` responses as
-/// "The server returned an internal error"; those keep the client (the server is alive), and
-/// every other error, including unknown ones, retires it so a dead server is never reused.
-fn is_server_connection_failure(error: &str) -> bool {
-    const SERVER_REPORTED: [&str; 2] = [
-        "The server returned an internal error",
-        "The server returned a prover error",
-    ];
-    !SERVER_REPORTED
-        .iter()
-        .any(|reported| error.contains(reported))
-}
-
-fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
-    panic
-        .downcast_ref::<String>()
-        .cloned()
-        .or_else(|| panic.downcast_ref::<&str>().map(|s| (*s).to_string()))
-        .unwrap_or_else(|| "unknown panic".to_string())
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
 #[cfg(test)]
 mod tests {
     use std::io::{Error as IoError, ErrorKind};
-    use std::time::{Duration, Instant};
 
     use sp1_cuda::CudaClientError;
 
-    use super::{
-        IN_FLIGHT, InFlight, deadline_after, is_server_connection_failure, lock, panic_message,
-        single_new_server, take_expired_requests,
-    };
+    use super::is_server_connection_failure;
 
+    /// Real `sp1-cuda` errors, so a change in its messages fails here.
     #[test]
-    fn oversized_timeouts_do_not_overflow_the_deadline() {
-        let before = Instant::now();
-        assert!(deadline_after(Duration::MAX) >= before);
-        assert!(deadline_after(Duration::from_secs(60)) > before);
-    }
-
-    #[test]
-    fn transport_failures_retire_the_client() {
+    fn sp1_cuda_errors_are_classified() {
         for error in [
             CudaClientError::Connect(IoError::from(ErrorKind::NotFound)),
             CudaClientError::Read(IoError::from(ErrorKind::UnexpectedEof)),
@@ -794,10 +800,6 @@ mod tests {
             let message = error.to_string();
             assert!(is_server_connection_failure(&message), "{message}");
         }
-    }
-
-    #[test]
-    fn server_reported_failures_keep_the_client() {
         for error in [
             CudaClientError::ServerError("out of memory".to_string()),
             CudaClientError::ProverError("bad witness".to_string()),
@@ -805,60 +807,5 @@ mod tests {
             let message = error.to_string();
             assert!(!is_server_connection_failure(&message), "{message}");
         }
-    }
-
-    #[test]
-    fn a_start_must_produce_exactly_one_new_server() {
-        assert_eq!(single_new_server(1, &[4242]), Ok(4242));
-        let reused =
-            single_new_server(1, &[]).expect_err("no new server means a reused connection");
-        assert!(reused.contains("reused"), "{reused}");
-        assert!(single_new_server(1, &[1, 2]).is_err());
-    }
-
-    #[test]
-    fn expired_requests_are_taken_once() {
-        let now = Instant::now();
-        {
-            let mut in_flight = lock(&IN_FLIGHT);
-            in_flight.insert(
-                u64::MAX,
-                InFlight {
-                    device_id: 9,
-                    generation: Some(1),
-                    server_pid: Some(4242),
-                    operation: "prove",
-                    deadline: now.checked_sub(Duration::from_secs(1)).unwrap_or(now),
-                },
-            );
-            in_flight.insert(
-                u64::MAX - 1,
-                InFlight {
-                    device_id: 9,
-                    generation: Some(1),
-                    server_pid: Some(4242),
-                    operation: "setup",
-                    deadline: now + Duration::from_hours(1),
-                },
-            );
-        }
-
-        let expired = take_expired_requests(now);
-        assert_eq!(expired.len(), 1);
-        assert_eq!(expired[0].operation, "prove");
-        assert_eq!(expired[0].server_pid, Some(4242));
-        assert!(take_expired_requests(now).is_empty());
-        lock(&IN_FLIGHT).remove(&(u64::MAX - 1));
-    }
-
-    #[test]
-    fn panic_message_reads_string_payloads() {
-        let owned: Box<dyn std::any::Any + Send> = Box::new("boom".to_string());
-        let borrowed: Box<dyn std::any::Any + Send> = Box::new("bang");
-        let other: Box<dyn std::any::Any + Send> = Box::new(7_u8);
-
-        assert_eq!(panic_message(owned.as_ref()), "boom");
-        assert_eq!(panic_message(borrowed.as_ref()), "bang");
-        assert_eq!(panic_message(other.as_ref()), "unknown panic");
     }
 }

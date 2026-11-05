@@ -42,7 +42,8 @@ permissions:
 
 concurrency:
   group: cuda-image-${{ github.ref }}
-  # Supersede stale PR builds, but let every main build finish.
+  # Supersede stale PR builds. On main a running build is never cancelled, but GitHub keeps only
+  # one pending run per group, so a queued main build is replaced by the next push.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:

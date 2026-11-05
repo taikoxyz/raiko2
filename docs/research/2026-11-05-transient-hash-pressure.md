@@ -196,6 +196,20 @@ outcomes are excluded by original hash with portable resource projections retain
 Real remote download, the existing CI integrity assertions and the README unpack workflow
 passed; archive integrity is distinct from successor-model validation.
 
+The separate [successor fixture](https://github.com/taikoxyz/raiko2-atlas/tree/36f11ba990b1a9bdb4a1390d94d18ddcad06c03e/fixtures/benchmarks/unzen-transient-ledger-reprice-v1)
+and [immutable repricing release](https://github.com/taikoxyz/raiko2-atlas/releases/tag/fixture-unzen-transient-ledger-reprice-v1)
+retain all59 original model923 quotes, the old50-row quote baseline, both model snapshots
+and the two independent numeric readbacks. Original synthetic inputs/actuals and235MB of
+historical inputs are referenced through their existing immutable assets. Explicit portable
+projections identify their original hashes and removed private fields; raw quotes are not
+rewritten. The archive has76 regular members, including69 original files; compressed size
+936,358 bytes and SHA256
+`b0d6ecfccb732d86f378be3eb8aa4602363e59d5552c9d6728992def5fb1751b`.
+Independent source/data review, the existing CI integrity body and literal README unpack
+commands passed. The latter two used a real GitHub draft download before publication;
+a fresh published download also matches compressed and decoded identities. No new quote,
+SP1 execution or guest build was needed to archive the observations.
+
 The high-priority finding remains regression evidence after the measured correction;
 it is not counted as an unopened holdout. Outer-map owner interactions, the deferred
 account-journal issue, future L1 frequency sampling and a full30M maximum remain separate

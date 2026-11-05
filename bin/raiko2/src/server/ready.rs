@@ -302,7 +302,26 @@ async fn check_local_cuda_devices(config: &Config) -> Result<()> {
     if visible < required {
         bail!("local GPU proving needs {required} CUDA device(s), nvidia-smi reports {visible}");
     }
+    // An sp1-gpu-server that failed to start or died stays unready until it is replaced.
+    let failures = raiko2_prover::sp1::cuda_device_failures();
+    if let Some(message) = describe_cuda_failures(&failures) {
+        bail!(message);
+    }
     Ok(())
+}
+
+/// Summarizes SP1 CUDA servers that are down, or `None` when every started server is healthy.
+#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+fn describe_cuda_failures(failures: &[(u32, String)]) -> Option<String> {
+    if failures.is_empty() {
+        return None;
+    }
+    let devices = failures
+        .iter()
+        .map(|(device_id, failure)| format!("device {device_id}: {failure}"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    Some(format!("sp1-gpu-server unavailable ({devices})"))
 }
 
 const fn sp1_network_credentials_required(config: &Config) -> bool {
@@ -369,8 +388,8 @@ fn sp1_effective_pair_config(
 #[cfg(test)]
 mod tests {
     use super::{
-        ReadyCheck, Sp1RemoteVerifyConfig, check_prover, format_error_chain,
-        parse_cuda_device_count, readiness_response, required_cuda_devices,
+        ReadyCheck, Sp1RemoteVerifyConfig, check_prover, describe_cuda_failures,
+        format_error_chain, parse_cuda_device_count, readiness_response, required_cuda_devices,
         sp1_effective_pair_config, sp1_network_credentials_required,
     };
     use crate::config::Config;
@@ -562,5 +581,18 @@ mod tests {
         assert_eq!(parse_cuda_device_count("0\n1\n"), 2);
         assert_eq!(parse_cuda_device_count("\n"), 0);
         assert_eq!(parse_cuda_device_count(""), 0);
+    }
+
+    #[test]
+    fn cuda_failures_are_reported_per_device() {
+        assert_eq!(describe_cuda_failures(&[]), None);
+        assert_eq!(
+            describe_cuda_failures(&[
+                (0, "socket closed".to_string()),
+                (1, "start failed".to_string()),
+            ])
+            .as_deref(),
+            Some("sp1-gpu-server unavailable (device 0: socket closed; device 1: start failed)")
+        );
     }
 }

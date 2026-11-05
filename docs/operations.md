@@ -110,6 +110,13 @@ CPU-only and unchanged.
   device (socket `/tmp/sp1-cuda-<id>.sock`) and keeps it for the life of the raiko2 process. The
   first proof of each guest program pays a one-time GPU key setup. `prover.sp1.cuda_device_id`
   selects the device (default `0`). Execute-only runs (`mode = "execute"`) stay on the CPU.
+- `sp1-gpu-server` does not enforce the SP1 cycle limit, so each GPU proof (proposal and
+  aggregation) first executes the same input on the CPU with the stage's cycle limit and fails
+  before using the GPU if the limit is exceeded.
+- If `sp1-gpu-server` exits or its socket breaks, raiko2 retires that client: proofs on the
+  device fail fast while in-flight users finish, then a fresh server starts in the background. The
+  device is reported unready until the restart succeeds. Errors the live server reports itself
+  (prover or internal errors) keep the client.
 - Mock and network modes are unaffected.
 
 ### GPU Image
@@ -209,8 +216,9 @@ Pin the image by digest. `--gpus all` exposes every GPU; device placement is the
 
 In `cuda` builds, the `/ready` `accelerator` check runs `nvidia-smi` and fails when fewer devices
 are visible than the enabled local runners need. That covers a container started without
-`--gpus` or a driver/toolkit mismatch. It does not track GPU utilization, memory, ECC errors, or a
-hung `sp1-gpu-server`. Keep the host-level `prover-health` probe (`nvidia-smi` plus `/ready`) as the
+`--gpus` or a driver/toolkit mismatch. It also fails while an `sp1-gpu-server` that could not start
+or died has not been replaced yet. It does not track GPU utilization, memory, ECC errors, or a
+server that is alive but hung. Keep the host-level `prover-health` probe (`nvidia-smi` plus `/ready`) as the
 VM health signal.
 
 ## Hosted Aggregate Route

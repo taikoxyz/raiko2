@@ -66,7 +66,8 @@ the responsiveness of any enabled GPU/accelerator (SGX/SGXGETH TEE) proving back
 health endpoint (`/health` for SGX, `/healthz` for SGXGETH), and the liveness of the proving worker pool.
 In binaries built with the `cuda` feature, `accelerator` also requires `nvidia-smi` to report enough
 NVIDIA devices for local GPU proving: one when non-mock `risc0/local` is enabled, and
-`prover.sp1.cuda_device_id + 1` (default 1) when `sp1.prover=local` is enabled. Each check is reported as an
+`prover.sp1.cuda_device_id + 1` (default 1) when `sp1.prover=local` is enabled. It also fails while
+an SP1 `sp1-gpu-server` that failed to start or died has not been restarted. Each check is reported as an
 individual field (`reth`, `runtime`, `queue`, `prover`, `accelerator`, `workers`) with an `ok` flag
 and an optional `error` string. The endpoint returns HTTP `200` only when every check passes;
 draining, an inaccessible runtime store, an unresponsive accelerator backend, or a dead worker pool

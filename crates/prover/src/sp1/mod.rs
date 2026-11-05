@@ -12,6 +12,8 @@ pub use crate::sp1_config::{
     Sp1FulfillmentStrategy, Sp1NetworkMetadata, Sp1NetworkMode, Sp1NetworkSubmissionProgress,
     Sp1RemoteVerifyConfig, Sp1RequestContext, Sp1SystemConfig,
 };
+#[cfg(feature = "cuda")]
+pub use cuda::cuda_device_failures;
 pub use types::{Sp1ExecutionMetadata, Sp1Response};
 
 use alloy::{providers::ProviderBuilder, sol};
@@ -1130,11 +1132,12 @@ impl LocalSp1Client {
 
     /// Client for proving. In `cuda` builds `prover = "local"` proves on the configured GPU
     /// (device 0 unless `cuda_device_id` is set); otherwise it proves on the CPU.
-    fn for_proving(target: LocalSp1Target) -> Self {
+    #[allow(clippy::unnecessary_wraps)] // fallible only in `cuda` builds
+    fn for_proving(target: LocalSp1Target) -> RaikoResult<Self> {
         match target.prover_mode {
             #[cfg(feature = "cuda")]
-            ProverMode::Local => Self::Cuda(cuda::device(target.cuda_device_id.unwrap_or(0))),
-            prover_mode => Self::new(prover_mode),
+            ProverMode::Local => cuda::device(target.cuda_device_id.unwrap_or(0)).map(Self::Cuda),
+            prover_mode => Ok(Self::new(prover_mode)),
         }
     }
 
@@ -1153,11 +1156,7 @@ impl LocalSp1Client {
                 .run()
                 .map_err(|err| err.to_string()),
             #[cfg(feature = "cuda")]
-            Self::Cuda(device) => device
-                .prover()
-                .execute(elf.into(), stdin)
-                .run()
-                .map_err(|err| err.to_string()),
+            Self::Cuda(device) => device.execute(elf, stdin),
         }
     }
 
@@ -1182,16 +1181,7 @@ impl LocalSp1Client {
                 .run()
                 .map_err(|err| err.to_string()),
             #[cfg(feature = "cuda")]
-            Self::Cuda(device) => {
-                let cuda_pk = device.proving_key(pk).map_err(|err| err.to_string())?;
-                device
-                    .prover()
-                    .prove(&cuda_pk, stdin)
-                    .mode(proof_mode)
-                    .cycle_limit(cycle_limit)
-                    .run()
-                    .map_err(|err| err.to_string())
-            }
+            Self::Cuda(device) => device.prove(pk, stdin, proof_mode, cycle_limit),
         }
     }
 
@@ -1204,10 +1194,7 @@ impl LocalSp1Client {
                 .verify(proof, vk, None)
                 .map_err(|err| err.to_string()),
             #[cfg(feature = "cuda")]
-            Self::Cuda(device) => device
-                .prover()
-                .verify(proof, vk, None)
-                .map_err(|err| err.to_string()),
+            Self::Cuda(device) => device.verify(proof, vk),
         }
     }
 }
@@ -1271,7 +1258,7 @@ async fn prove_proposal_with_local_client(
         let mut stdin = SP1Stdin::new();
         stdin.write(&guest_input);
 
-        let client = LocalSp1Client::for_proving(target);
+        let client = LocalSp1Client::for_proving(target)?;
         prove_proposal_with_client(
             &client,
             setup.as_ref(),
@@ -1390,7 +1377,7 @@ async fn aggregate_with_local_client(
         let mut stdin = SP1Stdin::new();
         stdin.write(&aggregation_input);
 
-        let client = LocalSp1Client::for_proving(target);
+        let client = LocalSp1Client::for_proving(target)?;
         aggregate_with_client(
             &client,
             proposal_setup.as_ref(),

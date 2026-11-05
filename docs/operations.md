@@ -124,10 +124,15 @@ CPU-only and unchanged.
     count. The watchdog then kills the hung server so the blocked request returns. Set this
     above the longest expected single proof.
 
-  A replacement is installed only after it has set up every program the device served before,
-  which warms the keys and proves it is not reusing the dead connection; a program whose setup
-  fails on its own (for example an ELF/VK mismatch) is dropped from that set instead of blocking
-  the device. The device is reported unready until a replacement is installed.
+  Each client records the `sp1-gpu-server` process it started. Before a restart the previous
+  server is killed, and a replacement counts only if a new server process actually started (so it
+  cannot be the dead connection reused). It is installed after it has set up every program the
+  device served before. A program whose setup fails on its own (an ELF/VK mismatch) is dropped
+  from that set; any server failure keeps the device restarting. The watchdog only kills and
+  checks the exact server process of the request or client in question. The device is reported
+  unready until a replacement is installed.
+- On shutdown, after workers stop, raiko2 kills the `sp1-gpu-server` processes it started, so
+  they and their pooled GPU memory do not outlive it on a plain Linux host.
 - Mock and network modes are unaffected.
 
 ### GPU Image

@@ -32,9 +32,20 @@ pub(super) fn server_pids(device_id: u32) -> Vec<i32> {
 pub(super) fn kill_servers(device_id: u32) -> usize {
     server_pids(device_id)
         .into_iter()
-        .filter_map(Pid::from_raw)
-        .filter(|pid| kill_process(*pid, Signal::KILL).is_ok())
+        .filter(|pid| kill_server(*pid, device_id))
         .count()
+}
+
+/// Whether `pid` is still a live `sp1-gpu-server` child of this process serving `device_id`.
+pub(super) fn is_server(pid: i32, device_id: u32) -> bool {
+    is_server_for_device(pid, std::process::id(), device_id)
+}
+
+/// Sends `SIGKILL` to `pid` only if it is still a live `sp1-gpu-server` child serving
+/// `device_id`, so a reused PID or a different server is never signalled.
+pub(super) fn kill_server(pid: i32, device_id: u32) -> bool {
+    is_server(pid, device_id)
+        && Pid::from_raw(pid).is_some_and(|pid| kill_process(pid, Signal::KILL).is_ok())
 }
 
 fn is_server_for_device(pid: i32, parent: u32, device_id: u32) -> bool {

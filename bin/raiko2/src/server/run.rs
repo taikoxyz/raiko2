@@ -58,6 +58,12 @@ pub async fn run_server(config: Config, json_logs: bool) -> Result<()> {
         }
     };
     state.shutdown().await;
+    // Workers have stopped; stop the SP1 GPU servers so they and their pooled GPU memory do not
+    // outlive this process.
+    #[cfg(feature = "cuda")]
+    if let Err(err) = tokio::task::spawn_blocking(raiko2_prover::sp1::shutdown_cuda_devices).await {
+        warn!(%err, "SP1 CUDA shutdown task failed");
+    }
     server_result?;
 
     Ok(())

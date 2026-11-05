@@ -1,3 +1,5 @@
+#![recursion_limit = "256"] // Large protocol JSON fixtures exceed the default macro depth.
+
 mod common;
 
 use common::trusted_temp_root;

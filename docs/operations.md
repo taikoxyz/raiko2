@@ -112,20 +112,22 @@ CPU-only and unchanged.
   selects the device (default `0`). Execute-only runs (`mode = "execute"`) stay on the CPU.
 - `sp1-gpu-server` does not enforce the SP1 cycle limit, so each GPU proof (proposal and
   aggregation) first executes the same input on the CPU with the stage's cycle limit and fails
-  before using the GPU if the limit is exceeded.
+  before using the GPU if the limit is exceeded. That execution also verifies aggregation
+  sub-proofs, so an invalid sub-proof fails there rather than as a server error.
 - The first SP1 proof on a device starts its server; concurrent first proofs wait for that one
   start. raiko2 retires a device's client, fails proofs on it fast, and restarts the server in the
   background with exponential backoff (2 s up to 1 min), independent of proof traffic, when:
   - the start fails, or a request fails at the transport level (server exited, socket closed);
   - the server reports errors on three requests in a row;
   - a watchdog (every 5 s) finds the server process gone between proofs;
-  - a setup or proof runs longer than `prover.sp1.cuda_timeout_secs` (default 7200) at the
-    server. GPU requests on a device take turns, and time spent waiting for a turn does not
+  - a setup or proof runs longer than `prover.sp1.cuda_timeout_secs` (default 7200, at most
+    604800) at the server, or a server start takes longer than 5 minutes. GPU requests on a device take turns, and time spent waiting for a turn does not
     count. The watchdog then kills the hung server so the blocked request returns. Set this
     above the longest expected single proof.
 
   Each client records the `sp1-gpu-server` process it started. Before a restart the previous
-  server is killed, and a replacement counts only if a new server process actually started (so it
+  server is killed and must exit within 30 s, and a replacement counts only if a new server
+  process actually started (so it
   cannot be the dead connection reused). It is installed after it has set up every program the
   device served before. A program whose setup fails on its own (an ELF/VK mismatch) is dropped
   from that set; any server failure keeps the device restarting. The watchdog only kills and
@@ -250,8 +252,8 @@ In `cuda` builds, the `/ready` `accelerator` check runs `nvidia-smi` and fails w
 - the SP1 local runner is enabled (`prover = "local"` or `"mock"`, any `mode`, since requests may
   override both) and host device `cuda_device_id` does not exist (the SP1 server sets its own
   `CUDA_VISIBLE_DEVICES`, so the id indexes host devices);
-- RISC0 and SP1 resolve to the same host GPU (CUDA's default device order matches `nvidia-smi`'s
-  on hosts with identical GPUs, such as 2× L4);
+- RISC0 and SP1 resolve to the same host GPU (the image sets `CUDA_DEVICE_ORDER=PCI_BUS_ID`, so
+  CUDA numbers devices the way `nvidia-smi` does);
 - an `sp1-gpu-server` that could not start, died, hung past `cuda_timeout_secs`, or kept failing
   has not been replaced yet.
 

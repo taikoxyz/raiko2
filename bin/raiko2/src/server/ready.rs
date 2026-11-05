@@ -306,6 +306,7 @@ fn parse_nvidia_gpus(stdout: &str) -> Result<Vec<NvidiaGpu>> {
 }
 
 /// Host device indices CUDA exposes to this process after `CUDA_VISIBLE_DEVICES`, in CUDA order.
+/// `Dockerfile.cuda` sets `CUDA_DEVICE_ORDER=PCI_BUS_ID`, so CUDA indices equal `nvidia-smi`'s.
 ///
 /// Follows CUDA's rules: unset exposes every device; entries are indices or unique prefixes of
 /// `GPU-`/`MIG-` UUIDs; the first invalid, ambiguous, or repeated entry hides it and every later

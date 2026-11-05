@@ -152,6 +152,11 @@ RUN test "$(/root/.sp1/bin/sp1-gpu-server --version)" = "${SP1_VERSION}"
 ENV RISC0_HOME=/opt/risc0
 COPY --from=risc0-groth16 /opt/risc0 /opt/risc0
 
+# Number CUDA devices like nvidia-smi (PCI bus order) instead of fastest-first, so
+# CUDA_VISIBLE_DEVICES, RISC0's device 0, sp1.cuda_device_id, and the /ready checks agree on
+# hosts with mixed GPUs. sp1-gpu-server inherits it.
+ENV CUDA_DEVICE_ORDER=PCI_BUS_ID
+
 COPY --from=builder /app/build-output/raiko2 /usr/local/bin/raiko2
 COPY --from=builder /app/crates/guests/elf ./crates/guests/elf
 COPY --from=builder /app/config/chain_spec_list_default.json /etc/raiko2/chain_spec_list_default.json

@@ -1249,7 +1249,7 @@ set both SGX lane timeouts. Use the independent `prover.sgx.timeout_ms` and
   `prover.sp1.proposal_cycle_limit` and `prover.sp1.aggregation_cycle_limit` override it per
   stage; request-scoped `prover_args.sp1.cycle_limit` still takes precedence for compatibility.
 - `prover.sp1.cuda_device_id` selects the CUDA device for `sp1.prover=local` in binaries built with
-  the `cuda` feature (default `0`, at most `255`). `prover.sp1.cuda_timeout_secs` (default `7200`)
+  the `cuda` feature (default `0`, at most `255`). `prover.sp1.cuda_timeout_secs` (default `7200`, `1`–`604800`)
   bounds one SP1 GPU setup or proof; past it the hung `sp1-gpu-server` is killed and restarted.
   When SP1 is enabled, other builds reject both keys at startup. Both are operator configuration
   only and are not accepted as request overrides.

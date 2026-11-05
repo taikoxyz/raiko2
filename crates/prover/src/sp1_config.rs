@@ -33,7 +33,7 @@ pub enum Sp1ConfigError {
     CudaDeviceRequiresCudaBuild,
     CudaDeviceIdOutOfRange(u32),
     CudaTimeoutRequiresCudaBuild,
-    CudaTimeoutSecsMustBePositive,
+    CudaTimeoutSecsOutOfRange(u64),
 }
 
 impl std::fmt::Display for Sp1ConfigError {
@@ -101,9 +101,10 @@ impl std::fmt::Display for Sp1ConfigError {
             Self::CudaTimeoutRequiresCudaBuild => f.write_str(
                 "sp1.cuda_timeout_secs requires a raiko2 binary built with the `cuda` feature",
             ),
-            Self::CudaTimeoutSecsMustBePositive => {
-                f.write_str("sp1.cuda_timeout_secs must be greater than 0")
-            }
+            Self::CudaTimeoutSecsOutOfRange(timeout_secs) => write!(
+                f,
+                "sp1.cuda_timeout_secs must be between 1 and {MAX_CUDA_TIMEOUT_SECS}, got {timeout_secs}"
+            ),
             Self::CudaDeviceIdOutOfRange(device_id) => write!(
                 f,
                 "sp1.cuda_device_id must be at most {MAX_CUDA_DEVICE_ID}, got {device_id}"
@@ -182,6 +183,9 @@ pub const MAX_CUDA_DEVICE_ID: u32 = 255;
 
 /// Default `sp1.cuda_timeout_secs`: matches the network proof timeout.
 pub const DEFAULT_CUDA_TIMEOUT_SECS: u64 = 7_200;
+
+/// Highest accepted `sp1.cuda_timeout_secs` (seven days); keeps deadline arithmetic in range.
+pub const MAX_CUDA_TIMEOUT_SECS: u64 = 7 * 24 * 60 * 60;
 
 const fn default_true() -> bool {
     true
@@ -413,8 +417,8 @@ impl Sp1Config {
             if !cfg!(feature = "cuda") {
                 return Err(Sp1ConfigError::CudaTimeoutRequiresCudaBuild);
             }
-            if timeout_secs == 0 {
-                return Err(Sp1ConfigError::CudaTimeoutSecsMustBePositive);
+            if !(1..=MAX_CUDA_TIMEOUT_SECS).contains(&timeout_secs) {
+                return Err(Sp1ConfigError::CudaTimeoutSecsOutOfRange(timeout_secs));
             }
         }
         if self.prover == ProverMode::Network {
@@ -713,9 +717,17 @@ mod tests {
         if cfg!(feature = "cuda") {
             assert_eq!(
                 zero.validate(),
-                Err(Sp1ConfigError::CudaTimeoutSecsMustBePositive)
+                Err(Sp1ConfigError::CudaTimeoutSecsOutOfRange(0))
             );
             assert!(set.validate().is_ok());
+            let huge = Sp1Config {
+                cuda_timeout_secs: Some(u64::MAX),
+                ..Sp1Config::default()
+            };
+            assert_eq!(
+                huge.validate(),
+                Err(Sp1ConfigError::CudaTimeoutSecsOutOfRange(u64::MAX))
+            );
         } else {
             assert_eq!(
                 set.validate(),

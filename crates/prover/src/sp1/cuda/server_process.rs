@@ -6,8 +6,11 @@
 
 use std::fs;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use rustix::process::{Pid, Signal, kill_process};
+use tracing::warn;
 
 const SERVER_BINARY: &str = "sp1-gpu-server";
 
@@ -28,12 +31,38 @@ pub(super) fn server_pids(device_id: u32) -> Vec<i32> {
         .collect()
 }
 
-/// Sends `SIGKILL` to every `sp1-gpu-server` child serving `device_id`; returns how many.
-pub(super) fn kill_servers(device_id: u32) -> usize {
+/// Sends `SIGKILL` to every `sp1-gpu-server` child serving `device_id`; returns their PIDs.
+pub(super) fn kill_servers(device_id: u32) -> Vec<i32> {
     server_pids(device_id)
         .into_iter()
         .filter(|pid| kill_server(*pid, device_id))
-        .count()
+        .collect()
+}
+
+/// Waits until every PID in `pids` has exited (zombie or gone), so its socket listener and GPU
+/// memory are released. Returns the PIDs still running after `timeout`.
+pub(super) fn wait_exited(pids: &[i32], timeout: Duration) -> Vec<i32> {
+    const POLL: Duration = Duration::from_millis(100);
+    let deadline = Instant::now() + timeout;
+    loop {
+        let running: Vec<i32> = pids
+            .iter()
+            .copied()
+            .filter(|pid| is_running(*pid))
+            .collect();
+        if running.is_empty() || Instant::now() >= deadline {
+            return running;
+        }
+        std::thread::sleep(POLL);
+    }
+}
+
+/// Whether `pid` exists and has not exited yet (zombies have exited).
+fn is_running(pid: i32) -> bool {
+    fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|stat| parse_stat(&stat))
+        .is_some_and(|(state, _)| !matches!(state, 'Z' | 'X' | 'x'))
 }
 
 /// Whether `pid` is still a live `sp1-gpu-server` child of this process serving `device_id`.
@@ -61,10 +90,25 @@ fn is_server_for_device(pid: i32, parent: u32, device_id: u32) -> bool {
     let Ok(cmdline) = fs::read(format!("/proc/{pid}/cmdline")) else {
         return false;
     };
-    let Ok(environ) = fs::read(format!("/proc/{pid}/environ")) else {
+    if !is_server_cmdline(&cmdline) {
         return false;
-    };
-    is_server_cmdline(&cmdline) && environ_selects_device(&environ, device_id)
+    }
+    match fs::read(format!("/proc/{pid}/environ")) {
+        Ok(environ) => environ_selects_device(&environ, device_id),
+        // Unreadable environ (non-dumpable process, LSM policy): fall back to binary name and
+        // parent. raiko2 runs at most one SP1 GPU device per process, so this stays unambiguous.
+        Err(err) => {
+            static WARNED: AtomicBool = AtomicBool::new(false);
+            if !WARNED.swap(true, Ordering::Relaxed) {
+                warn!(
+                    pid,
+                    %err,
+                    "Cannot read sp1-gpu-server environ; matching servers by binary name and parent only"
+                );
+            }
+            true
+        }
+    }
 }
 
 /// Process state and parent PID from `/proc/<pid>/stat`. The command name may contain spaces

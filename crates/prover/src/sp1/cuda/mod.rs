@@ -23,8 +23,11 @@
 //!   independent of proof traffic. A replacement is installed only after it set up every program
 //!   the device has served. A program whose setup fails for its own reasons (a verifying-key
 //!   mismatch) is dropped from that set; any server failure keeps the device restarting.
+//! - Before a restart the previous server is killed and waited on (bounded), so the new client
+//!   cannot reach the old listener and the old GPU memory is released. Server starts have their
+//!   own watchdog deadline.
 //! - [`shutdown_cuda_devices`] stops the supervisors and watchdog, kills the servers, and releases
-//!   the cached clients at process shutdown.
+//!   the cached clients at process shutdown; a start still running then is not installed.
 //!
 //! `sp1-gpu-server` does not receive the SP1 cycle limit (its protocol carries only the proof
 //! nonce), so every GPU proof is preceded by a cycle-bounded CPU execution of the same input.
@@ -53,7 +56,7 @@ use tokio::runtime::Handle;
 use tracing::{error, info, warn};
 
 use super::sp1_vk_digest;
-use crate::sp1_config::DEFAULT_CUDA_TIMEOUT_SECS;
+use crate::sp1_config::{DEFAULT_CUDA_TIMEOUT_SECS, MAX_CUDA_TIMEOUT_SECS};
 
 type CudaProvingKey = <BlockingCudaProver as sp1_sdk::blocking::Prover>::ProvingKey;
 
@@ -63,6 +66,10 @@ const WATCHDOG_INTERVAL: Duration = Duration::from_secs(5);
 /// Server-reported errors in a row after which the client is treated as broken.
 const MAX_CONSECUTIVE_SERVER_ERRORS: u32 = 3;
 const SHUTTING_DOWN: &str = "SP1 CUDA proving is shutting down";
+/// How long a restart waits for killed servers to exit (releasing their socket and GPU memory).
+const PREVIOUS_SERVER_EXIT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Deadline for starting `sp1-gpu-server` and connecting to it.
+const START_TIMEOUT: Duration = Duration::from_mins(5);
 
 /// One CUDA device: the `sp1-gpu-server` client plus the proving keys already set up on it.
 pub(super) struct Sp1CudaDevice {
@@ -93,10 +100,11 @@ struct DeviceSlot {
     timeout: Option<Duration>,
 }
 
-/// A setup or proof request currently being served by a server.
+/// A server start, or a setup or proof request currently being served by a server.
 struct InFlight {
     device_id: u32,
-    generation: u64,
+    /// Client generation; `None` for a server start, which has no client yet.
+    generation: Option<u64>,
     server_pid: Option<i32>,
     operation: &'static str,
     deadline: Instant,
@@ -147,8 +155,8 @@ pub fn shutdown_cuda_devices() {
     };
     for device_id in device_ids {
         let killed = server_process::kill_servers(device_id);
-        if killed > 0 {
-            info!(device_id, killed, "Stopped sp1-gpu-server");
+        if !killed.is_empty() {
+            info!(device_id, ?killed, "Stopped sp1-gpu-server");
         }
     }
     drop(devices);
@@ -178,6 +186,13 @@ pub(super) fn device(device_id: u32, timeout: Duration) -> RaikoResult<Arc<Sp1Cu
     let mut slots = lock(&SLOTS);
     let slot = slots.entry(device_id).or_default();
     match started {
+        // Shutdown began while this start was running: never install, stop its server.
+        Ok(device) if SHUTDOWN.load(Ordering::SeqCst) => {
+            drop(slots);
+            server_process::kill_servers(device_id);
+            drop(device);
+            Err(RaikoError::Guest(SHUTTING_DOWN.to_string()))
+        }
         Ok(device) => {
             slot.current = Some(Arc::clone(&device));
             slot.failure = None;
@@ -216,21 +231,34 @@ fn start_device(device_id: u32, timeout: Duration) -> Result<Arc<Sp1CudaDevice>,
     let tracking = server_process::supported();
     let previous = if tracking {
         // A previous server is dead, hung, or being replaced. Killing it makes stale users of its
-        // connection fail fast and release it, so sp1-cuda starts a new server below.
-        server_process::kill_servers(device_id);
+        // connection fail fast and release it, so sp1-cuda starts a new server below. Wait for it
+        // to exit, so the new client cannot connect to the old listener and the old server's GPU
+        // memory is released first.
+        let killed = server_process::kill_servers(device_id);
+        let running = server_process::wait_exited(&killed, PREVIOUS_SERVER_EXIT_TIMEOUT);
+        if !running.is_empty() {
+            return Err(format!(
+                "previous sp1-gpu-server on CUDA device {device_id} (pids {running:?}) did not exit \
+                 within {PREVIOUS_SERVER_EXIT_TIMEOUT:?} after SIGKILL"
+            ));
+        }
         server_process::server_pids(device_id)
     } else {
         Vec::new()
     };
 
     info!(device_id, "Starting SP1 CUDA prover (sp1-gpu-server)");
-    // `sp1-sdk` panics when the server cannot be started or reached.
-    let prover = catch_unwind(AssertUnwindSafe(|| {
-        BlockingProverClient::builder()
-            .cuda()
-            .with_device_id(device_id)
-            .build()
-    }))
+    // `sp1-sdk` panics when the server cannot be started or reached. A start that hangs is
+    // reported and its server killed by the watchdog.
+    let prover = {
+        let _watched = WatchedRequest::start(device_id);
+        catch_unwind(AssertUnwindSafe(|| {
+            BlockingProverClient::builder()
+                .cuda()
+                .with_device_id(device_id)
+                .build()
+        }))
+    }
     .map_err(|panic| {
         format!(
             "failed to start sp1-gpu-server on CUDA device {device_id}: {}",
@@ -337,6 +365,7 @@ fn mark_failed(slot: &mut DeviceSlot, device_id: u32, failure: String) {
 /// in-flight users of a retired client time to release it.
 fn supervise(device_id: u32, handle: &Handle) {
     let _runtime = handle.enter();
+    let _supervising = SupervisorGuard(device_id);
     let mut backoff = RESTART_BACKOFF_INITIAL;
     loop {
         std::thread::sleep(backoff);
@@ -371,6 +400,19 @@ fn supervise(device_id: u32, handle: &Handle) {
                 slot.failure = Some(failure);
                 backoff = (backoff * 2).min(RESTART_BACKOFF_MAX);
             }
+        }
+    }
+}
+
+/// Clears `supervising` if a supervisor panics, so a later failure starts a new one.
+struct SupervisorGuard(u32);
+
+impl Drop for SupervisorGuard {
+    fn drop(&mut self) {
+        if std::thread::panicking()
+            && let Some(slot) = lock(&SLOTS).get_mut(&self.0)
+        {
+            slot.supervising = false;
         }
     }
 }
@@ -421,23 +463,7 @@ fn watchdog(handle: &Handle) {
     while !SHUTDOWN.load(Ordering::SeqCst) {
         std::thread::sleep(WATCHDOG_INTERVAL);
         for request in take_expired_requests(Instant::now()) {
-            let reason = format!(
-                "SP1 CUDA {} on device {} exceeded sp1.cuda_timeout_secs; killed the hung sp1-gpu-server",
-                request.operation, request.device_id
-            );
-            error!(device_id = request.device_id, "{reason}");
-            retire_generation(request.device_id, request.generation, &reason);
-            // Kill exactly the server that request was waiting on. Its socket closes, so the
-            // blocked request returns; a replacement server is never touched.
-            let killed = request
-                .server_pid
-                .is_some_and(|pid| server_process::kill_server(pid, request.device_id));
-            if !killed {
-                warn!(
-                    device_id = request.device_id,
-                    "Hung sp1-gpu-server process not found; the request may stay blocked"
-                );
-            }
+            handle_expired(&request);
         }
         for device in installed_devices() {
             if let Some(pid) = device.server_pid
@@ -453,6 +479,44 @@ fn watchdog(handle: &Handle) {
                 );
             }
         }
+    }
+}
+
+fn handle_expired(request: &InFlight) {
+    let device_id = request.device_id;
+    let Some(generation) = request.generation else {
+        // A server start hung (no client exists yet). Report the device as down and kill this
+        // device's servers so the blocked start fails; the start path then retries.
+        let reason = format!(
+            "starting sp1-gpu-server on CUDA device {device_id} exceeded {START_TIMEOUT:?}; killed it"
+        );
+        error!(device_id, "{reason}");
+        {
+            let mut slots = lock(&SLOTS);
+            let slot = slots.entry(device_id).or_default();
+            if slot.current.is_none() {
+                mark_failed(slot, device_id, reason);
+            }
+        }
+        server_process::kill_servers(device_id);
+        return;
+    };
+    let reason = format!(
+        "SP1 CUDA {} on device {device_id} exceeded sp1.cuda_timeout_secs; killed the hung sp1-gpu-server",
+        request.operation
+    );
+    error!(device_id, "{reason}");
+    retire_generation(device_id, generation, &reason);
+    // Kill exactly the server that request was waiting on. Its socket closes, so the blocked
+    // request returns; a replacement server is never touched.
+    let killed = request
+        .server_pid
+        .is_some_and(|pid| server_process::kill_server(pid, device_id));
+    if !killed {
+        warn!(
+            device_id,
+            "Hung sp1-gpu-server process not found; the request may stay blocked"
+        );
     }
 }
 
@@ -481,19 +545,38 @@ struct WatchedRequest(u64);
 
 impl WatchedRequest {
     fn new(device: &Sp1CudaDevice, operation: &'static str) -> Self {
+        Self::register(InFlight {
+            device_id: device.device_id,
+            generation: Some(device.generation),
+            server_pid: device.server_pid,
+            operation,
+            deadline: deadline_after(device.timeout),
+        })
+    }
+
+    fn start(device_id: u32) -> Self {
+        Self::register(InFlight {
+            device_id,
+            generation: None,
+            server_pid: None,
+            operation: "start",
+            deadline: deadline_after(START_TIMEOUT),
+        })
+    }
+
+    fn register(request: InFlight) -> Self {
         let id = REQUEST_ID.fetch_add(1, Ordering::Relaxed);
-        lock(&IN_FLIGHT).insert(
-            id,
-            InFlight {
-                device_id: device.device_id,
-                generation: device.generation,
-                server_pid: device.server_pid,
-                operation,
-                deadline: Instant::now() + device.timeout,
-            },
-        );
+        lock(&IN_FLIGHT).insert(id, request);
         Self(id)
     }
+}
+
+/// `now + timeout`, capped so an oversized timeout can never overflow `Instant`.
+fn deadline_after(timeout: Duration) -> Instant {
+    let now = Instant::now();
+    now.checked_add(timeout)
+        .or_else(|| now.checked_add(Duration::from_secs(MAX_CUDA_TIMEOUT_SECS)))
+        .unwrap_or(now)
 }
 
 impl Drop for WatchedRequest {
@@ -520,13 +603,13 @@ impl Sp1CudaDevice {
         cycle_limit: u64,
     ) -> Result<SP1ProofWithPublicValues, String> {
         // sp1-gpu-server ignores the request cycle limit, so enforce it before using the GPU.
-        // Gas and deferred-proof checks do not affect the cycle count; the server checks
-        // deferred proofs while proving.
+        // Gas does not affect the cycle count. Deferred-proof verification stays on: invalid
+        // aggregation sub-proofs must fail here, not as server errors that count toward
+        // retiring the device.
         self.prover
             .execute(pk.elf().clone(), stdin.clone())
             .cycle_limit(cycle_limit)
             .calculate_gas(false)
-            .deferred_proof_verification(false)
             .run()
             .map_err(|err| {
                 format!(
@@ -688,9 +771,16 @@ mod tests {
     use sp1_cuda::CudaClientError;
 
     use super::{
-        IN_FLIGHT, InFlight, is_server_connection_failure, lock, panic_message, single_new_server,
-        take_expired_requests,
+        IN_FLIGHT, InFlight, deadline_after, is_server_connection_failure, lock, panic_message,
+        single_new_server, take_expired_requests,
     };
+
+    #[test]
+    fn oversized_timeouts_do_not_overflow_the_deadline() {
+        let before = Instant::now();
+        assert!(deadline_after(Duration::MAX) >= before);
+        assert!(deadline_after(Duration::from_secs(60)) > before);
+    }
 
     #[test]
     fn transport_failures_retire_the_client() {
@@ -735,7 +825,7 @@ mod tests {
                 u64::MAX,
                 InFlight {
                     device_id: 9,
-                    generation: 1,
+                    generation: Some(1),
                     server_pid: Some(4242),
                     operation: "prove",
                     deadline: now.checked_sub(Duration::from_secs(1)).unwrap_or(now),
@@ -745,7 +835,7 @@ mod tests {
                 u64::MAX - 1,
                 InFlight {
                     device_id: 9,
-                    generation: 1,
+                    generation: Some(1),
                     server_pid: Some(4242),
                     operation: "setup",
                     deadline: now + Duration::from_hours(1),

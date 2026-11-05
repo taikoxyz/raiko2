@@ -60,7 +60,8 @@ pub struct ReadyResponse {
     pub runtime: ReadyCheck,
     pub queue: ReadyCheck,
     pub prover: ReadyCheck,
-    /// Responsiveness of the GPU/accelerator (SGX/SGXGETH TEE) proving backend.
+    /// Responsiveness of the accelerator proving backends: the remote SGX/SGXGETH TEE runtimes and,
+    /// in `cuda` builds, the local NVIDIA GPUs used by RISC0/SP1 local proving.
     pub accelerator: ReadyCheck,
     /// Liveness of the proving worker pool.
     pub workers: ReadyCheck,
@@ -215,10 +216,10 @@ fn check_prover(config: &Config) -> Result<()> {
 
 /// Probe the responsiveness of every enabled GPU/accelerator proving backend.
 ///
-/// The accelerator analogue in this service is the remote TEE prover (SGX/SGXGETH), reached over
-/// HTTP via its configured `base_url`. For each enabled remote backend this performs the `/health`
-/// probe that the TEE runtime already exposes. Backends that are not enabled are skipped, so a
-/// pure CPU/local configuration reports ready.
+/// For each enabled remote TEE prover (SGX/SGXGETH), reached over HTTP via its configured
+/// `base_url`, this performs the `/health` probe that the TEE runtime already exposes. In `cuda`
+/// builds it also checks that the NVIDIA devices used by local RISC0/SP1 proving are visible.
+/// Backends that are not enabled are skipped, so a pure CPU/local configuration reports ready.
 async fn check_accelerator_health(config: &Config) -> Result<()> {
     for (proof_type, remote) in [
         (ProofType::Sgx, &config.prover.sgx),
@@ -237,6 +238,69 @@ async fn check_accelerator_health(config: &Config) -> Result<()> {
             .health_check()
             .await
             .with_context(|| format!("{proof_type} accelerator backend is not responsive"))?;
+    }
+    #[cfg(feature = "cuda")]
+    check_local_cuda_devices(config)
+        .await
+        .context("local CUDA proving devices are not available")?;
+    Ok(())
+}
+
+/// Number of CUDA devices local proving needs, or `None` when no local GPU proving is enabled.
+///
+/// In `cuda` builds RISC0 local proving runs in-process on CUDA device 0 (or the first device in
+/// `CUDA_VISIBLE_DEVICES`), and SP1 `prover = "local"` runs `sp1-gpu-server` on
+/// `sp1.cuda_device_id` (default 0).
+#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+fn required_cuda_devices(config: &Config) -> Option<u32> {
+    let risc0_gpu = matches!(
+        config.prover.runner(ProofType::Risc0),
+        Some(RunnerKind::Local)
+    ) && !config.prover.risc0.mock;
+    let sp1_gpu = config.prover.is_enabled(ProofType::Sp1)
+        && config.prover.sp1.prover == raiko2_prover::sp1_config::ProverMode::Local;
+    let sp1_required = sp1_gpu.then(|| config.prover.sp1.cuda_device_id.unwrap_or(0) + 1);
+    let risc0_required = risc0_gpu.then_some(1);
+    risc0_required.max(sp1_required)
+}
+
+/// Counts devices in `nvidia-smi --query-gpu=index --format=csv,noheader` output.
+#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+fn parse_cuda_device_count(stdout: &str) -> u32 {
+    let count = stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count();
+    u32::try_from(count).unwrap_or(u32::MAX)
+}
+
+#[cfg(feature = "cuda")]
+async fn check_local_cuda_devices(config: &Config) -> Result<()> {
+    const NVIDIA_SMI_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+    let Some(required) = required_cuda_devices(config) else {
+        return Ok(());
+    };
+    let output = tokio::time::timeout(
+        NVIDIA_SMI_TIMEOUT,
+        tokio::process::Command::new("nvidia-smi")
+            .args(["--query-gpu=index", "--format=csv,noheader"])
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .context("nvidia-smi timed out")?
+    .context("failed to run nvidia-smi; is the container started with `--gpus all`?")?;
+    if !output.status.success() {
+        bail!(
+            "nvidia-smi exited with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let visible = parse_cuda_device_count(&String::from_utf8_lossy(&output.stdout));
+    if visible < required {
+        bail!("local GPU proving needs {required} CUDA device(s), nvidia-smi reports {visible}");
     }
     Ok(())
 }
@@ -305,7 +369,8 @@ fn sp1_effective_pair_config(
 #[cfg(test)]
 mod tests {
     use super::{
-        ReadyCheck, Sp1RemoteVerifyConfig, check_prover, format_error_chain, readiness_response,
+        ReadyCheck, Sp1RemoteVerifyConfig, check_prover, format_error_chain,
+        parse_cuda_device_count, readiness_response, required_cuda_devices,
         sp1_effective_pair_config, sp1_network_credentials_required,
     };
     use crate::config::Config;
@@ -460,5 +525,42 @@ mod tests {
 
         set_routes(&mut config, "sp1/network");
         assert!(sp1_network_credentials_required(&config));
+    }
+
+    #[test]
+    fn cuda_devices_not_required_without_local_zk_proving() {
+        let mut config = Config::default();
+        set_routes(&mut config, "sp1/network,sgx/remote");
+
+        assert_eq!(required_cuda_devices(&config), None);
+    }
+
+    #[test]
+    fn cuda_devices_not_required_for_mock_risc0() {
+        let mut config = Config::default();
+        set_routes(&mut config, "risc0/local");
+        config.prover.risc0.mock = true;
+
+        assert_eq!(required_cuda_devices(&config), None);
+    }
+
+    #[test]
+    fn cuda_devices_cover_risc0_and_configured_sp1_device() {
+        let mut config = Config::default();
+        set_routes(&mut config, "risc0/local");
+        config.prover.risc0.mock = false;
+        assert_eq!(required_cuda_devices(&config), Some(1));
+
+        set_routes(&mut config, "risc0/local,sp1/local");
+        config.prover.sp1.prover = Sp1ProverMode::Local;
+        config.prover.sp1.cuda_device_id = Some(1);
+        assert_eq!(required_cuda_devices(&config), Some(2));
+    }
+
+    #[test]
+    fn cuda_device_count_ignores_blank_lines() {
+        assert_eq!(parse_cuda_device_count("0\n1\n"), 2);
+        assert_eq!(parse_cuda_device_count("\n"), 0);
+        assert_eq!(parse_cuda_device_count(""), 0);
     }
 }

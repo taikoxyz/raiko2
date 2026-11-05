@@ -3,6 +3,8 @@
 //! This module provides the SP1 prover implementation for generating
 //! zero-knowledge proofs of Taiko block execution.
 
+#[cfg(feature = "cuda")]
+mod cuda;
 mod types;
 
 pub use crate::sp1_config::{
@@ -727,7 +729,7 @@ where
                 match effective_config.prover {
                     ProverMode::Mock | ProverMode::Local => {
                         prove_proposal_with_local_client(
-                            effective_config.prover,
+                            LocalSp1Target::from_config(&effective_config),
                             setup,
                             guest_input,
                             proof_mode,
@@ -784,7 +786,7 @@ where
         match effective_config.prover {
             ProverMode::Mock | ProverMode::Local => {
                 aggregate_with_local_client(
-                    effective_config.prover,
+                    LocalSp1Target::from_config(&effective_config),
                     proposal_setup,
                     aggregation_setup,
                     input,
@@ -841,7 +843,7 @@ where
         match effective_config.prover {
             ProverMode::Mock | ProverMode::Local => {
                 aggregate_with_local_client(
-                    effective_config.prover,
+                    LocalSp1Target::from_config(&effective_config),
                     proposal_setup,
                     aggregation_setup,
                     input,
@@ -1091,17 +1093,48 @@ fn blocking_sp1_join_error(operation: &str, err: &tokio::task::JoinError) -> Rai
     RaikoError::Guest(format!("SP1 {operation} task join failed: {err}"))
 }
 
+/// Local (non-network) SP1 proving target resolved from the effective request config.
+#[derive(Clone, Copy, Debug)]
+struct LocalSp1Target {
+    prover_mode: ProverMode,
+    /// CUDA device for `prover = "local"`; only read in `cuda` builds.
+    #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+    cuda_device_id: Option<u32>,
+}
+
+impl LocalSp1Target {
+    const fn from_config(config: &Sp1Config) -> Self {
+        Self {
+            prover_mode: config.prover,
+            cuda_device_id: config.cuda_device_id,
+        }
+    }
+}
+
 enum LocalSp1Client {
     Mock(BlockingMockProver),
     Cpu(BlockingCpuProver),
+    #[cfg(feature = "cuda")]
+    Cuda(Arc<cuda::Sp1CudaDevice>),
 }
 
 impl LocalSp1Client {
+    /// Client for execute-only runs. Execution always runs on the CPU, also in `cuda` builds.
     fn new(prover_mode: ProverMode) -> Self {
         match prover_mode {
             ProverMode::Mock => Self::Mock(BlockingProverClient::builder().mock().build()),
             ProverMode::Local => Self::Cpu(BlockingProverClient::builder().cpu().build()),
             ProverMode::Network => unreachable!("network prover is handled by the network path"),
+        }
+    }
+
+    /// Client for proving. In `cuda` builds `prover = "local"` proves on the configured GPU
+    /// (device 0 unless `cuda_device_id` is set); otherwise it proves on the CPU.
+    fn for_proving(target: LocalSp1Target) -> Self {
+        match target.prover_mode {
+            #[cfg(feature = "cuda")]
+            ProverMode::Local => Self::Cuda(cuda::device(target.cuda_device_id.unwrap_or(0))),
+            prover_mode => Self::new(prover_mode),
         }
     }
 
@@ -1116,6 +1149,12 @@ impl LocalSp1Client {
                 .run()
                 .map_err(|err| err.to_string()),
             Self::Cpu(client) => client
+                .execute(elf.into(), stdin)
+                .run()
+                .map_err(|err| err.to_string()),
+            #[cfg(feature = "cuda")]
+            Self::Cuda(device) => device
+                .prover()
                 .execute(elf.into(), stdin)
                 .run()
                 .map_err(|err| err.to_string()),
@@ -1142,6 +1181,17 @@ impl LocalSp1Client {
                 .cycle_limit(cycle_limit)
                 .run()
                 .map_err(|err| err.to_string()),
+            #[cfg(feature = "cuda")]
+            Self::Cuda(device) => {
+                let cuda_pk = device.proving_key(pk).map_err(|err| err.to_string())?;
+                device
+                    .prover()
+                    .prove(&cuda_pk, stdin)
+                    .mode(proof_mode)
+                    .cycle_limit(cycle_limit)
+                    .run()
+                    .map_err(|err| err.to_string())
+            }
         }
     }
 
@@ -1151,6 +1201,11 @@ impl LocalSp1Client {
                 .verify(proof, vk, None)
                 .map_err(|err| err.to_string()),
             Self::Cpu(client) => client
+                .verify(proof, vk, None)
+                .map_err(|err| err.to_string()),
+            #[cfg(feature = "cuda")]
+            Self::Cuda(device) => device
+                .prover()
                 .verify(proof, vk, None)
                 .map_err(|err| err.to_string()),
         }
@@ -1205,7 +1260,7 @@ async fn execute_proposal_with_local_client(
 }
 
 async fn prove_proposal_with_local_client(
-    prover_mode: ProverMode,
+    target: LocalSp1Target,
     setup: Arc<Sp1ProgramSetup>,
     guest_input: GuestInput,
     proof_mode: SP1ProofMode,
@@ -1216,7 +1271,7 @@ async fn prove_proposal_with_local_client(
         let mut stdin = SP1Stdin::new();
         stdin.write(&guest_input);
 
-        let client = LocalSp1Client::new(prover_mode);
+        let client = LocalSp1Client::for_proving(target);
         prove_proposal_with_client(
             &client,
             setup.as_ref(),
@@ -1322,7 +1377,7 @@ async fn prove_proposal_with_network_client(
 
 #[allow(clippy::too_many_arguments)]
 async fn aggregate_with_local_client(
-    prover_mode: ProverMode,
+    target: LocalSp1Target,
     proposal_setup: Arc<Sp1ProgramSetup>,
     aggregation_setup: Arc<Sp1ProgramSetup>,
     input: AggregationGuestInput,
@@ -1335,7 +1390,7 @@ async fn aggregate_with_local_client(
         let mut stdin = SP1Stdin::new();
         stdin.write(&aggregation_input);
 
-        let client = LocalSp1Client::new(prover_mode);
+        let client = LocalSp1Client::for_proving(target);
         aggregate_with_client(
             &client,
             proposal_setup.as_ref(),

@@ -36,6 +36,10 @@ release-image backend tag repository="us-docker.pkg.dev/evmchain/images/raiko2" 
         cargo run -r -p xtask -- release-image {{backend}} --tag {{tag}} --repository {{repository}} {{args}}; \
     fi
 
+# NVIDIA GPU image from Dockerfile.cuda (raiko2 built with `--features cuda`).
+release-image-cuda backend tag repository="us-docker.pkg.dev/evmchain/images/raiko2-cuda" *args:
+    cargo run -r -p xtask -- release-image {{backend}} --cuda --tag {{tag}} --repository {{repository}} {{args}}
+
 update-alethia-reth:
     cargo update -p alethia-reth-block
     cargo update -p alethia-reth-chainspec

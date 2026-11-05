@@ -63,7 +63,10 @@ GET /ready
 Readiness checks every configured `(network, l1_network)` pair in `rpc.pairs`, the global runtime
 lifecycle and authoritative-store coherence, the in-memory queue, the hosted proving capabilities,
 the responsiveness of any enabled GPU/accelerator (SGX/SGXGETH TEE) proving backend via its
-health endpoint (`/health` for SGX, `/healthz` for SGXGETH), and the liveness of the proving worker pool. Each check is reported as an
+health endpoint (`/health` for SGX, `/healthz` for SGXGETH), and the liveness of the proving worker pool.
+In binaries built with the `cuda` feature, `accelerator` also requires `nvidia-smi` to report enough
+NVIDIA devices for local GPU proving: one when non-mock `risc0/local` is enabled, and
+`prover.sp1.cuda_device_id + 1` (default 1) when `sp1.prover=local` is enabled. Each check is reported as an
 individual field (`reth`, `runtime`, `queue`, `prover`, `accelerator`, `workers`) with an `ok` flag
 and an optional `error` string. The endpoint returns HTTP `200` only when every check passes;
 draining, an inaccessible runtime store, an unresponsive accelerator backend, or a dead worker pool
@@ -1241,6 +1244,9 @@ set both SGX lane timeouts. Use the independent `prover.sgx.timeout_ms` and
 - `prover.sp1.cycle_limit` is the default SP1 network request cycle limit. Optional
   `prover.sp1.proposal_cycle_limit` and `prover.sp1.aggregation_cycle_limit` override it per
   stage; request-scoped `prover_args.sp1.cycle_limit` still takes precedence for compatibility.
+- `prover.sp1.cuda_device_id` selects the CUDA device for `sp1.prover=local` in binaries built with
+  the `cuda` feature (default `0`). Other builds reject the key at startup. It is operator
+  configuration only and is not accepted as a request override.
 - `prover.sp1.network_request_max_attempts` bounds the full SP1 network lifecycle, including a
   request resumed after restart. Exhausting the budget fails the task instead of submitting
   requests indefinitely. A request-scoped `prover_args.sp1.network_request_max_attempts` may lower

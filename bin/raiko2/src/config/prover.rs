@@ -909,6 +909,23 @@ runner = "remote"
     }
 
     #[test]
+    fn sp1_cuda_device_id_is_only_valid_in_cuda_builds() {
+        let mut config = config_with_routes("sp1/local");
+        config.sp1.prover = Sp1ProverMode::Local;
+        config.sp1.cuda_device_id = Some(1);
+
+        let result = config.validate();
+        if cfg!(feature = "cuda") {
+            result.expect("cuda builds accept prover.sp1.cuda_device_id");
+        } else {
+            let message = result
+                .expect_err("non-cuda builds must reject prover.sp1.cuda_device_id")
+                .to_string();
+            assert!(message.contains("cuda_device_id"), "{message}");
+        }
+    }
+
+    #[test]
     fn disabled_sp1_skips_sp1_backend_validation() {
         let mut config = config_with_routes("native/local");
         config.sp1.cycle_limit = 0;

@@ -46,6 +46,9 @@ default = ["chain-spec-json", "risc0", "sp1"]
 chain-spec-json = ["raiko2-primitives/chain-spec-json", "raiko2-pipeline/chain-spec-json"]
 risc0 = ["dep:risc0-zkvm", "dep:risc0-ethereum-contracts"]
 sp1 = ["dep:sp1-sdk"]
+# Local NVIDIA GPU proving for RISC0 (in-process CUDA kernels; needs nvcc at build time) and SP1
+# (`sp1-gpu-server` sidecar process). Opt-in: the default build stays CPU-only.
+cuda = ["risc0", "sp1", "risc0-zkvm/cuda", "sp1-sdk/cuda"]
 [dev-dependencies]
 alloy-signer-local.workspace = true
 httpmock = "0.7"

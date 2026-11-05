@@ -30,6 +30,7 @@ pub enum Sp1ConfigError {
     ExecuteModeDoesNotSupportNetworkProver,
     MainnetRequiresAuction(Sp1FulfillmentStrategy),
     ReservedRequiresReservedOrHosted(Sp1FulfillmentStrategy),
+    CudaDeviceRequiresCudaBuild,
 }
 
 impl std::fmt::Display for Sp1ConfigError {
@@ -91,6 +92,9 @@ impl std::fmt::Display for Sp1ConfigError {
                 f,
                 "sp1.network_mode=reserved requires sp1.fulfillment_strategy=reserved or hosted, got {strategy}"
             ),
+            Self::CudaDeviceRequiresCudaBuild => f.write_str(
+                "sp1.cuda_device_id requires a raiko2 binary built with the `cuda` feature",
+            ),
         }
     }
 }
@@ -149,6 +153,10 @@ pub struct Sp1Config {
     /// Optional remote verifier contract configuration for hosted SP1 verification.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_verify: Option<Sp1RemoteVerifyConfig>,
+    /// CUDA device index used by `prover = "local"` in `cuda` builds. Defaults to device 0.
+    /// Only valid when the binary is built with the `cuda` feature.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cuda_device_id: Option<u32>,
 }
 
 const fn default_true() -> bool {
@@ -190,6 +198,7 @@ impl Default for Sp1Config {
             auction_timeout_secs: None,
             rpc_url: None,
             remote_verify: None,
+            cuda_device_id: None,
         }
     }
 }
@@ -264,6 +273,7 @@ impl Sp1Config {
             auction_timeout_secs: overrides.auction_timeout_secs.or(self.auction_timeout_secs),
             rpc_url: self.rpc_url.clone(),
             remote_verify: self.remote_verify.clone(),
+            cuda_device_id: self.cuda_device_id,
         }
     }
 
@@ -364,6 +374,9 @@ impl Sp1Config {
         }
         if self.mode == ExecutionMode::Execute && self.prover == ProverMode::Network {
             return Err(Sp1ConfigError::ExecuteModeDoesNotSupportNetworkProver);
+        }
+        if self.cuda_device_id.is_some() && !cfg!(feature = "cuda") {
+            return Err(Sp1ConfigError::CudaDeviceRequiresCudaBuild);
         }
         if self.prover == ProverMode::Network {
             match (self.network_mode, self.fulfillment_strategy) {
@@ -613,6 +626,37 @@ mod tests {
             err,
             Sp1ConfigError::MainnetRequiresAuction(Sp1FulfillmentStrategy::Reserved)
         );
+    }
+
+    #[test]
+    fn sp1_cuda_device_id_requires_cuda_build() {
+        let config = Sp1Config {
+            prover: ProverMode::Local,
+            cuda_device_id: Some(1),
+            ..Sp1Config::default()
+        };
+
+        let result = config.validate();
+        if cfg!(feature = "cuda") {
+            assert!(result.is_ok(), "cuda builds accept a device id: {result:?}");
+        } else {
+            assert_eq!(result, Err(Sp1ConfigError::CudaDeviceRequiresCudaBuild));
+        }
+    }
+
+    #[test]
+    fn sp1_cuda_device_id_survives_request_overrides() {
+        let config = Sp1Config {
+            cuda_device_id: Some(1),
+            ..Sp1Config::default()
+        };
+
+        let merged = config.merged_with(&Sp1ConfigOverrides {
+            prover: Some(ProverMode::Local),
+            ..Sp1ConfigOverrides::default()
+        });
+
+        assert_eq!(merged.cuda_device_id, Some(1));
     }
 
     #[test]

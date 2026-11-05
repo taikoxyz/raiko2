@@ -68,6 +68,9 @@ local-provers = [
     "raiko2-prover/risc0",
 ]
 fixture-server = ["local-provers", "raiko2-runtime/test-utils"]
+# Local NVIDIA GPU proving for RISC0 and SP1. Build with `--features cuda` on a host with the CUDA
+# toolkit (see `Dockerfile.cuda`); the default build is unchanged and CPU-only.
+cuda = ["local-provers", "raiko2-prover/cuda"]
 
 [dev-dependencies]
 raiko2-runtime = { workspace = true, features = ["test-utils"] }

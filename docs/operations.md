@@ -97,6 +97,122 @@ Supported pairs are `risc0/local`, `sp1/local`, `sp1/network`, `native/local`,
 The queue is always in-process. Durable task state and remote-provider checkpoints use the
 configured namespaced GCS runtime store.
 
+## NVIDIA GPU Proving
+
+Local RISC0 and SP1 proving can run on NVIDIA GPUs. GPU support is an opt-in `cuda` Cargo feature
+(`cargo build -r -p raiko2 --features cuda`); the default build and the root `Dockerfile` image stay
+CPU-only and unchanged.
+
+- RISC0 proves in-process with its CUDA kernels on device 0, or on the first device in
+  `CUDA_VISIBLE_DEVICES`. With `snark = true`, the Groth16 wrap also runs on the GPU and needs the
+  `risc0-groth16` rzup component under `RISC0_HOME`.
+- SP1 `prover = "local"` proves through `sp1-gpu-server`. `sp1-sdk` starts one server per CUDA
+  device (socket `/tmp/sp1-cuda-<id>.sock`) and keeps it for the life of the raiko2 process. The
+  first proof of each guest program pays a one-time GPU key setup. `prover.sp1.cuda_device_id`
+  selects the device (default `0`). Execute-only runs (`mode = "execute"`) stay on the CPU.
+- Mock and network modes are unaffected.
+
+### GPU Image
+
+`Dockerfile.cuda` builds the `raiko2-cuda` image: a CUDA 12.8 Ubuntu 24.04 runtime with raiko2
+built with `--features cuda`, the pinned `sp1-gpu-server` binary at `/root/.sp1/bin`, and the
+`risc0-groth16` component at `RISC0_HOME=/opt/risc0`. RISC0 kernels are compiled for
+`CUDA_ARCHS` (default `89`, NVIDIA L4); pass `--build-arg CUDA_ARCHS="89 90"` for other GPUs.
+`SP1_VERSION` must equal the workspace `sp1-sdk` version (an `xtask` unit test enforces it).
+Otherwise `sp1-sdk` tries to download a matching server from GitHub at runtime.
+
+Host requirements: x86_64, an NVIDIA driver that supports CUDA 12.8 (R570 or newer), and
+nvidia-container-toolkit. The image needs no GPU to build; the `cuda-image` workflow builds it
+on every relevant PR.
+
+Publish it next to the CPU image through the same release entrypoint:
+
+```bash
+just release-image-cuda all release-20260507-1013
+```
+
+```bash
+cargo run -r -p xtask -- release-image all --cuda --tag release-20260507-1013
+```
+
+`--cuda` builds from `Dockerfile.cuda` and defaults the repository to
+`us-docker.pkg.dev/evmchain/images/raiko2-cuda`. Guest refresh and digest capture behave as
+they do for the CPU image.
+
+### GPU Configuration
+
+Enable the local runners and keep runtime state in GCS:
+
+```toml
+[runtime]
+environment = "mainnet"
+namespace = "raiko2-mainnet-gpu"
+
+[runtime.store]
+backend = "gcs"
+bucket = "<runtime-bucket>"
+prefix = "raiko2/runtime/v1"
+
+[prover.risc0]
+enabled = true
+runner = "local"
+mock = false
+snark = true
+
+[prover.sp1]
+enabled = true
+prover = "local"
+mode = "prove"
+verify = true
+# RISC0 uses device 0; put SP1 on the second GPU of a two-GPU host.
+cuda_device_id = 1
+```
+
+`RAIKO2_PROVER_ROUTES=risc0/local,sp1/local` selects the same routes over a mounted config.
+
+- **Runtime store:** production must use `runtime.store.backend = "gcs"`. The memory store is
+  process-local, loses every task on restart, and is rejected outside `development`, `local`, and
+  `test` environments unless you explicitly set `allow_ephemeral`. Treat it as dev-only. On GCE the
+  container reaches the GCS bucket through the VM service account's metadata-server credentials.
+- **One live process per namespace:** run exactly one raiko2 process per
+  `(runtime.environment, runtime.namespace)`. A second GPU VM needs its own namespace. Replace a
+  container by stopping the old one first (non-overlapping, `Recreate`-style), never by starting the
+  new one alongside it. See [Runtime Operations](#runtime-operations).
+
+### Guest ELFs
+
+The image includes the committed `crates/guests/elf` artifacts at
+`RAIKO2_GUEST_ELF_DIR=/app/crates/guests/elf`. To run a specific guest release, download its
+ELF/VK assets and mount them over that directory (or point `RAIKO2_GUEST_ELF_DIR` elsewhere):
+
+```bash
+cargo run -r -p xtask -- download-guest-elves --tag <guest-release-tag> --backend all --dir ./guest-elf
+```
+
+The SP1 GPU key setup checks that the proving key derived from the ELF matches the checked-in
+verifying key. A mismatched ELF/VK pair fails the proof instead of producing an unverifiable one.
+
+### Run
+
+```bash
+docker run -d --name raiko2 --gpus all --restart unless-stopped \
+  -p 8080:8080 \
+  -v /etc/raiko2/config.toml:/etc/raiko2/config.toml:ro \
+  -v /opt/raiko2/guest-elf:/app/crates/guests/elf:ro \
+  us-docker.pkg.dev/evmchain/images/raiko2-cuda@sha256:<digest>
+```
+
+Pin the image by digest. `--gpus all` exposes every GPU; device placement is then set by
+`CUDA_VISIBLE_DEVICES` (RISC0) and `prover.sp1.cuda_device_id` (SP1).
+
+### GPU Health
+
+In `cuda` builds, the `/ready` `accelerator` check runs `nvidia-smi` and fails when fewer devices
+are visible than the enabled local runners need. That covers a container started without
+`--gpus` or a driver/toolkit mismatch. It does not track GPU utilization, memory, ECC errors, or a
+hung `sp1-gpu-server`. Keep the host-level `prover-health` probe (`nvidia-smi` plus `/ready`) as the
+VM health signal.
+
 ## Hosted Aggregate Route
 
 The hosted API accepts external proposal proofs through:
@@ -601,6 +717,8 @@ cargo run -r -p xtask -- release-image risc0 \
   --repository us-docker.pkg.dev/evmchain/images/raiko2
 ```
 
+`release-image <backend> --cuda` (or `just release-image-cuda <backend> <tag>`) builds the NVIDIA
+GPU image from `Dockerfile.cuda` into `raiko2-cuda`; see [NVIDIA GPU Proving](#nvidia-gpu-proving).
 `release-image host` automatically builds the host-only feature set. Runtime image builds use
 Cargo's default release profile unless the caller explicitly overrides Cargo profile environment
 variables.
@@ -1413,7 +1531,9 @@ the proxy. If `l2_witness_rpc` is unset, the server falls back to `l2_rpc`.
   capabilities exposed by the endpoint. Queue maintenance is stale after
   `max(3 * queue.maintenance_interval_ms, 1000ms)`.
 
-The response reports separate `reth`, `runtime`, `queue`, and `prover` checks. See
+The response reports separate `reth`, `runtime`, `queue`, `prover`, `accelerator`, and `workers`
+checks. In `cuda` builds `accelerator` also checks NVIDIA device visibility; see
+[GPU Health](#gpu-health). See
 [Architecture](architecture.md#readiness) for the traffic-gating flow and lifecycle behavior.
 
 The hosted server exports a minimal Prometheus surface focused on request intake and proving-stage

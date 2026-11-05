@@ -57,6 +57,11 @@ otherwise from `crates/guests/elf`. For unreleased testing, build ELFs locally w
 `just build-guest all`. Packaged deployments can download released ELF assets with
 `cargo run -r -p xtask -- download-guest-elves --tag <tag> --dir <guest-elf-dir>`.
 
+Local RISC0 and SP1 proving can run on NVIDIA GPUs. Build with the opt-in `cuda` feature, or use
+the `raiko2-cuda` image built from `Dockerfile.cuda`, and run it with `docker run --gpus all`. The
+default build and image stay CPU-only. See
+[Operations: NVIDIA GPU Proving](docs/operations.md#nvidia-gpu-proving).
+
 A config file can keep a sensitive string outside version control by using an explicit
 environment reference:
 

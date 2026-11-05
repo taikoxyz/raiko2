@@ -113,6 +113,9 @@ timeout_secs = 7200
 # Operator-owned ceiling; request-scoped overrides may lower but never raise this value.
 network_request_max_attempts = 3
 # rpc_url = "https://rpc.production.succinct.xyz"
+# CUDA device for `prover = "local"` in `cuda` builds (Dockerfile.cuda). Defaults to 0. Non-cuda
+# builds reject this key. RISC0 local proving uses device 0, so `1` puts SP1 on a second GPU.
+# cuda_device_id = 1
 
 [prover.native]
 enabled = true

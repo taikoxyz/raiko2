@@ -166,3 +166,17 @@ are node-covered, all32 complete-proposal estimates cover actuals, and eight K16
 remain, maximum127,894,499PGU. Changes from prior new-model snapshotc893 are exactly the journal
 reserve; c893 is not Unzen. These are previously measured fixtures, not32 additional inputs or
 an onchain historical-block survey, and no global union or workload bound follows.
+
+
+The [repricing of eight retained synthetic transient inputs](2026-11-05-transient-historical-repricing.md)
+adds eight current1390/model5f quotes and zero new native constructor/SP1 executions. Original
+1998/null b76/SDK6.3 actuals remain unchanged. All four full-R node quotes and all eight
+completed-proposal quotes cover actuals; two K16/R0 node gaps remain, maximum144,238,337PGU,
+with no >2B/<=30M gap in these observations. All real journal terms are54 work units, so
+both node and full estimates increase exactly20,736PGU from prior new-model snapshotc893;
+every non-journal quote object is unchanged. c893 is not Unzen. These are the original eight
+opened store-heavy fixtures, not new actuals, TLOAD-dominant coverage or a global30M bound.
+The repricing Atlas supplement is not yet published; exact retained evidence hashes and
+independent verification are recorded in the linked report.
+
+The [ordinary transient-read catalogs](2026-11-05-transient-read-catalogs.md) add three fresh one-user inputs with K512 direct TSTORE seeds and R0/R64/R512 repeated TLOAD. Actual PGU is165,384,479/168,650,021/191,508,491; node PGU35,425,248/71,148,121/321,208,226 and complete-proposal PGU190,367,079/226,089,951/476,150,057. R512 node and all three proposal quotes cover actual; two literal node gaps remain, maximum129,959,231 PGU, with no >2B/30M case. R0 is calldata-floor dominated. Three own-input inner-map profiles qualify, with capped register samples and QUERY-only dynamic hash capture; 512 catalog hashes are independently computed, not512 observed placements. All three native/quote/SP1 executions and12-name host closures are independently verified. No price change, production parity, full30M maximum or concentrated-bucket guarantee follows; selected-distribution work remains separate.

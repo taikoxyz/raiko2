@@ -3337,3 +3337,72 @@ F2 keeps all eight R0 controls within30M block gas: cold large-K cases use about
 30M. This is not a full30M packing certificate. Sequential raw slots require no
 hash search; actual own-input map/mask and late reaccess observations still need
 qualification. No model, tariff, guest, SDK or account-journal correction changes.
+
+### Direct-write transient read catalogs
+
+`cases/transient_read_catalogs.py` isolates transient-map reads from the older
+store-heavy transient family. One signed CALL to the normal primary (Anchor plus
+one user) starts with empty persistent/transient state, guards fixed QUERY=0,
+seeds K ordered calldata keys with `TSTORE1`, guards QUERY=1, then executes64
+`TLOAD`/`POP` sites per round R. QUERY is last in the catalog. The final guards
+check counters, protected memory, retained query and empty stack before STOP.
+There are exactly K user TSTOREs and2+64R TLOADs, no user SLOAD/SSTORE, child frame,
+cleanup pass, extra prestate code account or transient-slot MPT proof targets.
+The K values remain transient until transaction finalization clears them.
+
+The new family reuses the bounded `warm_read_catalogs` key reader/validator and
+assembler/base request helpers. K is a strict integer1..1024; keys are unique
+canonical U256 hex with exactly eight nonzero bytes each and fixed QUERY last.
+The default is mixed/K512. An external JSON file has exactly
+`{"schema_version":1,"keys":[...]}` and is limited to128KiB. Changing its key
+values preserves code and EVM gas at fixed K/R but does not establish equal input
+seed, map layout or actual SP1 workload. Existing family defaults remain intact.
+
+```bash
+"$PYTHON_BIN" -S -B bin/zkgas/bench/cases/transient_read_catalogs.py \
+  --output-dir transient-read-r64 \
+  --model-id 5f93909ea1372eb6e10fa2b599c6087aafd4ec493ba28eb1cea4c4abb3708a11 \
+  --probe-repetitions 64
+"$PYTHON_BIN" -S -B -m unittest discover -s bin/zkgas/bench/tests \
+  -p test_transient_read_catalogs.py -v
+```
+
+Use the managed Python environment and a fresh output path. Model ID is required;
+the CLI does not inherit a legacy model default. `--catalog ordered|mixed`,
+`--catalog-file <catalog.json>` and `--key-count K` are optional. Without
+`--probe-repetitions` export contains ownzero/full; supplying one intermediate
+R exports ownzero/probe/full. The public factories are
+`make_case(catalog='mixed', level='full', *, key_count=512)`,
+`make_custom_case(keys, level='full', *, key_count=512)` and
+`make_probe_case(keys, repetitions, *, key_count=512)`; R64/R512 can be selected
+separately without executing full. `prepare(output, *, model_id, ...)` validates
+inputs before creating output and rejects existing output paths.
+
+All levels share their K-specific maximal-full signed envelope. Gross gas is
+`21484+397K+6775R`; intrinsic is21000+224K and the EIP7623 floor is21000+560K.
+Charged gas is max(gross,floor), without refund. At K512, R0 gross224,748 is below
+the307,720 floor; R64/R512 charge658,348/3,693,548. The full R is2180 and the
+shared signed envelope is14,995,248 (full charged gas plus1000). These are
+single-user selections under15M fixture/EIP7825,31M header-prefix,30M charged
+block including Anchor and24KiB code bounds, not30M full-block packing claims.
+Ownzero still writes all K keys and verifies the successful query.
+
+The independent byte oracle imports no producer gas/assembler. It checks complete
+code intent including R0's unreachable body, exact ordered writes, query values,
+full transient mapping, stack, protected memory, counters, gas floor, typed
+metadata and opcode routes. Its optional body cache proves all64 read sites and
+checks live full-state preconditions; direct/cache parity and state/byte mutants
+are tested. Real native/SP1 execution performs every instruction. `run_users(row)`
+returns explicit `gross_gas`/`charged_gas`, `counts`, `tload_count`/`tstore_count`,
+`seed_keys`, `query_values`, `transient_state_at_stop`, `transient_state_after_tx`,
+`peak_memory_bytes` and counter/stack details. No ambiguous `gas` alias is used.
+
+Exports are development probes, not IID/holdout samples or fitted pricing data.
+Before actual measurement, independently bind canonical GuestInput, signature,
+nonce/envelope, receipts, complete world/account/code/witness and the real current
+quote. Compare literal actual proposal PGU, node-known and full-proposal estimates
+separately. Physical map/hash observations need their own runtime qualification;
+semantic key/state checks do not establish capacity, collision or per-read PGU
+bounds. Optional incomplete diagnostics remain separate from canonical actual
+success. This tool alone makes no tariff, guest/SDK, production, proof or deployment
+change; immutable measured data belongs in Atlas.

@@ -1,7 +1,7 @@
 # Transient read catalogs: ordinary distribution
 
 Three new synthetic single-block proposals isolate repeated TLOAD from the store-heavy
-[earlier transient panel](2026-11-03-transient-storage.md). The current node quote covers
+[earlier transient panel](2026-11-03-transient-storage.md). The original model5f node quote covers
 the largest measured point; the complete-proposal quote covers all three. The two small
 points retain literal node deficits. This finite panel changes no tariff and does not
 certify a 30M-gas maximum or production SP1 parity.
@@ -91,14 +91,18 @@ Canonical hashes in table order:
 2. `a5917907554cca5f139ef02ac13b09920b378108cec2cc9ba47b013ca487fb1c`.
 3. `b9cfbfb93ed41ec5cdc7d1d0124679fa9b5c83b5fd79de674ded41c6efeeacc7`.
 
-The retained local source/input bindings, requests, native authentication, quotes, raw
-SP1 reports, observations and resource receipts support these results. This document's
-hashes alone are not a public data distribution mechanism; a new Atlas fixture has not
-yet been published for this three-point panel. The program manifest is not a full
-source-to-binary build attestation, and the actual runner explicitly reports production
-SDK parity unverified.
+The [Atlas release](https://github.com/taikoxyz/raiko2-atlas/releases/tag/fixture-unzen-transient-read-catalogs-v1)
+now distributes the original inputs, quotes and raw actuals for these three controls
+alongside the separately measured selected catalogs. Its metadata distinguishes nine
+native/quote-qualified inputs, eight actuals and one explicit skip; these three controls
+are not counted again as additional actuals. Private source/input bindings remain local,
+and excluded path-bearing outcomes retain original hashes and portable resource projections.
+The program manifest is not a full source-to-binary build attestation, and the actual
+runner explicitly reports production SDK parity unverified.
 
-The next finite contrast is a selected long/short comparison-prefix catalog. It must
-be checked against each new signed input's observed seed and mask; the ordinary catalog
-does not establish safety for concentrated hash buckets. Account-journal correction and
-future L1 frequency sampling remain deferred.
+The [selected long/short comparison-prefix follow-up](2026-11-05-transient-hash-pressure.md)
+subsequently found a high-priority model5f gap and records the measured model923 correction.
+Each new input's own seed and mask are checked; this ordinary catalog alone does not
+establish safety for concentrated hash buckets. The original values above remain frozen
+baseline observations. Account-journal correction and future L1 frequency sampling remain
+deferred.

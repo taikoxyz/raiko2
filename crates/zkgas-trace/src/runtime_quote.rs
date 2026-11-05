@@ -1231,6 +1231,11 @@ mod tests {
                 comparison_work_units_upper: 3,
                 ..Default::default()
             },
+            transient_storage_journal:
+                alethia_reth_evm::zk_gas::pricing::TransientStorageJournalDiagnostics {
+                    comparison_work_units_upper: 5,
+                    ..Default::default()
+                },
             authorization_validations: 4,
             access_list_items: 3,
             code_preparation: CodePreparationSelectors {
@@ -1251,6 +1256,11 @@ mod tests {
                 comparison_work_units_upper: 7,
                 ..Default::default()
             },
+            transient_storage_journal:
+                alethia_reth_evm::zk_gas::pricing::TransientStorageJournalDiagnostics {
+                    comparison_work_units_upper: 11,
+                    ..Default::default()
+                },
             authorization_validations: 16,
             access_list_items: 7,
             code_preparation: CodePreparationSelectors {
@@ -1310,10 +1320,10 @@ mod tests {
                 + node.evm_local_resources_scaled
                 + node.transaction_payload_scaled
         );
-        assert_eq!(node.storage_journal_work_units, 3);
-        assert_eq!(prove.storage_journal_work_units, 7);
-        assert_eq!(node.storage_journal_scaled, 3 * 384 * FIXED_POINT_SCALE);
-        assert_eq!(prove.storage_journal_scaled, 7 * 384 * FIXED_POINT_SCALE);
+        assert_eq!(node.storage_journal_work_units, 8);
+        assert_eq!(prove.storage_journal_work_units, 18);
+        assert_eq!(node.storage_journal_scaled, 8 * 384 * FIXED_POINT_SCALE);
+        assert_eq!(prove.storage_journal_scaled, 18 * 384 * FIXED_POINT_SCALE);
         assert_eq!(node.access_list_items, 3);
         assert_eq!(access_list_items, 7);
         assert_eq!(node.access_list_scaled, 3 * 8192 * FIXED_POINT_SCALE);
@@ -1356,6 +1366,125 @@ mod tests {
                 + prove.resources_scaled
                 + prove.transaction_payload_scaled
         );
+    }
+
+    #[test]
+    fn block_completion_transient_only_is_charged_once_without_persistent_resources() {
+        let report = |units| {
+            ZkGasBlockSnapshot {
+                transient_storage_journal:
+                    alethia_reth_evm::zk_gas::pricing::TransientStorageJournalDiagnostics {
+                        comparison_work_units_upper: units,
+                        ..Default::default()
+                    },
+                ..Default::default()
+            }
+            .shadow_report()
+        };
+        let (node, prove, ..) = complete_block_pricing(
+            0,
+            &report(5),
+            &report(11),
+            ProposalPayloadSelectors::default(),
+            ResourceSelectors::default(),
+            MptSelectors::default(),
+        )
+        .unwrap();
+        assert_eq!(node.storage_journal_work_units, 5);
+        assert_eq!(prove.storage_journal_work_units, 11);
+        assert_eq!(node.storage_journal_scaled, 5 * 384 * FIXED_POINT_SCALE);
+        assert_eq!(prove.storage_journal_scaled, 11 * 384 * FIXED_POINT_SCALE);
+        assert_eq!(
+            node.evm_local_resources,
+            ResourceSelectors::default().into()
+        );
+        assert_eq!(node.evm_local_resources_scaled, 0);
+        assert_eq!(prove.resources_scaled, 0);
+        assert_eq!(prove.mpt_scaled, 0);
+        assert_eq!(
+            node.known_subtotal_scaled,
+            node.fixed_scaled + node.storage_journal_scaled
+        );
+        assert_eq!(
+            prove.total_scaled,
+            prove.fixed_scaled + prove.storage_journal_scaled
+        );
+        let once = ZkGasModel
+            .price_proposal_once(&ProposalPricingInput {
+                canonical_transaction_bytes: 0,
+                nonempty_payload_transactions: 0,
+                true_unattempted_transactions: 0,
+                source_blob_counts: &[1],
+                proposal_blob_hash_count: 1,
+                provider_blob_count: 1,
+                provider_commitment_count: 1,
+                provider_proof_count: 1,
+                parent_mpt: MptSelectors::default(),
+            })
+            .unwrap();
+        assert_eq!(once.storage_journal_work_units, 0);
+        assert_eq!(once.storage_journal_scaled, 0);
+    }
+
+    #[test]
+    fn block_completion_rejects_partial_transient_and_combined_overflow() {
+        use alethia_reth_evm::zk_gas::pricing::{StorageJournalIncompleteness, ZkGasError};
+        let mut incomplete = ZkGasBlockSnapshot::default();
+        incomplete.transient_storage_journal.incomplete =
+            Some(StorageJournalIncompleteness::MissingFootprint);
+        let mut overflow = ZkGasBlockSnapshot::default();
+        overflow.storage_journal.comparison_work_units_upper = u64::MAX;
+        overflow
+            .transient_storage_journal
+            .comparison_work_units_upper = 1;
+        let mut out_of_domain = ZkGasBlockSnapshot::default();
+        out_of_domain.storage_journal.comparison_work_units_upper = 600_000_000_000;
+        out_of_domain
+            .transient_storage_journal
+            .comparison_work_units_upper = 600_000_000_000;
+        let cases = [
+            (
+                incomplete,
+                ZkGasShadowDiagnostic::StorageJournal(
+                    StorageJournalIncompleteness::MissingFootprint,
+                ),
+            ),
+            (
+                overflow,
+                ZkGasShadowDiagnostic::Pricing(ZkGasError::ArithmeticOverflow),
+            ),
+            (
+                out_of_domain,
+                ZkGasShadowDiagnostic::Pricing(ZkGasError::SelectorOutOfRange {
+                    selector: "storage_journal_work_units",
+                    value: 1_200_000_000_000,
+                }),
+            ),
+        ];
+        for (snapshot, expected) in cases {
+            let report = snapshot.shadow_report();
+            for attempted_failure in [false, true] {
+                let valid = ZkGasBlockSnapshot::default().shadow_report();
+                let (committed, attempted) = if attempted_failure {
+                    (&valid, &report)
+                } else {
+                    (&report, &valid)
+                };
+                let error = complete_block_pricing(
+                    3,
+                    committed,
+                    attempted,
+                    ProposalPayloadSelectors::default(),
+                    ResourceSelectors::default(),
+                    MptSelectors::default(),
+                )
+                .unwrap_err();
+                assert!(matches!(error, RuntimeQuoteError::BlockCompletion {
+                    block_index: 3,
+                    source: ZkGasCompletionError::ZkGasShadowDiagnostic(actual),
+                } if actual == expected));
+            }
+        }
     }
 
     #[test]

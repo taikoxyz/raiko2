@@ -7,8 +7,29 @@ meets the research priority rule: a block using at most 30M EVM gas can exhibit 
 deficit greater than 2B PGU. This is a measured example, not an extrapolation or a maximum.
 
 **Pricing is unchanged in this checkpoint.** The existing storage-journal reserve does not
-price this separate account-table workload. The next pricing change must address the
-account path and check its effect on historical proposal quotes.
+price this separate account-table workload. **Follow-up triage defers the correction to TODO**:
+the observed deficit requires a deliberately constructed combination and the largest measured
+actual/node ratio is 1.691347x (actual/proposal 1.619960x). The absolute-deficit screen remains
+true; it does not alone require an immediate pricing change under the updated project decision.
+
+## Current triage: crafted-only observation, deferred
+
+The demonstrated input combines a long common address prefix, a catalog selected for the
+measured account map's bucket/tag, query placement after 511 other targets, and repeated warm
+queries. The default dispersed control and concentrated short-prefix control do not underquote
+at R512. No natural historical transaction exhibiting this deficit has been established by this
+experiment; an online occurrence rate was not measured. The default control is itself synthetic,
+so it must not be presented as a survey of ordinary transaction frequency.
+
+Deliberate construction is cheap once this fixed profile is known: the long catalog search
+tested 71,473,058 candidates in 655,486,207 ns (about 0.66s). This observation supports a
+crafted-input classification, not an assumption that constructing such data is expensive or
+that another proposal must retain the same profile. Keep the fixed inputs and the known deficit.
+
+The project decision is to defer this sub-2x, deliberately constructed case and continue other
+coverage. Revisit the correction if ordinary/historical inputs reproduce it or a measured
+extension materially increases the ratio. No coefficient, runtime counter or price is changed
+as part of this triage update.
 
 ## Frozen program and measurement
 
@@ -120,12 +141,12 @@ verified separately; truncated comparison counters are not whole-execution total
 particular, long R512 and R1400 can have identical prefix counters despite different complete
 workloads. `samples_complete=false` is retained, including in completed R0 observations.
 
-## Next pricing work and remaining scope
+## Deferred pricing TODO and remaining scope
 
-Use a simple, conservatively priced observation of account set size, address-prefix groups
-and lookup-related work. Preserve the existing component prices and check historical mainnet
-repricing before accepting a material change to the previous proposal-level conclusions.
-Do not replace the journal container as part of this correction.
+If this TODO is reopened, consider a simple, conservatively priced observation of account set
+size, address-prefix groups and lookup-related work. Preserve the existing component prices
+and check historical mainnet repricing before accepting a material change to the previous
+proposal-level conclusions. A journal-container replacement is outside this proposed correction.
 
 The actual Taiko wrapper finalizes ordinary transactions with `mem::take(state)`, so this
 journal account map is transaction-scoped; the Anchor system marker can seed accounts before

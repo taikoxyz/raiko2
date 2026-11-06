@@ -816,20 +816,11 @@ pub(super) fn build_program(
                 .collect::<Result<Vec<_>>>()?,
         );
         if let Some(access_list) = access_list {
-            let committed = outcome
-                .filtered_block
-                .body()
-                .transactions
-                .get(1)
-                .ok_or_else(|| anyhow::anyhow!("access-list user transaction was not included"))?;
-            anyhow::ensure!(
-                committed == &candidates[index],
-                "committed access-list transaction differs"
-            );
-            access_list_blocks.push(access_list.validate_transaction(
-                committed,
+            access_list_blocks.push(access_list.validate_block(
+                &outcome.filtered_block.body().transactions[1..],
                 controlled_signer.address(),
                 index,
+                users_per_block,
             )?);
         }
         controlled_state.apply(&outcome);
@@ -1020,6 +1011,7 @@ pub(super) fn build_program(
         access_list: access_list.map(|a| AccessListReport {
             pattern: a.pattern,
             count_per_block: a.count,
+            transactions_per_block: (users_per_block > 1).then_some(users_per_block),
             blocks: access_list_blocks,
         }),
         storage: storage_state.map(|state| {
@@ -1076,6 +1068,77 @@ mod tests {
             p.prestate_contracts.as_deref(),
             raiko2_stateless::workload_lab::ExecutionProfile::EvmGasOnly,
         )
+    }
+
+    #[test]
+    fn shared_access_list_multi_call_parser_accepts_existing_transaction_descriptor() {
+        let value = json!({"schema_version":1,"program": {
+            "code_hex":"0x60006000f3", "input_hex":"0x", "block_count":2,
+            "expected_route_counts":{"opcode:0xf3":4},
+            "transactions":{"kind":"call","count_per_block":2,"gas_limit":15000000},
+            "access_list":{"pattern":"raw_keys","count":4,"storage_keys":[
+                B256::ZERO, B256::repeat_byte(0xff), B256::ZERO, B256::from(U256::from(1))
+            ]}
+        }});
+        super::super::parse_request(&serde_json::to_vec(&value).unwrap())
+            .expect("shared raw list must compose with explicit CALL users");
+    }
+
+    #[test]
+    fn shared_access_list_direct_constructor_reports_all_users_across_blocks() {
+        let value = json!({"schema_version":1,"program": {
+            "code_hex":"0x60006000f3", "input_hex":"0x", "block_count":2,
+            "expected_route_counts":{"opcode:0xf3":4},
+            "transactions":{"kind":"call","count_per_block":2,"gas_limit":15000000},
+            "access_list":{"pattern":"repeated_key","count":4}
+        }});
+        let built = direct_build(value).unwrap();
+        let report = serde_json::to_value(built.access_list.unwrap()).unwrap();
+        assert_eq!(report["transactions_per_block"], 2);
+        assert_eq!(report["count_per_block"], 4);
+        assert_eq!(report["blocks"].as_array().unwrap().len(), 2);
+        for block_index in 0..2 {
+            assert_eq!(built.receipts[block_index].len(), 3);
+            assert!(
+                built.receipts[block_index]
+                    .iter()
+                    .all(|receipt| receipt.success)
+            );
+            let block = &report["blocks"][block_index];
+            assert_eq!(block["raw_storage_keys"], 8);
+            assert_eq!(block["unique_storage_pairs"], 1);
+            for index in 0..2 {
+                let row = &block["transactions"][index];
+                assert_eq!(row["nonce"], block_index * 2 + index);
+                assert_eq!(row["transaction_index"], index + 1);
+                assert_eq!(row["raw_storage_keys"], 4);
+            }
+        }
+    }
+
+    #[test]
+    fn shared_access_list_composition_keeps_authorization_create_and_storage_exclusions() {
+        let value = json!({"schema_version":1,"program": {
+            "code_hex":"0x00", "input_hex":"0x", "expected_route_counts":{"opcode:0x00":2},
+            "transactions":{"kind":"call","count_per_block":2,"gas_limit":100000},
+            "access_list":{"pattern":"repeated_key","count":1}
+        }});
+        for (field, replacement) in [
+            ("authorizations", json!({"pattern":"compact","count":1})),
+            (
+                "storage_state",
+                json!({"initial_storage":{},"proof_slots":["0x0"]}),
+            ),
+            (
+                "transactions",
+                json!({"kind":"create","count_per_block":2,"gas_limit":100000}),
+            ),
+        ] {
+            let mut bad = value.clone();
+            bad["program"][field] = replacement;
+            assert!(super::super::parse_request(&serde_json::to_vec(&bad).unwrap()).is_err());
+            assert!(direct_build(bad).is_err());
+        }
     }
 
     #[test]

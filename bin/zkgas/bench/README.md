@@ -388,8 +388,10 @@ vectors share a baseline; extra block/Anchor work is not access-list-only work.
 
 The optional native `access_list` report contains `pattern`, `count_per_block` and one record
 per block with `transaction_type`, `raw_address_items`, `raw_storage_keys`, `unique_addresses`
-and `unique_storage_pairs`. These counts come from the actual included signed transaction
-through canonical EIP-2718 decoding, with signer/nonce, exact-list and inclusion gates. No
+and `unique_storage_pairs`. For the single-user catalog these counts come from the actual
+included signed transaction through canonical EIP-2718 decoding, with signer/nonce, exact-list
+and inclusion gates. The multi-user CALL extension and its block/raw/union semantics are
+documented below. No
 accounts or storage values are preloaded for warming. Witness shape and old canonical bytes
 remain unchanged when the descriptor is omitted; pricing observations must still name their
 actual model and quote executable rather than claiming cross-model price identity.
@@ -3746,3 +3748,66 @@ bincode plus the unchanged `native.json` and `quote.jsonl` through `--native-rep
 and `--quote-report`, with the original sample ID, matching actual config and a
 fresh output root. It executes only SP1. Keep canonical PGU validation separate
 from optional trace qualification; do not pass `--retry-failed` for once-only panels.
+
+### Multiple CALL users sharing an access list
+
+The existing `program.transactions` descriptor can compose with `program.access_list`
+for CALL users without `storage_state`. Every user receives the same complete raw
+list, with its order and duplicates preserved. Authorizations remain incompatible
+with explicit transaction descriptors; CREATE plus access-list, initialized extra
+recipients and storage-state combinations remain unsupported. This is an opt-in
+host fixture capability; GuestInput and the guest interface are unchanged.
+
+For example, compose a small request using the existing raw-key factory:
+
+```sh
+PYTHONPATH=bin/zkgas/bench/cases "$PYTHON_BIN" -S -B - <<'PY'
+import json
+from pathlib import Path
+from access_list_values import make_raw_case
+
+request = make_raw_case([0, (1 << 256) - 1, 0, 1])['request']
+request['program']['transactions'] = {
+    'kind': 'call', 'count_per_block': 2, 'gas_limit': 15_000_000,
+}
+request['program']['expected_route_counts']['opcode:0xf3'] = 2
+output = Path('experiment/shared-access-list')
+output.mkdir(parents=True, exist_ok=False)
+(output / 'request.json').write_text(json.dumps(request, indent=2) + '\n')
+PY
+"$NATIVE_FIXTURE_BIN" --execution-profile evm-gas-only \
+  --input experiment/shared-access-list/request.json \
+  --output experiment/shared-access-list/input.json \
+  --output-bincode experiment/shared-access-list/input.bin \
+  --report experiment/shared-access-list/native.json
+```
+
+The transaction descriptor retains its existing policy: sender funding1e18,
+maxfee1Gwei, zero tip/value, and individually bounded gas limits21,000..15,000,000.
+It does not use the old single-user envelope's funding1e16/maxfee25M. Success,
+revert and exceptional halt still require every requested signed transaction to
+be included in order and every receipt to match `expected_user_success`. Each
+included list is checked by canonical EIP2718 decoding, signature recovery,
+expected global user nonce and exact list equality. Nonces are
+`block_index * count_per_block + user_index`; Anchor remains transaction index0.
+
+The native access-list report still has one `blocks` entry per block. Old
+single-user serialization stays unchanged. Multi-user blocks add `transactions`,
+with each user's included transaction index, nonce, hash and raw/unique selectors.
+Flat block `raw_address_items` and `raw_storage_keys` sum every user, including
+raw duplicates. Flat `unique_addresses` and `unique_storage_pairs` are true block
+unions: every checked user has the same list, so these equal one user's unique
+set, without allocating a second union set. For the example, raw block slots8
+and block-unique pairs3 are distinct from summing the nested per-user unique
+counts3+3. The legacy top `count_per_block` field remains the descriptor's
+cardinality **per user transaction**; multi-user reports also expose
+`transactions_per_block` to make that multiplier explicit.
+
+Declared warm slots are not materialized state or witness targets. Real intrinsic
+gas, transaction admission and complete block validation remain in force. The
+fixture retains its existing31M header limit; an experiment using a stricter30M
+workload budget must separately check actual included receipts and each remaining
+envelope. No single-user PGU extrapolation establishes a multi-user measurement.
+The existing bounded observation reader's single-vector scope may be incomplete
+for repeated target-owner items; canonical PGU validation remains independent of
+optional profile qualification.

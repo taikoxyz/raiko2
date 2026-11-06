@@ -1978,3 +1978,109 @@ fn legacy_code_only_prestate_omits_initialized_storage_diagnostics() {
             .is_none()
     );
 }
+
+fn shared_access_list_request(code: &str, counts: Value) -> Value {
+    let mut value = transaction_request("call", 2, 15_000_000, code, counts, None);
+    value["program"]["access_list"] = json!({"pattern":"raw_keys","count":4,"storage_keys":[
+        format!("0x{:064x}",0),format!("0x{}","ff".repeat(32)),
+        format!("0x{:064x}",0),format!("0x{:064x}",1)
+    ]});
+    value
+}
+
+#[test]
+fn shared_access_list_call_users_report_exact_signed_vectors_and_block_union() {
+    let mut value = shared_access_list_request("0x60006000f3", json!({"opcode:0xf3":4}));
+    value["program"]["block_count"] = json!(2);
+    let (output, dir) = export_with_profile(&value, "evm-gas-only");
+    success(&output);
+    let actual = input(&dir);
+    let report = report(&dir);
+    assert_eq!(report["transaction_count"], 6);
+    assert_eq!(report["access_list"]["transactions_per_block"], 2);
+    assert_eq!(report["access_list"]["count_per_block"], 4);
+    assert_eq!(report["access_list"]["blocks"].as_array().unwrap().len(), 2);
+    for (block_index, witness) in actual.witnesses.iter().enumerate() {
+        assert_eq!(witness.block.body.transactions.len(), 3);
+        assert_eq!(
+            report["receipts_by_block"][block_index]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+        let block = &report["access_list"]["blocks"][block_index];
+        assert_eq!(block["raw_address_items"], 2);
+        assert_eq!(block["raw_storage_keys"], 8);
+        assert_eq!(block["unique_addresses"], 1);
+        assert_eq!(block["unique_storage_pairs"], 3);
+        for (index, tx) in witness.block.body.transactions[1..].iter().enumerate() {
+            assert_eq!(tx.nonce(), (block_index * 2 + index) as u64);
+            assert_eq!(tx.gas_limit(), 15_000_000);
+            assert_eq!(tx.max_fee_per_gas(), 1_000_000_000);
+            assert_eq!(tx.to(), Some(alloy_primitives::Address::repeat_byte(0x66)));
+            let list = tx.access_list().unwrap();
+            assert_eq!(list.0.len(), 1);
+            assert_eq!(
+                serde_json::to_value(&list.0[0].storage_keys).unwrap(),
+                value["program"]["access_list"]["storage_keys"]
+            );
+            let user = &block["transactions"][index];
+            assert_eq!(user["nonce"], tx.nonce());
+            assert_eq!(user["transaction_index"], index + 1);
+            assert_eq!(
+                user["transaction_hash"],
+                serde_json::to_value(tx.hash()).unwrap()
+            );
+            assert_eq!(user["raw_storage_keys"], 4);
+            assert_eq!(user["unique_storage_pairs"], 3);
+            assert_eq!(
+                report["receipts_by_block"][block_index][index + 1]["success"],
+                true
+            );
+        }
+    }
+}
+
+#[test]
+fn shared_access_list_call_revert_and_halt_still_gate_every_included_user() {
+    for (code, counts) in [
+        ("0x60006000fd", json!({"opcode:0xfd":2})),
+        ("0xfe", json!({"opcode:0xfe":0})),
+    ] {
+        let mut value = shared_access_list_request(code, counts);
+        value["expected_user_success"] = json!(false);
+        let (output, dir) = export_with_profile(&value, "evm-gas-only");
+        success(&output);
+        let report = report(&dir);
+        assert_eq!(
+            report["access_list"]["blocks"][0]["transactions"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        for receipt in report["receipts_by_block"][0]
+            .as_array()
+            .unwrap()
+            .iter()
+            .skip(1)
+        {
+            assert_eq!(receipt["success"], false);
+        }
+    }
+}
+
+#[test]
+fn shared_access_list_call_keeps_intrinsic_gas_and_per_transaction_bounds() {
+    let mut value = shared_access_list_request("0x60006000f3", json!({"opcode:0xf3":2}));
+    // Four raw slots:21000+2400+4*1900 =31000 intrinsic; duplicates still count.
+    value["program"]["transactions"]["gas_limit"] = json!(30_999);
+    let (output, dir) = export_with_profile(&value, "evm-gas-only");
+    assert!(!output.status.success());
+    absent_outputs(&dir);
+    for bad in [20_999, 15_000_001] {
+        value["program"]["transactions"]["gas_limit"] = json!(bad);
+        assert!(zkgas::fixture::parse_request(&serde_json::to_vec(&value).unwrap()).is_err());
+    }
+}

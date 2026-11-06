@@ -50,26 +50,45 @@ pub struct ProgramAccessList {
 pub struct AccessListReport {
     /// Requested raw vector shape.
     pub pattern: AccessListPattern,
-    /// Requested cardinality repeated in each block, without deduplication.
+    /// Legacy name: requested vector cardinality in each included user transaction.
     pub count_per_block: usize,
+    /// Present only for multiple users sharing the same descriptor in each block.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transactions_per_block: Option<usize>,
     /// Included user-transaction observations in block order.
     pub blocks: Vec<AccessListBlockReport>,
 }
 
-/// Per-block raw and unique selectors read from a canonical decoded transaction.
+/// One record per block, preserving the legacy single-user serialized shape.
 #[derive(Debug, Serialize)]
 pub struct AccessListBlockReport {
-    /// Zero-based block index in this constructed proposal.
     pub block_index: usize,
-    /// Canonical EIP-2718 envelope type, 2 or 4.
+    /// Raw counts are sums over included users; unique counts are block unions.
+    /// Every user has the same checked list, so its unique set is already the union.
+    #[serde(flatten)]
+    pub counts: AccessListCounts,
+    /// Explicit per-user counts only for multiple users; no cross-TX deduplication.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transactions: Option<Vec<AccessListTransactionReport>>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AccessListTransactionReport {
+    /// Included index in the block; Anchor occupies index zero.
+    pub transaction_index: usize,
+    pub nonce: u64,
+    pub transaction_hash: B256,
+    #[serde(flatten)]
+    pub counts: AccessListCounts,
+}
+
+/// Selectors from one canonical decoded signed raw list, without inferred state loads.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct AccessListCounts {
     pub transaction_type: u8,
-    /// Raw address item count, including repeated addresses.
     pub raw_address_items: usize,
-    /// Raw keys summed over every item, including duplicates.
     pub raw_storage_keys: usize,
-    /// Distinct declared addresses; this is not a database-load count.
     pub unique_addresses: usize,
-    /// Distinct declared (address, storage key) pairs.
     pub unique_storage_pairs: usize,
 }
 
@@ -147,6 +166,7 @@ impl ProgramAccessList {
         transaction: &TransactionSigned,
         signer: Address,
         block_index: usize,
+        expected_nonce: u64,
     ) -> Result<AccessListBlockReport> {
         let encoded = transaction.encoded_2718();
         let mut bytes = encoded.as_slice();
@@ -156,7 +176,7 @@ impl ProgramAccessList {
             "access-list transaction is not canonical EIP-2718"
         );
         ensure!(
-            decoded.recover_signer()? == signer && decoded.nonce() == u64::try_from(block_index)?,
+            decoded.recover_signer()? == signer && decoded.nonce() == expected_nonce,
             "included access-list signer or nonce differs"
         );
         let transaction_type = if decoded.as_eip7702().is_some() {
@@ -189,11 +209,65 @@ impl ProgramAccessList {
         }
         Ok(AccessListBlockReport {
             block_index,
-            transaction_type,
-            raw_address_items: list.0.len(),
-            raw_storage_keys,
-            unique_addresses: addresses.len(),
-            unique_storage_pairs: pairs.len(),
+            counts: AccessListCounts {
+                transaction_type,
+                raw_address_items: list.0.len(),
+                raw_storage_keys,
+                unique_addresses: addresses.len(),
+                unique_storage_pairs: pairs.len(),
+            },
+            transactions: None,
+        })
+    }
+
+    /// Gate every included user, retaining one block report and exact per-TX selectors.
+    pub(super) fn validate_block(
+        &self,
+        transactions: &[TransactionSigned],
+        signer: Address,
+        block_index: usize,
+        users_per_block: usize,
+    ) -> Result<AccessListBlockReport> {
+        ensure!(
+            users_per_block > 0 && transactions.len() == users_per_block,
+            "included access-list user count differs"
+        );
+        let first_nonce = block_index
+            .checked_mul(users_per_block)
+            .ok_or_else(|| anyhow::anyhow!("access-list user nonce overflow"))?;
+        let mut users = Vec::with_capacity(users_per_block);
+        for (index, transaction) in transactions.iter().enumerate() {
+            let nonce = first_nonce
+                .checked_add(index)
+                .ok_or_else(|| anyhow::anyhow!("access-list user nonce overflow"))?;
+            let report =
+                self.validate_transaction(transaction, signer, block_index, u64::try_from(nonce)?)?;
+            users.push(AccessListTransactionReport {
+                transaction_index: index + 1,
+                nonce: transaction.nonce(),
+                transaction_hash: *transaction.hash(),
+                counts: report.counts,
+            });
+        }
+        let mut counts = users[0].counts.clone();
+        ensure!(
+            users.iter().all(|user| user.counts == counts),
+            "shared access-list user selectors differ"
+        );
+        // Each raw vector is validated against the same exact canonical descriptor.
+        // Therefore the block union equals one user's unique set, without another set.
+        counts.raw_address_items = counts
+            .raw_address_items
+            .checked_mul(users_per_block)
+            .ok_or_else(|| anyhow::anyhow!("access-list raw address count overflow"))?;
+        counts.raw_storage_keys = counts
+            .raw_storage_keys
+            .checked_mul(users_per_block)
+            .ok_or_else(|| anyhow::anyhow!("access-list raw key count overflow"))?;
+        Ok(AccessListBlockReport {
+            block_index,
+            counts,
+            transactions: (users_per_block > 1).then_some(users),
         })
     }
 }
@@ -317,39 +391,39 @@ mod tests {
         };
         let list = descriptor.canonical_list().unwrap();
         let report = descriptor
-            .validate_transaction(&sign(list.clone()), signer.address(), 0)
+            .validate_transaction(&sign(list.clone()), signer.address(), 0, 0)
             .unwrap();
         assert_eq!(
             (
-                report.raw_address_items,
-                report.raw_storage_keys,
-                report.unique_addresses,
-                report.unique_storage_pairs
+                report.counts.raw_address_items,
+                report.counts.raw_storage_keys,
+                report.counts.unique_addresses,
+                report.counts.unique_storage_pairs
             ),
             (1, 4, 1, 3)
         );
         assert!(
             descriptor
-                .validate_transaction(&sign(list.clone()), Address::ZERO, 0)
+                .validate_transaction(&sign(list.clone()), Address::ZERO, 0, 0)
                 .is_err()
         );
         assert!(
             descriptor
-                .validate_transaction(&sign(list.clone()), signer.address(), 1)
+                .validate_transaction(&sign(list.clone()), signer.address(), 1, 1)
                 .is_err()
         );
         let mut reordered = list.clone();
         reordered.0[0].storage_keys.reverse();
         assert!(
             descriptor
-                .validate_transaction(&sign(reordered), signer.address(), 0)
+                .validate_transaction(&sign(reordered), signer.address(), 0, 0)
                 .is_err()
         );
         let mut missing_duplicate = list;
         missing_duplicate.0[0].storage_keys.remove(2);
         assert!(
             descriptor
-                .validate_transaction(&sign(missing_duplicate), signer.address(), 0)
+                .validate_transaction(&sign(missing_duplicate), signer.address(), 0, 0)
                 .is_err()
         );
     }
@@ -377,29 +451,136 @@ mod tests {
         let original = sign(list.clone());
         assert!(
             descriptor
-                .validate_transaction(&original, signer.address(), 0)
+                .validate_transaction(&original, signer.address(), 0, 0)
                 .is_ok()
         );
         assert!(
             descriptor
-                .validate_transaction(&original, Address::ZERO, 0)
+                .validate_transaction(&original, Address::ZERO, 0, 0)
                 .is_err()
         );
         assert!(
             descriptor
-                .validate_transaction(&original, signer.address(), 1)
+                .validate_transaction(&original, signer.address(), 1, 1)
                 .is_err()
         );
         let mut reversed = list;
         reversed.0[0].storage_keys.reverse();
         assert!(
             descriptor
-                .validate_transaction(&sign(reversed), signer.address(), 0)
+                .validate_transaction(&sign(reversed), signer.address(), 0, 0)
                 .is_err()
         );
         assert!(
             descriptor
-                .validate_transaction(&sign(AccessList::default()), signer.address(), 0)
+                .validate_transaction(&sign(AccessList::default()), signer.address(), 0, 0)
+                .is_err()
+        );
+    }
+    #[test]
+    fn shared_list_block_gates_every_user_and_global_nonce_without_deduping_raw_counts() {
+        let descriptor = ProgramAccessList {
+            pattern: AccessListPattern::RawKeys,
+            count: 4,
+            storage_keys: Some(vec![
+                B256::ZERO,
+                B256::repeat_byte(0xff),
+                B256::ZERO,
+                B256::from(U256::from(1)),
+            ]),
+        };
+        let signer = PrivateKeySigner::from_bytes(&B256::repeat_byte(0x11)).unwrap();
+        let sign = |nonce, list, key: &PrivateKeySigner| {
+            let tx = TxEip1559 {
+                nonce,
+                chain_id: 167_000,
+                gas_limit: 15_000_000,
+                access_list: list,
+                ..Default::default()
+            };
+            let signature = key.sign_hash_sync(&tx.signature_hash()).unwrap();
+            TransactionSigned::from(tx.into_signed(signature))
+        };
+        let list = descriptor.canonical_list().unwrap();
+        for block_index in 0..2 {
+            let first = (block_index * 2) as u64;
+            let users = vec![
+                sign(first, list.clone(), &signer),
+                sign(first + 1, list.clone(), &signer),
+            ];
+            let report = descriptor
+                .validate_block(&users, signer.address(), block_index, 2)
+                .unwrap();
+            assert_eq!(
+                (
+                    report.counts.raw_address_items,
+                    report.counts.raw_storage_keys
+                ),
+                (2, 8)
+            );
+            // Cross-transaction union is one identical list, not per-user unique sums.
+            assert_eq!(
+                (
+                    report.counts.unique_addresses,
+                    report.counts.unique_storage_pairs
+                ),
+                (1, 3)
+            );
+            let nested = report.transactions.unwrap();
+            assert_eq!(nested.len(), 2);
+            for (index, row) in nested.iter().enumerate() {
+                assert_eq!(
+                    (row.transaction_index, row.nonce),
+                    (index + 1, first + index as u64)
+                );
+                assert_eq!(row.transaction_hash, *users[index].hash());
+                assert_eq!(
+                    (row.counts.raw_storage_keys, row.counts.unique_storage_pairs),
+                    (4, 3)
+                );
+            }
+            let mut changed = list.clone();
+            changed.0[0].storage_keys.reverse();
+            let wrong_signer = PrivateKeySigner::from_bytes(&B256::repeat_byte(0x22)).unwrap();
+            for second in [
+                sign(first + 1, changed, &signer),
+                sign(first, list.clone(), &signer),
+                sign(first + 1, list.clone(), &wrong_signer),
+            ] {
+                assert!(
+                    descriptor
+                        .validate_block(
+                            &[users[0].clone(), second],
+                            signer.address(),
+                            block_index,
+                            2
+                        )
+                        .is_err()
+                );
+            }
+            assert!(
+                descriptor
+                    .validate_block(&users[..1], signer.address(), block_index, 2)
+                    .is_err()
+            );
+            assert!(
+                descriptor
+                    .validate_block(&users, signer.address(), block_index, 1)
+                    .is_err()
+            );
+        }
+        let report = descriptor
+            .validate_block(&[sign(0, list, &signer)], signer.address(), 0, 1)
+            .unwrap();
+        let json = serde_json::to_value(report).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"block_index":0,"transaction_type":2,
+            "raw_address_items":1,"raw_storage_keys":4,"unique_addresses":1,"unique_storage_pairs":3})
+        );
+        assert!(
+            descriptor
+                .validate_block(&[], signer.address(), 0, 0)
                 .is_err()
         );
     }

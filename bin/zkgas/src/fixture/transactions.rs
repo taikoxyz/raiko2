@@ -96,8 +96,12 @@ impl ProgramTransactions {
             "transactions block count exceeds bounds"
         );
         ensure!(
-            !authorizations && !access_list,
-            "transactions cannot be combined with authorizations or access_list"
+            !authorizations,
+            "transactions cannot be combined with authorizations"
+        );
+        ensure!(
+            !access_list || (self.kind == TransactionKind::Call && !storage),
+            "transactions access_list requires CALL without storage_state"
         );
         ensure!(
             !storage

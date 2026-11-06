@@ -149,4 +149,113 @@ class AccountReadCatalogTests(unittest.TestCase):
             self.assertEqual(result.returncode,0,result.stderr); self.assertEqual(json.loads(result.stdout),{'prepared':2})
             self.assertNotEqual(subprocess.run(command,capture_output=True,timeout=30).returncode,0)
 
+class SizedAccountReadCatalogTests(unittest.TestCase):
+    @staticmethod
+    def keys(n):
+        return ['0x' + 'ab' * 16 + i.to_bytes(4, 'big').hex() for i in range(1, n + 1)]
+
+    def test_legacy_complete_rows_and_requests_stay_byte_exact(self):
+        m = producer(); keys = m._catalog()
+        short = ['0x' + '00' * 12 + a[2:10] + a[-8:] for a in keys[:-1]] + [QUERY]
+        digest = hashlib.sha256()
+        for operation in ('balance', 'extcodesize'):
+            for catalog in (None, list(keys), short):
+                for level, values in [('zero', (0, 512, 1989)), ('probe', (1, 2, 512, 1400, 1989))]:
+                    for r in values:
+                        row = m.make_case(operation, level, keys=catalog, repetitions=r)
+                        digest.update(m.encoded(row)); digest.update(m.encoded(row['request']))
+        self.assertEqual(digest.hexdigest(), 'b099f48d100e617f07744b0c328b96d9d89763ae516087b721e1ec9d5a012858')
+
+    def test_sized_actual_byte_gas_and_access_list_intent(self):
+        m = producer(); self.assertTrue(callable(getattr(m, 'make_sized_case', None)), 'missing sized-case API')
+        from account_read_catalogs_vm import run_users
+        for operation in ('balance', 'extcodesize'):
+            for n in (1, 32, 1024):
+                for r in (0, 1, 1024):
+                    for use_al in (False, True):
+                        with self.subTest(operation=operation, n=n, r=r, access_list=use_al):
+                            keys = self.keys(n); row = m.make_sized_case(keys, operation=operation, repetitions=r, access_list=use_al)
+                            p = row['parameters']; program = row['request']['program']; result = run_users(row)[0]
+                            data = bytes.fromhex(program['input_hex'][2:]); nonzero = sum(x != 0 for x in data)
+                            intrinsic = 21000 + 4 * (len(data) - nonzero) + 16 * nonzero + (2400 * n if use_al else 0)
+                            self.assertEqual(p['key_count'], n); self.assertEqual(p['query_address'], keys[-1])
+                            self.assertEqual((p['transaction_gas_limit'], program['transactions']['gas_limit']), (15000000, 15000000))
+                            self.assertEqual(p['gas_accounting_per_user']['intrinsic_gas'], intrinsic)
+                            self.assertEqual(result['eip7623_floor_gas'], 21000 + 10 * (len(data) + 3 * nonzero))
+                            self.assertEqual(result['seed_addresses'], keys)
+                            self.assertEqual((result['cold_reads'], result['warm_reads']), (0 if use_al else n, 64 * r + 1 + (n if use_al else 0)))
+                            self.assertEqual((result['counter'], result['stack'], result['peak_memory_bytes']), (r, [], 128))
+                            self.assertEqual(result['counts'], +Counter(program['expected_route_counts']))
+                            self.assertEqual(result['gas'], p['expected_user_charged_gas'])
+                            self.assertEqual(p['expected_block_charged_gas'], result['gas'] + 167355)
+                            self.assertFalse(row['actuals_used_for_fitting']); self.assertFalse(row['holdout_only'])
+                            self.assertNotIn('prestate_contracts', program); self.assertNotIn('storage_state', program)
+                            if use_al: self.assertEqual(program['access_list'], dict(pattern='raw_addresses', count=n, addresses=keys))
+                            else: self.assertNotIn('access_list', program)
+        keys = self.keys(32); row = m.make_sized_case(keys, repetitions=1, access_list=True)
+        keys[0] = keys[-1]
+        self.assertNotEqual(keys, row['parameters']['ordered_addresses'])
+        row['request']['program']['access_list']['addresses'][0] = keys[-1]
+        self.assertNotEqual(row['request']['program']['access_list']['addresses'], row['parameters']['ordered_addresses'])
+
+    def test_sized_domains_and_budget_fail_before_export(self):
+        m = producer(); self.assertTrue(callable(getattr(m, 'make_sized_case', None)), 'missing sized-case API')
+        keys = self.keys(2)
+        for bad in (None, True, iter(keys), {}, [], self.keys(1025), [keys[0], keys[0]], [1], ['0x' + '00' * 19 + '01'], ['0x' + '66' * 20], [keys[0].upper()], [keys[0][:-2]], [keys[0] + '00']):
+            with self.subTest(keys=type(bad).__name__):
+                with self.assertRaises(ValueError): m.make_sized_case(bad)
+        for bad in (True, -1, 1.0, None, 1000001):
+            with self.assertRaises(ValueError): m.make_sized_case(keys, repetitions=bad)
+        for bad in (True, None, 'sload'):
+            with self.assertRaises(ValueError): m.make_sized_case(keys, operation=bad)
+        for bad in (1, None, 'yes', 0):
+            with self.assertRaises(ValueError): m.make_sized_case(keys, access_list=bad)
+        with self.assertRaises(ValueError): m.make_sized_case(self.keys(1024), repetitions=1000000)
+        for bad in (0, 1025, True, 1.0):
+            with self.assertRaises(ValueError): m._runtime('balance', 1, key_count=bad)
+
+    def test_sized_exact_budget_boundary_and_typed_counters(self):
+        m = producer(); from account_read_catalogs_vm import run_users
+        for n in (1, 1024):
+            for use_al in (False, True):
+                keys = self.keys(n); data = b''.join(bytes(12) + bytes.fromhex(a[2:]) for a in keys)
+                intrinsic = 21000 + 4 * data.count(0) + 16 * (len(data) - data.count(0))
+                base = intrinsic + (2592 if use_al else 2692) * n + 359
+                maximum = (15000000 - base) // 6775
+                row = m.make_sized_case(keys, repetitions=maximum, access_list=use_al)
+                result = run_users(row)[0]
+                self.assertEqual(result['gross_gas'], base + 6775 * maximum)
+                with self.assertRaises(ValueError): m.make_sized_case(keys, repetitions=maximum + 1, access_list=use_al)
+        row = m.make_sized_case(self.keys(1), repetitions=0)
+        for field in ('accessed_unique_addresses', 'seed_reads'):
+            for value in (True, 1.0):
+                bad = copy.deepcopy(row); bad['parameters'][field] = value
+                with self.assertRaises(AssertionError): run_users(bad)
+
+    def test_sized_oracle_rejects_rehashed_bytes_metadata_and_al_mutants(self):
+        m = producer(); self.assertTrue(callable(getattr(m, 'make_sized_case', None)), 'missing sized-case API')
+        from account_read_catalogs_vm import run_users
+        for use_al in (False, True):
+            row = m.make_sized_case(self.keys(32), repetitions=1, access_list=use_al); run_users(row)
+            for field, value in [('key_count', 1), ('query_address', self.keys(1)[0]), ('read_events', 1), ('expected_user_gross_gas', 1), ('sentinel', 0), ('access_list', not use_al), ('unroll_factor', 32), ('all_user_transactions', 2), ('header_gas_limit', 32000000), ('transaction_gas_limit', 15000000.0)]:
+                bad = copy.deepcopy(row); bad['parameters'][field] = value
+                with self.assertRaises(AssertionError): run_users(bad)
+            bad = copy.deepcopy(row); bad['request']['program']['transactions']['gas_limit'] = 14999999
+            with self.assertRaises(AssertionError): run_users(bad)
+            bad = copy.deepcopy(row); data = bytearray.fromhex(bad['request']['program']['input_hex'][2:]); data[0] = 1
+            bad['request']['program']['input_hex'] = '0x' + data.hex(); bad['parameters']['calldata_sha256'] = bad['parameters']['address_words_sha256'] = hashlib.sha256(data).hexdigest()
+            with self.assertRaises(AssertionError): run_users(bad)
+            bad = copy.deepcopy(row); code = bytes.fromhex(bad['request']['program']['code_hex'][2:]); marker = b'\x7f' + int(row['parameters']['query_address'], 16).to_bytes(32, 'big')
+            self.assertIn(marker, code); code = code.replace(marker, b'\x7f' + int(self.keys(1)[0], 16).to_bytes(32, 'big'), 1)
+            bad['request']['program']['code_hex'] = '0x' + code.hex(); bad['parameters']['runtime_sha256'] = hashlib.sha256(code).hexdigest()
+            with self.assertRaises(AssertionError): run_users(bad)
+            if use_al:
+                for change in ('order', 'count', 'keys'):
+                    bad = copy.deepcopy(row); al = bad['request']['program']['access_list']
+                    if change == 'order': al['addresses'].reverse()
+                    elif change == 'count': al['count'] += 1
+                    else: al['storage_keys'] = []
+                    with self.assertRaises(AssertionError): run_users(bad)
+
+
 if __name__ == '__main__': unittest.main()

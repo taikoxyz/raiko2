@@ -3187,6 +3187,35 @@ catalog uses deterministic mixed nonzero four-byte suffixes after `11223344` plu
 A shared raw prefix alone does not establish actual hash-table concentration; external short-prefix
 catalogs preserve calldata byte cost and runtime at the same operation/repetition count.
 
+The opt-in `make_sized_case(keys, *, operation='balance', repetitions=512,
+access_list=False)` accepts 1..1024 unique canonical lowercase Address20 strings and uses
+`keys[-1]` as its query. It permits arbitrary nonzero-byte counts, while `make_case`, `prepare`
+and the CLI retain their strict512/eight-nonzero/fixed-query byte contract. For example, with the
+cases directory on `PYTHONPATH` and an explicit ordered `addresses` list:
+
+```python
+from account_read_catalogs import make_sized_case
+
+case = make_sized_case(addresses, repetitions=1024, access_list=True)
+request = case['request']  # ordinary ProgramRequest for the existing workload harness
+```
+
+The sized path keeps the same calldata seed and 64-read memory-counter loop, one CALL user,
+31M header, fixed15M transaction envelope and no prestate targets. `access_list=True` declares
+exactly the same ordered addresses as raw empty-key items. Every seed is then warm; subsequent
+queries remain warm in either mode. Without AL there are N cold seeds plus 64R+1 warm queries;
+with AL there are N+64R+1 warm reads and no cold seed. AL declaration does not itself materialize
+the journal Account table or prove any map size, own seed or hash pressure.
+
+Gas uses actual ABI bytes: let I=21000+4*zero_bytes+16*nonzero_bytes. Gross user gas is
+I+2692N+359+6775R without AL, or I+2592N+359+6775R with AL (including 2400/item intrinsic).
+The separately recorded EIP7623 floor is21000+10*(zero_bytes+4*nonzero_bytes); charged gas is
+max(gross,floor), with no refund. Over-budget inputs fail before returning a row. The sized
+metadata includes `sized_account_catalog`, `key_count` and `access_list`, and does not claim
+legacy full-R/headroom bounds. It selects no pricing model or observed G and exports no input.
+The independent decoded-byte VM, signed-input/absence authentication, current quote and any
+actual/profile gates remain separate requirements before using a generated case as evidence.
+
 The standalone helper defaults to U256; select `--key-kind address20` explicitly for this family.
 Using the helper built above, hash an address or search a fresh catalog with the **observed**
 account map's seed, shared word and mask:

@@ -76,36 +76,57 @@ def _catalog():
     return _validate_keys(values + [QUERY])
 
 
-def _runtime(operation, repetitions):
+def _validate_sized_keys(keys):
+    """Accept unique canonical Address20 data; final key is the query, never a seed guess."""
+    if type(keys) not in (list, tuple) or not 1 <= len(keys) <= 1024:
+        raise ValueError('sized catalog requires 1..1024 addresses')
+    for key in keys:
+        if type(key) is not str or re.fullmatch('0x[0-9a-f]{40}', key) is None:
+            raise ValueError('address requires canonical lowercase20-byte hex')
+        if key in RESERVED or int(key, 16) <= 0xffff:
+            raise ValueError('reserved/system/precompile address')
+    if len(set(keys)) != len(keys): raise ValueError('sized addresses must be unique')
+    return tuple(keys)
+
+
+def _runtime(operation, repetitions, *, key_count=KEY_COUNT, query=QUERY):
     opcode = _operation(operation); _integer(repetitions, 0, MAX_REPETITIONS, 'repetitions')
+    _integer(key_count, 1, 1024, 'key count'); _validate_sized_keys([query])
+    n = key_count; seed_visits = n + 1
     asm = _Factory()
     def store(offset, value): asm.push(value); asm.push(offset); asm.op(0x52)
     def load(offset, times=1): asm.push(offset, times=times); asm.op(0x51, times)
     def guard(value, times=1):
         asm.push(value, 32, times); asm.op(0x14, times); asm.op(0x15, times)
         asm.target('failure', times); asm.op(0x57, times)
-    asm.op(0x36); guard(16384)
+    asm.op(0x36); guard(32 * n)
     for offset, value in ((0, 0), (64, 0), (96, SENTINEL)): store(offset, value)
-    asm.label('seed', 513); load(0, 513); asm.push(512, times=513); asm.op(0x14, 513); asm.target('seed_done', 513); asm.op(0x57, 513)
-    load(0, 512); asm.push(5, times=512); asm.op(0x1b, 512); asm.op(0x35, 512); asm.op(opcode, 512); guard(0, 512)
-    load(0, 512); asm.push(1, times=512); asm.op(1, 512); asm.push(0, times=512); asm.op(0x52, 512); asm.target('seed', 512); asm.op(0x56, 512)
-    asm.label('seed_done'); asm.push(16352); asm.op(0x35); asm.op(0x80); asm.op(opcode); guard(0)
+    asm.label('seed', seed_visits); load(0, seed_visits); asm.push(n, times=seed_visits); asm.op(0x14, seed_visits); asm.target('seed_done', seed_visits); asm.op(0x57, seed_visits)
+    load(0, n); asm.push(5, times=n); asm.op(0x1b, n); asm.op(0x35, n); asm.op(opcode, n); guard(0, n)
+    load(0, n); asm.push(1, times=n); asm.op(1, n); asm.push(0, times=n); asm.op(0x52, n); asm.target('seed', n); asm.op(0x56, n)
+    asm.label('seed_done'); asm.push(32 * (n - 1)); asm.op(0x35); asm.op(0x80); asm.op(opcode); guard(0)
     visits = repetitions + 1; asm.label('loop', visits)
     load(64, visits); asm.push(repetitions, 32, visits); asm.op(0x14, visits); asm.target('done', visits); asm.op(0x57, visits)
     for _ in range(UNROLL): asm.op(0x80, repetitions); asm.op(opcode, repetitions); asm.op(0x50, repetitions)
     load(64, repetitions); asm.push(1, times=repetitions); asm.op(1, repetitions); asm.push(64, times=repetitions); asm.op(0x52, repetitions)
     asm.target('loop', repetitions); asm.op(0x56, repetitions)
-    asm.label('done'); asm.op(0x80); guard(int(QUERY, 16)); asm.op(0x50)
-    for offset, value in ((0, 512), (64, repetitions), (96, SENTINEL)): load(offset); guard(value)
+    asm.label('done'); asm.op(0x80); guard(int(query, 16)); asm.op(0x50)
+    for offset, value in ((0, n), (64, repetitions), (96, SENTINEL)): load(offset); guard(value)
     asm.op(0); asm.label('failure', 0); asm.op(0xfe, 0)
     return asm.finish(), asm.counts
 
 
-def gas_accounting(operation, repetitions):
-    code, counts = _runtime(operation, repetitions)
+def _ordinary_gas(counts):
+    """Account for supported ordinary opcode multiplicities, excluding account access gas."""
     costs = {0: 0, 1: 3, 0x14: 3, 0x15: 3, 0x1b: 3, 0x35: 3, 0x36: 2, 0x50: 2,
         0x51: 3, 0x52: 3, 0x31: 0, 0x3b: 0, 0x56: 8, 0x57: 10, 0x5b: 1, 0x80: 3, 0xfe: 0}
     ordinary = sum(n * (3 if 0x60 <= (op := int(key[-2:], 16)) <= 0x7f else costs[op]) for key, n in counts.items())
+    return ordinary
+
+
+def gas_accounting(operation, repetitions):
+    code, counts = _runtime(operation, repetitions)
+    ordinary = _ordinary_gas(counts)
     cold = 512 * 2600; warm = (64 * repetitions + 1) * 100
     gross = 135688 + ordinary + 12 + cold + warm; floor = 307720
     return dict(intrinsic_gas=135688, eip7623_floor_gas=floor, eip7623_floor_active=gross < floor,
@@ -140,8 +161,15 @@ def make_case(operation='balance', level='probe', *, keys=None, repetitions=512)
     r = 0 if level == 'zero' else repetitions; code, counts = _runtime(operation, r)
     data = b''.join(bytes(12) + bytes.fromhex(address[2:]) for address in addresses)
     data_sha = digest(data); catalog_id = ('default-mixed-long-prefix' if keys is None else 'custom') + '-' + data_sha
-    prefix = 'account-read-' + operation + '-' + catalog_id; gas = gas_accounting(operation, r)
+    gas = gas_accounting(operation, r)
     envelope = gas_accounting(operation, maximum)['gross_gas'] + 1000
+    return _case_row(operation, level, addresses, r, code, counts, data, catalog_id, gas, envelope, maximum)
+
+
+def _case_row(operation, level, addresses, r, code, counts, data, catalog_id, gas, envelope, maximum):
+    """Build common read intent without imposing the legacy strict512 catalog validation."""
+    n = len(addresses); prefix = 'account-read-' + operation + '-' + catalog_id
+    data_sha = digest(data)
     request = dict(schema_version=1, expected_user_success=True, program=dict(block_count=1,
         code_hex='0x' + code.hex(), input_hex='0x' + data.hex(), expected_route_counts=dict(counts),
         transactions=dict(kind='call', count_per_block=1, gas_limit=envelope)))
@@ -150,10 +178,10 @@ def make_case(operation='balance', level='probe', *, keys=None, repetitions=512)
         holdout_only=False, actuals_used_for_fitting=False,
         completion_gate='Decoded-byte address/value/cold-warm/count/gas guards plus native signed-input/root/absence witness authentication before actuals.',
         scope='Finite one-user account-journal pilot; not IID, concentration realization, fitting, maximal-block, global-bound or production-SDK evidence.',
-        parameters=dict(operation=operation, key_kind='address20', ordered_addresses=list(addresses), query_address=QUERY,
-            catalog_id=catalog_id, catalog_source='deterministic-mixed-suffix-recipe' if keys is None else 'external-data',
+        parameters=dict(operation=operation, key_kind='address20', ordered_addresses=list(addresses), query_address=addresses[-1],
+            catalog_id=catalog_id, catalog_source='deterministic-mixed-suffix-recipe' if catalog_id.startswith('default-') else 'external-data',
             repetitions=r, full_repetitions=maximum, workload_level=level, unroll_factor=64, bulk_operations=64 * r,
-            seed_reads=512, query_reads=64 * r + 1, read_events=513 + 64 * r, accessed_unique_addresses=512,
+            seed_reads=n, query_reads=64 * r + 1, read_events=n + 1 + 64 * r, accessed_unique_addresses=n,
             expected_persistent_storage_reads=0, expected_persistent_storage_writes=0, target_balance=0, target_code_bytes=0,
             target_initial_state='ABSENT accounts; no target prestate code or storage is provisioned.',
             witness_policy='Canonical honest full tiny base-state trie; not an assertion of a globally minimal node subset.',
@@ -162,7 +190,7 @@ def make_case(operation='balance', level='probe', *, keys=None, repetitions=512)
             transaction_envelope_reserve=1000, header_gas_limit=31000000, header_prefix_remaining_gas=[30832645],
             charged_gas_budget=30000000, expected_anchor_gas=167355, expected_block_charged_gas=gas['charged_gas'] + 167355,
             gas_accounting_per_user=gas, expected_user_gross_gas=gas['gross_gas'], expected_user_charged_gas=gas['charged_gas'],
-            expected_user_refund_counter=0, expected_user_refund_applied=0, full_plus_one_constraint_failures=_constraint_failures(operation, maximum + 1),
+            expected_user_refund_counter=0, expected_user_refund_applied=0, full_plus_one_constraint_failures=_constraint_failures(operation, maximum + 1) if maximum is not None else [],
             fullness_scope='Intermediate own-zero/probe in a uniform15M envelope; not a30M block capacity certificate.',
             near_full=False, expected_terminal='STOP', expected_user_success=True, expected_user_receipt_statuses=[True],
             expected_anchor_success=True, expected_exceptional_instructions=0, execution_profile='evm-gas-only',
@@ -170,6 +198,45 @@ def make_case(operation='balance', level='probe', *, keys=None, repetitions=512)
             outer_calldata_bytes=len(data), calldata_zero_bytes=data.count(0), calldata_nonzero_bytes=len(data) - data.count(0),
             calldata_sha256=data_sha, address_words_sha256=data_sha, seed_counter_memory_offset=0, counter_memory_offset=64,
             protected_memory_offset=96, expected_counter=r, sentinel=SENTINEL, peak_memory_bytes=128), request=request)
+
+
+def make_sized_case(keys, *, operation='balance', repetitions=512, access_list=False):
+    """One opt-in variable-sized CALL with literal calldata accounting and a fixed15M envelope.
+
+    This does not select hash state or certify actual map size, placement or workload. Legacy
+    make_case/prepare retain their exact strict512 catalog, envelope and byte contracts.
+    """
+    _operation(operation); _integer(repetitions, 0, MAX_REPETITIONS, 'repetitions')
+    if type(access_list) is not bool: raise ValueError('access_list must be boolean')
+    addresses = _validate_sized_keys(keys); n = len(addresses); r = repetitions
+    code, counts = _runtime(operation, r, key_count=n, query=addresses[-1])
+    data = b''.join(bytes(12) + bytes.fromhex(address[2:]) for address in addresses)
+    ordinary = _ordinary_gas(counts)
+    al_intrinsic = n * 2400 if access_list else 0
+    intrinsic = 21000 + data.count(0) * 4 + (len(data) - data.count(0)) * 16 + al_intrinsic
+    cold_count = 0 if access_list else n; warm_count = 64 * r + 1 + (n if access_list else 0)
+    gross = intrinsic + ordinary + 12 + cold_count * 2600 + warm_count * 100
+    floor = 21000 + 10 * (data.count(0) + 4 * (len(data) - data.count(0)))
+    charged = max(gross, floor); envelope = 15000000
+    if (charged > envelope or envelope > 16777216 or 167355 + charged > 30000000 or
+            envelope > 31000000 - 167355 or len(code) > 24576 or len(data) > 32768):
+        raise ValueError('sized case exceeds transaction/block/code/calldata limits')
+    gas = dict(intrinsic_gas=intrinsic, access_list_intrinsic_gas=al_intrinsic,
+        eip7623_floor_gas=floor, eip7623_floor_active=gross < floor, ordinary_opcode_gas=ordinary,
+        memory_expansion_gas=12, cold_account_gas=cold_count * 2600, warm_account_gas=warm_count * 100,
+        cold_account_count=cold_count, warm_account_count=warm_count, gross_gas=gross,
+        charged_gas=charged, refund_counter=0, refund_applied=0, runtime_bytes=len(code))
+    catalog_id = f'sized-raw-k{n}-al{int(access_list)}-' + digest(data)
+    row = _case_row(operation, 'zero' if r == 0 else 'probe', addresses, r, code, counts,
+        data, catalog_id, gas, envelope, None)
+    row['scope'] = 'Variable-sized absent-account development probe; own map state and actual workload unqualified. No fitting, full-block, holdout, global-bound or production-SDK claim.'
+    p = row['parameters']; p.update(sized_account_catalog=True, key_count=n, access_list=access_list,
+        transaction_envelope_reserve=None, catalog_source='explicit-raw-addresses',
+        fullness_scope='Fixed15M envelope with one user; not a maximum or full30M block certificate.')
+    for name in ('full_repetitions', 'full_plus_one_constraint_failures'): del p[name]
+    if access_list:
+        row['request']['program']['access_list'] = dict(pattern='raw_addresses', count=n, addresses=list(addresses))
+    return row
 
 
 def source_modules():
@@ -180,7 +247,8 @@ def source_modules():
 def helpers():
     return {'initcode_preparation._Factory': _Factory, **{'account_read_catalogs.' + fn.__name__: fn for fn in
         (digest, encoded, _operation, _integer, _validate_keys, _catalog, _runtime, gas_accounting,
-         _constraint_failures, full_repetitions, make_case, _read_catalog)}}
+         _constraint_failures, full_repetitions, make_case, _read_catalog, _validate_sized_keys,
+         _ordinary_gas, _case_row, make_sized_case)}}
 
 
 def _read_catalog(path):

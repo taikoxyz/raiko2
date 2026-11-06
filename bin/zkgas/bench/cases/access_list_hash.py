@@ -1,4 +1,4 @@
-"""Frozen b76 generic U256 Hash and reproducible access-list test catalogs.
+"""Frozen b76 access-list hash source and reproducible test catalogs.
 
 This is not the journal fixed32 hash. Own runtime seeds and hashes still need
 independent observation; generation does not certify placement or workload.
@@ -70,4 +70,22 @@ def dispersed_keys(count):
     _count(count)
     return [int.from_bytes(sha256(b'warm-access-list-control\x00'
                                  + index.to_bytes(4, 'big')).digest(), 'big')
+            for index in range(1, count + 1)]
+
+
+def concentrated_owner_addresses(shared0, count, *, prefix_bytes=6):
+    """Conditional Fb20 owner hashes H=G, independent of the map's unknown S.
+
+    X1=own G and X2=1 force H=fold(1,G)=G for every X0. This Address20
+    path differs from generic U256 and fixed32 storage-journal hashes. The selected shared0
+    must match the new input's observed own G; a prior G is only a hypothesis.
+    Prefix length concerns first compared network-memory bytes, not low32.
+    """
+    _uint(shared0, 64)
+    _count(count)
+    if type(prefix_bytes) is not int or prefix_bytes not in (0, 4, 6):
+        raise ValueError('owner prefix_bytes must be a strict integer in (0, 4, 6)')
+    prefix = b'\xa5' + bytes(prefix_bytes - 1) if prefix_bytes else b''
+    suffix = shared0.to_bytes(8, 'little') + (1).to_bytes(4, 'little')
+    return ['0x' + (prefix + index.to_bytes(8 - prefix_bytes, 'little') + suffix).hex()
             for index in range(1, count + 1)]

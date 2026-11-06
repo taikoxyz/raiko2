@@ -3851,3 +3851,50 @@ block unions, with per-user counts in nested report rows. The unchanged 15M
 transaction envelope, intrinsic gas and inclusion rules still apply: a valid
 8192-item descriptor may not fit. No hash recipe, seed selection, dynamic
 placement, workload measurement or pricing claim follows from generation.
+
+### Conditional outer warm-owner Address20 catalogs
+
+`access_list_hash.concentrated_owner_addresses(shared0, count, *, prefix_bytes=6)`
+returns ordered, distinct, lowercase Address20 hex strings for the frozen b76 outer
+`AddressMap` / `FbBuildHasher<20>` path. It reuses strict U64 and count1–8192
+validation; `prefix_bytes` must be a strict integer0,4 or6 (no bool). Indexes1..count
+fill the remaining bytes of the first8-byte chunk in little-endian order, after a
+fixed `A5` plus zero prefix (empty for0). The next8bytes are selected `shared0` LE;
+the last4bytes are integer1 LE. Prefix length means the first compared Address
+network-memory bytes, not Address numeric low32, generic-U256 limbs or journal keys.
+
+For this exact source profile, `H=F(F(X0 XOR S,X1 XOR G) XOR X2,G)`, where
+`F` XORs the low/high64 halves of multiplication. Only if selected `shared0`
+equals the **new input's observed own G** do X1=G/X2=1 force H=F(1,G)=G for
+any unknown map S and any X0. `G=0` and maximal U64 are valid values. A G from an
+earlier input is a hypothesis, and even the same input dimensions do not guarantee
+seed reuse. Computed equal hashes do not certify dynamic placements/comparisons,
+actual workload or a pricing deficit. The generic-U256 and fixed32 storage-journal formulas differ. Other maps,
+including Fb20 account journals, still need their own observed S/G and caller;
+matching a hasher type does not transfer this qualification.
+
+For a data-only unit example (unit G17 is not an observed runtime choice):
+
+```bash
+PYTHONPATH=bin/zkgas/bench/cases "$PYTHON_BIN" -S -B - <<'PY'
+from access_list_hash import concentrated_owner_addresses
+from access_list_values import make_raw_addresses_case
+addresses = concentrated_owner_addresses(17, 4, prefix_bytes=6)
+row = make_raw_addresses_case(addresses)
+assert row['request']['program']['access_list']['addresses'] == addresses
+assert row['parameters']['expected_access_list_counts_per_block'] == {
+    'raw_address_items': 4, 'raw_storage_keys': 0,
+    'unique_addresses': 4, 'unique_storage_pairs': 0,
+}
+print(row['sample_id'])
+PY
+```
+
+The helper performs no file IO, selection/search, native construction or execution.
+Use existing `make_raw_addresses_case` and optional shared-CALL descriptors to
+compose requests; unchanged intrinsic gas,15M per-user envelope, controlled-world
+prestate exclusions and inclusion rules still apply. Existing canonical native,
+Kona/payload/signature/witness checks, quote, complete SP1 workload and input-own
+outer profile gates remain necessary. Canonical PGU validity is independent of
+optional profile qualification. This adds no runner, mode, price, guest, SDK or
+observer change and does not alter old key helpers or the23 default producer cases.

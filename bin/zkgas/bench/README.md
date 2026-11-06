@@ -3945,3 +3945,75 @@ Both fields are required by the current complete-quote contract. Regenerate
 quotes from retained canonical inputs when evaluating a new model, and join them
 to retained actual observations by the input identity. Preserve old quotes and
 raw actuals instead of filling missing fields or rewriting their provenance.
+
+### Cross-transaction account-cache requests
+
+`cases/cache_state_accounts.py` generates one ordinary ProgramRequest and catalog,
+without execution or a compiler:
+
+```bash
+"$PYTHON_BIN" -S -B bin/zkgas/bench/cases/cache_state_accounts.py \
+  --output-dir experiment/cache-state-reference
+```
+
+The fixed default is one block with512 successful CALL users,512 distinct
+predeployed code recipients, empty calldata and no access list. Each recipient
+reads eight globally disjoint initially absent Address20 targets using guarded
+BALANCE instructions, then returns empty bytes. A nonzero target balance reaches
+INVALID. Recipient runtime is215 bytes, with no memory expansion or refund.
+The existing explicit-transaction policy retains sequential nonces,1ETH test
+funding,1Gwei maxfee,50K user envelopes and31M header. Source arithmetic predicts
+41934 charged gas per user and21637563 including the fixed Anchor, below30M;
+actual inclusion, receipts and gas remain native qualification gates.
+
+Recipients are `0x4300000000000000000000000000000000000000 + i`, i=1..users.
+Reference targets are the first20 SHA256 bytes of
+`b'cache-state-absent-control\x00' + i.to_bytes(4, 'big')`, i=1..8*users,
+assigned eight consecutive targets to each recipient. Collision, reserved-address
+or recipient overlap is rejected; there is no filtering, retry or seed search.
+This reference recipe is not an EVM-map hash-distribution certificate.
+
+From the repository root, the Python API also accepts one explicit raw catalog in the same order:
+
+```python
+from pathlib import Path
+import sys
+
+sys.path.insert(0, 'bin/zkgas/bench/cases')
+from cache_state_accounts import make_case, prepare
+
+# Tiny engineering example, not the512-user campaign or an observed seed choice.
+reference = make_case(user_count=2)
+addresses = list(reversed(reference['parameters']['ordered_targets']))
+row = make_case(targets=addresses, user_count=2)
+assert row['request']['program']['transactions'] == reference['request']['program']['transactions']
+# prepare(Path('experiment/cache-state-raw'), targets=addresses, user_count=2)
+```
+
+`targets` must be a list/tuple of exactly eight canonical lowercase20-byte hex
+addresses per user, unique across all users and outside recipients, fixed initial
+accounts and the reserved low-address range. `user_count`1..512 permits tiny
+engineering tests; it does not select a sweep. Each fresh output contains one
+request with content-derived IDs, SHA-bound source/helpers and the existing
+catalog interface. Use unchanged `workload.py screen` and retained-input
+`measure`; no harness wiring or new runner is needed. `--model-id` changes only
+catalog metadata, never prices or request behavior.
+
+Changing target immediates changes deployed code/witness/canonical input while
+preserving user unsigned envelopes. The deterministic signer and fixed manifest
+fields predict unchanged signed user bytes and Kona transaction payload; verify
+those relations on retained native outputs instead of forcing a difference.
+All target absences,512 code recipients, signatures/order/nonces, exact routes,
+roots, success/gas and the actual blob/output limits require independent native
+readback before complete-workload measurement.
+
+This probes a block-long `State.cache.accounts`, distinct from the per-TX
+journal. Workload address union is not measured physical population. Hash/seed
+qualification requires the input's own CacheAccount specialization and caller;
+old journal/AL map observations do not transfer. Optional bounded profiles can
+remain UNKNOWN/incomplete while canonical PGU remains valid. Cold BALANCE,
+Account-density, resource and witness prices may already cover the work. Neither
+the recipe nor successful construction establishes pressure, a pricing deficit,
+all placements/comparisons, a global bound or SDK production parity. Predeployment
+cost is outside this measured block. Prices, Rust, guest, SDK, ELF and old
+producer behavior are unchanged.

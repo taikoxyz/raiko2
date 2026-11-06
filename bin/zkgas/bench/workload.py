@@ -78,6 +78,15 @@ def validate_program_manifest(manifest, profile, elf_sha256):
     require(manifest.get('sp1_sdk_version') == '6.3.0', 'program manifest SDK identity mismatch')
 
 
+def validate_observation_plan(plan, elf_sha256):
+    # This is only the artifact header contract; the sampler remains authoritative
+    # for strict watch/PC/register/instruction/output bounds.
+    require(isinstance(plan, dict), 'observation plan must be an object')
+    require(type(plan.get('schema_version')) is int and plan['schema_version'] == 1,
+            'unsupported observation plan schema')
+    require(plan.get('elf_sha256') == elf_sha256, 'observation plan ELF identity mismatch')
+
+
 def validate_report_profile(report, contract):
     expected = contract.get('execution_profile', 'legacy-unzen')
     require(expected in EXECUTION_PROFILES, 'unknown execution profile in contract')
@@ -105,12 +114,15 @@ def load_config(path):
     require(not has_manifest or 'execution_profile' in frozen,
             'program manifest requires an explicit execution profile')
     paths = {}
-    names = ('native', 'quote', 'sp1', 'elf', 'model') + (('program_manifest',) if has_manifest else ())
+    names = (('native', 'quote', 'sp1', 'elf', 'model')
+             + (('program_manifest',) if has_manifest else ())
+             + (('observation_plan',) if 'observation_plan' in config['artifacts'] else ()))
     for name in names:
         item = config['artifacts'][name]
         source = (path.parent / item['path']).resolve(strict=True)
         expected = sha(item['sha256'])
-        require(identity(source)[0] == expected, f'frozen {name} hash mismatch')
+        require(identity(source, limit=64 * 1024 if name == 'observation_plan' else None)[0]
+                == expected, f'frozen {name} hash mismatch')
         if name in ('native', 'quote', 'sp1'):
             require(os.access(source, os.X_OK), f'{name} is not executable')
         if name == 'elf':
@@ -121,6 +133,9 @@ def load_config(path):
         if name == 'program_manifest':
             require(identity(source)[1] <= MIB, 'program manifest exceeds 1 MiB')
             validate_program_manifest(read_json(source), frozen['execution_profile'],
+                                      frozen['identities']['elf'])
+        if name == 'observation_plan':
+            validate_observation_plan(read_json(source, limit=64 * 1024),
                                       frozen['identities']['elf'])
         paths[name] = source
         frozen['identities'][name] = expected
@@ -286,6 +301,13 @@ def read_attempt(folder):
                 'retained program manifest identity mismatch')
         validate_program_manifest(read_json(manifest_path), status['contract']['execution_profile'],
                                   status['contract']['identities']['elf'])
+    plan_sha256 = status['contract']['identities'].get('observation_plan')
+    plan_path = folder / 'observation-plan.json'
+    if plan_sha256 and (status['status'] in SUCCESS or plan_path.exists()):
+        require(identity(plan_path, limit=64 * 1024)[0] == plan_sha256,
+                'retained observation plan identity mismatch')
+        validate_observation_plan(read_json(plan_path, limit=64 * 1024),
+                                  status['contract']['identities']['elf'])
     if status['status'] in SUCCESS:
         record = next(r for r in status['artifacts'] if r['path'] == 'input.bin.gz')
         input_identity = record['uncompressed_sha256'], record['uncompressed_length']
@@ -421,6 +443,11 @@ def execute_source(root, source, paths, contract, through, retry=False, catalog_
             manifest_path = folder / 'program-manifest.json'
             copy_exclusive(paths['program_manifest'], manifest_path,
                            contract['identities']['program_manifest'])
+        plan_path = None
+        if 'observation_plan' in paths:
+            plan_path = folder / 'observation-plan.json'
+            copy_exclusive(paths['observation_plan'], plan_path,
+                           contract['identities']['observation_plan'])
         if prior:
             origin, old = prior
             record = next(r for r in old['artifacts'] if r['path'] == 'input.bin.gz')
@@ -462,8 +489,10 @@ def execute_source(root, source, paths, contract, through, retry=False, catalog_
             resource_path = folder / 'sp1-resources.json'
             manifest_args = (['--program-manifest', str(manifest_path)]
                              if manifest_path is not None else [])
+            plan_args = (['--observation-plan', str(plan_path)]
+                         if plan_path is not None else [])
             run([str(paths['sp1']), '--input-bincode', str(input_path), '--elf', str(paths['elf']),
-                 '--output', str(report_path), '--resource-receipt', str(resource_path)] + manifest_args, folder, phase,
+                 '--output', str(report_path), '--resource-receipt', str(resource_path)] + manifest_args + plan_args, folder, phase,
                 contract['limits'], [report_path, resource_path], resource_receipt=resource_path)
             phase = 'validation'
             report = read_json(report_path)

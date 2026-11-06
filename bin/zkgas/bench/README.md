@@ -3657,3 +3657,30 @@ arbitrary-key full-formula validation must not be claimed when G1 is unknown.
 Computed catalog hashes, directly sampled hashes, dynamic placements, comparison
 counts and actual complete-proposal PGU are separate evidence. The normal bench
 constructor, quote and estimator interfaces continue to own execution.
+
+## Frozen observation plans in the workload harness
+
+To collect optional historical-register diagnostics through `workload.py`, add an
+`observation_plan` artifact alongside the existing frozen tools and ELF:
+
+```json
+{
+  "observation_plan": {
+    "path": "programs/observation-plan.json",
+    "sha256": "REPLACE_WITH_SHA256"
+  }
+}
+```
+
+The plan must be a schema1 JSON object bound to the configured ELF, at most64KiB.
+The harness binds its hash in the existing contract, retains its exact bytes as
+`observation-plan.json` in each attempt, rechecks that identity, and passes the
+local copy to the sampler with `--observation-plan`. The sampler remains the
+authority for executable PCs and all detailed watch/register/sample limits; see
+the [observation plan contract](../sp1-estimator/README.md).
+
+Omitting this artifact preserves the existing command and measurement behavior.
+Canonical PGU/public-output validation does not depend on optional trace status,
+truncation, or a seed/placement hypothesis. Qualify those separately from the
+retained raw SP1 report with a pure postreader. No trace qualifier is run by the
+harness, and diagnostic replay wall time is not prover time.

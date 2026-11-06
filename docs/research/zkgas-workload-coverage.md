@@ -285,4 +285,29 @@ Independent269 actual-source behavior tests, fresh-ABI trace33 and defaultCLI125
 installed collector is suspended/restored for systemcalls, and real inspector callbacks establish
 the population parity branch. E3 production and E4 test-only source identities remain distinct.
 External validation/authority/fee residuals and L1 frequency remain TODOs, without a proved<2B bound.
-The new data-only fixture is not yet published; no guest/SDK/ELF/observer was rebuilt.
+The separate [data-only fixture](https://github.com/taikoxyz/raiko2-atlas/releases/tag/fixture-unzen-account-journal-density-v1) is published; no guest/SDK/ELF/observer was rebuilt.
+
+
+## Cross-transaction CacheState panel on 2026-11-07
+
+The [account-cache panel](2026-11-07-cache-state-accounts.md) adds exactly two
+512-user / 4096-cold-BALANCE inputs at 21,637,563 charged block gas. Reference
+actual 302,539,274 PGU is covered by literal node 3,780,228,313 and full proposal
+3,957,654,344; the sole reference-own-G successor measures 946,126,714 PGU
+versus node 3,790,845,145 and full 3,968,283,464. No tariff change follows.
+The actual paired increase exceeds the quote increase, but each literal whole
+quote covers its own complete workload; existing cold-opcode prices participate
+and are not subtracted. Large constructed overquotes remain visible.
+
+Independent signatures, full worlds, absence proofs, code, gas, Kona and quote
+checks pass. All signed user/Anchor bytes and Kona payload are equal; authenticated
+prestate/code and canonical inputs differ. Each own-input CacheAccount profile
+closes 20 local calls / eight candidate calls; the successor's observed own G
+matches its selected reference G and its eight actual target hashes equal G.
+Capped profile observations do not certify all 4096 placements, later-map/TX
+identity or whole pressure. An analysis-only header-RA assumption was corrected
+in a separate pure-reader epoch and matched independent raw reconstruction; no
+measurement was rerun. Each input has one native, one quote and one complete
+SP1 estimator execution, with no SDK/guest/observer build. Production parity and
+a global 30M bound remain unclaimed; other container/fee/validation paths remain
+separate follow-ups.

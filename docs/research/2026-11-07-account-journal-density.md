@@ -103,6 +103,5 @@ ELF or observer was rebuilt, and no additional SP1 input was sampled for reprici
 External caller validation, authorization, top-level frame and fee paths still have unmeasured
 residual work. Native-gas frequency bounds do not prove those residuals below2B PGU. Other table
 lifetimes, mixed capacity/read/write/revert cases and natural L1 frequency remain open. No blanket
-Account-path closure or global workload bound is claimed. The new data-only fixture is not yet
-published; existing original fixtures/releases remain immutable. Reusable producer and harness
+Account-path closure or global workload bound is claimed. The separate [data-only fixture](https://github.com/taikoxyz/raiko2-atlas/releases/tag/fixture-unzen-account-journal-density-v1) is published; existing original fixtures/releases remain immutable. Reusable producer and harness
 entrypoints remain in the [benchmark guide](../../bin/zkgas/bench/README.md#absent-account-journal-catalogs).

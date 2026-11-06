@@ -51,6 +51,8 @@ fn snapshot(pricing: PricingBreakdown) -> PricingBreakdownSnapshot {
         fixed_scaled: pricing.fixed_scaled,
         authorization_scaled: pricing.authorization_scaled,
         access_list_scaled: pricing.access_list_scaled,
+        access_list_construction_pairs: pricing.access_list_construction_pairs,
+        access_list_construction_scaled: pricing.access_list_construction_scaled,
         code_preparation_scaled: pricing.code_preparation_scaled,
         operations_scaled: pricing.operations_scaled,
         storage_journal_work_units: pricing.storage_journal_work_units,
@@ -82,8 +84,8 @@ fn current_model_profiles() -> CompatibilityProfilesV1 {
 
 fn quote() -> CompleteQuoteV1 {
     let public_output = format!("0x{}", "00".repeat(32));
-    let node_pricing = json!({"access_list_scaled":"0","code_preparation_scaled":"0","authorization_scaled":"0","fixed_scaled":"0","operations_scaled":"0","storage_journal_work_units":0,"storage_journal_scaled":"0","normal_dispatch_count":0,"normal_dispatch_scaled":"0","feature_error_scaled":"0","evm_local_resources":{"unique_account_count":0,"unique_storage_slot_access_count":0,"unique_storage_slot_write_count":0,"unique_code_hash_count":0,"unique_code_bytes":0},"evm_local_resources_scaled":"0","transaction_payload":{"canonical_transaction_bytes":1,"nonempty_payload_transactions":0},"transaction_payload_scaled":"0","access_list_items":0,"code_preparation":{"nonempty_events":0,"total_bytes":0},"authorization_validations":0,"known_subtotal_scaled":"0","known_subtotal_pgu":"0"});
-    let prove_pricing = json!({"access_list_scaled":"0","code_preparation_scaled":"0","authorization_scaled":"0","fixed_scaled":"0","operations_scaled":"0","storage_journal_work_units":0,"storage_journal_scaled":"0","normal_dispatch_count":0,"normal_dispatch_scaled":"0","feature_error_scaled":"0","resources_scaled":"0","mpt_scaled":"0","startup_scaled":"0","transaction_payload_scaled":"0","blob_source_scaled":"0","parent_mpt_scaled":"0","total_scaled":"0","total_pgu":"0"});
+    let node_pricing = json!({"access_list_scaled":"0","access_list_construction_pairs":0,"access_list_construction_scaled":"0","code_preparation_scaled":"0","authorization_scaled":"0","fixed_scaled":"0","operations_scaled":"0","storage_journal_work_units":0,"storage_journal_scaled":"0","normal_dispatch_count":0,"normal_dispatch_scaled":"0","feature_error_scaled":"0","evm_local_resources":{"unique_account_count":0,"unique_storage_slot_access_count":0,"unique_storage_slot_write_count":0,"unique_code_hash_count":0,"unique_code_bytes":0},"evm_local_resources_scaled":"0","transaction_payload":{"canonical_transaction_bytes":1,"nonempty_payload_transactions":0},"transaction_payload_scaled":"0","access_list_items":0,"code_preparation":{"nonempty_events":0,"total_bytes":0},"authorization_validations":0,"known_subtotal_scaled":"0","known_subtotal_pgu":"0"});
+    let prove_pricing = json!({"access_list_scaled":"0","access_list_construction_pairs":0,"access_list_construction_scaled":"0","code_preparation_scaled":"0","authorization_scaled":"0","fixed_scaled":"0","operations_scaled":"0","storage_journal_work_units":0,"storage_journal_scaled":"0","normal_dispatch_count":0,"normal_dispatch_scaled":"0","feature_error_scaled":"0","resources_scaled":"0","mpt_scaled":"0","startup_scaled":"0","transaction_payload_scaled":"0","blob_source_scaled":"0","parent_mpt_scaled":"0","total_scaled":"0","total_pgu":"0"});
     let mut quote: CompleteQuoteV1 = serde_json::from_value(json!({
         "schema_version":1,"key":{"corpus_id":"corpus","sample_id":"sample","guest_input_sha256":"input"},
         "executable":executable(),"input_source":{"kind":"single","descriptor_sha256":"descriptor"},"guest_input_byte_length":12,
@@ -96,7 +98,7 @@ fn quote() -> CompleteQuoteV1 {
         }],
             "node":{"unzen_zkgas_sum":"2","block_local_known_scaled":"0","block_local_known_pgu":"0","sum_of_block_known_pgu":"0"},
             "prove":{"selectors":{"payload":{"total_transaction_count":1,"canonical_transaction_bytes":1,"nonempty_payload_transactions":0},"true_unattempted_transactions":0,"blobs":{"source_blob_counts":[1],"proposal_blob_hash_count":1,"provider_blob_count":1,"provider_commitment_count":1,"provider_proof_count":1},"parent_mpt":{"path_node_visits":0,"materialization_work_units":0,"hydration_hash_blocks":0,"dirty_encoded_nodes":0,"dirty_hash_blocks":0,"structural_branch_extension_churn_nodes":0,"dropped_trie_nodes":0}},
-                "block_local_scaled":"0","block_local_pgu":"0","sum_of_block_local_pgu":"0","proposal_once":{"access_list_scaled":"0","code_preparation_scaled":"0","authorization_scaled":"0","fixed_scaled":"10000000000000000000","operations_scaled":"0","storage_journal_work_units":0,"storage_journal_scaled":"0","normal_dispatch_count":0,"normal_dispatch_scaled":"0","feature_error_scaled":"0","resources_scaled":"0","mpt_scaled":"0","startup_scaled":"0","transaction_payload_scaled":"0","blob_source_scaled":"0","parent_mpt_scaled":"0","total_scaled":"10000000000000000000","total_pgu":"10"},"proposal_once_pgu":"10","total_scaled":"10000000000000000000","total_pgu":"10"}}
+                "block_local_scaled":"0","block_local_pgu":"0","sum_of_block_local_pgu":"0","proposal_once":{"access_list_scaled":"0","access_list_construction_pairs":0,"access_list_construction_scaled":"0","code_preparation_scaled":"0","authorization_scaled":"0","fixed_scaled":"10000000000000000000","operations_scaled":"0","storage_journal_work_units":0,"storage_journal_scaled":"0","normal_dispatch_count":0,"normal_dispatch_scaled":"0","feature_error_scaled":"0","resources_scaled":"0","mpt_scaled":"0","startup_scaled":"0","transaction_payload_scaled":"0","blob_source_scaled":"0","parent_mpt_scaled":"0","total_scaled":"10000000000000000000","total_pgu":"10"},"proposal_once_pgu":"10","total_scaled":"10000000000000000000","total_pgu":"10"}}
     })).unwrap();
     let selectors = &quote.quote.prove.selectors;
     let parent = selectors.parent_mpt;
@@ -1553,6 +1555,171 @@ fn authorization_reports_reject_count_price_forgery_and_proposal_double_charge()
             serde_json::from_value::<CompleteQuoteV1>(encoded).is_err(),
             "required field {scope}"
         );
+    }
+}
+
+fn quote_with_access_list_construction(committed: u64, attempted: u64) -> CompleteQuoteV1 {
+    const SCALE: i128 = 1_000_000_000_000_000_000;
+    let mut q = quote_with_access_list_items(u64::from(committed > 0), u64::from(attempted > 0));
+    let node_scaled = ZkGasModel
+        .price_access_list_construction_pairs(committed)
+        .unwrap();
+    let prove_scaled = ZkGasModel
+        .price_access_list_construction_pairs(attempted)
+        .unwrap();
+    let node = &mut q.quote.blocks[0].node.pricing;
+    node.access_list_construction_pairs = committed;
+    node.access_list_construction_scaled = node_scaled;
+    node.known_subtotal_scaled += node_scaled;
+    node.known_subtotal_pgu += (node_scaled / SCALE) as u128;
+    q.quote.node.block_local_known_scaled += node_scaled;
+    q.quote.node.block_local_known_pgu += (node_scaled / SCALE) as u128;
+    q.quote.node.sum_of_block_known_pgu += (node_scaled / SCALE) as u128;
+    let prove = &mut q.quote.blocks[0].prove.pricing;
+    prove.access_list_construction_pairs = attempted;
+    prove.access_list_construction_scaled = prove_scaled;
+    prove.total_scaled += prove_scaled;
+    prove.total_pgu += (prove_scaled / SCALE) as u128;
+    q.quote.prove.block_local_scaled += prove_scaled;
+    q.quote.prove.block_local_pgu += (prove_scaled / SCALE) as u128;
+    q.quote.prove.sum_of_block_local_pgu += (prove_scaled / SCALE) as u128;
+    q.quote.prove.total_scaled += prove_scaled;
+    q.quote.prove.total_pgu += (prove_scaled / SCALE) as u128;
+    q
+}
+
+#[test]
+fn access_list_construction_closes_once_in_node_attempted_prove_and_proposal_scopes() {
+    for (committed, attempted) in [(0, 0), (1, 1), (3, 13), (29_487_360, 29_487_360)] {
+        let dir = TestDir::new();
+        let q = quote_with_access_list_construction(committed, attempted);
+        let encoded = serde_json::to_value(&q).unwrap();
+        assert_eq!(
+            encoded["quote"]["blocks"][0]["node"]["pricing"]["access_list_construction_pairs"],
+            committed
+        );
+        assert!(
+            encoded["quote"]["blocks"][0]["node"]["pricing"]["access_list_construction_scaled"]
+                .is_string()
+        );
+        assert_eq!(
+            encoded["quote"]["blocks"][0]["prove"]["pricing"]["access_list_construction_pairs"],
+            attempted
+        );
+        assert_eq!(
+            q.quote.prove.proposal_once.access_list_construction_pairs,
+            0
+        );
+        assert_eq!(
+            q.quote.prove.proposal_once.access_list_construction_scaled,
+            0
+        );
+        let args = write_inputs(
+            &dir,
+            &[QuoteRowV1::Complete(Box::new(q))],
+            &[complete_observation()],
+        );
+        let result = run_compare(&args, &executable()).unwrap();
+        assert_eq!(
+            result.manifest.counts.get(&ComparisonKind::Joined),
+            Some(&1)
+        );
+    }
+}
+
+#[test]
+fn access_list_construction_rejects_closed_total_forgeries_and_missing_fields() {
+    for mutation in [
+        "node-count",
+        "prove-count",
+        "attempted-below-committed",
+        "node-price",
+        "prove-price",
+        "proposal-count",
+        "proposal-price",
+        "selector-bound",
+    ] {
+        let dir = TestDir::new();
+        let mut q = quote_with_access_list_construction(3, 13);
+        match mutation {
+            "node-count" => {
+                q.quote.blocks[0]
+                    .node
+                    .pricing
+                    .access_list_construction_pairs = 4
+            }
+            "prove-count" => {
+                q.quote.blocks[0]
+                    .prove
+                    .pricing
+                    .access_list_construction_pairs = 14
+            }
+            "attempted-below-committed" => {
+                q.quote.blocks[0]
+                    .prove
+                    .pricing
+                    .access_list_construction_pairs = 2
+            }
+            "node-price" => {
+                q.quote.blocks[0]
+                    .node
+                    .pricing
+                    .access_list_construction_scaled -= 1;
+                q.quote.blocks[0].node.pricing.fixed_scaled += 1;
+            }
+            "prove-price" => {
+                q.quote.blocks[0]
+                    .prove
+                    .pricing
+                    .access_list_construction_scaled -= 1;
+                q.quote.blocks[0].prove.pricing.fixed_scaled += 1;
+            }
+            "proposal-count" => q.quote.prove.proposal_once.access_list_construction_pairs = 1,
+            "proposal-price" => {
+                q.quote.prove.proposal_once.access_list_construction_scaled = 1;
+                q.quote.prove.proposal_once.startup_scaled -= 1;
+            }
+            "selector-bound" => {
+                q.quote.blocks[0]
+                    .node
+                    .pricing
+                    .access_list_construction_pairs = u64::MAX;
+                q.quote.blocks[0]
+                    .prove
+                    .pricing
+                    .access_list_construction_pairs = u64::MAX;
+            }
+            _ => unreachable!(),
+        }
+        let args = write_inputs(
+            &dir,
+            &[QuoteRowV1::Complete(Box::new(q))],
+            &[complete_observation()],
+        );
+        assert!(
+            run_compare(&args, &executable()).is_err(),
+            "must reject {mutation} despite closed totals"
+        );
+    }
+    let q = quote_with_access_list_construction(3, 13);
+    for scope in ["node", "prove", "proposal"] {
+        for field in [
+            "access_list_construction_pairs",
+            "access_list_construction_scaled",
+        ] {
+            let mut encoded = serde_json::to_value(&q).unwrap();
+            let pricing = match scope {
+                "node" => &mut encoded["quote"]["blocks"][0]["node"]["pricing"],
+                "prove" => &mut encoded["quote"]["blocks"][0]["prove"]["pricing"],
+                "proposal" => &mut encoded["quote"]["prove"]["proposal_once"],
+                _ => unreachable!(),
+            };
+            pricing.as_object_mut().unwrap().remove(field);
+            assert!(
+                serde_json::from_value::<CompleteQuoteV1>(encoded).is_err(),
+                "required {scope} {field}"
+            );
+        }
     }
 }
 

@@ -232,3 +232,25 @@ owned SHM objects are absent, and no price or guest/SDK/observer change is made.
 The additive catalog helper preserves all23 old complete rows and requests.
 Legal two-transaction packing remains a separate experiment; PGU is not
 extrapolated by multiplying the single-input result.
+
+The [legal two-user packing panel](2026-11-06-access-list-packing.md) adds two
+distinct canonical/native/model389 quote inputs and two complete actuals. At
+29,398,167 charged block gas, the aligned case measures2,484,257,836 PGU against
+node207,800,835/full362,742,665: node deficit2,276,457,001 meets the priority rule.
+Its first captured map realizes the short family, while whole two-map pressure
+remains unqualified; full canonical workload establishes severity independently.
+The reference actual261,195,526 remains valid with whole-profile UNKNOWN.
+
+Successor c306 keeps384 per low32-equal raw pair and adds96 per different-low32
+raw pair in each TX/owner scope. Its62 fresh quotations cover12 controlled
+inputs/9 actuals/3 nulls and50 historical proposals/9,600 blocks. The aligned
+node/full become5,869,373,955/6,024,315,785 PGU, about2.36x/2.425x actual. All nine
+full-proposal quotes cover actual; maximum residual node gap152,615,649 remains
+explicit, with no measured >2B/<=30M row. All historical numeric values and public
+outputs are unchanged; old416f/SDK6.1 observations remain sensitivity-only.
+The large crafted reference overquote is retained. Repricing runs no new native
+constructor or SP1 sample, and existing manifests preserve all13 original corpus
+IDs. The shared CALL/access-list tool validates each signed vector/nonce and true
+block-unique versus per-TX raw counts. Independent source, actual-source behavior,
+consumer and raw numeric gates pass. The outer warm-owner AddressMap and broader
+composition boundaries remain follow-ups; no universal workload bound is claimed.

@@ -86,3 +86,6 @@ extrapolation of PGU. The frozen native1a used in this panel rejects access_list
 combined with its multi-transaction descriptor; a successor host tool must
 validate every included signed list and nonce when enabling that composition.
 Pricing and block-level severity remain open until the composition is tested.
+
+The subsequent [two-user experiment](2026-11-06-access-list-packing.md) measures
+that composition and records its correction separately from this initial panel.

@@ -94,6 +94,35 @@ def make_raw_case(keys, block_count=1):
     return row
 
 
+def make_raw_addresses_case(addresses, block_count=1):
+    """Exact empty-key owner items; order and duplicates survive canonical signing."""
+    if type(addresses) not in (list, tuple) or not 1 <= len(addresses) <= MAX_COUNT:
+        raise ValueError('raw access-list addresses must be a list/tuple of 1..8192 entries')
+    if any(type(address) is not str or len(address) != 42 or
+           not address.startswith('0x') or
+           any(char not in '0123456789abcdefABCDEF' for char in address[2:])
+           for address in addresses):
+        raise ValueError('raw access-list addresses must be exact 20-byte 0x-prefixed hex strings')
+    ordered = [address.lower() for address in addresses]
+    row = make_case('repeated_address', len(ordered), block_count)
+    address_digest = digest(b''.join(bytes.fromhex(address[2:]) for address in ordered))
+    row['request']['program']['access_list'] = dict(
+        pattern='raw_addresses', count=len(ordered), addresses=ordered)
+    row.update(sample_id=f'access-list-raw-addresses-k{len(ordered)}-{address_digest}-b{block_count}',
+               corpus_id=f'unzen-access-list-raw-addresses-{address_digest}',
+               pair_group=f'access-list-raw-addresses-k{len(ordered)}-b{block_count}',
+               data_role='development_probe', actuals_used_for_fitting=False, holdout_only=False,
+               scope='Explicit raw empty-key access-list owners; order and duplicates preserved. '
+                     'Generation does not establish guest hash layout, actual workload or pricing accuracy.')
+    row['parameters'].update(pattern='raw_addresses',
+        expected_access_list_counts_per_block=dict(raw_address_items=len(ordered), raw_storage_keys=0,
+            unique_addresses=len(set(ordered)), unique_storage_pairs=0),
+        extra_addresses='explicit owners; non-PROGRAM owners must be absent from initial prestate',
+        ordered_addresses_sha256=address_digest,
+        address_encoding='20-byte concatenation in raw order')
+    return row
+
+
 def prepare(output):
     selections = [(None, None, 1), ('repeated_address', 1, 1)]
     selections += [(pattern, count, 1) for pattern in ('repeated_address', 'distinct_addresses')

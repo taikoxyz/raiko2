@@ -3811,3 +3811,43 @@ envelope. No single-user PGU extrapolation establishes a multi-user measurement.
 The existing bounded observation reader's single-vector scope may be incomplete
 for repeated target-owner items; canonical PGU validation remains independent of
 optional profile qualification.
+
+### Explicit raw empty-key access-list owners
+
+`access_list_values.make_raw_addresses_case(addresses, block_count=1)` adds an
+ordered list of empty-key owner items. Supply a list or tuple of 1–8192 exact
+20-byte `0x`-prefixed hex strings. Zero, maximal addresses and duplicates are
+valid descriptor values; hex digits are normalized to lowercase without changing
+bytes, order or multiplicity. The descriptor is `pattern="raw_addresses"` with
+`count` and `addresses`; it does not insert PROGRAM automatically. All storage
+key lists are empty. The raw digest is SHA256 of the ordered 20-byte concatenation;
+counts distinguish raw items from unique owners, and storage pair counts are zero.
+
+```bash
+PYTHONPATH=bin/zkgas/bench/cases "$PYTHON_BIN" -S -B - <<'PY'
+from access_list_values import make_raw_addresses_case
+row = make_raw_addresses_case(['0x' + '00' * 20, '0x' + 'ff' * 20, '0x' + '00' * 20])
+assert row['parameters']['expected_access_list_counts_per_block'] == {
+    'raw_address_items': 3, 'raw_storage_keys': 0,
+    'unique_addresses': 2, 'unique_storage_pairs': 0,
+}
+print(row['sample_id'])
+PY
+```
+
+`raw_addresses` requires a non-null vector whose length equals `count` and rejects
+any `storage_keys` vector. Other patterns reject any `addresses` vector, including
+an empty one; `raw_keys` keeps its existing required storage vector. Optional
+fields omitted or represented by JSON null retain ordinary `None` semantics and
+are omitted when serialized. Old descriptors, 23 default rows/requests and report
+shapes are unchanged. Block count remains 1–32.
+
+Declaring an owner does not materialize or preload its account or storage. The
+constructor still rejects extra owners already present in its controlled initial
+prestate, except PROGRAM itself. Signed type-2/type-4 raw-list equality, signer,
+sequential nonce and every included user are checked by the existing gate.
+Shared CALL descriptors retain raw counts summed over users and unique counts as
+block unions, with per-user counts in nested report rows. The unchanged 15M
+transaction envelope, intrinsic gas and inclusion rules still apply: a valid
+8192-item descriptor may not fit. No hash recipe, seed selection, dynamic
+placement, workload measurement or pricing claim follows from generation.

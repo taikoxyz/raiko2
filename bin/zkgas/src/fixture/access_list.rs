@@ -30,6 +30,8 @@ pub enum AccessListPattern {
     ReversedDistinctKeys,
     /// One PROGRAM item with an explicit raw key vector, including ordered duplicates.
     RawKeys,
+    /// Explicit ordered owner items with empty key lists; duplicates are retained.
+    RawAddresses,
 }
 
 /// Optional bounded access-list description for an otherwise unchanged user transaction.
@@ -43,6 +45,9 @@ pub struct ProgramAccessList {
     /// Exact raw keys for `RawKeys` only; omitted for every existing pattern.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage_keys: Option<Vec<B256>>,
+    /// Exact empty-key owners for `RawAddresses` only; omitted for all older patterns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub addresses: Option<Vec<Address>>,
 }
 
 /// Requested vector shape and independent observations from included signed transactions.
@@ -115,7 +120,23 @@ impl ProgramAccessList {
             (1..=8192).contains(&self.count),
             "access-list count must be in 1..=8192"
         );
+        ensure!(
+            self.pattern == AccessListPattern::RawAddresses || self.addresses.is_none(),
+            "addresses is only valid with raw_addresses"
+        );
         match self.pattern {
+            AccessListPattern::RawAddresses => {
+                ensure!(
+                    self.storage_keys.is_none(),
+                    "raw_addresses cannot include storage_keys"
+                );
+                ensure!(
+                    self.addresses
+                        .as_ref()
+                        .is_some_and(|addresses| addresses.len() == self.count),
+                    "raw access-list addresses length must equal count"
+                );
+            }
             AccessListPattern::RawKeys => ensure!(
                 self.storage_keys
                     .as_ref()
@@ -138,6 +159,13 @@ impl ProgramAccessList {
             storage_keys,
         };
         let list = match self.pattern {
+            AccessListPattern::RawAddresses => self
+                .addresses
+                .as_ref()
+                .expect("validated raw address vector")
+                .iter()
+                .map(|&address| item(address, vec![]))
+                .collect(),
             AccessListPattern::RawKeys => {
                 vec![item(
                     PROGRAM,
@@ -280,6 +308,159 @@ mod tests {
     use alloy_signer_local_fixture::PrivateKeySigner;
 
     #[test]
+    fn raw_addresses_json_preserves_empty_key_items_order_and_duplicates() {
+        let addresses = vec![Address::ZERO, Address::repeat_byte(0xff), Address::ZERO];
+        let value = serde_json::json!({
+            "pattern": "raw_addresses", "count": 3, "addresses": addresses,
+        });
+        let ordered_json = format!(
+            r#"{{"pattern":"raw_addresses","count":3,"addresses":{}}}"#,
+            serde_json::to_string(&addresses).unwrap()
+        );
+        let descriptor: ProgramAccessList = serde_json::from_str(&ordered_json)
+            .expect("explicit raw_addresses descriptor must parse");
+        let list = descriptor.canonical_list().unwrap();
+        assert_eq!(
+            list.0.iter().map(|item| item.address).collect::<Vec<_>>(),
+            addresses
+        );
+        assert!(list.0.iter().all(|item| item.storage_keys.is_empty()));
+        assert_eq!(serde_json::to_value(&descriptor).unwrap(), value);
+    }
+
+    #[test]
+    fn raw_addresses_enforces_vector_domain_and_field_exclusivity() {
+        for value in [
+            serde_json::json!({"pattern":"raw_addresses", "count":1}),
+            serde_json::json!({"pattern":"raw_addresses", "count":1, "addresses":null}),
+            serde_json::json!({"pattern":"raw_addresses", "count":1, "addresses":[]}),
+            serde_json::json!({"pattern":"raw_addresses", "count":2, "addresses":[Address::ZERO]}),
+            serde_json::json!({"pattern":"raw_addresses", "count":0, "addresses":[]}),
+            serde_json::json!({"pattern":"raw_addresses", "count":1, "addresses":[Address::ZERO], "storage_keys":[]}),
+        ] {
+            let descriptor: ProgramAccessList = serde_json::from_value(value).unwrap();
+            assert!(descriptor.validate().is_err());
+        }
+        for value in [
+            serde_json::json!({"pattern":"raw_addresses", "count":1, "addresses":[true]}),
+            serde_json::json!({"pattern":"raw_addresses", "count":1, "addresses":[0]}),
+            serde_json::json!({"pattern":"raw_addresses", "count":1, "addresses":["0x00"]}),
+            serde_json::json!({"pattern":"raw_addresses", "count":1, "addresses":[format!("0x{}", "00".repeat(21))]}),
+            serde_json::json!({"pattern":"raw_addresses", "count":1, "addresses":["0xgg"]}),
+            serde_json::json!({"pattern":"raw_addresses", "count":1, "addresses":{}}),
+            serde_json::json!({"pattern":"raw_addresses", "count":true, "addresses":[Address::ZERO]}),
+            serde_json::json!({"pattern":"raw_addresses", "count":1.0, "addresses":[Address::ZERO]}),
+            serde_json::json!({"pattern":"raw_addresses", "count":-1, "addresses":[Address::ZERO]}),
+            serde_json::json!({"pattern":"raw_addresses", "count":1, "addresses":[Address::ZERO], "unknown":true}),
+        ] {
+            assert!(serde_json::from_value::<ProgramAccessList>(value).is_err());
+        }
+        for count in [1, 8192, 8193] {
+            let descriptor: ProgramAccessList = serde_json::from_value(serde_json::json!({
+                "pattern":"raw_addresses", "count":count, "addresses":vec![Address::ZERO; count],
+            }))
+            .unwrap();
+            assert_eq!(descriptor.canonical_list().is_ok(), count <= 8192);
+        }
+        for pattern in [
+            "repeated_address",
+            "distinct_addresses",
+            "repeated_key",
+            "distinct_keys",
+            "repeated_items",
+            "reversed_distinct_keys",
+            "raw_keys",
+        ] {
+            let mut value = serde_json::json!({"pattern":pattern, "count":1});
+            if pattern == "raw_keys" {
+                value["storage_keys"] = serde_json::json!([B256::ZERO]);
+            }
+            let original = value.clone();
+            value["addresses"] = serde_json::Value::Null;
+            let descriptor: ProgramAccessList = serde_json::from_value(value.clone()).unwrap();
+            assert!(descriptor.validate().is_ok());
+            assert_eq!(serde_json::to_value(descriptor).unwrap(), original);
+            for addresses in [serde_json::json!([]), serde_json::json!([Address::ZERO])] {
+                value["addresses"] = addresses;
+                let descriptor: ProgramAccessList = serde_json::from_value(value.clone()).unwrap();
+                assert!(descriptor.validate().is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn raw_addresses_signed_multi_user_gate_checks_every_raw_item_and_nonce() {
+        let descriptor: ProgramAccessList = serde_json::from_value(serde_json::json!({
+            "pattern":"raw_addresses", "count":4,
+            "addresses":[Address::ZERO, Address::repeat_byte(0xff), Address::ZERO, Address::with_last_byte(1)],
+        })).unwrap();
+        let signer = PrivateKeySigner::from_bytes(&B256::repeat_byte(0x11)).unwrap();
+        let sign = |nonce, list, signer: &PrivateKeySigner| {
+            let tx = TxEip1559 {
+                nonce,
+                chain_id: 167_000,
+                gas_limit: 15_000_000,
+                access_list: list,
+                ..Default::default()
+            };
+            let signature = signer.sign_hash_sync(&tx.signature_hash()).unwrap();
+            TransactionSigned::from(tx.into_signed(signature))
+        };
+        let list = descriptor.canonical_list().unwrap();
+        let users = vec![
+            sign(2, list.clone(), &signer),
+            sign(3, list.clone(), &signer),
+        ];
+        let report = descriptor
+            .validate_block(&users, signer.address(), 1, 2)
+            .unwrap();
+        assert_eq!(
+            (
+                report.counts.raw_address_items,
+                report.counts.raw_storage_keys,
+                report.counts.unique_addresses,
+                report.counts.unique_storage_pairs
+            ),
+            (8, 0, 3, 0)
+        );
+        let nested = report.transactions.unwrap();
+        assert!(
+            nested
+                .iter()
+                .all(|row| row.counts.raw_address_items == 4 && row.counts.unique_addresses == 3)
+        );
+        assert_eq!(
+            nested.iter().map(|row| row.nonce).collect::<Vec<_>>(),
+            vec![2, 3]
+        );
+        let mut reversed = list.clone();
+        reversed.0.reverse();
+        let mut removed_duplicate = list.clone();
+        removed_duplicate.0.remove(2);
+        let mut added_key = list.clone();
+        added_key.0[1].storage_keys.push(B256::ZERO);
+        let other_signer = PrivateKeySigner::from_bytes(&B256::repeat_byte(0x22)).unwrap();
+        for second in [
+            sign(3, reversed, &signer),
+            sign(3, removed_duplicate, &signer),
+            sign(3, added_key, &signer),
+            sign(2, list.clone(), &signer),
+            sign(3, list.clone(), &other_signer),
+        ] {
+            assert!(
+                descriptor
+                    .validate_block(&[users[0].clone(), second], signer.address(), 1, 2)
+                    .is_err()
+            );
+        }
+        let single = descriptor
+            .validate_transaction(&users[0], signer.address(), 1, 2)
+            .unwrap();
+        assert!(single.transactions.is_none());
+        assert_eq!(single.counts.raw_address_items, 4);
+    }
+
+    #[test]
     fn raw_keys_json_accepts_exact_order_and_duplicate_zero_extreme_keys() {
         let keys = vec![B256::ZERO, B256::repeat_byte(0xff), B256::ZERO];
         let descriptor: ProgramAccessList = serde_json::from_value(serde_json::json!({
@@ -360,6 +541,7 @@ mod tests {
                 pattern: AccessListPattern::RawKeys,
                 count,
                 storage_keys: Some(vec![B256::ZERO; count]),
+                addresses: None,
             };
             assert_eq!(descriptor.canonical_list().is_ok(), count <= 8192);
         }
@@ -434,6 +616,7 @@ mod tests {
             pattern: AccessListPattern::DistinctKeys,
             count: 4,
             storage_keys: None,
+            addresses: None,
         };
         let signer = PrivateKeySigner::from_bytes(&B256::repeat_byte(0x11)).unwrap();
         let sign = |list| {
@@ -488,6 +671,7 @@ mod tests {
                 B256::ZERO,
                 B256::from(U256::from(1)),
             ]),
+            addresses: None,
         };
         let signer = PrivateKeySigner::from_bytes(&B256::repeat_byte(0x11)).unwrap();
         let sign = |nonce, list, key: &PrivateKeySigner| {

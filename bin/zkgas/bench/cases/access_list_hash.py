@@ -51,6 +51,20 @@ def concentrated_keys(shared0, count):
             for index in range(1, count + 1)]
 
 
+def concentrated_short_prefix_keys(shared0, count):
+    """Conditional equal-hash keys with distinct first four compared LE bytes.
+
+    L0=L1=i and L2=L3=own shared0 give body0 and hash fold(4,shared0),
+    independently of S/G1. Generated shared0 must match this input's own G0;
+    computation does not qualify dynamic hashes or placements. Raw low32 values
+    are i=1..count, so every prefix-pair group is a singleton.
+    """
+    _uint(shared0, 64)
+    _count(count)
+    return [index | (index << 64) | (shared0 << 128) | (shared0 << 192)
+            for index in range(1, count + 1)]
+
+
 def dispersed_keys(count):
     """Deterministic control hypothesis; verify its distribution under own seeds."""
     _count(count)

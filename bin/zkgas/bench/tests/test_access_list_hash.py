@@ -60,6 +60,33 @@ class AccessListHashTests(unittest.TestCase):
                               for k in keys[:64]}), 64)
         # This one fixed unit seed does not establish the actual guest distribution.
 
+    def test_short_prefix_catalog_has_distinct_first_four_le_bytes(self):
+        m = self.helper()
+        for g0 in (0, (1 << 64) - 1, 0x8877665544332211):
+            for count in (1, 64, 7680, 8192):
+                keys = m.concentrated_short_prefix_keys(g0, count)
+                self.assertEqual(keys, [i | (i << 64) | (g0 << 128) | (g0 << 192)
+                                        for i in range(1, count + 1)])
+                self.assertEqual(len(keys), len(set(keys)))
+                self.assertEqual([k.to_bytes(32, 'little')[:4] for k in keys],
+                                 [i.to_bytes(4, 'little') for i in range(1, count + 1)])
+                # Every low32 group is a singleton: sum n*(n-1)/2 is zero.
+                self.assertEqual(len({k & 0xffffffff for k in keys}), count)
+                expected = ((4 * g0) & ((1 << 64) - 1)) ^ ((4 * g0) >> 64)
+                for seed, g1 in ((0, 0), ((1 << 64) - 1, (1 << 64) - 1),
+                                 (0x123456789abcdef0, 0x9988776655443322)):
+                    self.assertEqual({m.hash_key(k, seed, g0, g1) for k in keys},
+                                     {expected})
+
+    def test_short_prefix_catalog_rejects_untyped_or_out_of_bound_values(self):
+        m = self.helper()
+        for bad in (True, None, '1', 1.0, -1, 1 << 64):
+            with self.assertRaises(ValueError):
+                m.concentrated_short_prefix_keys(bad, 64)
+        for bad in (True, None, '1', 1.0, 0, -1, 8193):
+            with self.assertRaises(ValueError):
+                m.concentrated_short_prefix_keys(0, bad)
+
     def test_strict_keys_seeds_and_counts(self):
         m = self.helper()
         for bad in (True, None, '1', 1.0, -1, 1 << 256):

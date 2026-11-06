@@ -3684,3 +3684,65 @@ Canonical PGU/public-output validation does not depend on optional trace status,
 truncation, or a seed/placement hypothesis. Qualify those separately from the
 retained raw SP1 report with a pure postreader. No trace qualifier is run by the
 harness, and diagnostic replay wall time is not prover time.
+
+## Short-prefix access-list construction candidates
+
+`access_list_hash.concentrated_short_prefix_keys(shared0, count)` emits raw U256
+keys with `L0=L1=i` and `L2=L3=shared0`, for `i=1..count`. If that value equals the
+new input's **own** G0, both inner folds are zero and the two body terms cancel:
+`B=0`, `H=fold(4,G0)`, independently of S/G1. The first four compared little-endian
+bytes are distinct, so model389's numeric-low32 groups are singletons and its
+construction-pair reserve is zero. Verify that counter in the fresh quote.
+
+The existing long-prefix and dispersed functions are unchanged. The helper's
+1..8192 cap is a catalog bound, not an admission promise: the default15M envelope
+also limits raw access-list intrinsic gas. Generated equal hashes are conditional
+algebra, not observed placements, whole comparison counts or a workload result.
+Qualify a new input's own G0/hash/caller context; do not chase a seed or relabel a
+valid unrealized sample. A long-family-only postreader needs an explicit short-
+family qualifier; its old long-family pressure flag is not evidence about this form.
+
+Generation is ordinary data preparation. From the repository root, start with the
+standard frozen artifact configuration at `experiment/tools-config.json` (including
+an ELF-matching `observation_plan` if desired). This example seed is only a hypothesis:
+
+```sh
+~/.venv/bin/python -S -B - <<'PY'
+import copy
+import json
+from pathlib import Path
+import sys
+sys.path.insert(0, 'bin/zkgas/bench/cases')
+from access_list_hash import concentrated_short_prefix_keys
+from access_list_values import make_raw_case
+from spawn_memory import digest, encoded, write
+out = Path('experiment')
+template = json.loads((out / 'tools-config.json').read_text())
+row = make_raw_case(concentrated_short_prefix_keys(0x0123456789abcdef, 64))
+request = encoded(row.pop('request'))
+row.update(request_path='short-k64-request.json', request_sha256=digest(request))
+write(out / row['request_path'], request)
+write(out / 'short-k64-catalog.json', encoded({'schema_version': 1, 'cases': [row]}))
+for phase, limits in (
+    ('screen', dict(pss_mib=2048, min_free_mib=576, output_mib=16,
+                    log_mib=2, timeout_seconds=180)),
+    ('actual', dict(pss_mib=6144, min_free_mib=576, output_mib=192,
+                    log_mib=16, timeout_seconds=600))):
+    config = copy.deepcopy(template)
+    config.update(corpus_id=row['corpus_id'], limits=limits)
+    write(out / f'short-k64-{phase}-config.json', encoded(config))
+print(row['sample_id'])
+PY
+~/.venv/bin/python -S -B bin/zkgas/bench/workload.py screen \
+  --config experiment/short-k64-screen-config.json \
+  --catalog experiment/short-k64-catalog.json --output-root experiment/short-k64-screen
+```
+
+The existing harness owns execution. Independently validate the saved native
+world/signature/roots, literal quote and planned raw keys before any actual. The
+screen retains `input.bin.gz`; the existing `artifacts.restore` API can restore it
+to a fresh file using its retained receipt. Then `workload.py measure` accepts that
+bincode plus the unchanged `native.json` and `quote.jsonl` through `--native-report`
+and `--quote-report`, with the original sample ID, matching actual config and a
+fresh output root. It executes only SP1. Keep canonical PGU validation separate
+from optional trace qualification; do not pass `--retry-failed` for once-only panels.

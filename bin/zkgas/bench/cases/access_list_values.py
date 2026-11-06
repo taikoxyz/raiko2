@@ -67,6 +67,33 @@ def make_case(pattern=None, count=None, block_count=1):
             'request': {'schema_version': 1, 'expected_user_success': True, 'program': program}}
 
 
+
+def make_raw_case(keys, block_count=1):
+    """One PROGRAM address with an exact raw U256 vector; no sorting or deduplication."""
+    if type(keys) not in (list, tuple) or not 1 <= len(keys) <= MAX_COUNT:
+        raise ValueError('raw access-list keys must be a list/tuple of 1..8192 entries')
+    if any(type(key) is not int or not 0 <= key < (1 << 256) for key in keys):
+        raise ValueError('raw access-list keys must be strict U256 integers')
+    row = make_case('repeated_key', len(keys), block_count)
+    raw = b''.join(key.to_bytes(32, 'big') for key in keys)
+    key_digest = digest(raw)
+    descriptor = dict(pattern='raw_keys', count=len(keys),
+                      storage_keys=[f'0x{key:064x}' for key in keys])
+    row['request']['program']['access_list'] = descriptor
+    row.update(sample_id=f'access-list-raw-keys-k{len(keys)}-{key_digest}-b{block_count}',
+               corpus_id=f'unzen-access-list-raw-keys-{key_digest}',
+               pair_group=f'access-list-raw-storage-k{len(keys)}-b{block_count}',
+               data_role='development_probe', actuals_used_for_fitting=False, holdout_only=False,
+               scope='Explicit raw access-list input; order and duplicates preserved. Generation '
+                     'does not establish guest hash layout, actual workload or pricing accuracy.')
+    row['parameters'].update(pattern='raw_keys',
+        expected_access_list_counts_per_block=dict(raw_address_items=1, raw_storage_keys=len(keys),
+            unique_addresses=1, unique_storage_pairs=len(set(keys))),
+        extra_addresses='one PROGRAM address only', ordered_storage_keys_sha256=key_digest,
+        storage_key_encoding='32-byte big-endian concatenation in raw order')
+    return row
+
+
 def prepare(output):
     selections = [(None, None, 1), ('repeated_address', 1, 1)]
     selections += [(pattern, count, 1) for pattern in ('repeated_address', 'distinct_addresses')

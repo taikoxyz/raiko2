@@ -3568,3 +3568,92 @@ alone is not measured underpricing. Literal node-known estimates, full proposal
 estimates and actual SP1 PGU must remain separate; no model refit, global bound,
 production SDK parity or normal-transaction admission conclusion follows from
 generation or byte validation.
+
+### Explicit raw access-list storage keys
+
+`access_list_values.make_raw_case(keys, block_count=1)` opts into one PROGRAM
+address with a caller-supplied ordered storage-key vector. Keys must be a list or
+tuple of 1–8192 strict U256 integers; zero, maximal values and duplicates are
+valid. The request contains `access_list.pattern="raw_keys"`, its exact `count`,
+and fixed-width 32-byte hex `storage_keys`. The existing six patterns, 23 default
+rows, requests, CLI selection and five-byte empty RETURN runtime remain unchanged.
+Old descriptors omit `storage_keys`; non-raw patterns reject a supplied vector,
+including an empty vector. Raw descriptors require the vector length to equal
+`count`. Block count remains bounded to 1–32.
+
+The new row records raw/unique counts separately and hashes the concatenation of
+32-byte big-endian keys in original order. Its sample/corpus identities include
+that digest. No sorting, deduplication, storage preload, dummy proof or signed
+GuestInput rewriting occurs. The native constructor still validates the canonical
+included type-2/type-4 envelope, signer, nonce and complete access-list equality.
+The same 15M transaction envelope and ordinary intrinsic-gas enforcement apply;
+a syntactically accepted 8192-key descriptor need not fit into a legal transaction.
+
+For example, construct and inspect an in-memory request from the repository root:
+
+```bash
+PYTHONPATH=bin/zkgas/bench/cases "$PYTHON_BIN" -S -B - <<'PY'
+from access_list_values import make_raw_case
+row = make_raw_case([0, (1 << 256) - 1, 0])
+assert row['parameters']['expected_access_list_counts_per_block'] == {
+    'raw_address_items': 1, 'raw_storage_keys': 3,
+    'unique_addresses': 1, 'unique_storage_pairs': 2,
+}
+print(row['sample_id'])
+PY
+```
+
+Use a fixture-enabled host constructor containing this opt-in descriptor; an
+older pattern-only executable cannot consume it. This host-only feature requires
+no GuestInput version, pricing model, guest or SDK change. Generation alone does
+not establish guest seed/hash distribution, comparison counts, actual SP1 work
+or any pricing deficit. Existing constructor/quote/estimation tools own execution.
+Run the Python raw-key and default compatibility tests with:
+
+```bash
+"$PYTHON_BIN" -S -B -m unittest discover -s bin/zkgas/bench/tests \
+  -p 'test_access_list*.py'
+```
+
+### Frozen generic U256 warm-set hash catalogs
+
+`cases/access_list_hash.py` retains the generic U256 hash used by the frozen b76
+ELF's access-list warm set. It includes array-length hashing, rotation, both
+byte-hash lanes and finalization; the journal fixed32 hash is a different path.
+`ELF_SHA256` identifies this scope. `hash_key(key, seed, shared0, shared1)` takes
+strict U256/U64 integers. Its expected unit hashes come from exact RV64 words;
+static agreement does not establish an actual input's seeds or placement.
+
+`concentrated_keys(shared0, count)` generates distinct keys with numeric little-
+endian limbs L0=L1=shared0, L2=0 and L3=index<<32. They share the first28 compared
+bytes. If a new input's observed shared0 equals the candidate value, their hashes
+are `fold(4, shared0)`, generally nonzero and independent of own seed/shared1.
+`dispersed_keys(count)` supplies a deterministic SHA-256 control hypothesis.
+Both counts are bounded to1..8192. A zero shared0 is valid and collapses even the
+control hashes; no generated catalog is a distribution certificate.
+
+Compose either catalog with the existing raw-list producer:
+
+```bash
+PYTHONPATH=bin/zkgas/bench/cases "$PYTHON_BIN" -S -B - <<'PY'
+from access_list_hash import concentrated_keys, dispersed_keys
+from access_list_values import make_raw_case
+candidate_shared0 = 0x243f6a8885a308d3  # Example value, not a measured seed.
+candidate = make_raw_case(concentrated_keys(candidate_shared0, 64))
+control = make_raw_case(dispersed_keys(64))
+assert candidate['parameters']['expected_access_list_counts_per_block'] == {
+    'raw_address_items': 1, 'raw_storage_keys': 64,
+    'unique_addresses': 1, 'unique_storage_pairs': 64,
+}
+assert candidate['sample_id'] != control['sample_id']
+PY
+```
+
+Take a candidate value from a qualified observation, construct a **new** input,
+and verify that new input's own map/key/caller/seed/final-hash observations match.
+If they do not, retain the valid unrealized case; do not overwrite or retry it as
+a successful pressure test. The minimal local G0 watch does not provide G1, so
+arbitrary-key full-formula validation must not be claimed when G1 is unknown.
+Computed catalog hashes, directly sampled hashes, dynamic placements, comparison
+counts and actual complete-proposal PGU are separate evidence. The normal bench
+constructor, quote and estimator interfaces continue to own execution.

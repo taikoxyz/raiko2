@@ -3498,3 +3498,73 @@ seed/mask and missing-return path before a pressure claim; a previous input's
 seed remains only a hypothesis. The existing success-only observer reader is
 not a validator for this missing-query phase. Use the existing native/quote/SP1
 tools and separately reviewed diagnostics; no new runner is required.
+
+### Compiler-free ECMUL scalar mixtures
+
+`cases/ecmul_scalar_mix.py` builds ordinary `ProgramRequest` data without a
+Solidity compiler or a new runner. `make_case(recipe, level, repetitions=None)`
+provides three 31-entry recipes: `low` is all scalar zero, `high` is all
+`(3 << 252) - 1`, and `mixed` is twelve zero entries followed by nineteen high
+entries. `make_custom_case(scalars, level, repetitions=None)` accepts a list or
+tuple of 1–64 strict U256 integers. Levels are `zero`, `probe`, and `full`; only
+`probe` accepts an explicit positive repetition count below the full reference.
+Scalar zero and multiples of the curve order produce the valid infinity output
+`(0, 0)`. Nonzero scalars use the existing pure curve helpers; no existing helper
+contract or named scalar set changes.
+
+Each 96-byte calldata entry contains the raw scalar and its expected X/Y words.
+The program repeatedly STATICCALLs precompile 7 for fixed point `(1, 2)`, with
+requested gas 6000 and freshly cleared, disjoint output memory. Every call
+checks success, exact 64-byte returndata and both coordinates, including zero
+coordinates. Memory offsets 0/32 hold the point, 64 the scalar, 96/128 the
+output, 160 a protected zero, 192 the repetition counter, and 224 a protected
+sentinel. Peak memory is 256 bytes. The STOP path guards the point, counter and
+protected words; no persistent or transient storage is used. Code bytes depend
+only on sequence length and repetitions, so scalar mixtures have identical
+runtime bytes at the same size and repetition count.
+
+From the repository root, this example validates the six initial reference rows
+in memory without exporting inputs or running native/SP1 estimation:
+
+```bash
+PYTHONPATH=bin/zkgas/bench/cases:bin/zkgas/bench/tests \
+  "$PYTHON_BIN" -S -B - <<'PY'
+from ecmul_scalar_mix import make_case
+from ecmul_scalar_mix_vm import run_users
+for recipe in ('low', 'high', 'mixed'):
+    for level in ('zero', 'probe'):
+        row = make_case(recipe, level, repetitions=1 if level == 'probe' else None)
+        result = run_users(row)[0]
+        print(recipe, level, result['gross_gas'], result['charged_gas'])
+PY
+```
+
+The factory exposes `gas_accounting`, `fits`, `full_repetitions`, `source_modules`
+and `helpers` for composition with the existing constructor and quote tools.
+Gas includes actual calldata intrinsic/floor, executed opcodes, memory growth,
+100-gas warm access and 6000 native gas per call. The automatically solved full
+reference respects the existing 15M transaction fixture cap, EIP-7825 cap,
+31M header, 30M charged block budget and 24KiB code limit. A sequence uses the
+same full-derived signed envelope at every level, with a 1000-gas reserve; the
+literal VM additionally checks actual EIP-150 forwarding at each call. `full`
+is a generated reference, not evidence of a full-limit SP1 measurement.
+
+The independent byte oracle in `tests/ecmul_scalar_mix_vm.py` decodes every
+instruction and interprets every call and iteration. It independently validates
+curve outputs, scalar reduction, calldata, memory, stack, counters, gas,
+returndata, route counts and typed metadata. It does not import the producer's
+assembler, counts or gas functions. Run its regression tests with:
+
+```bash
+"$PYTHON_BIN" -S -B -m unittest discover -s bin/zkgas/bench/tests \
+  -p test_ecmul_scalar_mix.py
+```
+
+`source_derived_work_units` records reduced-scalar bit length plus popcount.
+These are expected selectors derived from inputs, not exported native A/I/S
+accumulators. This family first tests whether a legal mixed input reaches the
+intended aggregate-pricing branches. A mathematical aggregate-max difference
+alone is not measured underpricing. Literal node-known estimates, full proposal
+estimates and actual SP1 PGU must remain separate; no model refit, global bound,
+production SDK parity or normal-transaction admission conclusion follows from
+generation or byte validation.

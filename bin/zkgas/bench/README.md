@@ -3898,3 +3898,21 @@ Kona/payload/signature/witness checks, quote, complete SP1 workload and input-ow
 outer profile gates remain necessary. Canonical PGU validity is independent of
 optional profile qualification. This adds no runner, mode, price, guest, SDK or
 observer change and does not alter old key helpers or the23 default producer cases.
+
+### Raw access-list address-pair reporting
+
+The complete quote exposes `access_list_address_pairs` and
+`access_list_address_scaled` in each node/prove block breakdown. The selector is
+the sum of `n * (n - 1) / 2` for **individual transaction raw address-item lists**,
+including duplicate owners and empty storage-key lists. Node uses included
+transaction scopes; prove includes attempted scopes. It is separate from both
+storage-key construction selectors and from the existing linear address-item
+term. Proposal-once carries zero address pairs and zero address-pair price.
+
+The shared pricing model supplies the tariff and domain. This CLI transports
+and validates them; it does not infer guest hash seeds or implement another
+pricing formula. Each scaled amount is added once, outside the opcode discount.
+Both fields are required by the current complete-quote contract. Regenerate
+quotes from retained canonical inputs when evaluating a new model, and join them
+to retained actual observations by the input identity. Preserve old quotes and
+raw actuals instead of filling missing fields or rewriting their provenance.

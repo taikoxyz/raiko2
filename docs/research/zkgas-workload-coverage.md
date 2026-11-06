@@ -143,7 +143,9 @@ The preceding concentrated-probe section is a historical pre-correction snapshot
 [storage-journal record](2026-11-05-storage-journal-prefix.md) explains the independently priced
 comparison reserve and384 tariff in model5f, including retained conservative controls and
 historical native repricing. The separate [account-journal case](2026-11-05-account-journal.md)
-remains a crafted-input underpricing TODO; correction and future L1 frequency sampling are deferred.
+was deferred as a crafted-input TODO at that checkpoint. The later
+[Account-density correction](2026-11-07-account-journal-density.md) genuinely reprices and closes
+that specific R1400 sample; L1 frequency and unmeasured Account paths remain open.
 
 The [pure capacity panel](2026-11-05-storage-capacity-boundaries.md) adds eight selected new inputs
 at K448/449/896/897 × R0/R512. Own-input first-warm masks511/1023/1023/2047 are observed. R512
@@ -254,3 +256,33 @@ IDs. The shared CALL/access-list tool validates each signed vector/nonce and tru
 block-unique versus per-TX raw counts. Independent source, actual-source behavior,
 consumer and raw numeric gates pass. The outer warm-owner AddressMap and broader
 composition boundaries remain follow-ups; no universal workload bound is claimed.
+
+
+## Account-journal density supplement on 2026-11-07
+
+The [larger Account-query composition](2026-11-07-account-journal-density.md) adds two original
+N1024/R1024 AL-warm inputs, each measured once, with reference271,360,001 and successor5,073,040,910
+actual PGU. At10,055,942charged block gas, the successor's model69 literal-node deficit2,692,755,903
+meets the >2B priority rule. Qualified local ownG/H evidence remains separate from UNKNOWN
+whole-input pressure and TX identity; no third input or seed iteration was performed.
+
+The af30 model adds an independent empirical Account-density component. Each new input captures
+137,502,913 units at128PGU/unit: fresh node19,980,657,871, reference full20,135,904,598 and successor
+full20,135,896,918 cover both finite actuals with intentional large constructed overquotes. The
+older retained5f long-R1400 sample now has real node15,387,637,502/full15,542,727,812 versus original
+actual5,952,586,609; only that specific prior TODO is closed. No all-Account or normal-admission
+claim follows.
+
+All74 retained quotes complete without new native construction/SP1/retry:24 controlled rows,
+21 actuals/3 explicit nulls, plus50 historical proposals/9600blocks. All21 full quotes cover actual;
+4 positive literal-node deficits remain, maximum153,358,679PGU, none >2B. All67 parent69 comparisons
+preserve every non-Account numeric object/public output;7 original5f Account baselines have a
+separate older-model comparison. Historical50/9600 all change: node total+0.2835%, full+0.1643%,
+maximum proposal-node+0.5106%, maximum block+0.8290% (largest absolute block delta1,543,168PGU).
+This416f/SDK6.1 cohort is sensitivity-only, not currentb76 accuracy certification.
+
+Independent269 actual-source behavior tests, fresh-ABI trace33 and defaultCLI125 pass. The complete
+installed collector is suspended/restored for systemcalls, and real inspector callbacks establish
+the population parity branch. E3 production and E4 test-only source identities remain distinct.
+External validation/authority/fee residuals and L1 frequency remain TODOs, without a proved<2B bound.
+The new data-only fixture is not yet published; no guest/SDK/ELF/observer was rebuilt.

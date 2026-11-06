@@ -108,6 +108,7 @@ fn validate_pricing_breakdown(
             pricing.code_preparation_scaled,
             pricing.operations_scaled,
             pricing.storage_journal_scaled,
+            pricing.account_journal_scaled,
             pricing.normal_dispatch_scaled,
             pricing.feature_error_scaled,
             pricing.resources_scaled,
@@ -144,6 +145,7 @@ fn validate_pricing_breakdown(
                 pricing.code_preparation_scaled,
                 pricing.operations_scaled,
                 pricing.storage_journal_scaled,
+                pricing.account_journal_scaled,
                 pricing.resources_scaled,
                 pricing.mpt_scaled,
                 pricing.startup_scaled,
@@ -210,7 +212,9 @@ fn snapshot_matches_pricing(
         && snapshot.code_preparation_scaled == pricing.code_preparation_scaled
         && snapshot.operations_scaled == pricing.operations_scaled
         && snapshot.storage_journal_work_units == pricing.storage_journal_work_units
+        && snapshot.account_journal_work_units == pricing.account_journal_work_units
         && snapshot.storage_journal_scaled == pricing.storage_journal_scaled
+        && snapshot.account_journal_scaled == pricing.account_journal_scaled
         && snapshot.feature_error_scaled == pricing.feature_error_scaled
         && snapshot.resources_scaled == pricing.resources_scaled
         && snapshot.mpt_scaled == pricing.mpt_scaled
@@ -330,6 +334,7 @@ fn validate_complete_quote(complete: &CompleteQuoteV1) -> Result<()> {
                 node.code_preparation_scaled,
                 node.operations_scaled,
                 node.storage_journal_scaled,
+                node.account_journal_scaled,
                 node.normal_dispatch_scaled,
                 node.feature_error_scaled,
                 node.evm_local_resources_scaled,
@@ -356,6 +361,7 @@ fn validate_complete_quote(complete: &CompleteQuoteV1) -> Result<()> {
                     node.code_preparation_scaled,
                     node.operations_scaled,
                     node.storage_journal_scaled,
+                    node.account_journal_scaled,
                     node.evm_local_resources_scaled,
                     node.transaction_payload_scaled,
                 ])?,
@@ -468,6 +474,28 @@ fn validate_complete_quote(complete: &CompleteQuoteV1) -> Result<()> {
                 ensure!(scaled == expected, "storage journal work price mismatch");
             }
         }
+        ensure!(
+            prove.account_journal_work_units >= node.account_journal_work_units
+                && prove.account_journal_scaled >= node.account_journal_scaled,
+            "attempted Account journal work does not cover committed units or price"
+        );
+        // Reject out-of-domain work even for foreign-model diagnostics; reconcile the tariff
+        // only for this executable's current model identity.
+        for (units, scaled) in [
+            (node.account_journal_work_units, node.account_journal_scaled),
+            (
+                prove.account_journal_work_units,
+                prove.account_journal_scaled,
+            ),
+        ] {
+            let expected = ZkGasModel
+                .price_account_journal_work(units)
+                .context("Account journal work selector domain is invalid")?;
+            if current_model {
+                ensure!(scaled == expected, "Account journal work price mismatch");
+            }
+        }
+
         for (count, dispatch, operations, feature_errors) in [
             (
                 node.normal_dispatch_count,
@@ -571,6 +599,7 @@ fn validate_complete_quote(complete: &CompleteQuoteV1) -> Result<()> {
                     access_list_address_pairs: node.access_list_address_pairs,
                     code_preparation: node.code_preparation.into(),
                     storage_journal_work_units: node.storage_journal_work_units,
+                    account_journal_work_units: node.account_journal_work_units,
                     operation_routes: &[],
                     resources: resource_selectors(node.evm_local_resources),
                     transaction_payload: Default::default(),
@@ -593,6 +622,7 @@ fn validate_complete_quote(complete: &CompleteQuoteV1) -> Result<()> {
                     access_list_address_pairs: prove.access_list_address_pairs,
                     code_preparation: block.prove.code_preparation.into(),
                     storage_journal_work_units: prove.storage_journal_work_units,
+                    account_journal_work_units: prove.account_journal_work_units,
                     operation_routes: &[],
                     resources: resource_selectors(block.prove.exact_resources),
                     transaction_payload: Default::default(),
@@ -750,6 +780,11 @@ fn validate_complete_quote(complete: &CompleteQuoteV1) -> Result<()> {
         quote.prove.proposal_once.storage_journal_work_units == 0
             && quote.prove.proposal_once.storage_journal_scaled == 0,
         "proposal-only pricing contains storage journal work"
+    );
+    ensure!(
+        quote.prove.proposal_once.account_journal_work_units == 0
+            && quote.prove.proposal_once.account_journal_scaled == 0,
+        "proposal-only pricing contains Account journal work"
     );
     let block_scaled = checked_sum(quote.blocks.iter().map(|b| b.prove.pricing.total_scaled))?;
     ensure!(

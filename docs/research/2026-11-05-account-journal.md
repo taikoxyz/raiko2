@@ -188,3 +188,28 @@ free-disk guards. The observed peak was 4.233GiB PSS; the longest run was 169.12
 distinct owned SDK shared-memory names were verified absent afterward. No sampling stage
 was retried. A reporting-field typo after the first native control completed is preserved;
 its continuation ran only the previously unlaunched probe.
+
+
+## 2026-11-07 update: this retained R1400 pricing TODO is closed
+
+The earlier deferred decision and original5f table above remain historical records. The new
+[Account-journal density record](2026-11-07-account-journal-density.md) separately demonstrates a
+larger N1024/R1024 AL-warm composition: actual5,073,040,910 PGU versus model69 node2,380,285,007
+at10,055,942charged block gas. That >2x/+2,692,755,903-PGU case prompted an empirical density
+reserve; it was not merely a reopening of the old crafted sub-2x example.
+
+The frozen original long-R1400 input was genuinely repriced with model
+`af30c61656fd456ab290a837b44c181e4ff54e575a949d3579f07df20659a949`:
+literal node15,387,637,502 / full15,542,727,812 against its unchanged actual5,952,586,609 PGU.
+This closes the pricing TODO for **that specific retained sample**; future L1 frequency sampling,
+other Account/DB-map paths, capacity and compositions remain open. The7 original Account baselines
+are5f rather than parent69, so their total changes include inherited successors and are not all
+attributed to the new Account term.
+
+The new reserve uses per-TX actual physical Account population/prefix concentration and potential
+opcode-work budgets; AL declarations alone do not materialize Accounts. It is an empirical margin,
+not a PGU bound or a table-hash simulation. Across74 fresh quotes all21 original measured full
+quotes cover actuals, while4 literal-node deficits remain, maximum153,358,679PGU. The50 historical
+proposals/9600blocks have small nonzero sensitivity changes; their416f/SDK6.1 actuals do not certify
+currentb76 accuracy. No new constructor or SP1 actual was run during repricing; earlier immutable
+raw/input/5f quote bytes remain unchanged. The new static fixture is not yet published.

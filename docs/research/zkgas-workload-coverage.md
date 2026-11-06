@@ -219,3 +219,16 @@ are absent, with peak actual PSS4.55GB. Bounded optional observations remain
 separate from complete PGU, and the computed catalog is not a full placement
 trace. This empirically closes the demonstrated large gap; short-prefix/probe,
 rehash, multi-transaction packing and other container work remain follow-ups.
+
+The [short-prefix construction panel](2026-11-06-access-list-short-prefix.md)
+adds two canonical/native/model389 quote inputs and two actuals, each once. The
+realized K7680 input has distinct numeric low32 values and zero pair reserve,
+yet measures1,322,938,598 PGU at14,782,761 charged block gas against literal
+node142,698,613/proposal297,640,444. Its positive node gap1,180,239,985 remains
+below the single-example >2B screen; it does not settle full-block packing.
+The K64 actual161,465,174 is an explicitly unrealized own-G control. Independent
+signed-world, quote, raw-register and complete-actual checks pass, all eight
+owned SHM objects are absent, and no price or guest/SDK/observer change is made.
+The additive catalog helper preserves all23 old complete rows and requests.
+Legal two-transaction packing remains a separate experiment; PGU is not
+extrapolated by multiplying the single-input result.

@@ -195,3 +195,27 @@ The [transient delete-then-miss panel](2026-11-06-transient-delete-miss.md) adds
 The [same-route CALLDATACOPY analysis](2026-11-06-route-composition.md) establishes a narrower arithmetic bound: at most225M PGU is lost by route-wise rather than event-wise maximization for normal successful0x37 events in one included canonical block with at most30M charged gas and the current20% refund cap. This is a difference between price expressions, not a bound on actual-minus-node PGU or all Maximum routes. It adds no measurements and supports a low-priority completion TODO for this convention alone. Caught transient rollback-to-miss also remains a low-priority composition TODO: current source retains effective ownership, attempted A/J and ever-seen N across child rollback; each implicit removal has a prior J reserve. The exact large-map caught combination is unmeasured and is not declared closed by the direct-delete panel.
 
 The [ECMUL scalar-mixture panel](2026-11-06-ecmul-scalar-mixtures.md) adds six distinct canonical/native/model923 quote inputs and exactly two actuals, mixed R0/R1. Four low/high actuals remain explicitly unmeasured. Real sealed operations confirm the attainable W0/W507 crossover; the 2,110,378,488-PGU difference between route-wise and event-wise price maxima is not an actual deficit. Mixed R1 at 416,425 block gas measures 4,700,584,886 PGU against literal node 5,725,410,834 and complete proposal 5,880,353,177: node covers at 1.218021x. Its own-control whole-input increment is covered by both estimate increments. R0 retains a 153,017,715-PGU node deficit, both full-proposal quotes cover actual and no measured >2B/<=30M gap appears. Reusable compiler-free scalar/curve/byte tooling preserves the old kernel/table; independent real-world and branch gates precede actual measurement. All eight SHM objects are absent and peak PSS is 4.54GB. No price/model/guest/SDK/runner change, full-R measurement, arbitrary mixture/packing bound or ordinary usability certification follows.
+
+## Access-list construction supplement on 2026-11-06
+
+The [warm access-list construction panel](2026-11-06-access-list-construction.md)
+adds eight distinct canonical inputs, an extra old-native empty bridge, eight
+original quotes and five actuals; three actuals remain unmeasured. The realized
+K7680 case measures 5,773,513,175 PGU at 14,782,761 block gas against model923
+node142,698,613/proposal297,640,444. Its 5,630,814,562 literal-node deficit meets
+the high-priority rule. This is separate pre-execution set construction, not a
+missing opcode, physical journal access or MPT path visit.
+
+Successor389 prices raw per-TX/per-owner low32 key-pair counts at384 PGU/pair,
+preserving all earlier numeric prices and discount treatment. Eight fresh native
+quotes give the large case node11,465,844,853/proposal11,620,786,684, approximately
+1.986x/2.013x actual. All five measured proposal quotes cover actual; the two
+remaining positive node gaps152,028,762/39,746,256 remain visible. The unrealized
+large control's54.43x conservative node overquote is also retained. Historical
+50-proposal/9600-block prices are exactly unchanged; this is sensitivity, not
+current-program certification using the old SP1 observations. Independent raw,
+source, actual-source host and 58-quote checks pass. All20 original-host SHM names
+are absent, with peak actual PSS4.55GB. Bounded optional observations remain
+separate from complete PGU, and the computed catalog is not a full placement
+trace. This empirically closes the demonstrated large gap; short-prefix/probe,
+rehash, multi-transaction packing and other container work remain follow-ups.

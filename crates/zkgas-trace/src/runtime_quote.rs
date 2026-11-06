@@ -103,8 +103,12 @@ pub struct PricingBreakdownSnapshot {
     pub access_list_scaled: i128,
     /// Raw per-transaction, per-owner low32 key-pair reserve, including discarded attempts.
     pub access_list_construction_pairs: u64,
+    /// Same-owner raw occurrence pairs with different numeric low32 bits.
+    pub access_list_construction_other_pairs: u64,
     /// Independent normalized construction contribution; add once, outside operations.
     pub access_list_construction_scaled: i128,
+    /// Independent normalized different-low32 construction contribution, added once.
+    pub access_list_construction_other_scaled: i128,
     /// Per-occurrence accepted code preparation, including work later reverted.
     pub code_preparation_scaled: i128,
     pub operations_scaled: i128,
@@ -166,6 +170,8 @@ pub struct NodePricingBreakdownSnapshot {
     pub access_list_items: u64,
     /// Raw per-transaction, per-owner low32 key-pair reserve in committed scopes.
     pub access_list_construction_pairs: u64,
+    /// Same-owner raw occurrence pairs with different numeric low32 bits.
+    pub access_list_construction_other_pairs: u64,
     pub fixed_scaled: i128,
     /// Normalized raw-authorization validation contribution in fixed-point PGU.
     pub authorization_scaled: i128,
@@ -173,6 +179,8 @@ pub struct NodePricingBreakdownSnapshot {
     pub access_list_scaled: i128,
     /// Independent normalized construction contribution; add once, outside operations.
     pub access_list_construction_scaled: i128,
+    /// Independent normalized different-low32 construction contribution, added once.
+    pub access_list_construction_other_scaled: i128,
     /// Per-occurrence accepted code preparation, including work later reverted.
     pub code_preparation_scaled: i128,
     pub operations_scaled: i128,
@@ -206,7 +214,9 @@ impl From<ZkGasKnownBlockBreakdown> for NodePricingBreakdownSnapshot {
             access_list_items: value.access_list_items(),
             access_list_scaled: value.access_list_scaled(),
             access_list_construction_pairs: value.access_list_construction_pairs(),
+            access_list_construction_other_pairs: value.access_list_construction_other_pairs(),
             access_list_construction_scaled: value.access_list_construction_scaled(),
+            access_list_construction_other_scaled: value.access_list_construction_other_scaled(),
             operations_scaled: value.operations_scaled(),
             storage_journal_work_units: value.storage_journal_work_units(),
             storage_journal_scaled: value.storage_journal_scaled(),
@@ -232,7 +242,9 @@ impl TryFrom<PricingBreakdown> for PricingBreakdownSnapshot {
             authorization_scaled: value.authorization_scaled,
             access_list_scaled: value.access_list_scaled,
             access_list_construction_pairs: value.access_list_construction_pairs,
+            access_list_construction_other_pairs: value.access_list_construction_other_pairs,
             access_list_construction_scaled: value.access_list_construction_scaled,
+            access_list_construction_other_scaled: value.access_list_construction_other_scaled,
             code_preparation_scaled: value.code_preparation_scaled,
             operations_scaled: value.operations_scaled,
             storage_journal_work_units: value.storage_journal_work_units,
@@ -486,6 +498,7 @@ fn complete_block_pricing(
         attempted_priced.authorization_scaled,
         attempted_priced.access_list_scaled,
         attempted_priced.access_list_construction_scaled,
+        attempted_priced.access_list_construction_other_scaled,
         attempted_priced.code_preparation_scaled,
         attempted_priced.operations_scaled,
         attempted_priced.storage_journal_scaled,
@@ -500,7 +513,10 @@ fn complete_block_pricing(
         authorization_scaled: attempted_priced.authorization_scaled,
         access_list_scaled: attempted_priced.access_list_scaled,
         access_list_construction_pairs: attempted_priced.access_list_construction_pairs,
+        access_list_construction_other_pairs: attempted_priced.access_list_construction_other_pairs,
         access_list_construction_scaled: attempted_priced.access_list_construction_scaled,
+        access_list_construction_other_scaled: attempted_priced
+            .access_list_construction_other_scaled,
         code_preparation_scaled: attempted_priced.code_preparation_scaled,
         operations_scaled: attempted_priced.operations_scaled,
         storage_journal_work_units: attempted_priced.storage_journal_work_units,
@@ -976,6 +992,8 @@ mod tests {
         for field in [
             "access_list_construction_pairs",
             "access_list_construction_scaled",
+            "access_list_construction_other_pairs",
+            "access_list_construction_other_scaled",
         ] {
             assert!(node.get(field).is_some(), "node must expose {field}");
             assert!(prove.get(field).is_some(), "prove must expose {field}");
@@ -1068,6 +1086,7 @@ mod tests {
                 + block.node.pricing.authorization_scaled
                 + block.node.pricing.access_list_scaled
                 + block.node.pricing.access_list_construction_scaled
+                + block.node.pricing.access_list_construction_other_scaled
                 + block.node.pricing.code_preparation_scaled
                 + block.node.pricing.operations_scaled
                 + block.node.pricing.storage_journal_scaled
@@ -1080,6 +1099,7 @@ mod tests {
                 + block.prove.pricing.authorization_scaled
                 + block.prove.pricing.access_list_scaled
                 + block.prove.pricing.access_list_construction_scaled
+                + block.prove.pricing.access_list_construction_other_scaled
                 + block.prove.pricing.code_preparation_scaled
                 + block.prove.pricing.operations_scaled
                 + block.prove.pricing.storage_journal_scaled
@@ -1113,6 +1133,20 @@ mod tests {
     fn assert_proposal_formula_closes(quote: &ProposalWorkloadQuote) {
         assert_eq!(quote.prove.proposal_once.access_list_construction_pairs, 0);
         assert_eq!(quote.prove.proposal_once.access_list_construction_scaled, 0);
+        assert_eq!(
+            quote
+                .prove
+                .proposal_once
+                .access_list_construction_other_pairs,
+            0
+        );
+        assert_eq!(
+            quote
+                .prove
+                .proposal_once
+                .access_list_construction_other_scaled,
+            0
+        );
         assert_eq!(
             quote.prove.proposal_once.total_scaled,
             quote.prove.proposal_once.startup_scaled
@@ -1279,9 +1313,11 @@ mod tests {
             access_list_construction:
                 alethia_reth_evm::zk_gas::pricing::AccessListConstructionDiagnostics {
                     raw_address_items: 3,
-                    raw_storage_keys: 3,
+                    raw_storage_keys: 5,
                     max_low32_group: 3,
                     comparison_pairs: 3,
+                    other_pairs: 7,
+                    owner_pairs: 10,
                     incomplete: None,
                 },
             code_preparation: CodePreparationSelectors {
@@ -1315,6 +1351,8 @@ mod tests {
                     raw_storage_keys: 8,
                     max_low32_group: 5,
                     comparison_pairs: 13,
+                    other_pairs: 15,
+                    owner_pairs: 28,
                     incomplete: None,
                 },
             code_preparation: CodePreparationSelectors {
@@ -1369,6 +1407,7 @@ mod tests {
                 + node.authorization_scaled
                 + node.access_list_scaled
                 + node.access_list_construction_scaled
+                + node.access_list_construction_other_scaled
                 + node.code_preparation_scaled
                 + node.operations_scaled
                 + node.storage_journal_scaled
@@ -1392,6 +1431,16 @@ mod tests {
         assert_eq!(
             prove.access_list_construction_scaled,
             13 * 384 * FIXED_POINT_SCALE
+        );
+        assert_eq!(node.access_list_construction_other_pairs, 7);
+        assert_eq!(prove.access_list_construction_other_pairs, 15);
+        assert_eq!(
+            node.access_list_construction_other_scaled,
+            7 * 96 * FIXED_POINT_SCALE
+        );
+        assert_eq!(
+            prove.access_list_construction_other_scaled,
+            15 * 96 * FIXED_POINT_SCALE
         );
         assert_eq!(node.authorization_validations, 4);
         assert_eq!(authorization_validations, 16);
@@ -1426,6 +1475,7 @@ mod tests {
                 + prove.authorization_scaled
                 + prove.access_list_scaled
                 + prove.access_list_construction_scaled
+                + prove.access_list_construction_other_scaled
                 + prove.code_preparation_scaled
                 + prove.operations_scaled
                 + prove.storage_journal_scaled
@@ -1496,6 +1546,8 @@ mod tests {
         assert_eq!(once.storage_journal_scaled, 0);
         assert_eq!(once.access_list_construction_pairs, 0);
         assert_eq!(once.access_list_construction_scaled, 0);
+        assert_eq!(once.access_list_construction_other_pairs, 0);
+        assert_eq!(once.access_list_construction_other_scaled, 0);
     }
 
     #[test]
@@ -1945,7 +1997,9 @@ mod tests {
                 authorization_scaled: 0,
                 access_list_scaled: 0,
                 access_list_construction_pairs: 0,
+                access_list_construction_other_pairs: 0,
                 access_list_construction_scaled: 0,
+                access_list_construction_other_scaled: 0,
                 code_preparation_scaled: 0,
                 operations_scaled: 0,
                 storage_journal_work_units: 0,

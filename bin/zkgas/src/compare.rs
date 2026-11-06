@@ -103,6 +103,7 @@ fn validate_pricing_breakdown(
             pricing.authorization_scaled,
             pricing.access_list_scaled,
             pricing.access_list_construction_scaled,
+            pricing.access_list_construction_other_scaled,
             pricing.code_preparation_scaled,
             pricing.operations_scaled,
             pricing.storage_journal_scaled,
@@ -137,6 +138,7 @@ fn validate_pricing_breakdown(
                 pricing.authorization_scaled,
                 pricing.access_list_scaled,
                 pricing.access_list_construction_scaled,
+                pricing.access_list_construction_other_scaled,
                 pricing.code_preparation_scaled,
                 pricing.operations_scaled,
                 pricing.storage_journal_scaled,
@@ -197,6 +199,10 @@ fn snapshot_matches_pricing(
         && snapshot.access_list_scaled == pricing.access_list_scaled
         && snapshot.access_list_construction_pairs == pricing.access_list_construction_pairs
         && snapshot.access_list_construction_scaled == pricing.access_list_construction_scaled
+        && snapshot.access_list_construction_other_pairs
+            == pricing.access_list_construction_other_pairs
+        && snapshot.access_list_construction_other_scaled
+            == pricing.access_list_construction_other_scaled
         && snapshot.code_preparation_scaled == pricing.code_preparation_scaled
         && snapshot.operations_scaled == pricing.operations_scaled
         && snapshot.storage_journal_work_units == pricing.storage_journal_work_units
@@ -315,6 +321,7 @@ fn validate_complete_quote(complete: &CompleteQuoteV1) -> Result<()> {
                 node.authorization_scaled,
                 node.access_list_scaled,
                 node.access_list_construction_scaled,
+                node.access_list_construction_other_scaled,
                 node.code_preparation_scaled,
                 node.operations_scaled,
                 node.storage_journal_scaled,
@@ -339,6 +346,7 @@ fn validate_complete_quote(complete: &CompleteQuoteV1) -> Result<()> {
                     node.authorization_scaled,
                     node.access_list_scaled,
                     node.access_list_construction_scaled,
+                    node.access_list_construction_other_scaled,
                     node.code_preparation_scaled,
                     node.operations_scaled,
                     node.storage_journal_scaled,
@@ -374,6 +382,32 @@ fn validate_complete_quote(complete: &CompleteQuoteV1) -> Result<()> {
                 ensure!(
                     scaled == expected,
                     "access-list construction price mismatch"
+                );
+            }
+        }
+        ensure!(
+            prove.access_list_construction_other_pairs >= node.access_list_construction_other_pairs
+                && prove.access_list_construction_other_scaled
+                    >= node.access_list_construction_other_scaled,
+            "attempted different-prefix construction does not cover committed pairs or price"
+        );
+        for (pairs, scaled) in [
+            (
+                node.access_list_construction_other_pairs,
+                node.access_list_construction_other_scaled,
+            ),
+            (
+                prove.access_list_construction_other_pairs,
+                prove.access_list_construction_other_scaled,
+            ),
+        ] {
+            let expected = ZkGasModel
+                .price_access_list_construction_other_pairs(pairs)
+                .context("different-prefix construction selector domain is invalid")?;
+            if current_model {
+                ensure!(
+                    scaled == expected,
+                    "different-prefix construction price mismatch"
                 );
             }
         }
@@ -502,6 +536,7 @@ fn validate_complete_quote(complete: &CompleteQuoteV1) -> Result<()> {
                     authorization_validations: node.authorization_validations,
                     access_list_items: node.access_list_items,
                     access_list_construction_pairs: node.access_list_construction_pairs,
+                    access_list_construction_other_pairs: node.access_list_construction_other_pairs,
                     code_preparation: node.code_preparation.into(),
                     storage_journal_work_units: node.storage_journal_work_units,
                     operation_routes: &[],
@@ -521,6 +556,8 @@ fn validate_complete_quote(complete: &CompleteQuoteV1) -> Result<()> {
                     authorization_validations: block.prove.authorization_validations,
                     access_list_items: block.prove.access_list_items,
                     access_list_construction_pairs: prove.access_list_construction_pairs,
+                    access_list_construction_other_pairs: prove
+                        .access_list_construction_other_pairs,
                     code_preparation: block.prove.code_preparation.into(),
                     storage_journal_work_units: prove.storage_journal_work_units,
                     operation_routes: &[],
@@ -653,6 +690,19 @@ fn validate_complete_quote(complete: &CompleteQuoteV1) -> Result<()> {
         quote.prove.proposal_once.access_list_construction_pairs == 0
             && quote.prove.proposal_once.access_list_construction_scaled == 0,
         "proposal-only pricing contains access-list construction"
+    );
+    ensure!(
+        quote
+            .prove
+            .proposal_once
+            .access_list_construction_other_pairs
+            == 0
+            && quote
+                .prove
+                .proposal_once
+                .access_list_construction_other_scaled
+                == 0,
+        "proposal-only pricing contains different-prefix access-list construction"
     );
     ensure!(
         quote.prove.proposal_once.code_preparation_scaled == 0,

@@ -57,11 +57,12 @@ def _layout(value):
 
 
 def _ordinal_shift(value, mode, layout):
-    """Restrict optional endpoints to disjoint readonly mask/ordinal bits."""
+    """Restrict opt-in mask/ordinal layouts to supported body modes."""
     if type(value) is not int or value not in (0, 24, 48, 240):
         raise ValueError('ordinal_shift must be the integer0,24,48 or240')
-    if value != 48 and (mode != 'read' or layout is None or layout['L3'] != 0):
-        raise ValueError('ordinal_shift0/24/240 requires readonly explicit layout with L3=0')
+    if value != 48 and (layout is None or layout['L3'] != 0
+            or (mode != 'read' and not (mode == 'update' and value == 240))):
+        raise ValueError('nondefault shifts require explicit L3=0; update supports240, read supports0/24/240')
     return value
 
 
@@ -94,9 +95,9 @@ def _runtime(mode, n, raw_key_layout=None, *, ordinal_shift=48):
         asm.push(32, times=n); asm.op(0x52, n)
     else:
         for absent, value in operations:
-            _key(asm, absent, n, raw_key_layout); asm.op(0x54, n); _check(asm, 0 if absent else 1, n)
-            asm.push(value, times=n); _key(asm, absent, n, raw_key_layout); asm.op(0x55, n)
-            _key(asm, absent, n, raw_key_layout); asm.op(0x54, n)
+            _key(asm, absent, n, raw_key_layout, ordinal_shift); asm.op(0x54, n); _check(asm, 0 if absent else 1, n)
+            asm.push(value, times=n); _key(asm, absent, n, raw_key_layout, ordinal_shift); asm.op(0x55, n)
+            _key(asm, absent, n, raw_key_layout, ordinal_shift); asm.op(0x54, n)
             asm.push(32, times=n); asm.op(0x51, n); asm.op(1, n)
             asm.push(32, times=n); asm.op(0x52, n)
     asm.push(0, times=n); asm.op(0x51, n); asm.push(1, times=n); asm.op(1, n)
@@ -212,23 +213,25 @@ def make_case(mode='update', state_size=8192, level='full'):
     return row
 
 
-def make_sized_update_case(*, users, mutations_per_user, raw_key_layout=None):
+def make_sized_update_case(*, users, mutations_per_user, raw_key_layout=None, ordinal_shift=48):
     """Build one exact-sized successful update recipe, without preparing a sampling catalog.
 
     The optional algebraic layout is raw slot k(i)=(i<<48)|(L1<<64)|(L3<<192),
     with L2=0 and i an ordinal1..users*N. It is not an arbitrary raw-key vector.
+    Opt-in shift240 requires explicit L3=0 and uses (i<<240)|(L1<<64).
     N=0 is an engineering control. The phase itself always uses literal slot0.
     """
     original.integer(users, 1, 64, 'users')
     n = original.integer(mutations_per_user, 0, 64, 'mutations per user')
     layout = _layout(raw_key_layout)
-    keys = [i if layout is None else (i << 48) | (layout['L1'] << 64) | (layout['L3'] << 192)
+    ordinal_shift = _ordinal_shift(ordinal_shift, 'update', layout)
+    keys = [i if layout is None else (i << ordinal_shift) | (layout['L1'] << 64) | (layout['L3'] << 192)
             for i in range(1, users * n + 1)]
     # Count/bit bounds establish uniqueness, no wrap and no alias with phase0.
     if len(set(keys)) != users * n or any(not 0 < key < 1 << 256 for key in keys):
         raise ValueError('body raw slots must be distinct nonzero U256 values')
-    code, counts = _runtime('update', n, layout)
-    gas = gas_accounting('update', n, raw_key_layout=layout)
+    code, counts = _runtime('update', n, layout, ordinal_shift=ordinal_shift)
+    gas = gas_accounting('update', n, raw_key_layout=layout, ordinal_shift=ordinal_shift)
     # N0 still executes the same-value phase SSTORE. Its100-gas write needs
     # >2300 gas left at the sentry even though little gas is ultimately charged.
     reserve = 3000 if n == 0 else 1000
@@ -249,7 +252,8 @@ def make_sized_update_case(*, users, mutations_per_user, raw_key_layout=None):
     program['prestate_contracts'] = [dict(address=owner, code_hex='0x' + code.hex(),
         initial_storage={hex(key): '0x1' for key in [0] + keys})]
     parameters = dict(mode='update', users=users, mutations_per_user=n, raw_key_layout=layout,
-        raw_key_rule='ordinal' if layout is None else '(i<<48)|(L1<<64)|(L3<<192); L2=0',
+        raw_key_rule='ordinal' if layout is None else ('(i<<240)|(L1<<64); L0=L2=0'
+            if ordinal_shift == 240 else '(i<<48)|(L1<<64)|(L3<<192); L2=0'),
         block_count=1, user_transactions_per_block=users, all_transactions_including_anchor=users + 1,
         transaction_kind='call', transaction_gas_limit=envelope, transaction_envelope_reserve=reserve,
         header_gas_limit=HEADER_GAS_LIMIT, charged_gas_budget=BLOCK_BUDGET, expected_anchor_gas=ANCHOR_GAS,
@@ -267,6 +271,8 @@ def make_sized_update_case(*, users, mutations_per_user, raw_key_layout=None):
         runtime_bytes=len(code), runtime_sha256=digest(code), unused_primary_code_hex='0x00',
         expected_user_success=True, expected_exceptional_instructions=0, outer_calldata_bytes=0,
         execution_profile='evm-gas-only', preload_created_accounts_or_code=False)
+    if ordinal_shift != 48:
+        parameters['ordinal_shift'] = ordinal_shift
     identity = digest(encoded(dict(parameters=parameters,
         ordered_body_raw_keys=[f'0x{key:064x}' for key in keys], request=request)))
     return dict(sample_id=f'storage-sized-update-{identity}', family='sized-storage-update',
@@ -274,10 +280,11 @@ def make_sized_update_case(*, users, mutations_per_user, raw_key_layout=None):
         identity_sha256=identity, holdout_only=False, actuals_used_for_fitting=False,
         data_role='exact_sized_update_engineering_recipe',
         completion_gate='Before sampling independently qualify signed user/Anchor order, concrete raw reads/writes, phase/counter/checksum, coldness/originals/refunds, exact routes, canonical witness and initial/final roots. Producer VM success alone is insufficient.',
-        scope='Current model02223227 includes Account-cache128PGU/unit. This helper creates no formal panel, chooses no reference/successor layout and makes no workload or per-map attribution claim. Measure literal node block quotes and full proposal separately from actual SP1 if later authorized.')
+        scope=('Opt-in long-prefix update engineering recipe. No pricing model, observed G, placement or workload is asserted; no formal panel or sampling is performed.' if ordinal_shift == 240 else
+               'Current model02223227 includes Account-cache128PGU/unit. This helper creates no formal panel, chooses no reference/successor layout and makes no workload or per-map attribution claim. Measure literal node block quotes and full proposal separately from actual SP1 if later authorized.'))
 
 
-def make_prefixed_update_case(*, users, mutations_per_user, raw_key_layout=None):
+def make_prefixed_update_case(*, users, mutations_per_user, raw_key_layout=None, ordinal_shift=48):
     """One real Anchor-only block then the existing initialized-storage CALL recipe.
 
     This is an engineering composition, not a seed selection or sampling protocol.
@@ -285,7 +292,7 @@ def make_prefixed_update_case(*, users, mutations_per_user, raw_key_layout=None)
     qualification. All prefix gas and proving work remain part of the proposal.
     """
     row = make_sized_update_case(users=users, mutations_per_user=mutations_per_user,
-                                 raw_key_layout=raw_key_layout)
+                                 raw_key_layout=raw_key_layout, ordinal_shift=ordinal_shift)
     program = row['request']['program']; p = row['parameters']
     program['block_count'] = 2
     del program['transactions']['count_per_block']
@@ -308,7 +315,8 @@ def make_prefixed_update_case(*, users, mutations_per_user, raw_key_layout=None)
     row.update(sample_id=f'storage-prefixed-update-{identity}',
                family='prefixed-storage-update', identity_sha256=identity,
                data_role='prefixed_update_engineering_recipe',
-               scope='Two genuine blocks, first Anchor-only. Current model02223227 includes Account-cache128PGU/unit. No claim of allocation equivalence, stable G or realized workload pressure; no reference/successor or formal sampling panel is created.')
+               scope=('Two genuine blocks, first Anchor-only. Opt-in long-prefix update engineering recipe; no pricing model, allocation equivalence, observed G, placement or workload is asserted; no formal panel or sampling is performed.' if ordinal_shift == 240 else
+                      'Two genuine blocks, first Anchor-only. Current model02223227 includes Account-cache128PGU/unit. No claim of allocation equivalence, stable G or realized workload pressure; no reference/successor or formal sampling panel is created.'))
     return row
 
 

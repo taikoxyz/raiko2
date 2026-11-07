@@ -48,13 +48,17 @@ def _call_kind(call_kind):
         raise ValueError('call_kind must be call or delegatecall')
 
 
-def _emit_call(asm, target, expected_status, *, call_kind='call'):
+def _emit_call(asm, target, expected_status, *, call_kind='call', input_offset=0, input_size=0, times=1):
     """Emit the shared call operands and guards; caller owns all exit labels."""
     _call_kind(call_kind)
-    for _ in range(5 if call_kind == 'call' else 4): asm.push(0)
-    asm.push(int(target, 16), width=20); asm.push(CHILD_GAS); asm.op(0xf1 if call_kind == 'call' else 0xf4)
-    mutation._check(asm, expected_status)
-    asm.op(0x3d); mutation._check(asm, 0)
+    original.integer(input_offset, 0, (1 << 24) - 1, 'input offset')
+    original.integer(input_size, 0, 131072, 'input size')
+    original.integer(times, 1, 128, 'call multiplicity')
+    for value in (0, 0, input_size, input_offset): asm.push(value, times=times)
+    if call_kind == 'call': asm.push(0, times=times)
+    asm.push(int(target, 16), width=20, times=times); asm.push(CHILD_GAS, times=times); asm.op(0xf1 if call_kind == 'call' else 0xf4, times)
+    mutation._check(asm, expected_status, times)
+    asm.op(0x3d, times); mutation._check(asm, 0, times)
 
 
 def _wrapper(target, expected_status, *, call_kind='call'):

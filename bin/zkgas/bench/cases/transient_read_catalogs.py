@@ -51,10 +51,12 @@ def zero_hash_catalog(shared_seed, byte_offset, *, key_count=KEY_COUNT):
     return tuple(f'0x{query | (i << (8 * byte_offset)):064x}' for i in range(1, key_count)) + (f'0x{query:064x}',)
 
 
-def _runtime(repetitions, *, key_count=KEY_COUNT, query_key=QUERY, clear_before_reads=False):
+def _runtime(repetitions, *, key_count=KEY_COUNT, query_key=QUERY, clear_before_reads=False, terminal='stop'):
     catalogs._key_count(key_count); original.integer(repetitions, 0, MAX_REPETITIONS, 'repetitions'); _query_key(query_key)
     if type(clear_before_reads) is not bool: raise ValueError('clear_before_reads must be bool')
     if clear_before_reads and key_count < 2: raise ValueError('clearing requires at least two keys')
+    if type(terminal) is not str or terminal not in ('stop', 'revert'):
+        raise ValueError('terminal must be stop or revert')
     asm = _Factory()
     def store(offset, value): asm.push(value); asm.push(offset); asm.op(0x52)
     def load(offset, times=1): asm.push(offset, times=times); asm.op(0x51, times)
@@ -84,12 +86,16 @@ def _runtime(repetitions, *, key_count=KEY_COUNT, query_key=QUERY, clear_before_
     asm.label('done'); asm.op(0x80); guard(query_key); asm.op(0x50)
     for offset, value in ((0, key_count), (64, repetitions), (96, SENTINEL)): load(offset); guard(value)
     if clear_before_reads: load(32); guard(key_count)
-    asm.op(0); asm.label('failure', 0); asm.op(0xfe, 0)
+    if terminal == 'revert':
+        asm.push(0); asm.push(0); asm.op(0xfd)
+    else:
+        asm.op(0)
+    asm.label('failure', 0); asm.op(0xfe, 0)
     return asm.finish(), asm.counts
 
 
-def gas_accounting(repetitions, *, key_count=KEY_COUNT, calldata=None, query_key=QUERY, clear_before_reads=False):
-    code, counts = _runtime(repetitions, key_count=key_count, query_key=query_key, clear_before_reads=clear_before_reads)
+def gas_accounting(repetitions, *, key_count=KEY_COUNT, calldata=None, query_key=QUERY, clear_before_reads=False, terminal='stop'):
+    code, counts = _runtime(repetitions, key_count=key_count, query_key=query_key, clear_before_reads=clear_before_reads, terminal=terminal)
     if calldata is None:
         if query_key != QUERY: raise ValueError('a nondefault query requires actual calldata')
         nonzero = 8 * key_count  # The unchanged strict catalog API guarantees this shape.
@@ -98,7 +104,7 @@ def gas_accounting(repetitions, *, key_count=KEY_COUNT, calldata=None, query_key
     else:
         nonzero = len(calldata) - calldata.count(0)
     costs = {0: 0, 1: 3, 0x14: 3, 0x15: 3, 0x1b: 3, 0x35: 3, 0x36: 2, 0x50: 2,
-             0x51: 3, 0x52: 3, 0x5c: 0, 0x5d: 0, 0x56: 8, 0x57: 10, 0x5b: 1, 0x80: 3, 0xfe: 0}
+             0x51: 3, 0x52: 3, 0x5c: 0, 0x5d: 0, 0x56: 8, 0x57: 10, 0x5b: 1, 0x80: 3, 0xfd: 0, 0xfe: 0}
     ordinary = sum(n * (3 if 0x60 <= (op := int(key[-2:], 16)) <= 0x7f else costs[op]) for key, n in counts.items())
     zero = 32 * key_count - nonzero
     intrinsic = 21000 + 4 * zero + 16 * nonzero; floor = 21000 + 10 * (zero + 4 * nonzero)

@@ -4395,3 +4395,55 @@ three transformed body operands and literal phase slot0; the default ordinal
 layout keeps its existing kernel. At the maximum cardinality,64×128 would need
 8193 initial storage slots including phase0, but exceeds the gas budget and is
 rejected. No native/quote/SP1 result follows from this helper extension.
+
+### Caught transient rollback composition
+
+`cases/transient_caught_rollback.py` exposes a bounded engineering factory using
+the existing ProgramRequest schema and common workload tools. From `bench/`:
+
+```python
+import sys
+sys.path.insert(0, 'cases')
+from transient_caught_rollback import make_case
+
+row = make_case(key_count=2, caught_calls=2, user_count=2,
+                raw_key_layout={'L1': 0, 'L3': 0})
+request = row.pop('request')
+```
+
+The strict ranges are keys1..512, caught calls1..128 per user and users1..2;
+layout requires exactly unsigned64-bit L1 and L3=0. Raw slots are
+`(i<<24)|(L1<<64)` with the last key as query; slot0 is a disjoint transient
+sentinel. There is no count, seed or address search, model selector or execution
+inside this helper. A returned row/request can be written to the normal catalog
+and requests file interfaces; it does not authorize a formal measurement.
+
+Two genuine blocks use schedule `[0, user_count]`: the prefix is Anchor-only,
+and all users CALL the same parent owner with sequential transaction nonces.
+The parent copies calldata once into memory starting at128, beyond its loop
+counter, verifies sentinel0 then stores sentinel1. Each DELEGATECALL passes that
+exact input range to a distinct leaf-code address while preserving parent storage
+ownership. The shared transient leaf emitter checks query0, seeds every key1,
+checks query1 and executes an empty REVERT. The parent catches failure0, checks
+empty return data, query0 and sentinel1 after every child, then succeeds. All
+persistent storage maps stay empty; transient state resets between transactions.
+
+Gas metadata counts child execution as `leaf gross - leaf intrinsic`, never its
+calldata floor. Outer calldata intrinsic/floor, both frames' memory expansion,
+CALLDATACOPY, first cold/later warm code-address access and EIP150 are separate.
+The fixed source user cap is12.5M with a12,501,000 envelope; two1M Anchor allowances
+give27,002,000 envelope gas. Exact emitted leaf execution is `173*K+490`.
+For the future fixed512-key/128-call/two-user shape, maximal L1 byte density gives
+11,611,807 gross gas per user and a conservative875,300 forwarded-child lower bound,
+above the89,066 leaf requirement. These are source arithmetic bounds, not native
+receipts, actual PGU, a maximal30M result or node-limit admission evidence.
+
+The literal oracle in `tests/transient_caught_rollback_vm.py` executes checkpoints,
+actual REVERT and remaining gas; status0 with empty data alone cannot qualify a
+child. It rejects CALL replacing DELEGATECALL, OOG/INVALID, incorrect status/query
+guards, lost sentinel, missing iterations/users and key/data corruption. Existing
+call-helper defaults and transient STOP catalogs retain their old bytes.
+The frozen generic PlainStorage observation may yield no transient-body members:
+generic process G and conditional source hash algebra do not establish transient
+ownership, H0 placement, Journal depth or whole-map pressure. Independent canonical,
+signature/world/witness, native gas and current quote gates still precede actuals.

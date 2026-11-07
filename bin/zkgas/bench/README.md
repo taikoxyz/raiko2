@@ -1615,6 +1615,61 @@ patterns are finite evidence; they imply no global MPT bound, fitted price,
 per-user actual allocation, generated proof or GPU throughput result. Existing
 producers, pricing, protocol limits, dependencies, guest and ELF remain unchanged.
 
+### Exact-sized committed updates
+
+`storage_mutation.make_sized_update_case(users=..., mutations_per_user=...,
+raw_key_layout=None)` is a separate Python recipe helper. It reuses the existing
+guarded update loop and assembler; old mutation/fanout `make_case` and `prepare`
+requests and complete case rows retain their byte identities. Catalog source
+and helper hashes still identify the actual producer source, so those provenance
+fields change when the source changes.
+
+```python
+from storage_mutation import make_sized_update_case
+
+row = make_sized_update_case(users=3, mutations_per_user=2)
+# Optional compact layout; the caller must choose its protocol constants:
+# row = make_sized_update_case(users=..., mutations_per_user=...,
+#     raw_key_layout={'L1': chosen_l1, 'L3': chosen_l3})
+request = row['request']
+```
+
+Counts are strict integers: 1..64 users and 0..64 updates each; booleans are
+rejected. N0 is only an engineering control. Every user successfully updates
+its own consecutive ordinal range from 1 to 2 on one shared prestate recipient,
+checks its reads/counter/checksum and commits the next ordinal to raw phase slot0.
+The helper uses one `prestate_contracts` entry with `initial_storage` and matching
+`transactions.recipients`; it does not use the older eight-user `storage_state`
+path. The unused primary runtime stays STOP and calldata remains empty.
+
+Raw layout accepts exactly two strict U64 integers, `L1` and `L3`. It materializes
+the raw SLOAD/SSTORE key as `k(i)=(i<<48)|(L1<<64)|(L3<<192)`, with L2=0 and
+`i=1..users*N`. This is a compact algebraic layout, not an arbitrary 4096-key
+vector or trie-hash input. All three body key sites use the same transform;
+phase slot0 and its values remain ordinal. Every phase/body slot starts at1,
+body slots end at2, with no refund or restore-to-original branch. Identity binds
+the complete shape/envelope, ordered concrete raw keys and request. The runtime
+and initial slots fit existing ProgramRequest fields; no guest/schema change is
+introduced.
+
+The raw transform adds36 gas per update to the sequential instruction stream.
+The 64x64 pure-bytecode test predicts363551 charged gas/user,364551 envelope and
+23434619 block gas including Anchor167355. These are engineering VM/source
+checks, not native receipts or SP1 results. N0 reserves3000 beyond gross gas to
+satisfy the same-value phase SSTORE's2300-gas sentry; positive N reserves1000.
+Every ordered31M-header admission prefix and the30M charged block budget is checked.
+
+Focused tests execute actual bytes for tiny1/2/3 shapes and the full64x64 state,
+including raw key boundaries, original values, coldness, phase, checksum, exact
+routes/gas/refunds and negative transforms/initial states. Run the ordinary
+`test_storage_mutation.py` and `test_storage_fanout.py` suites with native opt-ins
+unset. The helper does not prepare a formal catalog, select reference/successor
+constants or invoke native/quote/SP1. Before any later sampling, independently
+qualify signed user/Anchor order, canonical witness and initial/final roots.
+Current model02223227 includes the128-PGU account-cache reserve; retain every
+existing pricing term when later comparing literal node, full proposal and
+actual SP1 workload. Neither per-map attribution nor underpricing is assumed.
+
 ### Initialized-storage fanout
 
 `storage_fanout.py` creates the separate `unzen-storage-fanout-20261102` corpus:

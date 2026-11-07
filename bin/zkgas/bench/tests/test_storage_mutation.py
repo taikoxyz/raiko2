@@ -52,6 +52,8 @@ def execute(code, state, envelope, *, initial_warm_keys=None):
         elif op == 0x1b:
             shift, value = stack.pop(), stack.pop()
             stack.append(0 if shift >= 256 else (value << shift) & MASK); gas += 3
+        elif op == 0x17:
+            stack.append(stack.pop() | stack.pop()); gas += 3
         elif op == 0x14:
             stack.append(int(stack.pop() == stack.pop())); gas += 3
         elif op == 0x15:
@@ -343,6 +345,202 @@ class StorageMutationTests(unittest.TestCase):
             self.assertEqual(report['storage_state']['final_storage_entry_count'], p['expected_final_storage_entry_count'])
             self.assertRegex(report['storage_state']['final_storage_root'], r'^0x[0-9a-f]{64}$')
             qualify(self, row)
+
+
+class SizedStorageUpdateTests(unittest.TestCase):
+    load = StorageMutationTests.load
+
+    def qualify_sized(self, row, users, n, layout):
+        program = row['request']['program']; p = row['parameters']
+        self.assertEqual(program['code_hex'], '0x00')
+        self.assertEqual(program['input_hex'], '0x')
+        self.assertNotIn('storage_state', program)
+        self.assertEqual(len(program['prestate_contracts']), 1)
+        contract = program['prestate_contracts'][0]
+        self.assertEqual(program['transactions']['recipients'], [contract['address']] * users)
+        self.assertEqual(program['transactions']['count_per_block'], users)
+        self.assertEqual(program['transactions']['gas_limit'], p['transaction_gas_limit'])
+        raw = lambda i: i if layout is None else (i << 48) | (layout['L1'] << 64) | (layout['L3'] << 192)
+        body_keys = [raw(i) for i in range(1, users * n + 1)]
+        expected_state = dict.fromkeys([0] + body_keys, 1)
+        self.assertEqual(len(set(body_keys)), users * n)
+        self.assertNotIn(0, body_keys)
+        state = {int(k, 16): int(v, 16) for k, v in contract['initial_storage'].items()}
+        self.assertEqual(state, expected_state, 'complete nonzero prestate, not a hinted subset')
+        code = bytes.fromhex(contract['code_hex'][2:]); routes = Counter(); results = []
+        self.assertEqual(len(code), p['runtime_bytes'])
+        self.assertEqual(hashlib.sha256(code).hexdigest(), p['runtime_sha256'])
+        for tx in range(users):
+            start = 1 + tx * n; final = start + n
+            keys = [raw(i) for i in range(start, final)]
+            reads = [(0, start, True)]
+            for key in keys: reads.extend([(key, 1, True), (key, 2, False)])
+            reads.append((0, final, False))
+            writes = [(key, 1, 2, 1, False) for key in keys] + [(0, start, final, start, False)]
+            result = execute(code, state, p['transaction_gas_limit']); results.append(result)
+            self.assertEqual(result['terminal'], 0)
+            self.assertEqual(result['stack'], [])
+            self.assertEqual(result['reads'], reads)
+            self.assertEqual(result['writes'], writes)
+            self.assertEqual(int.from_bytes(result['memory'][:32], 'big'), n)
+            self.assertEqual(int.from_bytes(result['memory'][32:64], 'big'), 2 * n)
+            self.assertEqual(int.from_bytes(result['memory'][64:96], 'big'), start)
+            if n: self.assertEqual(int.from_bytes(result['memory'][96:128], 'big'), final - 1)
+            self.assertEqual(len(result['memory']), 128 if n else 96)
+            expected_state.update(dict.fromkeys(keys, 2)); expected_state[0] = final
+            self.assertEqual(state, expected_state)
+            self.assertEqual(result['refund'], 0); self.assertEqual(result['applied'], 0)
+            self.assertEqual(result['gas'], result['charged'])
+            self.assertEqual(result['gas'], p['expected_user_gross_gas'])
+            self.assertEqual(result['charged'], p['expected_user_charged_gas'])
+            remaining = 31_000_000 - 167355 - sum(r['charged'] for r in results[:-1])
+            self.assertEqual(remaining, p['header_prefix_remaining_gas'][tx])
+            self.assertGreaterEqual(remaining, p['transaction_gas_limit'])
+            routes.update(result['counts'])
+        self.assertEqual(routes, +Counter(program['expected_route_counts']))
+        self.assertEqual(state[0], 1 + users * n)
+        self.assertEqual(len(state), 1 + users * n)
+        self.assertEqual(sum(len(r['writes']) for r in results), users * (n + 1))
+        self.assertEqual(p['expected_block_charged_gas'], 167355 + sum(r['charged'] for r in results))
+        self.assertLessEqual(p['expected_block_charged_gas'], 30_000_000)
+        return results
+
+    def test_sized_update_strict_shape_and_compact_layout(self):
+        m = self.load()
+        for users, n in [(True, 1), (0, 1), (65, 1), (1.0, 1), (1, True), (1, -1), (1, 65), (1, 1.0)]:
+            with self.subTest(users=users, n=n), self.assertRaises(ValueError):
+                m.make_sized_update_case(users=users, mutations_per_user=n)
+        for layout in [True, [], [0]*4096, {}, {'L1':0}, {'L1':0,'L3':0,'keys':[]},
+                       {'L1':True,'L3':0}, {'L1':0,'L3':1.0}, {'L1':-1,'L3':0}, {'L1':0,'L3':1<<64}]:
+            with self.subTest(layout=str(layout)[:80]), self.assertRaises(ValueError):
+                m.make_sized_update_case(users=1, mutations_per_user=1, raw_key_layout=layout)
+        row = m.make_sized_update_case(users=3, mutations_per_user=2, raw_key_layout={'L1':7,'L3':11})
+        program = row['request']['program']
+        self.assertNotIn('storage_state', program)
+        self.assertEqual(program['code_hex'], '0x00')
+        self.assertEqual(program['transactions']['count_per_block'], 3)
+        self.assertEqual(len(set(program['transactions']['recipients'])), 1)
+        self.assertEqual(len(program['prestate_contracts']), 1)
+        storage = program['prestate_contracts'][0]['initial_storage']
+        self.assertEqual(storage, {hex(k):'0x1' for k in [0]+[(i<<48)|(7<<64)|(11<<192) for i in range(1,7)]})
+
+    def test_sized_actual_compact_bytecode_executes_exact_updates(self):
+        m = self.load()
+        row = m.make_sized_update_case(users=2, mutations_per_user=3, raw_key_layout={'L1':7,'L3':11})
+        contract = row['request']['program']['prestate_contracts'][0]
+        code = bytes.fromhex(contract['code_hex'][2:])
+        state = {int(k,16):int(v,16) for k,v in contract['initial_storage'].items()}
+        for tx in range(2):
+            result = execute(code,state,row['parameters']['transaction_gas_limit'])
+            self.assertEqual(result['terminal'],0)
+            expected = [(i<<48)|(7<<64)|(11<<192) for i in range(1+3*tx,4+3*tx)]
+            self.assertEqual([key for key,*_ in result['writes']],expected+[0])
+            self.assertTrue(all(state[k]==2 for k in expected))
+            self.assertEqual(state[0],1+3*(tx+1))
+            self.assertEqual(result['refund'],0)
+            self.assertEqual(result['stack'],[])
+
+    def test_tiny_sequential_and_u64_layouts_match_independent_complete_trajectory(self):
+        m = self.load()
+        for users in [1, 2, 3]:
+            for n in [0, 1, 2, 3]:
+                for layout in [None, {'L1': 0, 'L3': 0}, {'L1': (1 << 64) - 1, 'L3': (1 << 64) - 1}]:
+                    with self.subTest(users=users, n=n, layout=layout):
+                        row = m.make_sized_update_case(users=users, mutations_per_user=n, raw_key_layout=layout)
+                        self.qualify_sized(row, users, n, layout)
+
+    def test_full_64_by_64_pure_vm_has_unique_keys_and_admission_prefixes(self):
+        m = self.load(); layout = {'L1': 1, 'L3': 2}
+        row = m.make_sized_update_case(users=64, mutations_per_user=64, raw_key_layout=layout)
+        self.qualify_sized(row, 64, 64, layout)
+        p = row['parameters']
+        self.assertEqual(p['expected_user_gross_gas'], 363551)
+        self.assertEqual(p['transaction_gas_limit'], 364551)
+        self.assertEqual(p['expected_block_charged_gas'], 23434619)
+        self.assertEqual(p['expected_final_phase'], 4097)
+        self.assertEqual(p['expected_distinct_storage_keys'], 4097)
+        plain = m.make_sized_update_case(users=64, mutations_per_user=64)
+        self.assertEqual(p['expected_user_gross_gas'] - plain['parameters']['expected_user_gross_gas'], 36 * 64)
+
+    def test_sized_identity_binds_shape_order_layout_and_envelope(self):
+        m = self.load(); layout = {'L1': 1, 'L3': 2}
+        row = m.make_sized_update_case(users=2, mutations_per_user=3, raw_key_layout=layout)
+        again = m.make_sized_update_case(users=2, mutations_per_user=3, raw_key_layout={'L3': 2, 'L1': 1})
+        self.assertEqual(row, again)
+        payload = dict(parameters=row['parameters'], ordered_body_raw_keys=[f'0x{(i << 48) | (1 << 64) | (2 << 192):064x}' for i in range(1, 7)], request=row['request'])
+        expected = hashlib.sha256((json.dumps(payload, indent=2, sort_keys=True) + '\n').encode()).hexdigest()
+        self.assertEqual(expected, row['identity_sha256'])
+        layout['L1'] = 99
+        self.assertEqual(row['parameters']['raw_key_layout']['L1'], 1)
+        variants = [m.make_sized_update_case(users=1, mutations_per_user=6, raw_key_layout={'L1':1,'L3':2}),
+                    m.make_sized_update_case(users=2, mutations_per_user=3, raw_key_layout={'L1':2,'L3':1}),
+                    m.make_sized_update_case(users=2, mutations_per_user=3)]
+        self.assertTrue(all(v['identity_sha256'] != expected for v in variants))
+
+    def test_sized_negative_phase_initial_value_transform_and_failure_jump(self):
+        m = self.load(); layout = {'L1': 1, 'L3': 2}
+        row = m.make_sized_update_case(users=2, mutations_per_user=2, raw_key_layout=layout)
+        contract = row['request']['program']['prestate_contracts'][0]
+        code = bytes.fromhex(contract['code_hex'][2:]); envelope = row['parameters']['transaction_gas_limit']
+        initial = {int(k,16):int(v,16) for k,v in contract['initial_storage'].items()}
+        for wrong_phase in [0, 5, 1 << 64]:
+            state = dict(initial); state[0] = wrong_phase
+            self.assertEqual(execute(code, state, envelope)['terminal'], 0xfe)
+        wrong_initial = copy.deepcopy(row)
+        first = hex((1 << 48) | (1 << 64) | (2 << 192))
+        wrong_initial['request']['program']['prestate_contracts'][0]['initial_storage'][first] = '0x2'
+        with self.assertRaises(AssertionError): self.qualify_sized(wrong_initial, 2, 2, layout)
+        state = dict(initial); state[int(first,16)] = 2
+        self.assertEqual(execute(code, state, envelope)['terminal'], 0xfe)
+        # Every materialization must agree. Break only the second PUSH32 (the write),
+        # leaving both body reads untouched; a different write key cannot qualify.
+        pushes = [at for at, op, _ in decode(code) if op == 0x7f]
+        self.assertEqual(len(pushes), 3)
+        wrong = bytearray(code); wrong[pushes[1] + 1] ^= 1
+        # The malformed write creates an absent slot and costs more; a generous
+        # test-only envelope lets the independent checksum guard run to failure.
+        self.assertEqual(execute(wrong, dict(initial), 15_000_000)['terminal'], 0xfe)
+        # A wrong but initialized start can STOP on TX1; the literal specification
+        # rejects the skipped cohort even though the local checksum remains correct.
+        shifted = dict(initial); shifted[0] = 3
+        result = execute(code, shifted, envelope)
+        self.assertEqual(result['terminal'], 0)
+        self.assertNotEqual(result['reads'][0], (0, 1, True))
+        # Reusing the same cohort across TXs hits the original-value guard, while
+        # ordinary execution leaves persistent2 and advances ordinal phase.
+        reused = dict(initial); self.assertEqual(execute(code,reused,envelope)['terminal'],0)
+        reused[0] = 1
+        self.assertEqual(execute(code,reused,envelope)['terminal'],0xfe)
+        broken_jump = bytearray(code)
+        failure = next(at for at, op, _ in decode(code) if op == 0x5b and code[at+1] == 0xfe)
+        at = next(at for at, op, value in decode(code) if op == 0x61 and value == failure)
+        broken_jump[at+1:at+3] = b'\x00\x00'
+        state = dict(initial); state[0] = 0
+        with self.assertRaisesRegex(AssertionError, 'invalid jump destination'):
+            execute(broken_jump,state,envelope)
+
+    def test_legacy_complete_rows_and_requests_keep_parent_byte_identities(self):
+        m = self.load()
+        import storage_fanout as fanout
+        payloads = []
+        for mode in MODES:
+            for size in SIZES:
+                for level in LEVELS:
+                    payloads.append(m.make_case(mode, size, level))
+        for accounts in fanout.ACCOUNT_COUNTS:
+            for size in fanout.STATE_SIZES:
+                for mode in fanout.MODES:
+                    for level in fanout.LEVELS:
+                        payloads.append(fanout.make_case(accounts, size, mode, level))
+        self.assertEqual(len(payloads), 48)
+        digest = hashlib.sha256()
+        for row in payloads:
+            for value in [row, row['request']]:
+                encoded = (json.dumps(value, indent=2, sort_keys=True) + '\n').encode()
+                digest.update(hashlib.sha256(encoded).digest())
+        # Frozen from all actual parent mutation/fanout module outputs before
+        # adding this opt-in. Complete rows include the unchanged request bytes.
+        self.assertEqual(digest.hexdigest(), '8158c31cbe089b5b52c82e23d02348bb100b99a4f406d9b530a382817d44ff3d')
 
 
 if __name__ == '__main__': unittest.main()

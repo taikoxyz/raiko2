@@ -36,14 +36,31 @@ def _check(asm, expected, times=1):
     asm.push(expected, times=times); asm.op(0x14, times); _require(asm, times)
 
 
-def _key(asm, absent, times):
+def _key(asm, absent, times, raw_key_layout=None):
     asm.push(96, times=times); asm.op(0x51, times)
+    if raw_key_layout is not None:
+        # Memory96 and the committed phase remain ordinals. Only the three actual
+        # body SLOAD/SSTORE operands receive this identical compact transform.
+        asm.push(48, times=times); asm.op(0x1b, times)
+        mask = (raw_key_layout['L1'] << 64) | (raw_key_layout['L3'] << 192)
+        asm.push(mask, width=32, times=times); asm.op(0x17, times)
     if absent:
         asm.push(INSERT_BASE, times=times); asm.op(1, times)
 
 
-def _runtime(mode, n):
+def _layout(value):
+    if value is None:
+        return None
+    if type(value) is not dict or set(value) != {'L1', 'L3'}:
+        raise ValueError('raw_key_layout must contain exactly L1 and L3, not a key vector')
+    return {name: original.integer(value[name], 0, (1 << 64) - 1, name) for name in ('L1', 'L3')}
+
+
+def _runtime(mode, n, raw_key_layout=None):
     """One fixed-width loop; multiplicities describe one successful user."""
+    raw_key_layout = _layout(raw_key_layout)
+    if raw_key_layout is not None and mode != 'update':
+        raise ValueError('compact raw layout supports update only')
     asm = _Factory()
     asm.push(0); asm.op(0x54); asm.push(64); asm.op(0x52)
     for offset in (0, 32):
@@ -59,9 +76,9 @@ def _runtime(mode, n):
     asm.push(96, times=n); asm.op(0x52, n)
     operations = ((False, 2),) if mode == 'update' else ((False, 0),) if mode == 'delete' else ((True, 2),) if mode == 'insert' else ((False, 0), (True, 2))
     for absent, value in operations:
-        _key(asm, absent, n); asm.op(0x54, n); _check(asm, 0 if absent else 1, n)
-        asm.push(value, times=n); _key(asm, absent, n); asm.op(0x55, n)
-        _key(asm, absent, n); asm.op(0x54, n)
+        _key(asm, absent, n, raw_key_layout); asm.op(0x54, n); _check(asm, 0 if absent else 1, n)
+        asm.push(value, times=n); _key(asm, absent, n, raw_key_layout); asm.op(0x55, n)
+        _key(asm, absent, n, raw_key_layout); asm.op(0x54, n)
         asm.push(32, times=n); asm.op(0x51, n); asm.op(1, n)
         asm.push(32, times=n); asm.op(0x52, n)
     asm.push(0, times=n); asm.op(0x51, n); asm.push(1, times=n); asm.op(1, n)
@@ -75,14 +92,14 @@ def _runtime(mode, n):
     return asm.finish(), asm.counts
 
 
-def gas_accounting(mode, n):
+def gas_accounting(mode, n, *, raw_key_layout=None):
     """Price actual instruction counts once, then cold/warm storage separately."""
     if type(mode) is not str or mode not in MODES:
         raise ValueError('unknown storage mutation mode')
     original.integer(n, 0, 8192, 'mutations per user')
-    _, counts = _runtime(mode, n)
+    _, counts = _runtime(mode, n, raw_key_layout)
     static_cost = {0: 0, 1: 3, 0x14: 3, 0x15: 3, 0x51: 3, 0x52: 3,
-                   0x54: 0, 0x55: 0, 0x56: 8, 0x57: 10, 0x5b: 1, 0xfe: 0}
+                   0x17: 3, 0x1b: 3, 0x54: 0, 0x55: 0, 0x56: 8, 0x57: 10, 0x5b: 1, 0xfe: 0}
     ordinary = sum(count * (3 if 0x60 <= int(route[-2:], 16) <= 0x7f else static_cost[int(route[-2:], 16)])
                    for route, count in counts.items())
     words = 4 if n else 3
@@ -175,6 +192,71 @@ def make_case(mode='update', state_size=8192, level='full'):
         execution_profile='evm-gas-only', preload_created_accounts_or_code=False,
         runtime_bytes=len(code), runtime_sha256=digest(code))
     return row
+
+
+def make_sized_update_case(*, users, mutations_per_user, raw_key_layout=None):
+    """Build one exact-sized successful update recipe, without preparing a sampling catalog.
+
+    The optional algebraic layout is raw slot k(i)=(i<<48)|(L1<<64)|(L3<<192),
+    with L2=0 and i an ordinal1..users*N. It is not an arbitrary raw-key vector.
+    N=0 is an engineering control. The phase itself always uses literal slot0.
+    """
+    original.integer(users, 1, 64, 'users')
+    n = original.integer(mutations_per_user, 0, 64, 'mutations per user')
+    layout = _layout(raw_key_layout)
+    keys = [i if layout is None else (i << 48) | (layout['L1'] << 64) | (layout['L3'] << 192)
+            for i in range(1, users * n + 1)]
+    # Count/bit bounds establish uniqueness, no wrap and no alias with phase0.
+    if len(set(keys)) != users * n or any(not 0 < key < 1 << 256 for key in keys):
+        raise ValueError('body raw slots must be distinct nonzero U256 values')
+    code, counts = _runtime('update', n, layout)
+    gas = gas_accounting('update', n, raw_key_layout=layout)
+    # N0 still executes the same-value phase SSTORE. Its100-gas write needs
+    # >2300 gas left at the sentry even though little gas is ultimately charged.
+    reserve = 3000 if n == 0 else 1000
+    envelope = gas['gross_gas'] + reserve
+    remaining = [HEADER_GAS_LIMIT - ANCHOR_GAS - j * gas['charged_gas'] for j in range(users)]
+    if (envelope > 15_000_000 or ANCHOR_GAS + users * gas['charged_gas'] > BLOCK_BUDGET
+            or any(value < envelope for value in remaining)):
+        raise ValueError('exact-sized recipe exceeds an admission envelope')
+    request = original.make_case('call', 'stop', count=users, gas_limit=envelope)['request']
+    program = request['program']
+    routes = dict.fromkeys(program['expected_route_counts'], 0)
+    routes.update({route: count * users for route, count in counts.items()})
+    owner = '0x3000000000000000000000000000000000010000'
+    recipients = [owner] * users
+    program['expected_route_counts'] = routes
+    program['transactions']['recipients'] = recipients
+    # prestate_contracts supports64 users; storage_state intentionally has a lower cap8.
+    program['prestate_contracts'] = [dict(address=owner, code_hex='0x' + code.hex(),
+        initial_storage={hex(key): '0x1' for key in [0] + keys})]
+    parameters = dict(mode='update', users=users, mutations_per_user=n, raw_key_layout=layout,
+        raw_key_rule='ordinal' if layout is None else '(i<<48)|(L1<<64)|(L3<<192); L2=0',
+        block_count=1, user_transactions_per_block=users, all_transactions_including_anchor=users + 1,
+        transaction_kind='call', transaction_gas_limit=envelope, transaction_envelope_reserve=reserve,
+        header_gas_limit=HEADER_GAS_LIMIT, charged_gas_budget=BLOCK_BUDGET, expected_anchor_gas=ANCHOR_GAS,
+        header_prefix_remaining_gas=remaining, gas_accounting_per_user=gas,
+        expected_user_gross_gas=gas['gross_gas'], expected_user_charged_gas=gas['charged_gas'],
+        expected_user_refund_counter=0, expected_user_refund_applied=0,
+        expected_block_charged_gas=ANCHOR_GAS + users * gas['charged_gas'],
+        expected_distinct_storage_keys=1 + users * n, expected_initial_storage_entry_count=1 + users * n,
+        expected_final_storage_entry_count=1 + users * n, expected_main_storage_writes=users * n,
+        expected_phase_storage_writes=users, expected_storage_writes=users * (n + 1),
+        phase_slot=0, initial_phase=1, expected_final_phase=1 + users * n,
+        start_phase_schedule=[1 + j * n for j in range(users)],
+        final_phase_schedule=[1 + (j + 1) * n for j in range(users)],
+        expected_counter=n, expected_checksum=2 * n, recipient_schedule=recipients.copy(),
+        runtime_bytes=len(code), runtime_sha256=digest(code), unused_primary_code_hex='0x00',
+        expected_user_success=True, expected_exceptional_instructions=0, outer_calldata_bytes=0,
+        execution_profile='evm-gas-only', preload_created_accounts_or_code=False)
+    identity = digest(encoded(dict(parameters=parameters,
+        ordered_body_raw_keys=[f'0x{key:064x}' for key in keys], request=request)))
+    return dict(sample_id=f'storage-sized-update-{identity}', family='sized-storage-update',
+        role='control' if n == 0 else 'candidate', parameters=parameters, request=request,
+        identity_sha256=identity, holdout_only=False, actuals_used_for_fitting=False,
+        data_role='exact_sized_update_engineering_recipe',
+        completion_gate='Before sampling independently qualify signed user/Anchor order, concrete raw reads/writes, phase/counter/checksum, coldness/originals/refunds, exact routes, canonical witness and initial/final roots. Producer VM success alone is insufficient.',
+        scope='Current model02223227 includes Account-cache128PGU/unit. This helper creates no formal panel, chooses no reference/successor layout and makes no workload or per-map attribution claim. Measure literal node block quotes and full proposal separately from actual SP1 if later authorized.')
 
 
 def prepare(output: Path, *, model_id=MODEL):

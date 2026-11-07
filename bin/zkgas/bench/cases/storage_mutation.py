@@ -305,11 +305,11 @@ def make_prefixed_update_case(*, users, mutations_per_user, raw_key_layout=None)
 def make_prefixed_read_case(*, users, reads_per_user, raw_key_layout=None):
     """One genuine empty-user prefix, then bounded phase-advancing readonly bodies.
 
-    The selected finite point is64users/128reads, not a count search. Smaller
-    users1..64/read counts0..128 are reusable engineering cases; zero is a control.
+    Users1..89/read counts0..128 are reusable engineering cases; zero is a control.
+    The89user bound packs the128-read kernel under two1M Anchor gas bounds.
     This creates an in-memory recipe only, without selecting seeds or sampling.
     """
-    original.integer(users, 1, 64, 'users')
+    original.integer(users, 1, 89, 'users')
     n = original.integer(reads_per_user, 0, 128, 'reads per user')
     layout = _layout(raw_key_layout)
     keys = [i if layout is None else (i << 48) | (layout['L1'] << 64) | (layout['L3'] << 192)

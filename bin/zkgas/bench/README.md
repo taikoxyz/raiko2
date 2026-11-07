@@ -4204,15 +4204,20 @@ assert row['parameters']['expected_main_storage_writes'] == 0
 PY
 ```
 
-The helper accepts strict integer users1..64 and reads0..128; zero is only an
+The helper accepts strict integer users1..89 and reads0..128; zero is only an
 engineering control, with the same-value phase-SSTORE sentry accounted for.
 OptionalL1/L3 are strictu64 values, with body key
 `(ordinal<<48)|(L1<<64)|(L3<<192)` andL2=0; phase remains raw slot0 and ordinals
-advance across transactions. These bounds require at most8193 nonzero initialized
+advance across transactions. These bounds require at most11393 initialized
 slots, below the fixture schema's16384 entry cap. The request specifies plain
 CALL counts`[0,users]` and one storage owner. Existing native tools can materialize
-its genuine per-block witnesses after qualification. The fixed prospective point is64users/128reads; this API does not perform
-count/seed searches, create a catalog or execute any workload.
+its genuine per-block witnesses after qualification. At128reads/user,89users is
+selected by pure EVM gas arithmetic: `floor((30M-2M)/312223)=89`; the proposal upper
+bound is29,787,847gas, while90users would require30,100,070. The128-read kernel,
+per-user312223gas/envelope313223 and two independent1M Anchor upper bounds are
+unchanged. Earlier<=64 outputs and all update-helper bounds remain unchanged.
+This API does not perform count/seed searches, create a catalog or execute any
+workload.
 
 Per-user gas metadata comes from emitted instruction counts, memory expansion,
 phase cold/warm reads, each cold body read and the final phase SSTORE, with zero

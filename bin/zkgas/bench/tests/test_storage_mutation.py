@@ -635,9 +635,42 @@ class PrefixedStorageReadTests(unittest.TestCase):
                         self.assertGreaterEqual(remaining, p['transaction_gas_limit'])
                     self.assertEqual(p['evaluator_model_id'], '3e335de20582fca48f84b3df1b2ecd8d8d7281de02442ab35a134e4635431d73')
 
+    def test_readonly_high_user_boundary_has_literal_phase_routes_and_gas(self):
+        # Tiny body only; never construct the prospective89x128 point in tests.
+        m = self.load()
+        row = m.make_prefixed_read_case(users=89, reads_per_user=1,
+                                        raw_key_layout={'L1': 0, 'L3': 0})
+        p = row['parameters']; program = row['request']['program']
+        contract, = program['prestate_contracts']
+        state = {int(k, 16): int(v, 16) for k, v in contract['initial_storage'].items()}
+        code = bytes.fromhex(contract['code_hex'][2:]); counts = Counter()
+        self.assertEqual(program['transactions']['counts_by_block'], [0, 89])
+        self.assertEqual(program['transactions']['recipients'], [contract['address']] * 89)
+        self.assertEqual(len(state), 90)
+        for tx in range(89):
+            start = tx + 1; final = start + 1
+            result = execute(code, state, p['transaction_gas_limit'])
+            self.assertEqual((result['terminal'], result['stack']), (0, []))
+            self.assertEqual(result['reads'], [(0, start, True), (start << 48, 1, True),
+                                                (0, final, False)])
+            self.assertEqual(result['writes'], [(0, start, final, start, False)])
+            self.assertEqual((result['refund'], result['applied']), (0, 0))
+            self.assertEqual(result['charged'], p['expected_user_charged_gas'])
+            self.assertEqual(result['gas'], p['expected_user_gross_gas'])
+            self.assertGreaterEqual(p['header_prefix_remaining_gas'][tx], p['transaction_gas_limit'])
+            self.assertEqual(int.from_bytes(result['memory'][:32], 'big'), 1)
+            self.assertEqual(int.from_bytes(result['memory'][32:64], 'big'), 1)
+            counts.update(result['counts'])
+        self.assertEqual(state, {0: 90} | {i << 48: 1 for i in range(1, 90)})
+        self.assertEqual(counts, +Counter(program['expected_route_counts']))
+        self.assertEqual((p['expected_final_phase'], p['expected_body_storage_reads']), (90, 89))
+        self.assertEqual((p['expected_main_storage_writes'], p['expected_phase_storage_writes']), (0, 89))
+        self.assertEqual(p['block_charged_gas_upper_bounds'],
+                         [1_000_000, 1_000_000 + 89 * p['expected_user_charged_gas']])
+
     def test_readonly_strict_limits_and_layout_are_not_legacy_mode_aliases(self):
         m = self.load()
-        for users, n in [(True, 1), (0, 1), (65, 1), (1.0, 1), (1, True), (1, -1), (1, 129), (1, 1.0)]:
+        for users, n in [(True, 1), (0, 1), (90, 1), (1.0, 1), (1, True), (1, -1), (1, 129), (1, 1.0)]:
             with self.subTest(users=users, n=n), self.assertRaises(ValueError):
                 m.make_prefixed_read_case(users=users, reads_per_user=n)
         for layout in [True, [], {}, {'L1': 0}, {'L1': 0, 'L3': 0, 'keys': []}, {'L1': True, 'L3': 0}, {'L1': 0, 'L3': 1.0}, {'L1': -1, 'L3': 0}, {'L1': 0, 'L3': 1 << 64}]:
@@ -646,6 +679,8 @@ class PrefixedStorageReadTests(unittest.TestCase):
         self.assertEqual(m.MODES, ('update', 'delete', 'insert', 'mixed'))
         with self.assertRaises(ValueError): m.make_case('read', 8192, 'zero')
         with self.assertRaises(ValueError): m.make_sized_update_case(users=1, mutations_per_user=128)
+        for helper in [m.make_sized_update_case, m.make_prefixed_update_case]:
+            with self.assertRaises(ValueError): helper(users=65, mutations_per_user=1)
 
     def test_readonly_bad_initial_slot_and_wrong_phase_fail_literal_guards(self):
         m = self.load(); row = m.make_prefixed_read_case(users=2, reads_per_user=2)
@@ -660,12 +695,17 @@ class PrefixedStorageReadTests(unittest.TestCase):
         self.assertEqual(execute(code, state, cap)['terminal'], 0xfe)
         with self.assertRaisesRegex(AssertionError, 'underflow'): execute(bytes([0x80, 0]), {}, 30000)
 
-    def test_fixed_128_accounting_without_constructing_formal_64_user_input(self):
+    def test_fixed_128_gas_packing_without_constructing_formal_high_user_input(self):
         m = self.load(); gas = m.gas_accounting('read', 128, raw_key_layout={'L1': 0, 'L3': 0})
         self.assertEqual(gas['storage_read_gas'], 2200 + 128 * 2100)
         self.assertEqual(gas['storage_write_gas'], 2900)
         self.assertEqual((gas['refund_counter'], gas['refund_applied']), (0, 0))
-        self.assertLess(2_000_000 + 64 * gas['charged_gas'], 30_000_000)
+        self.assertEqual(gas['charged_gas'], 312223)
+        self.assertEqual((30_000_000 - 2_000_000) // gas['charged_gas'], 89)
+        self.assertEqual(2_000_000 + 89 * gas['charged_gas'], 29_787_847)
+        self.assertEqual(2_000_000 + 90 * gas['charged_gas'], 30_100_070)
+        self.assertEqual(1 + 89 * 128, 11_393)
+        self.assertLess(1 + 89 * 128, 16_384)
 
     def test_all_78_legacy_rows_and_requests_remain_byte_identical(self):
         m = self.load()

@@ -54,14 +54,19 @@ pub struct ProgramAccessList {
 #[derive(Debug, Serialize)]
 pub struct AccessListReport {
     /// Requested raw vector shape.
-    pub pattern: AccessListPattern,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pattern: Option<AccessListPattern>,
     /// Legacy name: requested vector cardinality in each included user transaction.
-    pub count_per_block: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub count_per_block: Option<usize>,
     /// Present only for multiple users sharing the same descriptor in each block.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub transactions_per_block: Option<usize>,
     /// Included user-transaction observations in block order.
     pub blocks: Vec<AccessListBlockReport>,
+    /// Present only for the explicit heterogeneous per-transaction mode.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<&'static str>,
 }
 
 /// One record per block, preserving the legacy single-user serialized shape.
@@ -69,7 +74,6 @@ pub struct AccessListReport {
 pub struct AccessListBlockReport {
     pub block_index: usize,
     /// Raw counts are sums over included users; unique counts are block unions.
-    /// Every user has the same checked list, so its unique set is already the union.
     #[serde(flatten)]
     pub counts: AccessListCounts,
     /// Explicit per-user counts only for multiple users; no cross-TX deduplication.
@@ -85,6 +89,11 @@ pub struct AccessListTransactionReport {
     pub transaction_hash: B256,
     #[serde(flatten)]
     pub counts: AccessListCounts,
+    /// Descriptor shape of this user, present only in per-transaction mode.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pattern: Option<AccessListPattern>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub count: Option<usize>,
 }
 
 /// Selectors from one canonical decoded signed raw list, without inferred state loads.
@@ -256,6 +265,24 @@ impl ProgramAccessList {
         block_index: usize,
         users_per_block: usize,
     ) -> Result<AccessListBlockReport> {
+        Self::validate_selected_block(
+            &vec![self; users_per_block],
+            transactions,
+            signer,
+            block_index,
+            false,
+        )
+    }
+
+    /// Gate ordered heterogeneous descriptors and derive unions from actual included lists.
+    pub(super) fn validate_selected_block(
+        descriptors: &[&Self],
+        transactions: &[TransactionSigned],
+        signer: Address,
+        block_index: usize,
+        per_transaction: bool,
+    ) -> Result<AccessListBlockReport> {
+        let users_per_block = descriptors.len();
         ensure!(
             users_per_block > 0 && transactions.len() == users_per_block,
             "included access-list user count differs"
@@ -264,38 +291,62 @@ impl ProgramAccessList {
             .checked_mul(users_per_block)
             .ok_or_else(|| anyhow::anyhow!("access-list user nonce overflow"))?;
         let mut users = Vec::with_capacity(users_per_block);
-        for (index, transaction) in transactions.iter().enumerate() {
+        let mut addresses = BTreeSet::new();
+        let mut pairs = BTreeSet::new();
+        let mut raw_items = 0_usize;
+        let mut raw_keys = 0_usize;
+        for (index, (transaction, descriptor)) in transactions.iter().zip(descriptors).enumerate() {
             let nonce = first_nonce
                 .checked_add(index)
                 .ok_or_else(|| anyhow::anyhow!("access-list user nonce overflow"))?;
-            let report =
-                self.validate_transaction(transaction, signer, block_index, u64::try_from(nonce)?)?;
+            let report = descriptor.validate_transaction(
+                transaction,
+                signer,
+                block_index,
+                u64::try_from(nonce)?,
+            )?;
+            raw_items = raw_items
+                .checked_add(report.counts.raw_address_items)
+                .ok_or_else(|| anyhow::anyhow!("access-list raw address count overflow"))?;
+            raw_keys = raw_keys
+                .checked_add(report.counts.raw_storage_keys)
+                .ok_or_else(|| anyhow::anyhow!("access-list raw key count overflow"))?;
+            for item in &transaction
+                .access_list()
+                .expect("validated included access list")
+                .0
+            {
+                addresses.insert(item.address);
+                for key in &item.storage_keys {
+                    pairs.insert((item.address, *key));
+                }
+            }
             users.push(AccessListTransactionReport {
                 transaction_index: index + 1,
                 nonce: transaction.nonce(),
                 transaction_hash: *transaction.hash(),
                 counts: report.counts,
+                pattern: per_transaction.then_some(descriptor.pattern),
+                count: per_transaction.then_some(descriptor.count),
             });
         }
-        let mut counts = users[0].counts.clone();
+        let transaction_type = users[0].counts.transaction_type;
         ensure!(
-            users.iter().all(|user| user.counts == counts),
-            "shared access-list user selectors differ"
+            users
+                .iter()
+                .all(|user| user.counts.transaction_type == transaction_type),
+            "access-list transaction types differ"
         );
-        // Each raw vector is validated against the same exact canonical descriptor.
-        // Therefore the block union equals one user's unique set, without another set.
-        counts.raw_address_items = counts
-            .raw_address_items
-            .checked_mul(users_per_block)
-            .ok_or_else(|| anyhow::anyhow!("access-list raw address count overflow"))?;
-        counts.raw_storage_keys = counts
-            .raw_storage_keys
-            .checked_mul(users_per_block)
-            .ok_or_else(|| anyhow::anyhow!("access-list raw key count overflow"))?;
         Ok(AccessListBlockReport {
             block_index,
-            counts,
-            transactions: (users_per_block > 1).then_some(users),
+            counts: AccessListCounts {
+                transaction_type,
+                raw_address_items: raw_items,
+                raw_storage_keys: raw_keys,
+                unique_addresses: addresses.len(),
+                unique_storage_pairs: pairs.len(),
+            },
+            transactions: (per_transaction || users_per_block > 1).then_some(users),
         })
     }
 }
@@ -767,5 +818,103 @@ mod tests {
                 .validate_block(&[], signer.address(), 0, 0)
                 .is_err()
         );
+    }
+    #[test]
+    fn heterogeneous_lists_gate_each_signed_user_and_actual_block_union() {
+        let descriptors = [
+            serde_json::json!({"pattern":"raw_addresses","count":3,"addresses":[Address::ZERO,Address::with_last_byte(1),Address::ZERO]}),
+            serde_json::json!({"pattern":"raw_keys","count":2,"storage_keys":[B256::ZERO,B256::ZERO]}),
+            serde_json::json!({"pattern":"raw_addresses","count":2,"addresses":[PROGRAM,Address::with_last_byte(2)]}),
+        ].map(|value| serde_json::from_value::<ProgramAccessList>(value).unwrap());
+        let signer = PrivateKeySigner::from_bytes(&B256::repeat_byte(0x11)).unwrap();
+        let other = PrivateKeySigner::from_bytes(&B256::repeat_byte(0x22)).unwrap();
+        let sign = |nonce, list, signer: &PrivateKeySigner| {
+            let tx = TxEip1559 {
+                chain_id: 1,
+                nonce,
+                gas_limit: 100000,
+                access_list: list,
+                ..Default::default()
+            };
+            let signature = signer.sign_hash_sync(&tx.signature_hash()).unwrap();
+            TransactionSigned::from(tx.into_signed(signature))
+        };
+        let users = descriptors
+            .iter()
+            .enumerate()
+            .map(|(i, d)| sign(i as u64, d.canonical_list().unwrap(), &signer))
+            .collect::<Vec<_>>();
+        let refs = descriptors.iter().collect::<Vec<_>>();
+        let block =
+            ProgramAccessList::validate_selected_block(&refs, &users, signer.address(), 0, true)
+                .unwrap();
+        assert_eq!(
+            block.counts,
+            AccessListCounts {
+                transaction_type: 2,
+                raw_address_items: 6,
+                raw_storage_keys: 2,
+                unique_addresses: 4,
+                unique_storage_pairs: 1
+            }
+        );
+        let rows = block.transactions.unwrap();
+        assert_eq!(
+            rows.iter().map(|r| r.count.unwrap()).collect::<Vec<_>>(),
+            vec![3, 2, 2]
+        );
+        for position in 0..3 {
+            for variant in 0..4 {
+                let mut bad = users.clone();
+                let mut list = descriptors[position].canonical_list().unwrap();
+                if variant == 0 {
+                    list.0.reverse();
+                    if list == descriptors[position].canonical_list().unwrap() {
+                        list.0[0].storage_keys.push(B256::repeat_byte(9));
+                    }
+                }
+                if variant == 1 {
+                    list.0[0].address = Address::repeat_byte(0x55);
+                }
+                bad[position] = sign(
+                    if variant == 2 { 99 } else { position as u64 },
+                    list,
+                    if variant == 3 { &other } else { &signer },
+                );
+                assert!(
+                    ProgramAccessList::validate_selected_block(
+                        &refs,
+                        &bad,
+                        signer.address(),
+                        0,
+                        true
+                    )
+                    .is_err()
+                );
+            }
+        }
+        assert!(
+            ProgramAccessList::validate_selected_block(
+                &refs,
+                &users[..2],
+                signer.address(),
+                0,
+                true
+            )
+            .is_err()
+        );
+        assert!(
+            ProgramAccessList::validate_selected_block(&refs, &users, signer.address(), 1, true)
+                .is_err()
+        );
+        let single = ProgramAccessList::validate_selected_block(
+            &refs[..1],
+            &users[..1],
+            signer.address(),
+            0,
+            true,
+        )
+        .unwrap();
+        assert!(single.transactions.is_some());
     }
 }

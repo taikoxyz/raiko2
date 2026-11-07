@@ -82,7 +82,8 @@ def concentrated_owner_addresses(shared0, count, *, prefix_bytes=6):
     Prefix length concerns first compared network-memory bytes, not low32.
     """
     _uint(shared0, 64)
-    _count(count)
+    if type(count) is not int or not 1 <= count <= 16384:
+        raise ValueError('owner catalog count must be in 1..16384')
     if type(prefix_bytes) is not int or prefix_bytes not in (0, 4, 6):
         raise ValueError('owner prefix_bytes must be a strict integer in (0, 4, 6)')
     prefix = b'\xa5' + bytes(prefix_bytes - 1) if prefix_bytes else b''

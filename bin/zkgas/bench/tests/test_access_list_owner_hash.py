@@ -79,7 +79,7 @@ class OwnerCatalogTests(unittest.TestCase):
         m=self.require_helper()
         for g in (True,False,None,'1',1.0,-1,1<<64):
             with self.assertRaises(ValueError):m.concentrated_owner_addresses(g,1)
-        for count in (True,False,None,'1',1.0,0,-1,8193):
+        for count in (True,False,None,'1',1.0,0,-1,16385):
             with self.assertRaises(ValueError):m.concentrated_owner_addresses(0,count)
         for prefix in (True,False,None,'6',6.0,-1,1,2,3,5,7,8):
             with self.assertRaises(ValueError):m.concentrated_owner_addresses(0,1,prefix_bytes=prefix)

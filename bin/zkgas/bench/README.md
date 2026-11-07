@@ -3885,7 +3885,7 @@ placement, workload measurement or pricing claim follows from generation.
 
 `access_list_hash.concentrated_owner_addresses(shared0, count, *, prefix_bytes=6)`
 returns ordered, distinct, lowercase Address20 hex strings for the frozen b76 outer
-`AddressMap` / `FbBuildHasher<20>` path. It reuses strict U64 and count1–8192
+`AddressMap` / `FbBuildHasher<20>` path. It uses strict U64 and owner-only count1–16384
 validation; `prefix_bytes` must be a strict integer0,4 or6 (no bool). Indexes1..count
 fill the remaining bytes of the first8-byte chunk in little-endian order, after a
 fixed `A5` plus zero prefix (empty for0). The next8bytes are selected `shared0` LE;
@@ -4017,3 +4017,73 @@ the recipe nor successful construction establishes pressure, a pricing deficit,
 all placements/comparisons, a global bound or SDK production parity. Predeployment
 cost is outside this measured block. Prices, Rust, guest, SDK, ELF and old
 producer behavior are unchanged.
+
+### Per-transaction access lists and warm-first CacheState cases
+
+Offline `program.transactions.access_lists` optionally supplies one complete
+`ProgramAccessList` descriptor per user, in nonce order. This mode requires one
+block and ordinary CALL transactions, with no `storage_state`, authorizations or
+CREATE. Its length must equal `count_per_block`; it is exclusive with the old
+shared `program.access_list`. Each descriptor retains its1..8192 bound. Checked
+aggregate raw address items and raw storage keys each have a16384 tool bound,
+independently; these are fixture allocation limits, not protocol/admission limits.
+Code-only `prestate_contracts` may compose with this mode, including empty initial
+storage maps; nonempty initialized storage is rejected. Extra AL owners must still
+be absent from the constructor's initial state (apart from its existing PROGRAM
+exception), including exclusion of other predeployed recipients.
+
+Signing and the actual committed-user gate select the same nonce-indexed list.
+Every included envelope is canonical-decoded, signature/nonce checked and compared
+against the exact raw ordered list, preserving duplicates. Raw block counts sum
+users; unique addresses and owner/key pairs are true block unions. The new report
+has `access_list.mode="per_transaction"`, `transactions_per_block` and per-user
+`blocks[].transactions` rows with descriptor `pattern`/`count`. It omits the shared
+`pattern` and legacy `count_per_block` fields rather than assigning them a misleading
+first-list value. Omitted/shared inputs retain their previous report shape and
+semantics. AL declaration establishes warmth, not account materialization or an
+absence proof.
+
+`cache_state_warm_accounts.make_case(*, targets=None, user_count=86)` prepares a
+finite one-block recipe with128 guarded BALANCE reads per user, disjoint targets,
+empty calldata and an exact matching empty-key raw-address list per user. It reuses
+the existing guard assembler. The default fixed public G0 control calls
+`concentrated_owner_addresses(0, 128*users, prefix_bytes=6)` once, then slices
+that ordered vector across users without restarting indices. Each Address20 is
+`A5 || zero[5] || indexLE16 || zero[8] || 01 || zero[3]`. This supplies a
+structural compression source, not a randomized/dispersed control or observed own
+G/placement. Actual one-blob fit remains a native gate: no pretrial/retry, recipe
+change or fallback after capacity failure. Generation performs no filtering, seed
+search or execution; explicit canonical Address20
+`targets` require exactly128*users unique addresses, excluding recipients and
+reserved accounts. Smaller1..86 user counts are engineering controls. Each runtime
+is3335 bytes. Source accounting is343054 charged gas per user and29669999 for86
+users plus Anchor, with400000 user envelopes and a31M header. Native receipts and
+full signed/world/absence checks must establish those claims before measurement.
+AL values are inside the signed envelopes and Kona payload; changing them can
+change signatures/compression and does not preserve the old cold panel payload.
+
+This tiny data-only example neither executes a stage nor creates the86-user case:
+
+```sh
+"$PYTHON_BIN" -S -B - <<'PY'
+from pathlib import Path
+import sys
+sys.path.insert(0, str(Path('bin/zkgas/bench/cases')))
+from cache_state_warm_accounts import make_case
+row = make_case(user_count=1)
+assert len(row['request']['program']['transactions']['access_lists']) == 1
+assert row['parameters']['expected_block_charged_gas'] == 510409
+PY
+```
+
+Use the existing `prepare(Path(...), user_count=...)` catalog and standard workload
+screen/retained measure interfaces; there is no additional runner. Generation is
+not dynamic placement or pricing evidence. The owner-only
+`concentrated_owner_addresses` catalog bound is now1..16384; generic U256 helpers
+and each raw-address transaction descriptor remain bounded to8192. Generate one
+ordered owner vector before slicing into per-user lists; restarting indices per
+chunk would duplicate owners. A previous own G is only a prospective hypothesis.
+An optional closed CacheAccount profile can supply local own parameters even with
+an empty expected-candidate vector; missing/capped evidence and whole placement,
+TX identity and population remain UNKNOWN. Canonical PGU validation stays separate
+from this optional diagnostic.

@@ -2084,3 +2084,103 @@ fn shared_access_list_call_keeps_intrinsic_gas_and_per_transaction_bounds() {
         assert!(zkgas::fixture::parse_request(&serde_json::to_vec(&value).unwrap()).is_err());
     }
 }
+
+fn per_transaction_access_lists_request() -> Value {
+    let mut value = request("0x60006000f3", json!({"opcode:0xf3":3}));
+    let a = "0xa500000000000000000000000000000000000001";
+    let b = "0xa500000000000000000000000000000000000002";
+    let c = "0xa500000000000000000000000000000000000003";
+    let recipients = [
+        "0x4400000000000000000000000000000000000001",
+        "0x4400000000000000000000000000000000000002",
+        "0x4400000000000000000000000000000000000003",
+    ];
+    value["program"]["transactions"] = json!({"kind":"call","count_per_block":3,"gas_limit":100000,
+        "recipients":recipients, "access_lists":[
+            {"pattern":"raw_addresses","count":4,"addresses":[a,b,a,b]},
+            {"pattern":"raw_addresses","count":1,"addresses":[c]},
+            {"pattern":"raw_addresses","count":3,"addresses":[b,c,b]}]});
+    value["program"]["prestate_contracts"] = recipients
+        .iter()
+        .map(|address| json!({"address":address,"code_hex":"0x60006000f3"}))
+        .collect();
+    value
+}
+
+#[test]
+fn per_transaction_access_lists_native_checks_actual_order_counts_and_union() {
+    let value = per_transaction_access_lists_request();
+    let (output, dir) = export_with_profile(&value, "evm-gas-only");
+    success(&output);
+    let guest = input(&dir);
+    let native = report(&dir);
+    let users = &guest.witnesses[0].block.body.transactions[1..];
+    assert_eq!(users.len(), 3);
+    let block = &native["access_list"]["blocks"][0];
+    assert_eq!(native["access_list"]["mode"], "per_transaction");
+    assert!(native["access_list"].get("pattern").is_none());
+    assert!(native["access_list"].get("count_per_block").is_none());
+    assert_eq!(block["raw_address_items"], 8);
+    assert_eq!(block["unique_addresses"], 3);
+    assert_eq!(block["raw_storage_keys"], 0);
+    assert_eq!(block["unique_storage_pairs"], 0);
+    for (i, tx) in users.iter().enumerate() {
+        assert_eq!(tx.nonce(), i as u64);
+        let actual = tx
+            .access_list()
+            .unwrap()
+            .0
+            .iter()
+            .map(|item| {
+                assert!(item.storage_keys.is_empty());
+                serde_json::to_value(item.address).unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            json!(actual),
+            value["program"]["transactions"]["access_lists"][i]["addresses"]
+        );
+        assert_eq!(
+            block["transactions"][i]["transaction_hash"],
+            serde_json::to_value(tx.hash()).unwrap()
+        );
+        assert_eq!(block["transactions"][i]["nonce"], i);
+        assert_eq!(block["transactions"][i]["pattern"], "raw_addresses");
+        assert_eq!(
+            native["receipts_by_block"][0][i + 1]["gas_used"],
+            [30606, 23406, 28206][i]
+        );
+    }
+    assert_eq!(native["blocks"][0]["block_gas_used"], 249573);
+}
+
+#[test]
+fn per_transaction_access_lists_native_rejects_conflicts_and_illegal_shapes_without_outputs() {
+    let base = per_transaction_access_lists_request();
+    let mut variants = Vec::new();
+    for owner in [
+        json!("0x8888888888888888888888888888888888888888"),
+        base["program"]["transactions"]["recipients"][1].clone(),
+    ] {
+        let mut bad = base.clone();
+        bad["program"]["transactions"]["access_lists"][2]["addresses"][0] = owner;
+        variants.push(bad);
+    }
+    let mut bad = base.clone();
+    bad["program"]["transactions"]["access_lists"]
+        .as_array_mut()
+        .unwrap()
+        .pop();
+    variants.push(bad);
+    let mut bad = base.clone();
+    bad["program"]["transactions"]["gas_limit"] = json!(21000);
+    variants.push(bad);
+    let mut bad = base.clone();
+    bad["program"]["access_list"] = json!({"pattern":"repeated_address","count":1});
+    variants.push(bad);
+    for bad in variants {
+        let (output, dir) = export_with_profile(&bad, "evm-gas-only");
+        assert!(!output.status.success());
+        absent_outputs(&dir);
+    }
+}

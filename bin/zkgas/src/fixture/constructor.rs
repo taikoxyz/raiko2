@@ -168,12 +168,16 @@ fn candidate_transactions(
     transactions: Option<&ProgramTransactions>,
 ) -> Result<Vec<TransactionSigned>> {
     let signer = controlled_candidate_signer()?;
-    let access_list = access_list
-        .map(ProgramAccessList::canonical_list)
-        .transpose()?
-        .unwrap_or_default();
     (0..count)
         .map(|nonce| {
+            let selected_list = match transactions {
+                Some(t) => t.access_list_for_user(nonce, access_list)?,
+                None => access_list,
+            };
+            let access_list = selected_list
+                .map(ProgramAccessList::canonical_list)
+                .transpose()?
+                .unwrap_or_default();
             if let Some(authorizations) = authorizations {
                 let tx = TxEip7702 {
                     chain_id: OVERHEAD_CHAIN_ID,
@@ -589,8 +593,13 @@ pub(super) fn build_program(
     if let Some(state) = storage_state {
         state.apply_fixture(&mut controlled_state, &candidates)?;
     }
-    if let Some(access_list) = access_list {
-        for item in access_list.canonical_list()?.0 {
+    for descriptor in access_list.into_iter().chain(
+        transactions
+            .and_then(|t| t.access_lists.as_deref())
+            .into_iter()
+            .flatten(),
+    ) {
+        for item in descriptor.canonical_list()?.0 {
             anyhow::ensure!(
                 item.address == Address::repeat_byte(0x66)
                     || !controlled_state
@@ -815,7 +824,16 @@ pub(super) fn build_program(
                 })
                 .collect::<Result<Vec<_>>>()?,
         );
-        if let Some(access_list) = access_list {
+        if let Some(lists) = transactions.and_then(|t| t.access_lists.as_deref()) {
+            let descriptors = lists.iter().collect::<Vec<_>>();
+            access_list_blocks.push(ProgramAccessList::validate_selected_block(
+                &descriptors,
+                &outcome.filtered_block.body().transactions[1..],
+                controlled_signer.address(),
+                index,
+                true,
+            )?);
+        } else if let Some(access_list) = access_list {
             access_list_blocks.push(access_list.validate_block(
                 &outcome.filtered_block.body().transactions[1..],
                 controlled_signer.address(),
@@ -1008,12 +1026,23 @@ pub(super) fn build_program(
             entries_per_block: a.count,
             blocks: authorization_blocks,
         }),
-        access_list: access_list.map(|a| AccessListReport {
-            pattern: a.pattern,
-            count_per_block: a.count,
-            transactions_per_block: (users_per_block > 1).then_some(users_per_block),
-            blocks: access_list_blocks,
-        }),
+        access_list: if transactions.is_some_and(|t| t.access_lists.is_some()) {
+            Some(AccessListReport {
+                pattern: None,
+                count_per_block: None,
+                transactions_per_block: Some(users_per_block),
+                blocks: access_list_blocks,
+                mode: Some("per_transaction"),
+            })
+        } else {
+            access_list.map(|a| AccessListReport {
+                pattern: Some(a.pattern),
+                count_per_block: Some(a.count),
+                transactions_per_block: (users_per_block > 1).then_some(users_per_block),
+                blocks: access_list_blocks,
+                mode: None,
+            })
+        },
         storage: storage_state.map(|state| {
             let mut report = state.report(full_witness_node_count, minimized_witness_node_count);
             if transactions.is_some() {
@@ -1272,5 +1301,55 @@ mod tests {
             candidate_transactions(&Bytes::new(), 3, None, None, Some(&wrong_descriptor)).unwrap();
         assert!(descriptor.after_block(0, sender, &wrong, &state).is_err());
         assert!(descriptor.call_recipient(3).is_err());
+    }
+    #[test]
+    fn per_transaction_lists_allow_only_plain_prestate_call_composition() {
+        let mut base = initialized_request();
+        base["program"]["prestate_contracts"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("initial_storage");
+        base["program"]["transactions"]["access_lists"] = json!([{"pattern":"raw_addresses","count":1,"addresses":["0xa500000000000000000000000000000000000001"]}]);
+        assert!(super::super::parse_request(&serde_json::to_vec(&base).unwrap()).is_ok());
+        for (field, value) in [
+            ("block_count", json!(2)),
+            (
+                "storage_state",
+                json!({"initial_storage":{},"proof_slots":["0x0"]}),
+            ),
+            ("authorizations", json!({"pattern":"distinct","count":1})),
+            (
+                "access_list",
+                json!({"pattern":"repeated_address","count":1}),
+            ),
+        ] {
+            let mut bad = base.clone();
+            bad["program"][field] = value;
+            assert!(super::super::parse_request(&serde_json::to_vec(&bad).unwrap()).is_err());
+        }
+        let mut bad = base.clone();
+        bad["program"]["transactions"]["kind"] = json!("create");
+        assert!(super::super::parse_request(&serde_json::to_vec(&bad).unwrap()).is_err());
+        bad = base.clone();
+        bad["program"]["prestate_contracts"][0]["initial_storage"] = json!({"0x0":"0x1"});
+        assert!(super::super::parse_request(&serde_json::to_vec(&bad).unwrap()).is_err());
+        let parsed = super::super::parse_request(&serde_json::to_vec(&base).unwrap()).unwrap();
+        // The core constructor independently repeats validation, even without the parser.
+        let mut transactions = parsed.program.transactions.unwrap();
+        transactions.access_lists.as_mut().unwrap().clear();
+        assert!(
+            build_program(
+                &[0],
+                &[],
+                1,
+                None,
+                None,
+                None,
+                Some(&transactions),
+                parsed.program.prestate_contracts.as_deref(),
+                raiko2_stateless::workload_lab::ExecutionProfile::EvmGasOnly
+            )
+            .is_err()
+        );
     }
 }

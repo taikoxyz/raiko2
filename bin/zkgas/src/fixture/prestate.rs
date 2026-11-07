@@ -108,6 +108,7 @@ pub(super) fn validate(
     access_list: bool,
     authorizations: bool,
 ) -> Result<()> {
+    let per_transaction_lists = transactions.is_some_and(|t| t.access_lists.is_some());
     let recipients = transactions.and_then(|t| t.recipients.as_deref());
     if let Some(recipients) = recipients {
         let t = transactions.expect("recipients have a transaction descriptor");
@@ -134,6 +135,13 @@ pub(super) fn validate(
     ensure!(
         !storage && !access_list && !authorizations,
         "prestate_contracts cannot combine storage_state, access_list or authorizations"
+    );
+    ensure!(
+        !per_transaction_lists
+            || contracts
+                .iter()
+                .all(|c| c.initial_storage.as_ref().is_none_or(|s| s.is_empty())),
+        "per-transaction access_lists prestate cannot initialize storage"
     );
     let mut addresses = BTreeSet::new();
     let reserved = super::constructor::prestate_reserved_addresses()?;

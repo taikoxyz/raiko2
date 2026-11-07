@@ -173,12 +173,14 @@ def execute(code, data, envelope, *, repetitions, cache=True, key_count=512, que
 def run_users(row, *, structured=False):
     p = row['parameters']; request = row['request']; program = request['program']; tx = program['transactions']
     key_count = p.get('key_count', 512)
+    users = p['all_user_transactions'] if structured else 1
+    assert type(users) is int and users in (1, 2), 'structured user count domain'
     assert type(structured) is bool and type(key_count) is int and 1 <= key_count <= (4096 if structured else 1024), 'key_count metadata domain'
     assert set(request) == {'schema_version', 'expected_user_success', 'program'} and request['schema_version'] == 1 and request['expected_user_success'] is True, 'request domain'
     assert set(program) == {'code_hex', 'input_hex', 'block_count', 'expected_route_counts', 'transactions'}, 'primary empty storage/domain'
-    expected_tx = dict(kind='call', counts_by_block=[0, 1], gas_limit=p['transaction_gas_limit']) if structured else dict(kind='call', count_per_block=1, gas_limit=p['transaction_gas_limit'])
-    assert tx == expected_tx and program['block_count'] == (2 if structured else 1), 'one-user schedule'
-    assert p['primary_code_owner'] == PRIMARY and p['transaction_nonce'] == 0 and p['recipient_schedule'] == [PRIMARY], 'primary/nonce'
+    expected_tx = dict(kind='call', counts_by_block=[0, users], gas_limit=p['transaction_gas_limit']) if structured else dict(kind='call', count_per_block=1, gas_limit=p['transaction_gas_limit'])
+    assert tx == expected_tx and program['block_count'] == (2 if structured else 1), 'user schedule'
+    assert p['primary_code_owner'] == PRIMARY and type(p['transaction_nonce']) is int and p['transaction_nonce'] == 0 and p['recipient_schedule'] == [PRIMARY]*users, 'primary/nonce'
     assert 0 < tx['gas_limit'] <= 15000000 and tx['gas_limit'] <= 16777216, 'transaction caps'
     data = bytes.fromhex(program['input_hex'][2:]); code = bytes.fromhex(program['code_hex'][2:])
     query = int.from_bytes(data[-32:], 'big') if structured else QUERY
@@ -195,47 +197,55 @@ def run_users(row, *, structured=False):
     assert hashlib.sha256(data).hexdigest() == p['calldata_sha256'] == p['raw_key_sha256'], 'catalog hashes'
     assert hashlib.sha256(code).hexdigest() == p['runtime_sha256'], 'runtime hash'
     assert p['query_key'] == f'0x{query:064x}' and p['initial_storage_entries'] == 0, 'query/zero prestate'
-    result = execute(code, data, tx['gas_limit'], repetitions=p['repetitions'], key_count=key_count, query=query, structured=structured)
-    if not structured:
-        assert 31000000 - 167355 >= tx['gas_limit'] and 167355 + result['gas'] <= 30000000, 'header/block caps'
-    r = p['repetitions']; z = data.count(0); nz = len(data) - z
-    intrinsic = 21000 + 4*z + 16*nz; floor = 21000 + 10*(z + 4*nz)
-    cold = 2100 * key_count; warm = 100 * (64 * r + 1)
-    gross = result['gas']; charged = max(gross, floor)
-    expected = dict(seed_reads=key_count, accessed_unique=key_count, accessed_unique_keys=key_count,
-        expected_persistent_storage_reads=key_count + 1 + 64*r, read_events=key_count + 1 + 64*r,
-        expected_persistent_storage_writes=0, initial_storage_entries=0, initial_state_size=0,
-        aggregate_state_size=0, state_size_per_account=0, expected_initial_storage_entry_count=0,
-        expected_final_storage_entry_count=0, seed_counter_memory_offset=0, counter_memory_offset=64,
-        protected_memory_offset=96, sentinel=SENTINEL, peak_memory_bytes=128, memory_words=4, runtime_bytes=len(code),
-        outer_calldata_bytes=32*key_count,
-        calldata_zero_bytes=z, calldata_nonzero_bytes=nz,
-        target_query_reads=64*r+1, target_operations_per_user=64*r+1,
-        warmup_target_operations_per_user=1, body_target_operations_per_user=64*r,
-        bulk_operations=64*r, unroll_factor=64, expected_counter=r,
-        expected_user_gross_gas=gross, expected_user_charged_gas=charged,
-        expected_user_refund_counter=0, expected_user_refund_applied=0)
-    if structured:
-        assert 'expected_anchor_gas' not in p and 'expected_block_charged_gas' not in p, 'no fake actual Anchor gas'
-        assert type(p['anchor_gas_limit_upper_bound']) is int and p['anchor_gas_limit_upper_bound'] == 1000000
-        assert p['user_transactions_by_block'] == [0, 1] and all(type(x) is int for x in p['user_transactions_by_block'])
-        assert p['block_charged_gas_upper_bounds'] == [1000000, 1000000+charged] and p['header_prefix_remaining_gas'] == [30000000], 'source per-block bounds'
-        expected.update(block_count=2, all_user_transactions=1, all_transactions_including_anchor=3,
-            source_proposal_charged_gas_upper_bound=2000000+charged, source_proposal_envelope_upper_bound=2000000+gross+1000)
-        assert tx['gas_limit'] == gross + 1000 and 2000000+tx['gas_limit'] <= 30000000 and 2000000+charged <= 30000000, 'source proposal envelope/budget'
-        assert len(data) <= 131072
-    else:
-        expected['expected_block_charged_gas'] = 167355+charged
-    for name, value in expected.items():
-        assert type(p[name]) is int and p[name] == value, 'count/gas metadata: ' + name
-    gas = dict(intrinsic_gas=intrinsic, eip7623_floor_gas=floor, eip7623_floor_active=gross < floor,
-        ordinary_opcode_gas=gross-intrinsic-12-cold-warm, memory_expansion_gas=12,
-        cold_sload_gas=cold, warm_sload_gas=warm, cold_sload_count=key_count,
-        warm_sload_count=64*r+1, body_gas_per_repetition=64*105, gross_gas=gross,
-        charged_gas=charged, refund_counter=0, refund_applied=0, runtime_bytes=len(code))
-    actual_gas = p['gas_accounting_per_user']
-    assert set(actual_gas) == set(gas), 'gas accounting field domain'
-    for name, value in gas.items():
-        assert type(actual_gas[name]) is type(value) and actual_gas[name] == value, 'literal gas accounting metadata: ' + name
-    assert result['counts'] == +Counter(program['expected_route_counts']), 'literal opcode route counts'
-    return [result]
+    results = []; routes = Counter()
+    for _ in range(users):
+        result = execute(code, data, tx['gas_limit'], repetitions=p['repetitions'], key_count=key_count, query=query, structured=structured)
+        assert (result['cold_reads'], result['warm_reads'], result['read_events']) == (key_count, 64*p['repetitions']+1, key_count+64*p['repetitions']+1), 'per-transaction cold/warm intent'
+        if not structured:
+            assert 31000000 - 167355 >= tx['gas_limit'] and 167355 + result['gas'] <= 30000000, 'header/block caps'
+        r = p['repetitions']; z = data.count(0); nz = len(data) - z
+        intrinsic = 21000 + 4*z + 16*nz; floor = 21000 + 10*(z + 4*nz)
+        cold = 2100 * key_count; warm = 100 * (64 * r + 1)
+        gross = result['gas']; charged = max(gross, floor)
+        expected = dict(seed_reads=key_count, accessed_unique=key_count, accessed_unique_keys=key_count,
+            expected_persistent_storage_reads=key_count + 1 + 64*r, read_events=key_count + 1 + 64*r,
+            expected_persistent_storage_writes=0, initial_storage_entries=0, initial_state_size=0,
+            aggregate_state_size=0, state_size_per_account=0, expected_initial_storage_entry_count=0,
+            expected_final_storage_entry_count=0, seed_counter_memory_offset=0, counter_memory_offset=64,
+            protected_memory_offset=96, sentinel=SENTINEL, peak_memory_bytes=128, memory_words=4, runtime_bytes=len(code),
+            outer_calldata_bytes=32*key_count,
+            calldata_zero_bytes=z, calldata_nonzero_bytes=nz,
+            target_query_reads=64*r+1, target_operations_per_user=64*r+1,
+            warmup_target_operations_per_user=1, body_target_operations_per_user=64*r,
+            bulk_operations=64*r, unroll_factor=64, expected_counter=r,
+            expected_user_gross_gas=gross, expected_user_charged_gas=charged,
+            expected_user_refund_counter=0, expected_user_refund_applied=0)
+        if structured:
+            assert 'expected_anchor_gas' not in p and 'expected_block_charged_gas' not in p, 'no fake actual Anchor gas'
+            assert type(p['anchor_gas_limit_upper_bound']) is int and p['anchor_gas_limit_upper_bound'] == 1000000
+            assert p['user_transactions_by_block'] == [0, users] and all(type(x) is int for x in p['user_transactions_by_block'])
+            remaining = [30000000-before*charged for before in range(users)]
+            assert p['block_charged_gas_upper_bounds'] == [1000000, 1000000+users*charged] and p['header_prefix_remaining_gas'] == remaining, 'source per-block bounds'
+            assert all(prefix >= tx['gas_limit'] for prefix in remaining), 'each header admission prefix'
+            assert p['expected_user_receipt_statuses'] == [True]*users and all(v is True for v in p['expected_user_receipt_statuses']), 'receipt status intent'
+            expected.update(block_count=2, all_user_transactions=users, all_transactions_including_anchor=users+2, visits_per_account=users,
+                header_gas_limit=31000000, charged_gas_budget=30000000,
+                source_proposal_charged_gas_upper_bound=2000000+users*charged, source_proposal_envelope_upper_bound=2000000+users*(gross+1000))
+            assert tx['gas_limit'] == gross + 1000 and 2000000+users*tx['gas_limit'] <= 30000000 and 2000000+users*charged <= 30000000, 'source proposal envelope/budget'
+            assert len(data) <= 131072
+        else:
+            expected['expected_block_charged_gas'] = 167355+charged
+        for name, value in expected.items():
+            assert type(p[name]) is int and p[name] == value, 'count/gas metadata: ' + name
+        gas = dict(intrinsic_gas=intrinsic, eip7623_floor_gas=floor, eip7623_floor_active=gross < floor,
+            ordinary_opcode_gas=gross-intrinsic-12-cold-warm, memory_expansion_gas=12,
+            cold_sload_gas=cold, warm_sload_gas=warm, cold_sload_count=key_count,
+            warm_sload_count=64*r+1, body_gas_per_repetition=64*105, gross_gas=gross,
+            charged_gas=charged, refund_counter=0, refund_applied=0, runtime_bytes=len(code))
+        actual_gas = p['gas_accounting_per_user']
+        assert set(actual_gas) == set(gas), 'gas accounting field domain'
+        for name, value in gas.items():
+            assert type(actual_gas[name]) is type(value) and actual_gas[name] == value, 'literal gas accounting metadata: ' + name
+        results.append(result); routes.update(result['counts'])
+    assert routes == +Counter(program['expected_route_counts']), 'literal aggregate opcode route counts'
+    return results

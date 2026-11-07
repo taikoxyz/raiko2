@@ -447,6 +447,102 @@ def intent_mutant(row):
 
 
 class StructuredWarmTailTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform.startswith('linux') and os.environ.get('WARM_READ_STRUCTURED_NATIVE_BIN'), 'set WARM_READ_STRUCTURED_NATIVE_BIN for optional constructor check')
+    def test_native_two_user_nonce_schedule(self):
+        # Construction/nonce/receipt evidence only; no current EEA pricing parity claim.
+        m = producer(); from warm_read_catalogs_vm import run_users
+        sys.path.insert(0, str(CASES.parent)); import process_guard
+        root = Path(os.environ['WARM_READ_STRUCTURED_NATIVE_OUTPUT_DIR']); root.mkdir(parents=True, exist_ok=False)
+        binary = Path(os.environ['WARM_READ_STRUCTURED_NATIVE_BIN'])
+        row = m.make_structured_case(raw_key_layout={'L1': 1, 'L3': 0}, key_count=2, repetitions=1, user_count=2)
+        self.assertEqual(len(run_users(row, structured=True)), 2)
+        source = root/'request.json'; source.write_bytes(m.encoded(row['request']))
+        guest, canonical, report_path = [root/name for name in ('input.json', 'input.bin', 'native.json')]
+        command = [str(binary), '--input', str(source), '--output', str(guest), '--output-bincode', str(canonical), '--report', str(report_path), '--execution-profile', 'evm-gas-only']
+        outcome = process_guard.run(command, root, 'native', dict(pss_mib=2048, timeout_seconds=180, output_mib=64, log_mib=2, min_free_mib=576), growing=[guest, canonical, report_path])
+        self.assertEqual(outcome['exit_code'], 0); self.assertIsNone(outcome['failure'])
+        report = json.loads(report_path.read_bytes()); inp = json.loads(guest.read_bytes())
+        self.assertEqual(report['guest_input_sha256'], hashlib.sha256(canonical.read_bytes()).hexdigest())
+        self.assertEqual(report['construction_request_sha256'], hashlib.sha256(source.read_bytes()).hexdigest())
+        self.assertEqual((report['block_count'], report['transaction_count']), (2, 4))
+        self.assertEqual([b['transaction_count'] for b in report['blocks']], [1, 3])
+        self.assertTrue(all(r['success'] for block in report['receipts_by_block'] for r in block))
+        receipts = report['receipts_by_block'][1]; charged = row['parameters']['expected_user_charged_gas']
+        self.assertEqual([r['gas_used'] for r in receipts[1:]], [charged, charged])
+        self.assertEqual(receipts[-1]['cumulative_gas_used'], receipts[0]['gas_used']+2*charged)
+        transactions = inp['witnesses'][1]['block']['body']['transactions'][1:]
+        self.assertEqual([tx['transaction']['Eip1559']['nonce'] for tx in transactions], [0, 1])
+        self.assertEqual([tx['transaction']['Eip1559']['to'] for tx in transactions], row['parameters']['recipient_schedule'])
+        for field in ('observed_route_counts', 'attempted_route_counts'):
+            self.assertEqual(+Counter({k:v for k,v in report[field].items() if k.startswith('opcode:')}), +Counter(row['request']['program']['expected_route_counts']))
+
+    def test_two_user_same_owner_fresh_vm_and_aggregate_routes(self):
+        m = producer(); import warm_read_catalogs_vm as vm
+        for k, r, word in ((1, 0, 0), (2, 1, (1 << 64) - 1), (3, 2, 1), (257, 0, 1)):
+            with self.subTest(k=k, r=r, word=word):
+                one = m.make_structured_case(raw_key_layout={'L1': word, 'L3': 0}, key_count=k, repetitions=r)
+                row = m.make_structured_case(raw_key_layout={'L1': word, 'L3': 0}, key_count=k, repetitions=r, user_count=2)
+                p = row['parameters']; program = row['request']['program']
+                self.assertEqual(program['code_hex'], one['request']['program']['code_hex'])
+                self.assertEqual(program['input_hex'], one['request']['program']['input_hex'])
+                self.assertEqual(program['transactions'], dict(kind='call', counts_by_block=[0, 2], gas_limit=p['transaction_gas_limit']))
+                with patch.object(vm, 'execute', wraps=vm.execute) as execution:
+                    results = vm.run_users(row, structured=True)
+                self.assertEqual(execution.call_count, 2); self.assertEqual(len(results), 2)
+                self.assertIsNot(results[0], results[1]); self.assertIsNot(results[0]['counts'], results[1]['counts'])
+                total = Counter()
+                for result in results:
+                    self.assertEqual((result['cold_reads'], result['warm_reads'], result['read_events']), (k, 64*r+1, k+64*r+1))
+                    self.assertEqual((result['stack'], result['counter'], result['peak_memory_bytes']), ([], r, 128))
+                    self.assertEqual(result['gas'], p['expected_user_gross_gas']); total.update(result['counts'])
+                self.assertEqual(total, +Counter(program['expected_route_counts']))
+                self.assertEqual(p['recipient_schedule'], [vm.PRIMARY, vm.PRIMARY])
+                self.assertEqual((p['all_user_transactions'], p['all_transactions_including_anchor'], p['visits_per_account']), (2, 4, 2))
+                self.assertEqual(p['transaction_nonce'], 0)  # Initial constructor nonce, not signed-TX authentication.
+                self.assertEqual(p['expected_user_receipt_statuses'], [True, True])
+                charged = p['expected_user_charged_gas']; envelope = p['transaction_gas_limit']
+                self.assertEqual(p['source_proposal_charged_gas_upper_bound'], 2000000+2*charged)
+                self.assertEqual(p['source_proposal_envelope_upper_bound'], 2000000+2*envelope)
+                self.assertEqual(p['header_prefix_remaining_gas'], [30000000, 30000000-charged])
+                self.assertTrue(all(remaining >= envelope for remaining in p['header_prefix_remaining_gas']))
+                self.assertIn('-u2-r', row['sample_id']); self.assertIn('-u2-r0', row['baseline_sample_id'])
+                self.assertNotEqual(row['corpus_id'], one['corpus_id'])
+                for key in ('seed_reads', 'read_events', 'target_query_reads', 'gas_accounting_per_user'):
+                    self.assertEqual(p[key], one['parameters'][key])
+
+    def test_user_count_domain_caps_and_default_byte_compatibility(self):
+        m = producer(); args = dict(raw_key_layout={'L1': 1, 'L3': 0}, key_count=2, repetitions=1)
+        default = m.make_structured_case(**args); explicit = m.make_structured_case(**args, user_count=1)
+        self.assertEqual(m.encoded(default), m.encoded(explicit))
+        self.assertEqual(hashlib.sha256(m.encoded(default)).hexdigest(), '15dde029475b59799a7b1bb4b136603280667d475b72792d6d08fb74f74ef4d1')
+        self.assertEqual(hashlib.sha256(m.encoded(default['request'])).hexdigest(), '36059981c3135b1073f050d4816815ca17ea50b575710b8924c595e7ad16c8ae')
+        with patch.object(m, '_runtime_core', side_effect=AssertionError('runtime emitted')):
+            for count in (0, 3, True, False, 1.0, 2.0, '2', None):
+                with self.subTest(count=count), self.assertRaises(ValueError): m.make_structured_case(**args, user_count=count)
+        with patch.object(m.original, 'make_case', side_effect=AssertionError('request constructed')):
+            with patch.object(m, 'BLOCK_BUDGET', 100000):
+                with self.assertRaises(ValueError): m.make_structured_case(**args, user_count=2)
+            # A later header admission fails even when source whole-budget caps permit it.
+            gas = default['parameters']['expected_user_charged_gas']; envelope = default['parameters']['transaction_gas_limit']
+            with patch.object(m, 'HEADER_GAS_LIMIT', 1000000+gas+envelope-1):
+                with self.assertRaises(ValueError): m.make_structured_case(**args, user_count=2)
+
+    def test_two_user_metadata_and_route_mutants(self):
+        m = producer(); from warm_read_catalogs_vm import run_users
+        row = m.make_structured_case(raw_key_layout={'L1': 1, 'L3': 0}, key_count=2, repetitions=1, user_count=2)
+        for field, value in [('all_user_transactions', True), ('all_user_transactions', 3), ('visits_per_account', 1),
+                             ('recipient_schedule', ['0x'+'66'*20]), ('expected_user_receipt_statuses', [True]),
+                             ('source_proposal_charged_gas_upper_bound', row['parameters']['expected_user_charged_gas']+2000000),
+                             ('header_prefix_remaining_gas', [30000000])]:
+            bad = copy.deepcopy(row); bad['parameters'][field] = value
+            with self.subTest(field=field), self.assertRaises(AssertionError): run_users(bad, structured=True)
+        for schedule in ([1, 1], [0, True], [0, 1]):
+            bad = copy.deepcopy(row); bad['request']['program']['transactions']['counts_by_block'] = schedule
+            with self.subTest(schedule=schedule), self.assertRaises(AssertionError): run_users(bad, structured=True)
+        bad = copy.deepcopy(row)
+        bad['request']['program']['expected_route_counts'] = {key: value//2 for key, value in bad['request']['program']['expected_route_counts'].items()}
+        with self.assertRaises(AssertionError): run_users(bad, structured=True)
+
     def test_tiny_structured_literal_bytes_and_direct_cache_parity(self):
         m = producer()
         from warm_read_catalogs_vm import run_users, execute

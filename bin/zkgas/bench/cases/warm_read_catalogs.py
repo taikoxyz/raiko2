@@ -191,19 +191,21 @@ def _make_case(keys, catalog_id, level, *, custom, repetitions=None, key_count=K
             range_rule=f'{key_count} ordered unique cold reads followed by retained-query warmup and64-site warm zero reads per batch; counters/sentinel/query/empty stack guarded.'), request=request)
 
 
-def _program_request(code, data, counts, envelope, *, prefixed):
-    request = original.make_case('call', 'stop', count=1, gas_limit=envelope)['request']; program = request['program']
-    routes = dict.fromkeys(program['expected_route_counts'], 0); routes.update(counts)
+def _program_request(code, data, counts, envelope, *, prefixed, user_count=1):
+    if not prefixed and user_count != 1: raise ValueError('multiple users require structured prefix')
+    request = original.make_case('call', 'stop', count=user_count, gas_limit=envelope)['request']; program = request['program']
+    routes = dict.fromkeys(program['expected_route_counts'], 0); routes.update({key: value*user_count for key, value in counts.items()})
     program.update(code_hex='0x' + code.hex(), input_hex='0x' + data.hex(), expected_route_counts=routes)
     if prefixed:
         program['block_count'] = 2
         del program['transactions']['count_per_block']
-        program['transactions']['counts_by_block'] = [0, 1]
+        program['transactions']['counts_by_block'] = [0, user_count]
     return request
 
 
-def make_structured_case(*, raw_key_layout, key_count=4096, repetitions=512):
+def make_structured_case(*, raw_key_layout, key_count=4096, repetitions=512, user_count=1):
     """Explicit absent-zero two-block warm-tail recipe, with fixed last-key query."""
+    users = original.integer(user_count, 1, 2, 'user_count')
     if type(raw_key_layout) is not dict or set(raw_key_layout) != {'L1', 'L3'}:
         raise ValueError('raw_key_layout requires exactly L1 and L3')
     word = original.integer(raw_key_layout['L1'], 0, (1 << 64) - 1, 'L1')
@@ -215,14 +217,16 @@ def make_structured_case(*, raw_key_layout, key_count=4096, repetitions=512):
     query = int(keys[-1], 16); code, counts = _runtime_core(r, key_count=k, query=query)
     z = data.count(0); nz = len(data) - z
     gas = _gas_for_counts(code, counts, r, k, z, nz); envelope = gas['gross_gas'] + 1000
+    remaining = [HEADER_GAS_LIMIT - 1_000_000 - before*gas['charged_gas'] for before in range(users)]
     if (envelope > TRANSACTION_GAS_CAP or envelope > EIP7825_GAS_CAP or len(code) >= 24576
-            or len(data) > 131072 or 2_000_000 + gas['charged_gas'] > BLOCK_BUDGET
-            or 2_000_000 + envelope > BLOCK_BUDGET or HEADER_GAS_LIMIT - 1_000_000 < envelope):
+            or len(data) > 131072 or 2_000_000 + users*gas['charged_gas'] > BLOCK_BUDGET
+            or 2_000_000 + users*envelope > BLOCK_BUDGET or any(prefix < envelope for prefix in remaining)):
         raise ValueError('structured recipe exceeds source gas/size admission bounds')
-    request = _program_request(code, data, counts, envelope, prefixed=True)
+    request = _program_request(code, data, counts, envelope, prefixed=True, user_count=users)
     data_sha = digest(data); prefix = f'warm-read-structured-k{k}-{data_sha}'
+    suffix = '-u2' if users == 2 else ''; prefix += suffix
     return dict(sample_id=f'{prefix}-r{r}', baseline_sample_id=f'{prefix}-r0',
-        family='warm-read-catalogs-structured', corpus_id='unzen-structured-warm-tail-v1',
+        family='warm-read-catalogs-structured', corpus_id='unzen-structured-warm-tail-v1'+suffix,
         role='control' if r == 0 else 'candidate', data_role='opened_structured_engineering_recipe',
         holdout_only=False, actuals_used_for_fitting=False,
         completion_gate='Fresh independent canonical, byte VM, signature/world/witness and quote gates before actual.',
@@ -241,18 +245,18 @@ def make_structured_case(*, raw_key_layout, key_count=4096, repetitions=512):
             primary_code_owner_count=1, account_count=1, seed_counter_memory_offset=0,
             counter_memory_offset=64, protected_memory_offset=96, expected_counter=r, sentinel=SENTINEL,
             peak_memory_bytes=128, memory_words=4, outer_calldata_bytes=len(data),
-            calldata_zero_bytes=z, calldata_nonzero_bytes=nz, all_user_transactions=1,
-            user_transactions_by_block=[0, 1], all_transactions_including_anchor=3, block_count=2,
-            visits_per_account=1, transaction_kind='call', transaction_nonce=0, primary_code_owner=PRIMARY,
-            recipient_schedule=[PRIMARY], transaction_gas_limit=envelope, transaction_envelope_reserve=1000,
+            calldata_zero_bytes=z, calldata_nonzero_bytes=nz, all_user_transactions=users,
+            user_transactions_by_block=[0, users], all_transactions_including_anchor=users+2, block_count=2,
+            visits_per_account=users, transaction_kind='call', transaction_nonce=0, primary_code_owner=PRIMARY,
+            recipient_schedule=[PRIMARY]*users, transaction_gas_limit=envelope, transaction_envelope_reserve=1000,
             header_gas_limit=HEADER_GAS_LIMIT, charged_gas_budget=BLOCK_BUDGET,
-            anchor_gas_limit_upper_bound=1_000_000, block_charged_gas_upper_bounds=[1_000_000, 1_000_000+gas['charged_gas']],
-            source_proposal_charged_gas_upper_bound=2_000_000+gas['charged_gas'],
-            source_proposal_envelope_upper_bound=2_000_000+envelope,
-            header_prefix_remaining_gas=[30_000_000], gas_accounting_per_user=gas,
+            anchor_gas_limit_upper_bound=1_000_000, block_charged_gas_upper_bounds=[1_000_000, 1_000_000+users*gas['charged_gas']],
+            source_proposal_charged_gas_upper_bound=2_000_000+users*gas['charged_gas'],
+            source_proposal_envelope_upper_bound=2_000_000+users*envelope,
+            header_prefix_remaining_gas=remaining, gas_accounting_per_user=gas,
             expected_user_gross_gas=gas['gross_gas'], expected_user_charged_gas=gas['charged_gas'],
             expected_user_refund_counter=0, expected_user_refund_applied=0,
-            expected_terminal='STOP', expected_user_success=True, expected_user_receipt_statuses=[True],
+            expected_terminal='STOP', expected_user_success=True, expected_user_receipt_statuses=[True]*users,
             expected_anchor_success=True, expected_exceptional_instructions=0, execution_profile='evm-gas-only',
             preload_created_accounts_or_code=False, shared_runtime=True, runtime_bytes=len(code), runtime_sha256=digest(code),
             initial_storage_rule='Default primary absent persistent slots read zero; no per-key MPT witness padding.',

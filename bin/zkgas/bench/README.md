@@ -3225,6 +3225,9 @@ from cases.warm_read_catalogs import make_structured_case
 row = make_structured_case(
     raw_key_layout={'L1': 0, 'L3': 0}, key_count=3, repetitions=2)
 request = row['request']
+# Opt in to two identical calls to the same owner in the second block:
+two_users = make_structured_case(
+    raw_key_layout={'L1': 0, 'L3': 0}, key_count=2, repetitions=1, user_count=2)
 ```
 
 The required layout has exactly strict U64 L1 and strict integer L3=0. K is1..4096,
@@ -3232,28 +3235,52 @@ R is0..1000000 subject to gas admission; bool/float values are rejected. Keys ar
 ascending `(i<<24)|(L1<<64)` for i1..K, with no phase key. Query is always the last
 key. All slots are initially absent and read0; there are K distinct cold seeds,
 one guarded warmup and64warm SLOADs per R batch, with zero persistent writes.
-R0 is an engineering control. This is a genuine two-block schedule `[0,1]`, not
-a single-block result relabelled as a measured prefix. Both real Anchor receipts
-and later canonical data must be verified independently.
+R0 is an engineering control. Strict integer `user_count` accepts only1or2;
+default and explicit1 retain the complete prior row/request bytes and IDs. The
+genuine two-block schedule is `[0,U]`, with the same owner, code and calldata for
+each user. U2 adds `-u2` before `-rN` in sample/baseline IDs and to the corpus ID.
+No legacy catalog/CLI behavior or key-count cap is widened. Both real Anchor
+receipts and later canonical data must be verified independently.
+
+Key/read/opcode-intent and `gas_accounting_per_user` fields describe **each user**.
+`all_user_transactions` is the aggregate multiplier; schedules, recipients, visits
+and expected user receipt statuses describe all users. Unique owner/key count is
+still1/K, not U/U*K. Request opcode routes sum all users. `transaction_nonce=0`
+is the initial constructor nonce: signed user nonces must be0/1 for U2. The byte
+VM executes twice with fresh stack/memory/storage/warmness, returns two genuine
+results and reconciles aggregate routes. It does not authenticate signatures or
+model physical PlainStorage cache performance; later native/canonical gates do.
 
 Calldata gas counts actual zero/nonzero bytes. Intrinsic is21000+4z+16nz;
 EIP7623 floor is21000+10(z+4nz), charged=max(gross,floor). Envelope is gross+1000,
 with15M/EIP7825/code/calldata limits checked before request construction. Each
-Anchor has a conservative1M source bound. Proposal charged/envelope bounds add2M;
-actual Anchor/proposal gas remains unknown until native receipts. No3.6B node
+Anchor has a conservative1M source bound. Proposal charged/envelope bounds are
+`2M+U*charged` and `2M+U*envelope`. Each later header prefix separately checks
+`31M-1M-previous_charged_upper >= envelope` before constructing a request;
+the final sum alone is insufficient. Actual Anchor/proposal gas remains unknown
+until native receipts. No3.6B node
 admission rule is imposed: this is evm-gas-only price-ratio stress, with literal
 node, full quote and actual PGU reported separately by a later finite protocol.
 
-A separate prospective fixed geometry is K4096/R512 **batches**,32769warm query
-reads plus4096cold reads. Source scalar arithmetic gives reference user13087931gas,
+For the single-user K4096/R512 geometry,512 **batches** plus the initial warmup
+give32769warm query reads plus4096cold reads. Source scalar arithmetic gives reference user13087931gas,
 any U64 L1 user≤13481147/envelope≤13482147, and two-Anchor source envelope
-≤15482147. These are unmeasured bounds, not a formal request or complete quote.
+≤15482147. These are source bounds, not actual receipts or a complete quote.
 The shared low3LEbytes and late query do not prove the deepest occupied placement.
-Choosing THIS new reference's qualified ownG as a future L1 would conditionally
+Choosing THIS new reference's qualified ownG as L1 would conditionally
 make H0 independent of S, but actual ownG/H requires fresh same-map evidence;
 generic PlainStorage G is not Journal-target qualification. Incomplete local
 observation may remain UNKNOWN while complete canonical PGU is still valid.
 There is no seed/query/count/R search, new runner, price change or global bound.
+
+For the separate U2/K1024/R1536 composition, source scalar bounds are27649814
+charged/27651814envelope at L1zero, and27846422/27848422 at maximal U64 L1.
+These are arithmetic only, not a generated request, measured PGU or30M maximum.
+The optional `StructuredWarmTailTests.test_native_two_user_nonce_schedule` uses
+`WARM_READ_STRUCTURED_NATIVE_BIN` and a fresh `WARM_READ_STRUCTURED_NATIVE_OUTPUT_DIR`
+to check one tiny K2/R1 constructor case under existing process guards. It checks
+two actual user nonces/receipts/routes; a historical binary does not establish
+current EEA collector pricing parity. It invokes no quote/SP1 or guest build.
 
 ### Absent-account journal catalogs
 

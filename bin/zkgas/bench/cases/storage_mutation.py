@@ -259,6 +259,41 @@ def make_sized_update_case(*, users, mutations_per_user, raw_key_layout=None):
         scope='Current model02223227 includes Account-cache128PGU/unit. This helper creates no formal panel, chooses no reference/successor layout and makes no workload or per-map attribution claim. Measure literal node block quotes and full proposal separately from actual SP1 if later authorized.')
 
 
+def make_prefixed_update_case(*, users, mutations_per_user, raw_key_layout=None):
+    """One real Anchor-only block then the existing initialized-storage CALL recipe.
+
+    This is an engineering composition, not a seed selection or sampling protocol.
+    The prefix's minimal witness/allocation shape and actual own G need independent
+    qualification. All prefix gas and proving work remain part of the proposal.
+    """
+    row = make_sized_update_case(users=users, mutations_per_user=mutations_per_user,
+                                 raw_key_layout=raw_key_layout)
+    program = row['request']['program']; p = row['parameters']
+    program['block_count'] = 2
+    del program['transactions']['count_per_block']
+    program['transactions']['counts_by_block'] = [0, users]
+    # constructor::anchor_tx signs every Anchor with gas_limit=1_000_000.
+    # Its actual charged gas differs across blocks and comes only from receipts.
+    anchor_bound = 1_000_000
+    charged = p['expected_user_charged_gas']; envelope = p['transaction_gas_limit']
+    remaining = [HEADER_GAS_LIMIT - anchor_bound - j * charged for j in range(users)]
+    if anchor_bound + users * charged > BLOCK_BUDGET or any(gas < envelope for gas in remaining):
+        raise ValueError('prefixed recipe exceeds conservative Anchor admission bound')
+    for key in ['user_transactions_per_block', 'expected_anchor_gas', 'expected_block_charged_gas']:
+        p.pop(key)
+    p.update(block_count=2, user_transactions_by_block=[0, users],
+             all_transactions_including_anchor=users + 2,
+             anchor_gas_limit_upper_bound=anchor_bound,
+             block_charged_gas_upper_bounds=[anchor_bound, anchor_bound + users * charged],
+             header_prefix_remaining_gas=remaining)
+    identity = digest(encoded(dict(parameters=p, request=row['request'])))
+    row.update(sample_id=f'storage-prefixed-update-{identity}',
+               family='prefixed-storage-update', identity_sha256=identity,
+               data_role='prefixed_update_engineering_recipe',
+               scope='Two genuine blocks, first Anchor-only. Current model02223227 includes Account-cache128PGU/unit. No claim of allocation equivalence, stable G or realized workload pressure; no reference/successor or formal sampling panel is created.')
+    return row
+
+
 def prepare(output: Path, *, model_id=MODEL):
     if type(model_id) is not str or re.fullmatch('[0-9a-f]{64}', model_id) is None:
         raise ValueError('model_id must be lowercase SHA256')

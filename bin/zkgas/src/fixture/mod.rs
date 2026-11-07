@@ -244,17 +244,17 @@ pub fn run(args: &FixtureArgs) -> Result<serde_json::Value> {
         request.program.prestate_contracts.as_deref(),
         args.execution_profile,
     )?;
-    let user_count = request
-        .program
-        .transactions
-        .as_ref()
-        .map_or(1, |t| t.count_per_block);
+    let schedule = transactions::user_schedule(
+        request.program.transactions.as_ref(),
+        request.program.block_count,
+    )?;
     ensure!(
-        built.receipts.len() == request.program.block_count
+        built.receipts.len() == schedule.len()
             && built
                 .receipts
                 .iter()
-                .all(|receipts| receipts.len() == user_count + 1
+                .zip(&schedule)
+                .all(|(receipts, range)| receipts.len() == range.len() + 1
                     && receipts[0].success
                     && receipts[1..]
                         .iter()
@@ -307,7 +307,7 @@ pub fn run(args: &FixtureArgs) -> Result<serde_json::Value> {
         "chain_id":built.input.taiko.chain_spec.chain_id,"fork_profile":"controlled_mainnet_post_unzen",
         "anchor_artifact_sha256":sha256_hex(include_bytes!("../../../../scripts/regression/shasta/Anchor.json")),
         "block_count":request.program.block_count,"blocks":blocks,"proposal_id":built.input.taiko.proposal_id,
-        "transaction_count":request.program.block_count*(user_count+1),"expected_user_success":request.expected_user_success,
+        "transaction_count":built.receipts.iter().map(Vec::len).sum::<usize>(),"expected_user_success":request.expected_user_success,
         "expected_route_counts":request.program.expected_route_counts,"observed_route_counts":observed,
         "attempted_route_counts":attempted,"terminal_counts":terminals,"observations_by_block":built.observations,
         "receipts_by_block":built.receipts,"storage_state":built.storage,

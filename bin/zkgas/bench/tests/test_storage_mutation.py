@@ -405,6 +405,38 @@ class SizedStorageUpdateTests(unittest.TestCase):
         self.assertLessEqual(p['expected_block_charged_gas'], 30_000_000)
         return results
 
+    def test_prefixed_update_reuses_storage_kernel_with_real_empty_first_block(self):
+        m = self.load()
+        for users, n in [(1, 1), (2, 2), (3, 0)]:
+            layout = {'L1': 7, 'L3': 11}
+            row = m.make_prefixed_update_case(users=users, mutations_per_user=n, raw_key_layout=layout)
+            old = m.make_sized_update_case(users=users, mutations_per_user=n, raw_key_layout=layout)
+            program = row['request']['program']; p = row['parameters']
+            self.assertEqual(program['block_count'], 2)
+            self.assertEqual(program['transactions']['counts_by_block'], [0, users])
+            self.assertNotIn('count_per_block', program['transactions'])
+            self.assertEqual(program['transactions']['recipients'], old['request']['program']['transactions']['recipients'])
+            self.assertEqual(program['prestate_contracts'], old['request']['program']['prestate_contracts'])
+            self.assertEqual(program['expected_route_counts'], old['request']['program']['expected_route_counts'])
+            self.assertEqual(p['all_transactions_including_anchor'], users + 2)
+            self.assertEqual(p['user_transactions_by_block'], [0, users])
+            self.assertEqual(p['anchor_gas_limit_upper_bound'], 1_000_000)
+            self.assertEqual(p['block_charged_gas_upper_bounds'], [1_000_000, 1_000_000 + users * p['expected_user_charged_gas']])
+            self.assertNotIn('expected_anchor_gas', p)
+            self.assertNotIn('expected_block_charged_gas', p)
+            self.assertNotEqual(row['sample_id'], old['sample_id'])
+            contract = program['prestate_contracts'][0]
+            state = {int(k, 16): int(v, 16) for k, v in contract['initial_storage'].items()}
+            code = bytes.fromhex(contract['code_hex'][2:]); routes = Counter()
+            for j in range(users):
+                result = execute(code, state, p['transaction_gas_limit'])
+                self.assertEqual(result['terminal'], 0)
+                self.assertEqual(result['reads'][0], (0, 1 + j * n, True))
+                self.assertEqual(result['refund'], 0)
+                routes.update(result['counts'])
+            self.assertEqual(state[0], 1 + users * n)
+            self.assertEqual(routes, +Counter(program['expected_route_counts']))
+
     def test_sized_update_strict_shape_and_compact_layout(self):
         m = self.load()
         for users, n in [(True, 1), (0, 1), (65, 1), (1.0, 1), (1, True), (1, -1), (1, 65), (1, 1.0)]:

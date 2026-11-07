@@ -2184,3 +2184,185 @@ fn per_transaction_access_lists_native_rejects_conflicts_and_illegal_shapes_with
         absent_outputs(&dir);
     }
 }
+
+#[test]
+fn nonuniform_plain_call_blocks_keep_real_anchors_and_global_user_nonces() {
+    let mut value = request("0x5f5ff3", json!({"opcode:0xf3":3}));
+    value["program"]["block_count"] = json!(3);
+    value["program"]["transactions"] =
+        json!({"kind":"call", "counts_by_block":[0,2,1], "gas_limit":100000});
+    let (output, dir) = export_with_profile(&value, "evm-gas-only");
+    success(&output);
+    let native = report(&dir);
+    let guest: GuestInput =
+        bincode::deserialize(&fs::read(dir.path().join("input.bin")).unwrap()).unwrap();
+    assert_eq!(native["transaction_count"], 6);
+    assert!(native["transactions"].get("count_per_block").is_none());
+    assert_eq!(native["transactions"]["counts_by_block"], json!([0, 2, 1]));
+    let mut next_nonce = 0;
+    for (index, count) in [0, 2, 1].into_iter().enumerate() {
+        let block = &guest.witnesses[index].block;
+        assert_eq!(block.body.transactions.len(), count + 1);
+        assert_eq!(block.body.transactions[0].nonce(), index as u64);
+        for tx in &block.body.transactions[1..] {
+            assert_eq!(tx.nonce(), next_nonce);
+            next_nonce += 1;
+        }
+        assert_eq!(
+            native["receipts_by_block"][index].as_array().unwrap().len(),
+            count + 1
+        );
+        assert_eq!(
+            native["transactions"]["blocks"][index]["users"]
+                .as_array()
+                .unwrap()
+                .len(),
+            count
+        );
+        if index > 0 {
+            assert_eq!(
+                block.header.parent_hash,
+                guest.witnesses[index - 1].block.header.hash_slow()
+            );
+        }
+    }
+    assert_eq!(next_nonce, 3);
+}
+
+#[test]
+fn nonuniform_initialized_calls_keep_proposal_initial_final_and_global_recipients() {
+    for counts in [vec![0, 1, 2], vec![1, 0, 2, 0]] {
+        let mut value = initialized_fanout_request("0x5f546001015f5500", "opcode:0x55");
+        value["program"]["block_count"] = json!(counts.len());
+        value["program"]["transactions"]
+            .as_object_mut()
+            .unwrap()
+            .remove("count_per_block");
+        value["program"]["transactions"]["counts_by_block"] = json!(counts);
+        let (output, dir) = export_with_profile(&value, "evm-gas-only");
+        success(&output);
+        let native = report(&dir);
+        let guest: GuestInput =
+            bincode::deserialize(&fs::read(dir.path().join("input.bin")).unwrap()).unwrap();
+        let initialized = &native["prestate_contracts"]["initialized_storage"];
+        assert_eq!(
+            initialized[0]["initial_storage_root"],
+            independent_storage_root(&[(0, 1), (9, 11)])
+        );
+        assert_eq!(
+            initialized[0]["final_storage_root"],
+            independent_storage_root(&[(0, 3), (9, 11)])
+        );
+        assert_eq!(
+            initialized[1]["initial_storage_root"],
+            independent_storage_root(&[(0, 5), (9, 13)])
+        );
+        assert_eq!(
+            initialized[1]["final_storage_root"],
+            independent_storage_root(&[(0, 6), (9, 13)])
+        );
+        assert_eq!(native["prestate_contracts"]["witnessed_account_count"], 2);
+        assert!(
+            native["prestate_contracts"]["loaded_storage_target_count"]
+                .as_u64()
+                .unwrap()
+                >= 2
+        );
+        let mut global = 0;
+        for (index, count) in counts.into_iter().enumerate() {
+            let txs = &guest.witnesses[index].block.body.transactions;
+            assert_eq!(txs.len(), count + 1);
+            for tx in &txs[1..] {
+                assert_eq!(tx.nonce(), global as u64);
+                assert_eq!(
+                    serde_json::to_value(tx.to().unwrap()).unwrap(),
+                    value["program"]["transactions"]["recipients"][global]
+                );
+                global += 1;
+            }
+            assert!(
+                native["receipts_by_block"][index]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|r| r["success"] == true)
+            );
+        }
+        assert_eq!(global, 3);
+        let minimum_node_sum = guest
+            .witnesses
+            .iter()
+            .map(|w| w.witness.state.len() + w.witness.state_indices.len())
+            .sum::<usize>();
+        assert_eq!(
+            native["prestate_contracts"]["minimized_witness_node_count"],
+            json!(minimum_node_sum)
+        );
+        assert!(
+            native["prestate_contracts"]["full_witness_node_count"]
+                .as_u64()
+                .unwrap()
+                >= minimum_node_sum as u64
+        );
+        // Prefix code is chosen by its actual database reads, not configured storage runtime.
+        if value["program"]["transactions"]["counts_by_block"][0] == 0 {
+            let runtime = hex::decode("5f546001015f5500").unwrap();
+            assert!(
+                guest.witnesses[0]
+                    .witness
+                    .codes
+                    .iter()
+                    .all(|code| code.as_ref() != runtime.as_slice())
+            );
+        }
+    }
+}
+
+#[test]
+fn nonuniform_invalid_descriptors_publish_no_final_artifacts() {
+    let base = json!({"schema_version":1,"program":{"code_hex":"0x00","block_count":2,
+        "expected_route_counts":{"opcode:0x00":1},
+        "transactions":{"kind":"call","counts_by_block":[0,1],"gas_limit":100000}}});
+    let mut variants = Vec::new();
+    for counts in [
+        json!([]),
+        json!([0, 0]),
+        json!([1]),
+        json!([0, 2049]),
+        json!([0, true]),
+        Value::Null,
+    ] {
+        let mut value = base.clone();
+        value["program"]["transactions"]["counts_by_block"] = counts;
+        variants.push(value);
+    }
+    for field in ["count_per_block", "access_lists"] {
+        let mut value = base.clone();
+        value["program"]["transactions"][field] = if field == "count_per_block" {
+            json!(1)
+        } else {
+            json!([])
+        };
+        variants.push(value);
+    }
+    let mut missing = base.clone();
+    missing["program"]["transactions"]
+        .as_object_mut()
+        .unwrap()
+        .remove("counts_by_block");
+    variants.push(missing);
+    let mut create = base.clone();
+    create["program"]["transactions"]["kind"] = json!("create");
+    variants.push(create);
+    let mut shared = base.clone();
+    shared["program"]["access_list"] = json!({"pattern":"repeated_address","count":1});
+    variants.push(shared);
+    let mut recipients = base.clone();
+    recipients["program"]["transactions"]["recipients"] = json!([]);
+    variants.push(recipients);
+    for value in variants {
+        let (output, dir) = export_with_profile(&value, "evm-gas-only");
+        assert!(!output.status.success());
+        absent_outputs(&dir);
+    }
+}

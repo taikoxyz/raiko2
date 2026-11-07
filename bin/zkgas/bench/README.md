@@ -4142,3 +4142,41 @@ An optional closed CacheAccount profile can supply local own parameters even wit
 an empty expected-candidate vector; missing/capped evidence and whole placement,
 TX identity and population remain UNKNOWN. Canonical PGU validation stays separate
 from this optional diagnostic.
+
+### Genuine empty-user prefix blocks
+
+`storage_mutation.make_prefixed_update_case(users=..., mutations_per_user=...,
+raw_key_layout=None)` reuses the initialized-storage update kernel with a real
+Anchor-only first block, followed by the requested CALL users. It is a small
+engineering recipe, not a sampling catalog or seed-selection loop:
+
+```sh
+"$PYTHON_BIN" -S -B - <<'PY'
+from pathlib import Path
+import sys
+sys.path.insert(0, str(Path('bin/zkgas/bench/cases')))
+from storage_mutation import make_prefixed_update_case
+row = make_prefixed_update_case(users=2, mutations_per_user=2)
+assert row['request']['program']['transactions']['counts_by_block'] == [0, 2]
+PY
+```
+
+The fixture interface accepts exactly one of uniform `count_per_block` or
+`counts_by_block`; the latter must match `block_count`, contain0..2048 users per
+block and include at least one user overall. It supports plain CALL, optionally
+with initialized `prestate_contracts`; CREATE, access lists, authorizations and
+`storage_state` combinations remain outside this mode. Flat `recipients` and
+sender nonces follow global user order, including across empty blocks. Omitting
+the entire transaction descriptor retains the legacy one-user-per-block behavior.
+
+For initialized-prestate fixtures, every block gets its own actual-read minimal
+witness and verified replay. Ordinary CALL fixtures retain full witnesses.
+`prestate_contracts` report reads are proposal-wide unions; its full/minimal proof
+node counts sum the respective per-block witnesses, rather than counting unique
+nodes in the shared proposal pool. Initial storage refers to proposal entry and
+final storage to proposal exit. Each block retains its own roots and receipts.
+The recipe uses the constructor's1M per-Anchor gas-limit upper bound for admission;
+actual Anchor gas must come from each receipt, not a repeated single-block value.
+All prefix costs remain included in node/full/actual comparisons. Minimal first
+witnesses do not by themselves establish allocation equivalence or a stable G;
+those require a separately declared experiment and fresh observations.

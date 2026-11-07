@@ -5,7 +5,7 @@ use alloy_primitives::{Address, B256, U256, keccak256};
 use anyhow::{Result, ensure};
 use reth_ethereum_primitives::TransactionSigned;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, ops::Range};
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -18,7 +18,18 @@ pub enum TransactionKind {
 #[serde(deny_unknown_fields)]
 pub struct ProgramTransactions {
     pub kind: TransactionKind,
-    pub count_per_block: usize,
+    #[serde(
+        default,
+        deserialize_with = "present_count",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub count_per_block: Option<usize>,
+    #[serde(
+        default,
+        deserialize_with = "present_counts",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub counts_by_block: Option<Vec<usize>>,
     pub gas_limit: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_runtime_hex: Option<String>,
@@ -32,7 +43,10 @@ pub struct ProgramTransactions {
 #[derive(Debug, Serialize)]
 pub struct TransactionsReport {
     pub kind: TransactionKind,
-    pub count_per_block: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub count_per_block: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub counts_by_block: Option<Vec<usize>>,
     pub gas_limit: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expected_runtime_hex: Option<String>,
@@ -61,7 +75,77 @@ pub struct TransactionAccountPostState {
     pub code_hash: B256,
 }
 
+// Present null is invalid, preserving the legacy required-count scalar contract.
+fn present_count<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<usize>, D::Error> {
+    usize::deserialize(d).map(Some)
+}
+fn present_counts<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Vec<usize>>, D::Error> {
+    Vec::<usize>::deserialize(d).map(Some)
+}
+
+/// The implicit legacy envelope remains exactly one user per block.
+pub(super) fn user_schedule(
+    transactions: Option<&ProgramTransactions>,
+    block_count: usize,
+) -> Result<Vec<Range<usize>>> {
+    ensure!(
+        (1..=32).contains(&block_count),
+        "transactions block count exceeds bounds"
+    );
+    match transactions {
+        Some(t) => t.schedule(block_count),
+        None => Ok((0..block_count).map(|i| i..i + 1).collect()),
+    }
+}
+
 impl ProgramTransactions {
+    /// One checked prefix schedule for signing, block slices, global nonces and reporting.
+    pub(super) fn schedule(&self, block_count: usize) -> Result<Vec<Range<usize>>> {
+        ensure!(
+            (1..=32).contains(&block_count),
+            "transactions block count exceeds bounds"
+        );
+        let counts = match (&self.count_per_block, &self.counts_by_block) {
+            (Some(n), None) => {
+                ensure!(
+                    (1..=2048).contains(n),
+                    "transactions count_per_block must be in 1..=2048"
+                );
+                vec![*n; block_count]
+            }
+            (None, Some(counts)) => {
+                ensure!(
+                    counts.len() == block_count,
+                    "counts_by_block length must equal block_count"
+                );
+                ensure!(
+                    counts.iter().all(|n| *n <= 2048),
+                    "counts_by_block entries must be in 0..=2048"
+                );
+                counts.clone()
+            }
+            _ => anyhow::bail!(
+                "transactions requires exactly one of count_per_block or counts_by_block"
+            ),
+        };
+        let mut end = 0usize;
+        let ranges = counts
+            .into_iter()
+            .map(|n| {
+                let start = end;
+                end = start
+                    .checked_add(n)
+                    .ok_or_else(|| anyhow::anyhow!("transaction count overflow"))?;
+                Ok(start..end)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        ensure!(
+            end > 0,
+            "transactions proposal must contain at least one user"
+        );
+        Ok(ranges)
+    }
+
     /// One source of truth for signing and committed-envelope/poststate checks.
     pub(super) fn call_recipient(&self, index: usize) -> Result<Address> {
         ensure!(
@@ -106,18 +190,19 @@ impl ProgramTransactions {
         authorizations: bool,
         access_list: bool,
     ) -> Result<()> {
+        self.schedule(block_count)?;
         ensure!(
-            (1..=2048).contains(&self.count_per_block),
-            "transactions count_per_block must be in 1..=2048"
+            self.counts_by_block.is_none()
+                || (self.kind == TransactionKind::Call
+                    && !storage
+                    && !authorizations
+                    && !access_list
+                    && self.access_lists.is_none()),
+            "counts_by_block requires plain CALL without storage_state, access lists or authorizations"
         );
         ensure!(
             (21_000..=15_000_000).contains(&self.gas_limit),
             "transactions gas_limit must be in 21000..=15000000"
-        );
-        ensure!(
-            (1..=32).contains(&block_count)
-                && self.count_per_block.checked_mul(block_count).is_some(),
-            "transactions block count exceeds bounds"
         );
         ensure!(
             !authorizations,
@@ -131,7 +216,7 @@ impl ProgramTransactions {
             !storage
                 || (self.kind == TransactionKind::Call
                     && block_count == 1
-                    && self.count_per_block <= 8),
+                    && self.count_per_block.is_some_and(|n| n <= 8)),
             "storage_state transactions require CALL, one block and 1..=8 users"
         );
         if let Some(lists) = &self.access_lists {
@@ -147,7 +232,7 @@ impl ProgramTransactions {
                 "per-transaction and shared access lists are exclusive"
             );
             ensure!(
-                lists.len() == self.count_per_block,
+                Some(lists.len()) == self.count_per_block,
                 "access_lists length must equal count_per_block"
             );
             let mut items = 0_usize;
@@ -196,20 +281,19 @@ impl ProgramTransactions {
     }
     pub(super) fn before_block(
         &self,
-        block_index: usize,
+        user_range: Range<usize>,
         sender: Address,
         accounts: &BTreeMap<B256, TrieAccount>,
     ) -> Result<()> {
-        let nonce = u64::try_from(block_index * self.count_per_block)?;
+        let nonce = u64::try_from(user_range.start)?;
         ensure!(
             accounts.get(&keccak256(sender)).map(|a| a.nonce) == Some(nonce),
             "unexpected transaction sender prestate nonce"
         );
         if self.kind == TransactionKind::Create {
-            for offset in 0..self.count_per_block {
+            for position in user_range {
                 ensure!(
-                    !accounts
-                        .contains_key(&keccak256(sender.create(nonce + u64::try_from(offset)?))),
+                    !accounts.contains_key(&keccak256(sender.create(u64::try_from(position)?))),
                     "create address must be absent before its block"
                 );
             }
@@ -219,12 +303,13 @@ impl ProgramTransactions {
     pub(super) fn after_block(
         &self,
         block_index: usize,
+        user_range: Range<usize>,
         sender: Address,
         transactions: &[TransactionSigned],
         accounts: &BTreeMap<B256, TrieAccount>,
     ) -> Result<TransactionBlockReport> {
         ensure!(
-            transactions.len() == self.count_per_block,
+            transactions.len() == user_range.len(),
             "unexpected committed user count"
         );
         let expected_hash = self
@@ -233,11 +318,15 @@ impl ProgramTransactions {
             .map(super::program_bytes)
             .transpose()?
             .map(keccak256);
-        let mut users = Vec::with_capacity(self.count_per_block);
+        let mut users = Vec::with_capacity(user_range.len());
         for (index, tx) in transactions.iter().enumerate() {
-            let nonce = u64::try_from(block_index * self.count_per_block + index)?;
+            let position = user_range
+                .start
+                .checked_add(index)
+                .ok_or_else(|| anyhow::anyhow!("user position overflow"))?;
+            let nonce = u64::try_from(position)?;
             let expected_to = (self.kind == TransactionKind::Call)
-                .then(|| self.call_recipient(index))
+                .then(|| self.call_recipient(position))
                 .transpose()?;
             ensure!(
                 tx.nonce() == nonce && tx.to() == expected_to && tx.gas_limit() == self.gas_limit,
@@ -277,7 +366,7 @@ impl ProgramTransactions {
         }
         ensure!(
             accounts.get(&keccak256(sender)).map(|a| a.nonce)
-                == Some(u64::try_from((block_index + 1) * self.count_per_block)?),
+                == Some(u64::try_from(user_range.end)?),
             "unexpected transaction sender poststate nonce"
         );
         Ok(TransactionBlockReport { block_index, users })
@@ -287,6 +376,98 @@ impl ProgramTransactions {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nonuniform_call_schedule_preserves_empty_blocks_and_global_positions() {
+        let descriptor: ProgramTransactions = serde_json::from_value(serde_json::json!({
+            "kind":"call", "counts_by_block":[0,2,0,1], "gas_limit":100000
+        }))
+        .expect("nonuniform CALL descriptor must parse");
+        descriptor
+            .validate(&[0], &[], 4, false, false, false)
+            .unwrap();
+        assert_eq!(
+            descriptor.schedule(4).unwrap(),
+            vec![0..0, 0..2, 2..2, 2..3]
+        );
+        let uniform: ProgramTransactions = serde_json::from_value(serde_json::json!({
+            "kind":"call", "count_per_block":2, "gas_limit":100000
+        }))
+        .unwrap();
+        assert_eq!(uniform.schedule(3).unwrap(), vec![0..2, 2..4, 4..6]);
+        assert!(uniform.schedule(0).is_err());
+        assert!(uniform.schedule(33).is_err());
+        let maximum: ProgramTransactions = serde_json::from_value(serde_json::json!({
+            "kind":"call", "counts_by_block":vec![2048;32], "gas_limit":100000
+        }))
+        .unwrap();
+        assert_eq!(maximum.schedule(32).unwrap().last().unwrap().end, 65536);
+        let duplicate =
+            r#"{"kind":"call","counts_by_block":[1],"counts_by_block":[1],"gas_limit":100000}"#;
+        assert!(serde_json::from_str::<ProgramTransactions>(duplicate).is_err());
+    }
+
+    #[test]
+    fn schedule_requires_exactly_one_strict_bounded_positive_total_mode() {
+        let base = serde_json::json!({"kind":"call", "gas_limit":100000});
+        for (uniform, counts, blocks) in [
+            (None, None, 2),
+            (Some(1), Some(serde_json::json!([0, 1])), 2),
+            (Some(0), None, 1),
+            (Some(2049), None, 1),
+            (None, Some(serde_json::json!([])), 1),
+            (None, Some(serde_json::json!([0, 0])), 2),
+            (None, Some(serde_json::json!([1])), 2),
+            (None, Some(serde_json::json!([0, 2049])), 2),
+        ] {
+            let mut value = base.clone();
+            if let Some(n) = uniform {
+                value["count_per_block"] = serde_json::json!(n);
+            }
+            if let Some(v) = counts {
+                value["counts_by_block"] = v;
+            }
+            let descriptor: ProgramTransactions = serde_json::from_value(value).unwrap();
+            assert!(
+                descriptor
+                    .validate(&[0], &[], blocks, false, false, false)
+                    .is_err()
+            );
+        }
+        for field in ["count_per_block", "counts_by_block"] {
+            for bad in [
+                serde_json::Value::Null,
+                serde_json::json!(true),
+                serde_json::json!(1.5),
+                serde_json::json!(-1),
+            ] {
+                let mut value = base.clone();
+                value[field] = bad;
+                assert!(serde_json::from_value::<ProgramTransactions>(value).is_err());
+            }
+        }
+        let mut value = base;
+        value["counts_by_block"] = serde_json::json!([0, 1]);
+        let descriptor: ProgramTransactions = serde_json::from_value(value.clone()).unwrap();
+        for (storage, auth, al) in [
+            (true, false, false),
+            (false, true, false),
+            (false, false, true),
+        ] {
+            assert!(
+                descriptor
+                    .validate(&[0], &[], 2, storage, auth, al)
+                    .is_err()
+            );
+        }
+        value["kind"] = serde_json::json!("create");
+        let descriptor: ProgramTransactions = serde_json::from_value(value).unwrap();
+        assert!(
+            descriptor
+                .validate(&[0], &[], 2, false, false, false)
+                .is_err()
+        );
+    }
 
     #[test]
     fn per_transaction_access_list_descriptor_parses_and_validates() {

@@ -113,12 +113,14 @@ pub(super) fn validate(
     if let Some(recipients) = recipients {
         let t = transactions.expect("recipients have a transaction descriptor");
         ensure!(
-            t.kind == TransactionKind::Call && block_count == 1 && contracts.is_some(),
-            "transactions recipients requires one block, CALL and prestate_contracts"
+            t.kind == TransactionKind::Call
+                && (block_count == 1 || t.counts_by_block.is_some())
+                && contracts.is_some(),
+            "transactions recipients requires one block or counts_by_block, CALL and prestate_contracts"
         );
         ensure!(
-            recipients.len() == t.count_per_block,
-            "transactions recipients length must equal count_per_block"
+            recipients.len() == t.schedule(block_count)?.last().map_or(0, |range| range.end),
+            "transactions recipients length must equal total user count"
         );
     }
     let Some(contracts) = contracts else {
@@ -129,8 +131,9 @@ pub(super) fn validate(
         "prestate_contracts requires1..=512 contracts"
     );
     ensure!(
-        block_count == 1 && transactions.is_some_and(|t| t.kind == TransactionKind::Call),
-        "prestate_contracts requires one block and explicit CALL transactions"
+        (block_count == 1 || transactions.is_some_and(|t| t.counts_by_block.is_some()))
+            && transactions.is_some_and(|t| t.kind == TransactionKind::Call),
+        "prestate_contracts requires one block or counts_by_block and explicit CALL transactions"
     );
     ensure!(
         !storage && !access_list && !authorizations,
@@ -205,7 +208,7 @@ pub(super) struct InitializedStorageReport {
     pub address: Address,
     pub initial_storage_root: B256,
     pub initial_storage_entry_count: usize,
-    /// None means the contract is absent in committed block-final state.
+    /// None means the contract is absent in committed proposal-final state.
     pub final_storage_root: Option<B256>,
     pub final_storage_entry_count: usize,
 }
@@ -276,6 +279,48 @@ impl PrestateReport {
             minimized_witness_node_count: minimized,
             witness_policy: "native_database_reads_multiproof_and_hash_deduplicated_code",
         })
+    }
+    /// Proposal-wide union of actual reads. Proof counts are sums of each block's
+    /// full/minimal witness nodes, not unique nodes in the shared proposal pool.
+    pub(super) fn observe_witness(
+        &mut self,
+        contracts: &[PrestateContract],
+        reads: &NativeReads,
+        full: usize,
+        minimized: usize,
+    ) -> Result<()> {
+        let mut configured = BTreeSet::new();
+        let mut witnessed_accounts = 0;
+        for contract in contracts {
+            let (address, code) = contract.decoded()?;
+            configured.insert(keccak256(code));
+            witnessed_accounts += usize::from(reads.accounts.contains(&address));
+        }
+        self.witnessed_account_count = witnessed_accounts;
+        self.witnessed_unique_code_count = reads
+            .codes
+            .keys()
+            .filter(|hash| configured.contains(*hash))
+            .count();
+        self.witnessed_code_bytes = reads
+            .codes
+            .iter()
+            .filter(|(hash, _)| configured.contains(*hash))
+            .map(|(_, code)| code.len())
+            .sum();
+        self.loaded_account_target_count = reads.accounts.len();
+        self.loaded_storage_target_count = reads.storage.values().map(BTreeSet::len).sum();
+        self.total_witness_unique_code_count = reads.codes.len();
+        self.total_witness_code_bytes = reads.codes.values().map(|code| code.len()).sum();
+        self.full_witness_node_count = self
+            .full_witness_node_count
+            .checked_add(full)
+            .ok_or_else(|| anyhow::anyhow!("full witness node sum overflow"))?;
+        self.minimized_witness_node_count = self
+            .minimized_witness_node_count
+            .checked_add(minimized)
+            .ok_or_else(|| anyhow::anyhow!("minimal witness node sum overflow"))?;
+        Ok(())
     }
     /// Called only after witness() refreshes storage roots and the block root agrees.
     pub(super) fn finish_storage(&mut self, state: &ControlledTrieState) {

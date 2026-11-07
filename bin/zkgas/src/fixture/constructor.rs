@@ -2,10 +2,10 @@
 use super::{
     access_list::{AccessListReport, ProgramAccessList},
     authorization::{AuthorizationReport, ProgramAuthorizations},
-    observer::{FixtureExecutor, OpcodeObservation},
+    observer::{FixtureExecutor, NativeReads, OpcodeObservation},
     prestate::{PrestateContract, PrestateReport},
     storage::{ProgramStorageState, ProgramStorageStateReport},
-    transactions::{ProgramTransactions, TransactionKind, TransactionsReport},
+    transactions::{ProgramTransactions, TransactionKind, TransactionsReport, user_schedule},
 };
 use alethia_reth_block::config::{TaikoEvmConfig, TaikoNextBlockEnvAttributes};
 use alloy_consensus::{
@@ -543,7 +543,8 @@ pub(super) fn build_program(
         };
     let runtime_chain_spec = builtin_taiko_chain_spec(OVERHEAD_CHAIN_ID)?;
     let evm_config = TaikoEvmConfig::new(runtime_chain_spec.clone());
-    let users_per_block = transactions.map_or(1, |t| t.count_per_block);
+    let schedule = user_schedule(transactions, block_count)?;
+    let uniform_users_per_block = transactions.and_then(|t| t.count_per_block).unwrap_or(1);
     let candidates = candidate_transactions(
         &Bytes::copy_from_slice(
             if transactions.is_some_and(|t| t.kind == TransactionKind::Create) {
@@ -552,9 +553,7 @@ pub(super) fn build_program(
                 input
             },
         ),
-        block_count
-            .checked_mul(users_per_block)
-            .ok_or_else(|| anyhow::anyhow!("candidate count overflow"))?,
+        schedule.last().map_or(0, |range| range.end),
         authorizations,
         access_list,
         transactions,
@@ -668,7 +667,11 @@ pub(super) fn build_program(
     let mut authorization_blocks = Vec::with_capacity(block_count);
     let mut access_list_blocks = Vec::with_capacity(block_count);
     let mut transaction_blocks = Vec::with_capacity(block_count);
-    let mut prestate_report = None;
+    let mut proposal_reads = NativeReads::default();
+    // Capture proposal initial storage once, before even the Anchor-only prefix.
+    let mut prestate_report = prestate_contracts
+        .map(|contracts| PrestateReport::new(contracts, &proposal_reads, &controlled_state, 0, 0))
+        .transpose()?;
 
     for index in 0..block_count {
         let block_number = OVERHEAD_BLOCK_NUMBER + u64::try_from(index)?;
@@ -693,11 +696,12 @@ pub(super) fn build_program(
             min_base_fee_for_chain(OVERHEAD_CHAIN_ID),
         )
         .ok_or_else(|| anyhow::anyhow!("controlled parent base fee is missing"))?;
-        let user_transactions =
-            candidates[index * users_per_block..(index + 1) * users_per_block].to_vec();
+        let user_range = schedule[index].clone();
+        let users_per_block = user_range.len();
+        let user_transactions = candidates[user_range.clone()].to_vec();
         if let Some(t) = transactions {
             t.before_block(
-                index,
+                user_range.clone(),
                 controlled_signer.address(),
                 &controlled_state.accounts,
             )?;
@@ -757,13 +761,21 @@ pub(super) fn build_program(
                 root == prestate_root,
                 "native-read proof root differs from full prestate"
             );
-            prestate_report = Some(PrestateReport::new(
-                contracts,
-                &executor.reads,
-                &controlled_state,
-                full_witness_node_count,
-                nodes.len(),
-            )?);
+            proposal_reads
+                .accounts
+                .extend(executor.reads.accounts.iter().copied());
+            for (address, slots) in &executor.reads.storage {
+                proposal_reads
+                    .storage
+                    .entry(*address)
+                    .or_default()
+                    .extend(slots);
+            }
+            proposal_reads.codes.extend(executor.reads.codes.clone());
+            prestate_report
+                .as_mut()
+                .expect("prestate report initialized")
+                .observe_witness(contracts, &proposal_reads, state_nodes.len(), nodes.len())?;
             witness.state = nodes;
             witness.codes = executor.reads.codes.values().cloned().collect();
             let mut replay_executor = FixtureExecutor {
@@ -845,6 +857,7 @@ pub(super) fn build_program(
         if let Some(t) = transactions {
             transaction_blocks.push(t.after_block(
                 index,
+                user_range.clone(),
                 controlled_signer.address(),
                 &outcome.filtered_block.body().transactions[1..],
                 &controlled_state.accounts,
@@ -904,7 +917,9 @@ pub(super) fn build_program(
                 block.header.state_root,
             );
         }
-        if let Some(report) = &mut prestate_report {
+        if index + 1 == block_count
+            && let Some(report) = &mut prestate_report
+        {
             report.finish_storage(&controlled_state);
         }
         if index + 1 < block_count {
@@ -1015,6 +1030,7 @@ pub(super) fn build_program(
         transactions: transactions.map(|t| TransactionsReport {
             kind: t.kind,
             count_per_block: t.count_per_block,
+            counts_by_block: t.counts_by_block.clone(),
             gas_limit: t.gas_limit,
             expected_runtime_hex: t.expected_runtime_hex.clone(),
             blocks: transaction_blocks,
@@ -1030,7 +1046,7 @@ pub(super) fn build_program(
             Some(AccessListReport {
                 pattern: None,
                 count_per_block: None,
-                transactions_per_block: Some(users_per_block),
+                transactions_per_block: Some(uniform_users_per_block),
                 blocks: access_list_blocks,
                 mode: Some("per_transaction"),
             })
@@ -1038,7 +1054,8 @@ pub(super) fn build_program(
             access_list.map(|a| AccessListReport {
                 pattern: Some(a.pattern),
                 count_per_block: Some(a.count),
-                transactions_per_block: (users_per_block > 1).then_some(users_per_block),
+                transactions_per_block: (uniform_users_per_block > 1)
+                    .then_some(uniform_users_per_block),
                 blocks: access_list_blocks,
                 mode: None,
             })
@@ -1194,7 +1211,7 @@ mod tests {
                 json!(["0x0000000000000000000000000000000000010001"]),
                 "declared",
             ),
-            ("count_per_block", json!(2049), "length"),
+            ("count_per_block", json!(2049), "count_per_block"),
         ] {
             let mut bad = base.clone();
             bad["program"]["transactions"][field] = value;
@@ -1279,7 +1296,7 @@ mod tests {
             },
         );
         let report = descriptor
-            .after_block(0, sender, &candidates, &state)
+            .after_block(0, 0..3, sender, &candidates, &state)
             .unwrap();
         assert_eq!(
             report.users[0].poststate.as_ref().unwrap().balance,
@@ -1299,7 +1316,11 @@ mod tests {
         .unwrap();
         let wrong =
             candidate_transactions(&Bytes::new(), 3, None, None, Some(&wrong_descriptor)).unwrap();
-        assert!(descriptor.after_block(0, sender, &wrong, &state).is_err());
+        assert!(
+            descriptor
+                .after_block(0, 0..3, sender, &wrong, &state)
+                .is_err()
+        );
         assert!(descriptor.call_recipient(3).is_err());
     }
     #[test]

@@ -171,10 +171,95 @@ Its9,672,438-byte archive hashes to
 Independent genuine remote download and README/CI integrity verification pass;
 published earlier revisions are unchanged. The repaired quotes above are separate
 consumer evidence and do not overwrite that fixture's original model binding.
-Long common-byte-prefix keys and absent-zero reads are separate prospective
-boundary questions, currently source analysis only.
+The following fixed-layout follow-up records the common-byte-prefix boundary.
+Absent-zero reads have source-level coverage only; bulk zero/proof-shape actuals
+remain a separate low-priority TODO.
 
 The new quote executable is`401a7e3d…`, built from actual Raiko`200ccc8e` dirty /
 Reth`5d6e281` dirty. Its production source is unchanged by the separately reviewed
 test-only domain/golden updates. Later commits retain this original build label.
 The cached host checks do not constitute a new guest or SDK build.
+
+
+## Fixed-layout follow-up under unchanged EEA
+
+Three separate, prospectively fixed panels use the same genuine two-block
+construction: Anchor-only prefix, then Anchor and89 users each reading128
+initialized body slots and writing only its phase. Each reference has word0;
+each sole successor uses that reference's qualified process-shared G. Each
+panel is closed after those two inputs, with no measurement retry or further
+count, seed, layout or observation-window adaptation.
+
+For raw body keys `(i << ordinal_shift) | (word << 64)`, all six inputs consume
+28,062,336 charged EVM gas:167,355 and27,894,981 by block. With11,393 physical
+keys including the phase, the geometry is:
+
+| Layout | Common leading LE bytes | Largest raw low32 group M | C |
+| --- | ---: | ---: | ---: |
+|shift240|30|11,393|11,393|
+|shift0|0|1|1,425|
+|shift24, the32−8 bit boundary|3|45|1,464|
+
+This geometry is the pricing proxy, not a measurement of a complete physical
+hash-table population, probe count or comparison work.
+
+| Layout/input | Actual SP1 PGU | Literal node PGU | Full proposal PGU |
+| --- | ---: | ---: | ---: |
+|shift240 reference|534,935,515|27,788,992,523|28,169,446,953|
+|shift240 successor|13,774,743,290|27,788,992,523|28,168,681,753|
+|shift0 reference|535,182,243|3,731,822,603|4,112,318,681|
+|shift0 successor|3,158,837,743|3,731,822,603|4,112,413,505|
+|shift24 reference|535,323,577|3,827,450,123|4,208,110,769|
+|shift24 successor|4,219,423,570|3,827,450,123|4,207,560,689|
+
+The long-prefix and dispersed successors are covered. The three-byte-prefix
+successor is **underquoted**: actual minus literal node is391,973,447PGU, and
+actual minus full proposal is11,862,881PGU. Actual/node is1.1024x. At this
+measured28.062M-gas point, the node deficit remains below the agreed high
+priority screen of strictly more than2BPGU at no more than30M actual charged
+gas. Keep this deliberate layout residual as a low-priority TODO and hold
+EEA/J+2X/384 unchanged. This classification is a complexity-versus-cost choice,
+not a proof that another input cannot exceed that screen.
+
+Across this storage/account follow-up only, the checkpoint now has92 unique
+inputs/9,654blocks and39 numeric actuals:34 node quotes and38 full quotes cover
+actual. Five positive node gaps remain; the largest is391,973,447PGU. One full
+quote is below actual by11,862,881PGU. No measured node gap exceeds2B. The three
+unmeasured controls and50 historical proposals/9,600blocks without current
+numeric actuals remain excluded from accuracy claims. The latter still provide
+only price sensitivity; this count does not summarize the whole opcode campaign.
+
+All six new inputs passed independent canonical signatures, state/root, VM,
+witness/Kona and quote checks, followed by independent actual/resource review.
+Each successor independently qualified245 retained declared-key-member local
+chains with matching ownG and fullH0. This does not qualify semantic owner,
+transaction, physical target-body count, whole-map placement or isolated-map
+PGU. In the shift0 reference, six earlier key aliases are retained by the
+original minimum-member selector; its251 members are not251 target-body calls.
+The generic G qualification is for that one process/input; a later input must
+qualify its own observed G again.
+
+The shift24 actual's raw gas is80,590,990,195, normalized by `*10//191` to
+4,219,423,570PGU. Its complete canonical execution has4,977,089,097instructions;
+the400M optional observation is incomplete and sample-capped. The whole
+measurement takes120.078seconds and peaks at4,578,564,096 process-tree PSS bytes,
+within the fixed6GiB/1,200-second guard. Independent original-host readback finds
+the exact producer and four owned shared-memory objects absent, with no signals
+or unlink operations. The raw report SHA256 is
+`cf2560972717784e8f009ad71ebe8691992d9821c8c9572623ea9354e3f8a246`.
+
+The permanent readonly recipe now strictly accepts shifts0/24/48/240; default48
+and existing0/240 requests remain byte-identical. The focused module passes33
+tests with one existing native-binary skip. Independent literal VM verification
+covers42 tiny recipes/342transactions,21 manual ordinal boundaries and207
+failure guards. No guest, SDK, ELF, observer or pricing implementation was
+rebuilt or changed for these fixed-layout follow-ups. Quote401a, native1368 and
+b76/SDK6.3 retain the artifact scopes and dirty-build labels above.
+
+The [long-prefix fixture](https://github.com/taikoxyz/raiko2-atlas/releases/tag/fixture-unzen-prefixed-storage-long-read-v1)
+and [dispersed fixture](https://github.com/taikoxyz/raiko2-atlas/releases/tag/fixture-unzen-dispersed-storage-read-v1)
+retain immutable original data and documented integrity checks. The shift24
+pair is retained locally pending the next data-only Atlas fixture checkpoint;
+it is not yet represented by either published asset. Existing release assets
+are not rewritten. Bulk-zero/proof-shape and custom/preseeded/failed-backend
+paths remain explicit TODOs rather than inferred coverage.

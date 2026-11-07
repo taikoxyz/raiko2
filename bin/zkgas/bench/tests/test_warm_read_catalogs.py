@@ -446,4 +446,107 @@ def intent_mutant(row):
     return result
 
 
+class StructuredWarmTailTests(unittest.TestCase):
+    def test_tiny_structured_literal_bytes_and_direct_cache_parity(self):
+        m = producer()
+        from warm_read_catalogs_vm import run_users, execute
+        for k in (1, 2, 3, 16, 256, 257):
+            for r in (0, 1, 2):
+                for word in (0, 1, (1 << 64) - 1):
+                    with self.subTest(k=k, r=r, word=word):
+                        row = m.make_structured_case(raw_key_layout={'L1': word, 'L3': 0}, key_count=k, repetitions=r)
+                        p = row['parameters']; program = row['request']['program']
+                        data = bytes.fromhex(program['input_hex'][2:]); code = bytes.fromhex(program['code_hex'][2:])
+                        keys = [(i << 24) | (word << 64) for i in range(1, k + 1)]
+                        self.assertEqual(data, b''.join(v.to_bytes(32, 'big') for v in keys))
+                        self.assertEqual(p['query_key'], f'0x{keys[-1]:064x}')
+                        self.assertEqual(program['block_count'], 2)
+                        self.assertEqual(program['transactions'], dict(kind='call', counts_by_block=[0, 1], gas_limit=p['transaction_gas_limit']))
+                        self.assertNotIn('expected_anchor_gas', p); self.assertNotIn('expected_block_charged_gas', p)
+                        result = run_users(row, structured=True)[0]
+                        args = (code, data, p['transaction_gas_limit'])
+                        direct = execute(*args, repetitions=r, key_count=k, query=keys[-1], structured=True, cache=False)
+                        self.assertEqual(result, direct)
+                        self.assertEqual((result['cold_reads'], result['warm_reads']), (k, 64 * r + 1))
+                        self.assertEqual(result['stack'], []); self.assertEqual(result['peak_memory_bytes'], 128)
+                        z = data.count(0); nz = len(data) - z
+                        gas = p['gas_accounting_per_user']
+                        self.assertEqual(gas['intrinsic_gas'], 21000 + 4*z + 16*nz)
+                        self.assertEqual(gas['eip7623_floor_gas'], 21000 + 10*(z + 4*nz))
+                        self.assertEqual(p['transaction_gas_limit'], result['gas'] + 1000)
+                        self.assertEqual(p['source_proposal_charged_gas_upper_bound'], 2000000 + max(result['gas'], gas['eip7623_floor_gas']))
+                        self.assertEqual(p['source_proposal_envelope_upper_bound'], 2000000 + p['transaction_gas_limit'])
+
+    def test_core_query_is_explicit_and_legacy_is_strict(self):
+        m = producer()
+        from warm_read_catalogs_vm import decode, structure
+        code, _ = m._runtime_core(2, key_count=3, query=3 << 24)
+        structure(list(decode(code)), 2, key_count=3, query=3 << 24)
+        with self.assertRaises(AssertionError): structure(list(decode(code)), 2, key_count=3)
+        for k in (1025, 4096, True):
+            with self.assertRaises(ValueError): m._runtime(0, key_count=k)
+        for query in (-1, 1 << 256, True, 1.0):
+            with self.assertRaises(ValueError): m._runtime_core(0, key_count=1, query=query)
+
+    def test_structured_factory_does_not_search_or_relabel_legacy_rows(self):
+        m = producer()
+        with patch.object(m, 'full_repetitions', side_effect=AssertionError('legacy R search')), \
+             patch.object(m, '_make_case', side_effect=AssertionError('legacy row rendering')):
+            row = m.make_structured_case(raw_key_layout={'L1': 0, 'L3': 0}, key_count=2, repetitions=1)
+        self.assertEqual(row['request']['program']['transactions']['counts_by_block'], [0, 1])
+        self.assertNotIn('full_repetitions', row['parameters'])
+
+    def test_strict_structured_inputs_reject_before_request(self):
+        m = producer()
+        with patch.object(m.original, 'make_case', side_effect=AssertionError('request constructed')):
+            for layout in (None, [], {}, {'L1': 0}, {'L1': 0, 'L3': 0, 'shift': 24},
+                           {'L1': True, 'L3': 0}, {'L1': -1, 'L3': 0}, {'L1': 1 << 64, 'L3': 0},
+                           {'L1': 1.0, 'L3': 0}, {'L1': 0, 'L3': True}, {'L1': 0, 'L3': 1}):
+                with self.subTest(layout=layout), self.assertRaises(ValueError):
+                    m.make_structured_case(raw_key_layout=layout, key_count=2, repetitions=1)
+            for k in (0, 4097, True, 1.0):
+                with self.subTest(k=k), self.assertRaises(ValueError):
+                    m.make_structured_case(raw_key_layout={'L1': 0, 'L3': 0}, key_count=k, repetitions=0)
+            for r in (-1, True, 1.0, m.MAX_REPETITIONS + 1, m.MAX_REPETITIONS):
+                with self.subTest(r=r), self.assertRaises(ValueError):
+                    m.make_structured_case(raw_key_layout={'L1': 0, 'L3': 0}, key_count=1, repetitions=r)
+
+    def test_structured_mutants_and_legacy_oracle_do_not_accept_new_mode(self):
+        m = producer(); from warm_read_catalogs_vm import run_users, decode
+        row = m.make_structured_case(raw_key_layout={'L1': 1, 'L3': 0}, key_count=3, repetitions=2)
+        with self.assertRaises(AssertionError): run_users(row)
+        for field, value in [('query_key', '0x'+'00'*32), ('calldata_zero_bytes', 0), ('expected_user_charged_gas', 1),
+                             ('source_proposal_charged_gas_upper_bound', 0), ('block_count', 1), ('sentinel', 0), ('counter_memory_offset', 0)]:
+            bad = copy.deepcopy(row); bad['parameters'][field] = value
+            with self.subTest(field=field), self.assertRaises(AssertionError): run_users(bad, structured=True)
+        for mode in ('reorder', 'duplicate', 'short', 'schedule', 'bool-schedule', 'query-code', 'sentinel-code', 'first-seed-code'):
+            bad = copy.deepcopy(row); program = bad['request']['program']; data = bytes.fromhex(program['input_hex'][2:]); code = bytearray.fromhex(program['code_hex'][2:])
+            if mode == 'reorder': data = data[32:64] + data[:32] + data[64:]
+            elif mode == 'duplicate': data = data[:32] + data[:32] + data[64:]
+            elif mode == 'short': data = data[:-1]
+            elif mode == 'schedule': program['transactions']['counts_by_block'] = [1, 0]
+            elif mode == 'bool-schedule': program['transactions']['counts_by_block'] = [False, True]
+            else:
+                if mode == 'query-code': at = next(at for at, op, value in decode(code) if op == 0x7f and value == (3<<24)|(1<<64))
+                elif mode == 'sentinel-code': at = next(at for at, op, value in decode(code) if value == 0xa55a)
+                else: at = next(at for at, op, value in decode(code) if op == 0x54); code[at] = 0x50; at = None
+                if at is not None: code[at + 1] ^= 1
+                program['code_hex'] = '0x' + code.hex(); bad['parameters']['runtime_sha256'] = hashlib.sha256(code).hexdigest()
+            program['input_hex'] = '0x' + data.hex()
+            with self.subTest(mode=mode), self.assertRaises(AssertionError): run_users(bad, structured=True)
+
+    def test_formal_geometry_scalar_only(self):
+        # No keyset, runtime or row is emitted at K4096/R512.
+        k = 4096; r = 512; ordinary = 569079; nz_ordinal = 7921
+        def gas(nz):
+            z = 32*k - nz
+            intrinsic = 21000 + 4*z + 16*nz; floor = 21000 + 10*(z + 4*nz)
+            gross = intrinsic + ordinary + 12 + 2100*k + 100*(64*r + 1)
+            return max(gross, floor)
+        self.assertEqual(gas(nz_ordinal), 13087931)
+        self.assertEqual(gas(nz_ordinal + 8*k), 13481147)
+        self.assertEqual(2000000 + gas(nz_ordinal + 8*k) + 1000, 15482147)
+        self.assertEqual((k + 7*16 + 7)//8, 526)
+
+
 if __name__ == '__main__': unittest.main()

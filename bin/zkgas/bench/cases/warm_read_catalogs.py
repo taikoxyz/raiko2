@@ -69,8 +69,16 @@ def _catalog(catalog, *, key_count=KEY_COUNT):
 
 
 def _runtime(repetitions, *, key_count=KEY_COUNT):
-    """Keys are ONLY calldata; fixed-width code depends on K and R."""
-    _key_count(key_count); original.integer(repetitions, 0, MAX_REPETITIONS, 'repetitions'); asm = _Factory()
+    """Legacy catalog domain and fixed query remain unchanged."""
+    _key_count(key_count)
+    return _runtime_core(repetitions, key_count=key_count, query=QUERY)
+
+
+def _runtime_core(repetitions, *, key_count, query):
+    """One emitter for legacy catalogs and explicit structured warm-tail rows."""
+    original.integer(key_count, 1, 4096, 'key_count')
+    original.integer(query, 0, (1 << 256) - 1, 'query')
+    original.integer(repetitions, 0, MAX_REPETITIONS, 'repetitions'); asm = _Factory()
     def store(offset, value): asm.push(value); asm.push(offset); asm.op(0x52)
     def load(offset, times=1): asm.push(offset, times=times); asm.op(0x51, times)
     def guard(value, times=1): asm.push(value, 32, times); asm.op(0x14, times); mutation._require(asm, times)
@@ -85,7 +93,7 @@ def _runtime(repetitions, *, key_count=KEY_COUNT):
     for _ in range(UNROLL): asm.op(0x80, repetitions); asm.op(0x54, repetitions); asm.op(0x50, repetitions)
     load(64, repetitions); asm.push(1, times=repetitions); asm.op(1, repetitions); asm.push(64, times=repetitions); asm.op(0x52, repetitions)
     asm.target('loop', repetitions); asm.op(0x56, repetitions)
-    asm.label('done'); asm.op(0x80); guard(QUERY); asm.op(0x50)
+    asm.label('done'); asm.op(0x80); guard(query); asm.op(0x50)
     for offset, value in ((0, key_count), (64, repetitions), (96, SENTINEL)): load(offset); guard(value)
     asm.op(0); asm.label('failure', 0); asm.op(0xfe, 0)
     return asm.finish(), asm.counts
@@ -93,11 +101,15 @@ def _runtime(repetitions, *, key_count=KEY_COUNT):
 
 def gas_accounting(repetitions, *, key_count=KEY_COUNT):
     code, counts = _runtime(repetitions, key_count=key_count)
+    return _gas_for_counts(code, counts, repetitions, key_count, 24 * key_count, 8 * key_count)
+
+
+def _gas_for_counts(code, counts, repetitions, key_count, zero_bytes, nonzero_bytes):
     costs = {0: 0, 1: 3, 0x14: 3, 0x15: 3, 0x1b: 3, 0x35: 3, 0x36: 2, 0x50: 2,
         0x51: 3, 0x52: 3, 0x54: 0, 0x56: 8, 0x57: 10, 0x5b: 1, 0x80: 3, 0xfe: 0}
     ordinary = sum(n * (3 if 0x60 <= (op := int(key[-2:], 16)) <= 0x7f else costs[op]) for key, n in counts.items())
     cold = key_count * 2100; warm = (64 * repetitions + 1) * 100
-    intrinsic = 21000 + 224 * key_count; floor = 21000 + 560 * key_count
+    intrinsic = 21000 + 4 * zero_bytes + 16 * nonzero_bytes; floor = 21000 + 10 * (zero_bytes + 4 * nonzero_bytes)
     gross = intrinsic + ordinary + 12 + cold + warm
     return dict(intrinsic_gas=intrinsic, eip7623_floor_gas=floor, eip7623_floor_active=gross < floor,
         ordinary_opcode_gas=ordinary, memory_expansion_gas=12, cold_sload_gas=cold, warm_sload_gas=warm,
@@ -144,9 +156,7 @@ def _make_case(keys, catalog_id, level, *, custom, repetitions=None, key_count=K
     gas = gas_accounting(r, key_count=key_count)
     envelope = gas_accounting(maximum, key_count=key_count)['gross_gas'] + 1000; code, counts = _runtime(r, key_count=key_count)
     data = b''.join(bytes.fromhex(k[2:]) for k in keys); data_sha = digest(data)
-    request = original.make_case('call', 'stop', count=1, gas_limit=envelope)['request']; program = request['program']
-    routes = dict.fromkeys(program['expected_route_counts'], 0); routes.update(counts)
-    program.update(code_hex='0x' + code.hex(), input_hex='0x' + data.hex(), expected_route_counts=routes)
+    request = _program_request(code, data, counts, envelope, prefixed=False)
     prefix = f'warm-read-{catalog_id}' + (f'-k{key_count}' if key_count != KEY_COUNT else ''); block_gas = ANCHOR_GAS + gas['charged_gas']
     key_rule = ({'high_tail_rule': f'low192 bits zero; all eight high64 bytes nonzero;{key_count} unique; fixed query last'}
         if all(int(key, 16) & ((1 << 192) - 1) == 0 for key in keys)
@@ -181,6 +191,75 @@ def _make_case(keys, catalog_id, level, *, custom, repetitions=None, key_count=K
             range_rule=f'{key_count} ordered unique cold reads followed by retained-query warmup and64-site warm zero reads per batch; counters/sentinel/query/empty stack guarded.'), request=request)
 
 
+def _program_request(code, data, counts, envelope, *, prefixed):
+    request = original.make_case('call', 'stop', count=1, gas_limit=envelope)['request']; program = request['program']
+    routes = dict.fromkeys(program['expected_route_counts'], 0); routes.update(counts)
+    program.update(code_hex='0x' + code.hex(), input_hex='0x' + data.hex(), expected_route_counts=routes)
+    if prefixed:
+        program['block_count'] = 2
+        del program['transactions']['count_per_block']
+        program['transactions']['counts_by_block'] = [0, 1]
+    return request
+
+
+def make_structured_case(*, raw_key_layout, key_count=4096, repetitions=512):
+    """Explicit absent-zero two-block warm-tail recipe, with fixed last-key query."""
+    if type(raw_key_layout) is not dict or set(raw_key_layout) != {'L1', 'L3'}:
+        raise ValueError('raw_key_layout requires exactly L1 and L3')
+    word = original.integer(raw_key_layout['L1'], 0, (1 << 64) - 1, 'L1')
+    original.integer(raw_key_layout['L3'], 0, 0, 'L3')
+    k = original.integer(key_count, 1, 4096, 'key_count')
+    r = original.integer(repetitions, 0, MAX_REPETITIONS, 'repetitions')
+    keys = [f'0x{(i << 24) | (word << 64):064x}' for i in range(1, k + 1)]
+    data = b''.join(bytes.fromhex(key[2:]) for key in keys)
+    query = int(keys[-1], 16); code, counts = _runtime_core(r, key_count=k, query=query)
+    z = data.count(0); nz = len(data) - z
+    gas = _gas_for_counts(code, counts, r, k, z, nz); envelope = gas['gross_gas'] + 1000
+    if (envelope > TRANSACTION_GAS_CAP or envelope > EIP7825_GAS_CAP or len(code) >= 24576
+            or len(data) > 131072 or 2_000_000 + gas['charged_gas'] > BLOCK_BUDGET
+            or 2_000_000 + envelope > BLOCK_BUDGET or HEADER_GAS_LIMIT - 1_000_000 < envelope):
+        raise ValueError('structured recipe exceeds source gas/size admission bounds')
+    request = _program_request(code, data, counts, envelope, prefixed=True)
+    data_sha = digest(data); prefix = f'warm-read-structured-k{k}-{data_sha}'
+    return dict(sample_id=f'{prefix}-r{r}', baseline_sample_id=f'{prefix}-r0',
+        family='warm-read-catalogs-structured', corpus_id='unzen-structured-warm-tail-v1',
+        role='control' if r == 0 else 'candidate', data_role='opened_structured_engineering_recipe',
+        holdout_only=False, actuals_used_for_fitting=False,
+        completion_gate='Fresh independent canonical, byte VM, signature/world/witness and quote gates before actual.',
+        scope='evm-gas-only price-ratio stress; own seed/hash/placement unknown; no node-limit admission claim.',
+        parameters=dict(key_count=k, mode='structured-warm-tail', raw_key_layout={'L1': word, 'L3': 0},
+            ordinal_shift=24, raw_key_rule='(i<<24)|(L1<<64); i1..K; L2=L3=0; no phase key',
+            catalog_source='explicit-affine-structured-recipe', ordered_keys=keys,
+            raw_key_sha256=data_sha, calldata_sha256=data_sha, query_key=f'0x{query:064x}',
+            repetitions=r, unroll_factor=64, bulk_operations=64*r, seed_reads=k,
+            target_query_reads=64*r+1, target_operations_per_user=64*r+1,
+            warmup_target_operations_per_user=1, body_target_operations_per_user=64*r,
+            expected_persistent_storage_reads=k+1+64*r, read_events=k+1+64*r,
+            accessed_unique=k, accessed_unique_keys=k, expected_persistent_storage_writes=0,
+            initial_storage_entries=0, initial_state_size=0, aggregate_state_size=0, state_size_per_account=0,
+            expected_initial_storage_entry_count=0, expected_final_storage_entry_count=0,
+            primary_code_owner_count=1, account_count=1, seed_counter_memory_offset=0,
+            counter_memory_offset=64, protected_memory_offset=96, expected_counter=r, sentinel=SENTINEL,
+            peak_memory_bytes=128, memory_words=4, outer_calldata_bytes=len(data),
+            calldata_zero_bytes=z, calldata_nonzero_bytes=nz, all_user_transactions=1,
+            user_transactions_by_block=[0, 1], all_transactions_including_anchor=3, block_count=2,
+            visits_per_account=1, transaction_kind='call', transaction_nonce=0, primary_code_owner=PRIMARY,
+            recipient_schedule=[PRIMARY], transaction_gas_limit=envelope, transaction_envelope_reserve=1000,
+            header_gas_limit=HEADER_GAS_LIMIT, charged_gas_budget=BLOCK_BUDGET,
+            anchor_gas_limit_upper_bound=1_000_000, block_charged_gas_upper_bounds=[1_000_000, 1_000_000+gas['charged_gas']],
+            source_proposal_charged_gas_upper_bound=2_000_000+gas['charged_gas'],
+            source_proposal_envelope_upper_bound=2_000_000+envelope,
+            header_prefix_remaining_gas=[30_000_000], gas_accounting_per_user=gas,
+            expected_user_gross_gas=gas['gross_gas'], expected_user_charged_gas=gas['charged_gas'],
+            expected_user_refund_counter=0, expected_user_refund_applied=0,
+            expected_terminal='STOP', expected_user_success=True, expected_user_receipt_statuses=[True],
+            expected_anchor_success=True, expected_exceptional_instructions=0, execution_profile='evm-gas-only',
+            preload_created_accounts_or_code=False, shared_runtime=True, runtime_bytes=len(code), runtime_sha256=digest(code),
+            initial_storage_rule='Default primary absent persistent slots read zero; no per-key MPT witness padding.',
+            range_rule='Ascending affine cold seeds, last-key warmup, then64 warm reads per batch; no writes; query not proven deepest.'),
+        request=request)
+
+
 def make_case(catalog='ordered', level='full', *, key_count=KEY_COUNT):
     return _make_case(_catalog(catalog, key_count=key_count), catalog, level, custom=False, key_count=key_count)
 
@@ -203,7 +282,7 @@ def source_modules():
 def helpers():
     return {'_Factory': _Factory, 'storage_mutation._require': mutation._require,
         'top_level_create.make_case': original.make_case, 'top_level_create.integer': original.integer,
-        **{f'warm_read_catalogs.{fn.__name__}': fn for fn in (_key_count, _validate_keys, _catalog, _runtime, gas_accounting, _constraint_failures, fits, full_repetitions, _make_case, make_case, make_custom_case, make_probe_case)},
+        **{f'warm_read_catalogs.{fn.__name__}': fn for fn in (_key_count, _validate_keys, _catalog, _runtime, _runtime_core, _gas_for_counts, _program_request, make_structured_case, gas_accounting, _constraint_failures, fits, full_repetitions, _make_case, make_case, make_custom_case, make_probe_case)},
         'spawn_memory.digest': digest, 'spawn_memory.encoded': encoded, 'spawn_memory.write': write}
 
 

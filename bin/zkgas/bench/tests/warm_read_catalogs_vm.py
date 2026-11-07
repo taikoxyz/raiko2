@@ -23,7 +23,7 @@ def decode(code):
         yield at, op, int.from_bytes(code[pc:pc + width], 'big'); pc += width
 
 
-def structure(instructions, repetitions, *, key_count=512):
+def structure(instructions, repetitions, *, key_count=512, query=QUERY):
     """Authenticate complete byte intent, including guards and the R0 body."""
     index = 0; failures = []
     def take(opcode, value=0):
@@ -49,7 +49,7 @@ def structure(instructions, repetitions, *, key_count=512):
     body_end = instructions[index][0]
     load(64); push(1); take(1); push(64); take(0x52); take(0x61, loop); take(0x56)
     done, _ = take(0x5b); assert done_target == done, 'done target'
-    take(0x80); guard(QUERY); take(0x50)
+    take(0x80); guard(query); take(0x50)
     for offset, value in ((0, key_count), (64, repetitions), (96, SENTINEL)): load(offset); guard(value)
     take(0); failure, _ = take(0x5b); take(0xfe)
     assert index == len(instructions) and failures == [failure] * 7, 'failure targets/extra bytes'
@@ -58,7 +58,7 @@ def structure(instructions, repetitions, *, key_count=512):
 
 
 def _entry(stack, warm, storage, query, expected_warm, *, key_count=512):
-    assert list(stack) == [query] and query == QUERY, 'complete query stack precondition'
+    assert type(query) is int and 0 <= query <= MASK and list(stack) == [query], 'complete query stack precondition'
     assert frozenset(warm) == expected_warm and query in warm and len(warm) == key_count, 'warmset precondition'
     assert all(value == 0 for value in storage.values()) and storage.get(query, 0) == 0, 'zero storage feedback/precondition'
 
@@ -85,22 +85,25 @@ def apply_body(proof, stack, warm, storage):
     # warmset, no writes and no memory footprint. Nothing mutable is skipped.
 
 
-def _keys(data, *, key_count=512):
-    assert type(key_count) is int and 1 <= key_count <= 1024, 'key_count domain'
+def _keys(data, *, key_count=512, query=QUERY, structured=False):
+    assert type(structured) is bool and type(key_count) is int and 1 <= key_count <= (4096 if structured else 1024), 'key_count domain'
     assert type(data) is bytes and len(data) == 32 * key_count, 'calldata length'
     keys = [int.from_bytes(data[i:i + 32], 'big') for i in range(0, 32 * key_count, 32)]
-    assert len(set(keys)) == key_count and keys[-1] == QUERY, 'unique catalog/query last'
-    assert all(sum(byte != 0 for byte in k.to_bytes(32, 'big')) == 8 for k in keys), 'fixed calldata byte cost'
+    assert len(set(keys)) == key_count and keys[-1] == query, 'unique catalog/query last'
+    if not structured:
+        assert query == QUERY and all(sum(byte != 0 for byte in k.to_bytes(32, 'big')) == 8 for k in keys), 'fixed calldata byte cost'
     return keys
 
 
-def execute(code, data, envelope, *, repetitions, cache=True, key_count=512):
-    assert type(key_count) is int and 1 <= key_count <= 1024, 'key_count domain'
+def execute(code, data, envelope, *, repetitions, cache=True, key_count=512, query=QUERY, structured=False):
+    assert type(structured) is bool and type(key_count) is int and 1 <= key_count <= (4096 if structured else 1024), 'key_count domain'
     assert type(repetitions) is int and 0 <= repetitions <= 1000000 and type(cache) is bool, 'R/cache domain'
-    assert type(code) is bytes and len(code) < 24576 and type(envelope) is int and envelope >= 21000 + 224 * key_count, 'code/gas domain'
-    keys = _keys(data, key_count=key_count); instructions = list(decode(code)); shape = structure(instructions, repetitions, key_count=key_count)
+    assert type(query) is int and 0 <= query <= MASK and (structured or query == QUERY), 'query domain'
+    assert type(data) is bytes
+    assert type(code) is bytes and len(code) < 24576 and type(envelope) is int and envelope >= 21000 + 4*data.count(0) + 16*(len(data)-data.count(0)), 'code/gas domain'
+    keys = _keys(data, key_count=key_count, query=query, structured=structured); instructions = list(decode(code)); shape = structure(instructions, repetitions, key_count=key_count, query=query)
     by_pc = {at: (op, value) for at, op, value in instructions}; jumps = {at for at, op, _ in instructions if op == 0x5b}
-    proof = prove_body([i for i in instructions if shape['body'] <= i[0] < shape['body_end']], [QUERY], set(keys), {}, QUERY, key_count=key_count)
+    proof = prove_body([i for i in instructions if shape['body'] <= i[0] < shape['body_end']], [query], set(keys), {}, query, key_count=key_count)
     stack = []; memory = bytearray(); storage = {}; warm = set(); counts = Counter(); pc_counts = Counter()
     gas = 21000 + data.count(0) * 4 + (len(data) - data.count(0)) * 16; pc = 0; expansion = 0
     cold = 0; warm_reads = 0; seed_keys = []; iterations = 0; loop_visits = 0
@@ -110,11 +113,11 @@ def execute(code, data, envelope, *, repetitions, cache=True, key_count=512):
         if pc == shape['seed']:
             assert stack == [] and word(0) == len(seed_keys), 'seed counter/stack'
         if pc == shape['loop']:
-            assert stack == [QUERY] and word(0) == key_count and word(64) == loop_visits and word(96) == SENTINEL, 'loop counter/sentinel/stack'
+            assert stack == [query] and word(0) == key_count and word(64) == loop_visits and word(96) == SENTINEL, 'loop counter/sentinel/stack'
             loop_visits += 1
         if pc == shape['body']:
             assert word(64) == iterations < repetitions, 'body counter'
-            _entry(stack, warm, storage, QUERY, proof['warm'], key_count=key_count); iterations += 1
+            _entry(stack, warm, storage, query, proof['warm'], key_count=key_count); iterations += 1
             if cache:
                 apply_body(proof, stack, warm, storage); gas += proof['gas']; counts.update(proof['counts']); warm_reads += 64
                 pc_counts.update({at: 1 for at, _, _ in instructions if shape['body'] <= at < shape['body_end']})
@@ -145,7 +148,7 @@ def execute(code, data, envelope, *, repetitions, cache=True, key_count=512):
                 assert len(seed_keys) < key_count and key == keys[len(seed_keys)] and key not in warm, 'seed order/unique first touch'
                 seed_keys.append(key); cold += 1; gas += 2100
             else:
-                assert key == QUERY and key in warm and len(warm) == key_count, 'query warm read'
+                assert key == query and key in warm and len(warm) == key_count, 'query warm read'
                 warm_reads += 1; gas += 100
             warm.add(key); stack.append(value)
         elif op in (0x56, 0x57):
@@ -158,7 +161,7 @@ def execute(code, data, envelope, *, repetitions, cache=True, key_count=512):
             assert iterations == repetitions and loop_visits == repetitions + 1, 'outer loop visits'
             assert cold == key_count and warm_reads == 64 * repetitions + 1 and seed_keys == keys and storage == {}, 'storage/read footprint'
             grouped = {str(k): v for k, v in sorted(pc_counts.items())}
-            commitment = hashlib.sha256(json.dumps(dict(keys=[f'0x{k:064x}' for k in seed_keys], query=f'0x{QUERY:064x}', pc_counts=grouped), sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+            commitment = hashlib.sha256(json.dumps(dict(keys=[f'0x{k:064x}' for k in seed_keys], query=f'0x{query:064x}', pc_counts=grouped), sort_keys=True, separators=(',', ':')).encode()).hexdigest()
             return dict(terminal=op, stack=stack, counter=repetitions, gas=gas, counts=counts, cold_reads=cold, warm_reads=warm_reads,
                 seed_keys=[f'0x{k:064x}' for k in seed_keys], read_events=cold + warm_reads, peak_memory_bytes=len(memory),
                 memory_expansion_gas=expansion, grouped_pc_counts=grouped, read_intent_sha256=commitment)
@@ -167,37 +170,62 @@ def execute(code, data, envelope, *, repetitions, cache=True, key_count=512):
     raise AssertionError('instruction bound')
 
 
-def run_users(row):
+def run_users(row, *, structured=False):
     p = row['parameters']; request = row['request']; program = request['program']; tx = program['transactions']
     key_count = p.get('key_count', 512)
-    assert type(key_count) is int and 1 <= key_count <= 1024, 'key_count metadata domain'
+    assert type(structured) is bool and type(key_count) is int and 1 <= key_count <= (4096 if structured else 1024), 'key_count metadata domain'
     assert set(request) == {'schema_version', 'expected_user_success', 'program'} and request['schema_version'] == 1 and request['expected_user_success'] is True, 'request domain'
     assert set(program) == {'code_hex', 'input_hex', 'block_count', 'expected_route_counts', 'transactions'}, 'primary empty storage/domain'
-    assert tx == dict(kind='call', count_per_block=1, gas_limit=p['transaction_gas_limit']) and program['block_count'] == 1, 'one-user schedule'
+    expected_tx = dict(kind='call', counts_by_block=[0, 1], gas_limit=p['transaction_gas_limit']) if structured else dict(kind='call', count_per_block=1, gas_limit=p['transaction_gas_limit'])
+    assert tx == expected_tx and program['block_count'] == (2 if structured else 1), 'one-user schedule'
     assert p['primary_code_owner'] == PRIMARY and p['transaction_nonce'] == 0 and p['recipient_schedule'] == [PRIMARY], 'primary/nonce'
     assert 0 < tx['gas_limit'] <= 15000000 and tx['gas_limit'] <= 16777216, 'transaction caps'
-    data = bytes.fromhex(program['input_hex'][2:]); code = bytes.fromhex(program['code_hex'][2:]); keys = _keys(data, key_count=key_count)
+    data = bytes.fromhex(program['input_hex'][2:]); code = bytes.fromhex(program['code_hex'][2:])
+    query = int.from_bytes(data[-32:], 'big') if structured else QUERY
+    keys = _keys(data, key_count=key_count, query=query, structured=structured)
+    if structured:
+        layout = p['raw_key_layout']
+        assert type(layout) is dict and set(layout) == {'L1', 'L3'} and type(layout['L1']) is int and 0 <= layout['L1'] < 1 << 64 and type(layout['L3']) is int and layout['L3'] == 0, 'structured layout'
+        assert p['ordinal_shift'] == 24 and type(p['ordinal_shift']) is int and keys == [(i << 24) | (layout['L1'] << 64) for i in range(1, key_count + 1)], 'affine ordered calldata'
+        assert p['mode'] == 'structured-warm-tail', 'explicit structured mode'
+        assert all(type(x) is int for x in tx['counts_by_block']), 'typed block schedule'
+        assert p['execution_profile'] == 'evm-gas-only' and p['preload_created_accounts_or_code'] is False, 'execution scope'
+        assert p['expected_terminal'] == 'STOP' and p['expected_user_success'] is True, 'terminal metadata'
     assert [f'0x{k:064x}' for k in keys] == p['ordered_keys'], 'original catalog/order intent'
     assert hashlib.sha256(data).hexdigest() == p['calldata_sha256'] == p['raw_key_sha256'], 'catalog hashes'
     assert hashlib.sha256(code).hexdigest() == p['runtime_sha256'], 'runtime hash'
-    assert p['query_key'] == f'0x{QUERY:064x}' and p['initial_storage_entries'] == 0, 'query/zero prestate'
-    result = execute(code, data, tx['gas_limit'], repetitions=p['repetitions'], key_count=key_count)
-    assert 31000000 - 167355 >= tx['gas_limit'] and 167355 + result['gas'] <= 30000000, 'header/block caps'
-    r = p['repetitions']; intrinsic = 21000 + 224 * key_count; floor = 21000 + 560 * key_count
+    assert p['query_key'] == f'0x{query:064x}' and p['initial_storage_entries'] == 0, 'query/zero prestate'
+    result = execute(code, data, tx['gas_limit'], repetitions=p['repetitions'], key_count=key_count, query=query, structured=structured)
+    if not structured:
+        assert 31000000 - 167355 >= tx['gas_limit'] and 167355 + result['gas'] <= 30000000, 'header/block caps'
+    r = p['repetitions']; z = data.count(0); nz = len(data) - z
+    intrinsic = 21000 + 4*z + 16*nz; floor = 21000 + 10*(z + 4*nz)
     cold = 2100 * key_count; warm = 100 * (64 * r + 1)
     gross = result['gas']; charged = max(gross, floor)
     expected = dict(seed_reads=key_count, accessed_unique=key_count, accessed_unique_keys=key_count,
         expected_persistent_storage_reads=key_count + 1 + 64*r, read_events=key_count + 1 + 64*r,
         expected_persistent_storage_writes=0, initial_storage_entries=0, initial_state_size=0,
         aggregate_state_size=0, state_size_per_account=0, expected_initial_storage_entry_count=0,
-        expected_final_storage_entry_count=0, outer_calldata_bytes=32*key_count,
-        calldata_zero_bytes=24*key_count, calldata_nonzero_bytes=8*key_count,
+        expected_final_storage_entry_count=0, seed_counter_memory_offset=0, counter_memory_offset=64,
+        protected_memory_offset=96, sentinel=SENTINEL, peak_memory_bytes=128, memory_words=4, runtime_bytes=len(code),
+        outer_calldata_bytes=32*key_count,
+        calldata_zero_bytes=z, calldata_nonzero_bytes=nz,
         target_query_reads=64*r+1, target_operations_per_user=64*r+1,
         warmup_target_operations_per_user=1, body_target_operations_per_user=64*r,
         bulk_operations=64*r, unroll_factor=64, expected_counter=r,
         expected_user_gross_gas=gross, expected_user_charged_gas=charged,
-        expected_user_refund_counter=0, expected_user_refund_applied=0,
-        expected_block_charged_gas=167355+charged)
+        expected_user_refund_counter=0, expected_user_refund_applied=0)
+    if structured:
+        assert 'expected_anchor_gas' not in p and 'expected_block_charged_gas' not in p, 'no fake actual Anchor gas'
+        assert type(p['anchor_gas_limit_upper_bound']) is int and p['anchor_gas_limit_upper_bound'] == 1000000
+        assert p['user_transactions_by_block'] == [0, 1] and all(type(x) is int for x in p['user_transactions_by_block'])
+        assert p['block_charged_gas_upper_bounds'] == [1000000, 1000000+charged] and p['header_prefix_remaining_gas'] == [30000000], 'source per-block bounds'
+        expected.update(block_count=2, all_user_transactions=1, all_transactions_including_anchor=3,
+            source_proposal_charged_gas_upper_bound=2000000+charged, source_proposal_envelope_upper_bound=2000000+gross+1000)
+        assert tx['gas_limit'] == gross + 1000 and 2000000+tx['gas_limit'] <= 30000000 and 2000000+charged <= 30000000, 'source proposal envelope/budget'
+        assert len(data) <= 131072
+    else:
+        expected['expected_block_charged_gas'] = 167355+charged
     for name, value in expected.items():
         assert type(p[name]) is int and p[name] == value, 'count/gas metadata: ' + name
     gas = dict(intrinsic_gas=intrinsic, eip7623_floor_gas=floor, eip7623_floor_active=gross < floor,

@@ -3213,6 +3213,48 @@ accessed historical value, not an arbitrary RAM or whole-table snapshot. Qualify
 against frozen default/observed controls and source-expected PC counts under the existing
 PSS/time/log/staging/disk guards before using values to identify a hasher or map.
 
+#### Explicit structured absent-storage warm tail
+
+The opt-in Python interface below uses the same assembler as the legacy catalogs;
+it does not widen the CLI, external128KiB catalog reader,1024-key legacy cap,
+eight-nonzero-byte rule or fixed legacy QUERY. Default/catalog request bytes are
+unchanged. A tiny engineering example is:
+
+```python
+from cases.warm_read_catalogs import make_structured_case
+row = make_structured_case(
+    raw_key_layout={'L1': 0, 'L3': 0}, key_count=3, repetitions=2)
+request = row['request']
+```
+
+The required layout has exactly strict U64 L1 and strict integer L3=0. K is1..4096,
+R is0..1000000 subject to gas admission; bool/float values are rejected. Keys are
+ascending `(i<<24)|(L1<<64)` for i1..K, with no phase key. Query is always the last
+key. All slots are initially absent and read0; there are K distinct cold seeds,
+one guarded warmup and64warm SLOADs per R batch, with zero persistent writes.
+R0 is an engineering control. This is a genuine two-block schedule `[0,1]`, not
+a single-block result relabelled as a measured prefix. Both real Anchor receipts
+and later canonical data must be verified independently.
+
+Calldata gas counts actual zero/nonzero bytes. Intrinsic is21000+4z+16nz;
+EIP7623 floor is21000+10(z+4nz), charged=max(gross,floor). Envelope is gross+1000,
+with15M/EIP7825/code/calldata limits checked before request construction. Each
+Anchor has a conservative1M source bound. Proposal charged/envelope bounds add2M;
+actual Anchor/proposal gas remains unknown until native receipts. No3.6B node
+admission rule is imposed: this is evm-gas-only price-ratio stress, with literal
+node, full quote and actual PGU reported separately by a later finite protocol.
+
+A separate prospective fixed geometry is K4096/R512 **batches**,32769warm query
+reads plus4096cold reads. Source scalar arithmetic gives reference user13087931gas,
+any U64 L1 user≤13481147/envelope≤13482147, and two-Anchor source envelope
+≤15482147. These are unmeasured bounds, not a formal request or complete quote.
+The shared low3LEbytes and late query do not prove the deepest occupied placement.
+Choosing THIS new reference's qualified ownG as a future L1 would conditionally
+make H0 independent of S, but actual ownG/H requires fresh same-map evidence;
+generic PlainStorage G is not Journal-target qualification. Incomplete local
+observation may remain UNKNOWN while complete canonical PGU is still valid.
+There is no seed/query/count/R search, new runner, price change or global bound.
+
 ### Absent-account journal catalogs
 
 `cases/account_read_catalogs.py` is a separate Address20 family. It does not change the existing

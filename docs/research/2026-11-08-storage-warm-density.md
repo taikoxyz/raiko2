@@ -100,7 +100,7 @@ warm-density pair is retained locally only. The old candidate asset does not
 contain these new inputs. No public commit, push or network operation is implied
 by this private research record.
 
-The next source-reviewed composition is two same-owner transactions in one block.
-Journal and read-through reserves are already charged per transaction; its whole
-PGU still needs a separate fixed experiment. The existing single-user data is
-not changed or treated as a measurement of that composition.
+The two-same-owner-transaction composition now has a separate
+[fixed experiment](2026-11-08-two-user-warm-density.md). Journal and read-through
+reserves remain charged per transaction. This single-user result stays unchanged
+and is not counted again as a measurement of that composition.

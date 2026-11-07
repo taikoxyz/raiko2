@@ -58,10 +58,10 @@ def _layout(value):
 
 def _ordinal_shift(value, mode, layout):
     """Restrict optional endpoints to disjoint readonly mask/ordinal bits."""
-    if type(value) is not int or value not in (0, 48, 240):
-        raise ValueError('ordinal_shift must be the integer0,48 or240')
+    if type(value) is not int or value not in (0, 24, 48, 240):
+        raise ValueError('ordinal_shift must be the integer0,24,48 or240')
     if value != 48 and (mode != 'read' or layout is None or layout['L3'] != 0):
-        raise ValueError('ordinal_shift0/240 requires readonly explicit layout with L3=0')
+        raise ValueError('ordinal_shift0/24/240 requires readonly explicit layout with L3=0')
     return value
 
 
@@ -317,7 +317,7 @@ def make_prefixed_read_case(*, users, reads_per_user, raw_key_layout=None, ordin
 
     Users1..89/read counts0..128 are reusable engineering cases; zero is a control.
     The89user bound packs the128-read kernel under two1M Anchor gas bounds.
-    Optional shift0 disperses low32 bits; shift240 uses a long LE prefix.
+    Optional shifts0/24 vary low32 grouping; shift240 uses a long LE prefix.
     Default48 retains the original metadata.
     This creates an in-memory recipe only, without selecting seeds or sampling.
     """
@@ -357,6 +357,7 @@ def make_prefixed_read_case(*, users, reads_per_user, raw_key_layout=None, ordin
     parameters = dict(mode='read', users=users, reads_per_user=n, raw_key_layout=layout,
         raw_key_rule='ordinal' if layout is None else {
             0: 'i|(L1<<64); L2=L3=0',
+            24: '(i<<24)|(L1<<64); L2=L3=0',
             48: '(i<<48)|(L1<<64)|(L3<<192); L2=0',
             240: '(i<<240)|(L1<<64); L0=L2=0',
         }[ordinal_shift],

@@ -4205,6 +4205,10 @@ assert row['parameters']['expected_main_storage_writes'] == 0
 long_row = make_prefixed_read_case(users=2, reads_per_user=2,
     raw_key_layout={'L1': 1, 'L3': 0}, ordinal_shift=240)
 assert long_row['parameters']['ordinal_shift'] == 240
+# Optional cutoff-prefix boundary, also only a tiny engineering recipe:
+prefix24_row = make_prefixed_read_case(users=2, reads_per_user=2,
+    raw_key_layout={'L1': 0, 'L3': 0}, ordinal_shift=24)
+assert prefix24_row['parameters']['raw_key_rule'] == '(i<<24)|(L1<<64); L2=L3=0'
 PY
 ```
 
@@ -4217,14 +4221,22 @@ layout with `L3=0` and produces `(ordinal<<240)|(L1<<64)`. The mask's `L3=0` doe
 not mean the final key's top limb is zero: that limb holds `ordinal<<48`.
 With the same L1, all body keys share their first30 little-endian bytes; only
 bytes30/31 vary. All body ordinals stay below2^16, so they cannot wrap or overlap
-the mask/phase slot. The other opt-in endpoint, `ordinal_shift=0`, requires the
+the mask/phase slot. The opt-in endpoint `ordinal_shift=0` requires the
 same explicit readonly layout with `L3=0` and produces `ordinal|(L1<<64)`.
 Its distinct body ordinals also have distinct low32 values, including when the
 L1 word is nonzero; phase remains slot0. This endpoint supports a separate test
-of the concentration discount. Neither endpoint asserts actual hash placement
-or PGU. Shifts0/240 are readonly-only; other shifts, booleans/floats, missing
-layout and a nonzero L3 mask are rejected. Default48, including explicit48,
-retains its original metadata without adding an `ordinal_shift` field. Only0/240
+of the concentration discount. The additional `ordinal_shift=24` endpoint has
+`(ordinal<<24)|(L1<<64)`, with `L2=L3=0` and the same explicit mask requirement.
+Its first three little-endian bytes are zero; byte3 holds the low ordinal byte
+and byte4 holds the next. Distinct raw keys can share low32 groups: ordinal256
+shares the phase key's low32 group without equaling slot0, and ordinals1/257
+share a group without equaling each other. For the fixed89×128 scalar size,
+N=11393 including phase, M=45 and C=ceil((N+7M)/8)=1464; this is arithmetic,
+not a constructed input, placement observation or measured PGU. All ordinals
+are below2^16 and shifted ordinal bits end below the L1 mask at bit64.
+No endpoint asserts actual hash placement or PGU. Shifts0/24/240 are readonly-only;
+other shifts, booleans/floats, missing layout and a nonzero L3 mask are rejected. Default48, including explicit48,
+retains its original metadata without adding an `ordinal_shift` field. Only0/24/240
 record that field and their different raw-key rules in the sample identity.
 
 These bounds require at most11393 initialized slots, below the fixture schema's16384 entry cap. The request specifies plain
@@ -4233,7 +4245,7 @@ its genuine per-block witnesses after qualification. At128reads/user,89users is
 selected by pure EVM gas arithmetic: `floor((30M-2M)/312223)=89`; the proposal upper
 bound is29,787,847gas, while90users would require30,100,070. The128-read kernel,
 per-user312223gas/envelope313223 and two independent1M Anchor upper bounds are
-unchanged. Both layouts use the same215-byte kernel and fixed-width PUSH3 shift
+unchanged. All layouts use the same215-byte kernel and fixed-width PUSH3 shift
 immediate; there is no duplicate assembler or kernel. At89×128, phase advances by128
 per TX and finishes11393. Default48 row/request bytes (including old89-user controls)
 and all update-helper bounds remain unchanged.
@@ -4254,6 +4266,10 @@ witnesses and a separately reviewed actual-own-PlainStorage observation protocol
 must qualify any finite experiment. Source comparison proxies are not actualPGU;
 the helper claims neither stable G, collisions nor underpricing. In particular,
 setting a mask word does not establish an actual target hasher's G: any finite
-long-prefix comparison must obtain it from its own fresh independently qualified
-reference and retain the sole-successor/no-search protocol. Closed inputs and
+comparison must obtain it from its own fresh independently qualified
+reference and retain the sole-successor/no-search protocol. Observer candidate
+membership is only declared raw-keyset membership, not semantic owner/TX or
+physical target-body attribution: small slots can alias keys in other maps. A
+qualified generic process G applies only to that observed input; a successor
+must independently qualify its actual G and H again. Closed inputs and
 archived actuals are never regenerated to add this layout.

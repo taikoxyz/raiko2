@@ -736,4 +736,124 @@ class PrefixedStorageReadTests(unittest.TestCase):
                          'ad47cc4048e7456e813ed49e436caadadfdd4fab6c0d6e3bf604583588249d90')
 
 
+class LongPrefixStorageReadTests(unittest.TestCase):
+    load = StorageMutationTests.load
+
+    def test_long_layout_keeps_kernel_and_gas_shape(self):
+        m = self.load(); layout = {'L1': 1, 'L3': 0}
+        row = m.make_prefixed_read_case(users=1, reads_per_user=128,
+                                        raw_key_layout=layout, ordinal_shift=240)
+        old = m.make_prefixed_read_case(users=1, reads_per_user=128, raw_key_layout=layout)
+        code = bytes.fromhex(row['request']['program']['prestate_contracts'][0]['code_hex'][2:])
+        old_code = bytes.fromhex(old['request']['program']['prestate_contracts'][0]['code_hex'][2:])
+        decoded, prior = list(decode(code)), list(decode(old_code))
+        differences = [(a, b) for a, b in zip(decoded, prior) if a != b]
+        self.assertEqual(len(differences), 1)
+        new_shift, old_shift = differences[0]
+        self.assertEqual((new_shift[1:], old_shift[1:]), ((0x62, 240), (0x62, 48)))
+        self.assertEqual(new_shift[0], old_shift[0])
+        self.assertEqual((len(code), len(old_code)), (215, 215))
+        self.assertEqual(row['request']['program']['expected_route_counts'], old['request']['program']['expected_route_counts'])
+        self.assertEqual(row['parameters']['gas_accounting_per_user'], old['parameters']['gas_accounting_per_user'])
+        self.assertEqual(row['parameters']['expected_user_charged_gas'], 312223)
+        self.assertEqual(row['parameters']['transaction_gas_limit'], 313223)
+        self.assertEqual(row['parameters']['ordinal_shift'], 240)
+        self.assertEqual(row['parameters']['raw_key_rule'], '(i<<240)|(L1<<64); L0=L2=0')
+        self.assertNotEqual(row['identity_sha256'], old['identity_sha256'])
+        self.assertEqual(1 + 89 * 128, 11393)  # scalar only, no formal89x128 helper
+        self.assertEqual(2_000_000 + 89 * 312223, 29787847)
+
+    def test_long_literal_body_keys_phase_checksum_routes_and_gas(self):
+        m = self.load()
+        for users, n in [(1, 0), (1, 1), (2, 2), (3, 7), (1, 128), (89, 1)]:
+            for shared in [0, 1, (1 << 64) - 1]:
+                with self.subTest(users=users, n=n, shared=shared):
+                    row = m.make_prefixed_read_case(users=users, reads_per_user=n,
+                            raw_key_layout={'L1': shared, 'L3': 0}, ordinal_shift=240)
+                    p = row['parameters']; program = row['request']['program']; owner, = program['prestate_contracts']
+                    key = lambda i: (i << 240) | (shared << 64)
+                    state = {int(k, 16): int(v, 16) for k, v in owner['initial_storage'].items()}
+                    self.assertEqual(state, {0: 1} | {key(i): 1 for i in range(1, users * n + 1)})
+                    code = bytes.fromhex(owner['code_hex'][2:]); counts = Counter()
+                    for tx in range(users):
+                        start = 1 + tx * n; final = start + n
+                        result = execute(code, state, p['transaction_gas_limit'])
+                        self.assertEqual((result['terminal'], result['stack']), (0, []))
+                        self.assertEqual(result['reads'], [(0, start, True)] +
+                                [(key(i), 1, True) for i in range(start, final)] + [(0, final, False)])
+                        self.assertEqual(result['writes'], [(0, start, final, start, False)])
+                        self.assertEqual((result['refund'], result['applied']), (0, 0))
+                        self.assertEqual((result['gas'], result['charged']),
+                                         (p['expected_user_gross_gas'], p['expected_user_charged_gas']))
+                        self.assertEqual(int.from_bytes(result['memory'][:32], 'big'), n)
+                        self.assertEqual(int.from_bytes(result['memory'][32:64], 'big'), n)
+                        self.assertEqual(int.from_bytes(result['memory'][64:96], 'big'), start)
+                        self.assertGreaterEqual(p['header_prefix_remaining_gas'][tx], p['transaction_gas_limit'])
+                        counts.update(result['counts'])
+                    self.assertEqual(state, {0: 1 + users * n} | {key(i): 1 for i in range(1, users * n + 1)})
+                    self.assertEqual(counts, +Counter(program['expected_route_counts']))
+                    self.assertEqual(p['expected_final_phase'], 1 + users * n)
+                    self.assertEqual(program['transactions']['counts_by_block'], [0, users])
+                    self.assertEqual(program['transactions']['recipients'], [owner['address']] * users)
+                    self.assertEqual(p['expected_main_storage_writes'], 0)
+                    if n:
+                        raw = [key(i).to_bytes(32, 'little') for i in range(1, users * n + 1)]
+                        self.assertTrue(all(value[:30] == bytes(8) + shared.to_bytes(8, 'little') + bytes(14) for value in raw))
+                        self.assertEqual([int.from_bytes(value[30:], 'little') for value in raw], list(range(1, users * n + 1)))
+
+    def test_long_high_word_boundary_and_literal_failure_guards(self):
+        m = self.load(); shared = (1 << 64) - 1
+        row = m.make_prefixed_read_case(users=1, reads_per_user=1,
+                raw_key_layout={'L1': shared, 'L3': 0}, ordinal_shift=240)
+        owner, = row['request']['program']['prestate_contracts']; code = bytes.fromhex(owner['code_hex'][2:])
+        cap = row['parameters']['transaction_gas_limit']; key = lambda i: (i << 240) | (shared << 64)
+        for phase in [1, 255, 256, 65535]:
+            state = {0: phase, key(phase): 1}
+            result = execute(code, state, cap)
+            self.assertEqual(result['terminal'], 0)
+            self.assertEqual(result['reads'][1], (key(phase), 1, True))
+            self.assertEqual(state[0], phase + 1)
+            self.assertEqual(key(phase) >> 256, 0)
+        # The next ordinal loses high bits in EVM U256 SHL; it must fail the value guard.
+        self.assertEqual(execute(code, {0: 65536}, cap)['terminal'], 0xfe)
+        self.assertEqual(execute(code, {0: 1, key(1): 2}, cap)['terminal'], 0xfe)
+        self.assertEqual(execute(code, {0: 2, key(1): 1}, cap)['terminal'], 0xfe)
+        control = m.make_prefixed_read_case(users=89, reads_per_user=1,
+                raw_key_layout={'L1': 0, 'L3': 0}, ordinal_shift=240)
+        self.assertEqual(control['parameters']['expected_final_phase'], 90)
+
+    def test_long_shift_and_overlap_inputs_are_strict(self):
+        m = self.load()
+        for shift in [True, False, None, 0, 47, 49, 239, 241, 255, 256, 240.0, '240']:
+            with self.subTest(shift=shift), self.assertRaises(ValueError):
+                m.make_prefixed_read_case(users=1, reads_per_user=1,
+                        raw_key_layout={'L1': 0, 'L3': 0}, ordinal_shift=shift)
+        for layout in [None, {'L1': 0, 'L3': 1}, {'L1': 0, 'L3': (1 << 64) - 1},
+                       {'L1': True, 'L3': 0}, {'L1': -1, 'L3': 0}, {'L1': 1 << 64, 'L3': 0},
+                       {'L1': 0, 'L3': 0, 'ordinal_shift': 240}]:
+            with self.subTest(layout=layout), self.assertRaises(ValueError):
+                m.make_prefixed_read_case(users=1, reads_per_user=1, raw_key_layout=layout, ordinal_shift=240)
+        for mode in m.MODES:
+            with self.subTest(mode=mode), self.assertRaises(ValueError):
+                m.gas_accounting(mode, 1, raw_key_layout={'L1': 0, 'L3': 0}, ordinal_shift=240)
+        for build in [m._runtime, m.gas_accounting]:
+            for layout in [None, {'L1': 0, 'L3': 1}]:
+                with self.subTest(build=build.__name__, layout=layout), self.assertRaises(ValueError):
+                    build('read', 1, raw_key_layout=layout, ordinal_shift=240)
+
+    def test_parent_default_readonly_rows_and_explicit48_are_byte_identical(self):
+        m = self.load(); rows = {}
+        for users, n in [(1, 0), (1, 1), (2, 2), (3, 3), (2, 128), (89, 1)]:
+            for layout in [None, {'L1': 0, 'L3': 0}, {'L1': 7, 'L3': (1 << 64) - 1}]:
+                row = m.make_prefixed_read_case(users=users, reads_per_user=n, raw_key_layout=layout)
+                self.assertNotIn('ordinal_shift', row['parameters'])
+                self.assertEqual(row, m.make_prefixed_read_case(users=users, reads_per_user=n,
+                                                raw_key_layout=layout, ordinal_shift=48))
+                rows[f'{users}/{n}/{layout}'] = {
+                    'row_sha256': hashlib.sha256(m.encoded(row)).hexdigest(),
+                    'request_sha256': hashlib.sha256(m.encoded(row['request'])).hexdigest()}
+        self.assertEqual(hashlib.sha256(m.encoded(rows)).hexdigest(),
+                         'cb0586f76af40bef3a19f38dac9d71124ee9d86ee8aceada999a0c121bc48169')
+
+
 if __name__ == '__main__': unittest.main()

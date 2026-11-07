@@ -4184,7 +4184,7 @@ those require a separately declared experiment and fresh observations.
 ### Phase-advancing readonly storage bodies
 
 `storage_mutation.make_prefixed_read_case(users=..., reads_per_user=...,
-raw_key_layout=None)` adds an opt-in recipe on the same fixed storage kernel.
+raw_key_layout=None, ordinal_shift=48)` adds an opt-in recipe on the same fixed storage kernel.
 Each body slot starts at1 and is read **once**, checked against1 and included in
 the checksum; body slots are never written. Only raw phase slot0 advances by
 `reads_per_user` after each successful transaction. The counter and checksum both
@@ -4201,6 +4201,10 @@ row = make_prefixed_read_case(users=2, reads_per_user=2,
                              raw_key_layout={'L1': 0, 'L3': 0})
 assert row['request']['program']['transactions']['counts_by_block'] == [0, 2]
 assert row['parameters']['expected_main_storage_writes'] == 0
+# Optional long LE prefix, still an in-memory tiny engineering recipe only:
+long_row = make_prefixed_read_case(users=2, reads_per_user=2,
+    raw_key_layout={'L1': 1, 'L3': 0}, ordinal_shift=240)
+assert long_row['parameters']['ordinal_shift'] == 240
 PY
 ```
 
@@ -4208,14 +4212,26 @@ The helper accepts strict integer users1..89 and reads0..128; zero is only an
 engineering control, with the same-value phase-SSTORE sentry accounted for.
 OptionalL1/L3 are strictu64 values, with body key
 `(ordinal<<48)|(L1<<64)|(L3<<192)` andL2=0; phase remains raw slot0 and ordinals
-advance across transactions. These bounds require at most11393 initialized
-slots, below the fixture schema's16384 entry cap. The request specifies plain
+advance across transactions. Optional `ordinal_shift=240` requires an explicit
+layout with `L3=0` and produces `(ordinal<<240)|(L1<<64)`. The mask's `L3=0` does
+not mean the final key's top limb is zero: that limb holds `ordinal<<48`.
+With the same L1, all body keys share their first30 little-endian bytes; only
+bytes30/31 vary. All body ordinals stay below2^16, so they cannot wrap or overlap
+the mask/phase slot. Shift240 is readonly-only; other shifts, booleans/floats,
+missing layout and a nonzero L3 mask are rejected. Default48, including explicit48,
+retains its original metadata without adding an `ordinal_shift` field. Only240
+records that field and its different raw-key rule in the sample identity.
+
+These bounds require at most11393 initialized slots, below the fixture schema's16384 entry cap. The request specifies plain
 CALL counts`[0,users]` and one storage owner. Existing native tools can materialize
 its genuine per-block witnesses after qualification. At128reads/user,89users is
 selected by pure EVM gas arithmetic: `floor((30M-2M)/312223)=89`; the proposal upper
 bound is29,787,847gas, while90users would require30,100,070. The128-read kernel,
 per-user312223gas/envelope313223 and two independent1M Anchor upper bounds are
-unchanged. Earlier<=64 outputs and all update-helper bounds remain unchanged.
+unchanged. Both layouts use the same215-byte kernel and fixed-width PUSH3 shift
+immediate; there is no duplicate assembler or kernel. At89×128, phase advances by128
+per TX and finishes11393. Default48 row/request bytes (including old89-user controls)
+and all update-helper bounds remain unchanged.
 This API does not perform count/seed searches, create a catalog or execute any
 workload.
 
@@ -4231,4 +4247,8 @@ delete/insert/mixed kernels and old helper request bytes retain their identities
 A model binding is not an accuracy claim: canonical signatures/gas/state/minimal
 witnesses and a separately reviewed actual-own-PlainStorage observation protocol
 must qualify any finite experiment. Source comparison proxies are not actualPGU;
-the helper claims neither stable G, collisions nor underpricing.
+the helper claims neither stable G, collisions nor underpricing. In particular,
+setting a mask word does not establish an actual target hasher's G: any finite
+long-prefix comparison must obtain it from its own fresh independently qualified
+reference and retain the sole-successor/no-search protocol. Closed inputs and
+archived actuals are never regenerated to add this layout.

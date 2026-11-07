@@ -221,7 +221,7 @@ gas. Keep this deliberate layout residual as a low-priority TODO and hold
 EEA/J+2X/384 unchanged. This classification is a complexity-versus-cost choice,
 not a proof that another input cannot exceed that screen.
 
-Across this storage/account follow-up only, the checkpoint now has92 unique
+At the readonly follow-up checkpoint, this storage/account subset has92 unique
 inputs/9,654blocks and39 numeric actuals:34 node quotes and38 full quotes cover
 actual. Five positive node gaps remain; the largest is391,973,447PGU. One full
 quote is below actual by11,862,881PGU. No measured node gap exceeds2B. The three
@@ -263,3 +263,69 @@ pair is retained locally pending the next data-only Atlas fixture checkpoint;
 it is not yet represented by either published asset. Existing release assets
 are not rewritten. Bulk-zero/proof-shape and custom/preseeded/failed-backend
 paths remain explicit TODOs rather than inferred coverage.
+
+
+## Dense writes and final state construction
+
+A separate closed64×64 pair combines30 common LE bytes with initialized1→2
+writes. It reuses the two genuine blocks with user counts[0,64]. Every user
+changes64 body keys and the phase; each transaction has J=X=65 for the target
+owner. The phase advances1→4097 and4,096 body keys become2. The target-only
+storage reserve is25,970,880units×384=9,972,817,920PGU; other components and
+Anchors remain in the complete quoted totals below.
+
+| Input | Actual SP1 PGU | Literal node PGU | Full proposal PGU |
+| --- | ---: | ---: | ---: |
+|dirty240 reference|363,071,660|10,971,432,738|11,274,506,921|
+|dirty240 sole successor|9,001,709,767|10,971,432,738|11,274,773,545|
+
+Both consume23,541,753 charged EVM gas, split167,355/23,374,398; this fixed
+point does not fill30M gas. The successor is covered at1.218817x node/actual
+and1.252515x full/actual, with signed gaps−1,969,722,971/−2,273,063,778PGU.
+EEA/J+2X/384 stays unchanged. The reference's approximately30x synthetic
+node overquote is retained rather than reported as natural-traffic precision.
+
+All independent prepared/data/actual/resource/profile gates pass. The successor
+completes11,410,625,627 canonical instructions in242.8134seconds, with
+4,563,782,656 process-tree PSS bytes. Raw gas171,932,656,563 normalizes by
+`*10//191` to9,001,709,767PGU; raw report SHA256 is
+`84024f2b5da675a442ad7921d355509f2d805e8610e9205905384d99437fc7ed`.
+Its400M observation is incomplete and capped. The reference completes below
+400M but still has capped samples. Independent reconstruction qualifies176
+same-call declared-key members with actual matchingG/fullH0, followed by
+comparison with all185 root local rows. It excludes71 incomplete intervals
+and proves no owner/TX, physical-body, final-Bundle or whole-placement attribution.
+Actual code-pool ordering differs between the two inputs; G was observed afresh.
+No measurement, seed, layout, count or observation window was retried or extended.
+
+The storage/account checkpoint now has94 unique inputs/9,658blocks and41
+numeric actuals:36 node quotes and40 full quotes cover actual. The five positive
+node gaps still peak at391,973,447PGU; the sole positive full gap is11,862,881PGU.
+No measured node gap exceeds2B. The unmeasured controls/historical-only rows and
+all frozen-ELF/SDK/native/dirty-build limits above continue to apply. This is
+finite evidence, not a universal cost bound or a whole-opcode accuracy audit.
+
+Two source checks clarify scope without changing the model. Each ordinary or
+lab block replay creates a fresh local revm State/CacheState/TransitionState.
+The immutable witness-node pool, headers and semantic state-root results may
+be shared across blocks; raw PlainStorage map contents are not inherited.
+`take_bundle()` extracts the bundle; the local State drops when that block's
+execution returns. Thus a previous block's large physical raw cache does not
+silently survive into the next block on these checked paths. Custom/preseeded
+backends remain separately qualified TODOs.
+
+The quote CLI's MPT observer has a different host-only cost: each dirty-slot
+mutation exports/rebuilds a complete trie snapshot and compares the snapshots.
+The4,097-dirty-slot quote takes108.8seconds; retained dirty48 quotes also take
+about108–109seconds, while readonly240 takes about0.57seconds. This existing
+observer work is not a demonstrated node-pricing-ledger regression or actual
+SP1 PGU. No profiling split or metrics-on/off ablation was run. Optimizing that
+observer is a separate tool TODO, with no source or guest change in this panel.
+
+The bounded structural matrix has readonly common-byte prefixes0/3/6/30 and
+dirty prefixes6/30 measured. Dirty0/3 remain unmeasured. The next distinct
+question is fixed64×64 dirty24: the raw-low32 discount combined with all changed
+slots and final state construction. This is a new finite cell, not another point
+in a closed panel. No actual, price fix or30M worst-case bound is inferred from
+the target-only reserve arithmetic. These two dirty inputs remain locally
+retained for the next data-only Atlas checkpoint.

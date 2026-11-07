@@ -222,7 +222,7 @@ def make_sized_update_case(*, users, mutations_per_user, raw_key_layout=None, or
     N=0 is an engineering control. The phase itself always uses literal slot0.
     """
     original.integer(users, 1, 64, 'users')
-    n = original.integer(mutations_per_user, 0, 64, 'mutations per user')
+    n = original.integer(mutations_per_user, 0, 128, 'mutations per user')
     layout = _layout(raw_key_layout)
     ordinal_shift = _ordinal_shift(ordinal_shift, 'update', layout)
     keys = [i if layout is None else (i << ordinal_shift) | (layout['L1'] << 64) | (layout['L3'] << 192)

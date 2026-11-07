@@ -1634,7 +1634,7 @@ row = make_sized_update_case(users=3, mutations_per_user=2)
 request = row['request']
 ```
 
-Counts are strict integers: 1..64 users and 0..64 updates each; booleans are
+Counts are strict integers: 1..64 users and 0..128 updates each; booleans are
 rejected. N0 is only an engineering control. Every user successfully updates
 its own consecutive ordinal range from 1 to 2 on one shared prestate recipient,
 checks its reads/counter/checksum and commits the next ordinal to raw phase slot0.
@@ -4181,7 +4181,7 @@ existing308-byte fixed-PUSH3 kernel,1→2 writes, checksum2*N and zero refunds a
 unchanged. No separate assembler or gas formula is introduced;
 delete/insert/mixed do not gain nondefault layouts.
 
-Update bounds remain strict users1..64 and N0..64, with0only an engineering control.
+Update bounds remain strict users1..64 and N0..128, with0only an engineering control.
 At the fixed64×64 planning size, per-user363551gas/envelope364551 plus two1M Anchor
 upper bounds give25,267,264proposal gas, not a claimed30M measurement. Phase ends
 4097 and4096body slots become2. This is scalar planning; the example above is2×2,
@@ -4289,7 +4289,8 @@ per-user312223gas/envelope313223 and two independent1M Anchor upper bounds are
 unchanged. All layouts use the same215-byte kernel and fixed-width PUSH3 shift
 immediate; there is no duplicate assembler or kernel. At89×128, phase advances by128
 per TX and finishes11393. Default48 row/request bytes (including old89-user controls)
-and all update-helper bounds remain unchanged.
+remain unchanged. The readonly layout endpoints do not alter the update-helper
+bounds documented above.
 This API does not perform count/seed searches, create a catalog or execute any
 workload.
 
@@ -4314,3 +4315,14 @@ physical target-body attribution: small slots can alias keys in other maps. A
 qualified generic process G applies only to that observed input; a successor
 must independently qualify its actual G and H again. Closed inputs and
 archived actuals are never regenerated to add this layout.
+
+
+The sized and prefixed update helpers accept up to128 mutations per user. This is
+a recipe bound, not admission for every users×N combination: the existing per-TX
+envelope and block gas checks still reject oversized recipes before constructing
+a request. Users remain bounded at64, and defaults plus all previously accepted
+N≤64 requests are unchanged. Explicit layouts retain the same308-byte kernel,
+three transformed body operands and literal phase slot0; the default ordinal
+layout keeps its existing kernel. At the maximum cardinality,64×128 would need
+8193 initial storage slots including phase0, but exceeds the gas budget and is
+rejected. No native/quote/SP1 result follows from this helper extension.

@@ -442,7 +442,7 @@ class SizedStorageUpdateTests(unittest.TestCase):
 
     def test_sized_update_strict_shape_and_compact_layout(self):
         m = self.load()
-        for users, n in [(True, 1), (0, 1), (65, 1), (1.0, 1), (1, True), (1, -1), (1, 65), (1, 1.0)]:
+        for users, n in [(True, 1), (0, 1), (65, 1), (1.0, 1), (1, True), (1, -1), (1, 129), (1, 1.0)]:
             with self.subTest(users=users, n=n), self.assertRaises(ValueError):
                 m.make_sized_update_case(users=users, mutations_per_user=n)
         for layout in [True, [], [0]*4096, {}, {'L1':0}, {'L1':0,'L3':0,'keys':[]},
@@ -678,7 +678,7 @@ class PrefixedStorageReadTests(unittest.TestCase):
                 m.make_prefixed_read_case(users=1, reads_per_user=1, raw_key_layout=layout)
         self.assertEqual(m.MODES, ('update', 'delete', 'insert', 'mixed'))
         with self.assertRaises(ValueError): m.make_case('read', 8192, 'zero')
-        with self.assertRaises(ValueError): m.make_sized_update_case(users=1, mutations_per_user=128)
+        with self.assertRaises(ValueError): m.make_sized_update_case(users=1, mutations_per_user=129)
         for helper in [m.make_sized_update_case, m.make_prefixed_update_case]:
             with self.assertRaises(ValueError): helper(users=65, mutations_per_user=1)
 
@@ -1253,13 +1253,86 @@ class DiscountedStorageUpdateTests(unittest.TestCase):
                                {'L1': -1, 'L3': 0}, {'L1': 1 << 64, 'L3': 0}, {'L1': 0, 'L3': 0, 'extra': 0}):
                     with self.subTest(shift=shift, build=build.__name__, layout=layout), self.assertRaises(ValueError):
                         build(users=1, mutations_per_user=1, raw_key_layout=layout, ordinal_shift=shift)
-                for users, n in ((0, 1), (65, 1), (True, 1), (1, -1), (1, 65), (1, True)):
+                for users, n in ((0, 1), (65, 1), (True, 1), (1, -1), (1, 129), (1, True)):
                     with self.subTest(shift=shift, users=users, n=n), self.assertRaises(ValueError):
                         build(users=users, mutations_per_user=n, raw_key_layout={'L1': 0, 'L3': 0}, ordinal_shift=shift)
             for build in (m._runtime, m.gas_accounting):
                 for mode in ('delete', 'insert', 'mixed'):
                     with self.subTest(shift=shift, mode=mode, build=build.__name__), self.assertRaises(ValueError):
                         build(mode, 1, raw_key_layout={'L1': 0, 'L3': 0}, ordinal_shift=shift)
+
+
+class ExtendedStorageUpdateBudgetTests(unittest.TestCase):
+    load = StorageMutationTests.load
+
+    def test_extended_update_literal_execution_and_prefixed_delegation(self):
+        m = self.load()
+        for n in (65, 128):
+            for shift in (0, 24, 48, 240):
+                with self.subTest(n=n, shift=shift):
+                    layout = {'L1': (1 << 64) - 1, 'L3': 0}
+                    row = m.make_sized_update_case(users=1, mutations_per_user=n,
+                        raw_key_layout=layout, ordinal_shift=shift)
+                    p = row['parameters']; program = row['request']['program']
+                    contract = program['prestate_contracts'][0]
+                    keys = [(i << shift) | (layout['L1'] << 64) for i in range(1, n + 1)]
+                    state = {int(k, 16): int(v, 16) for k, v in contract['initial_storage'].items()}
+                    self.assertEqual(state, dict.fromkeys([0] + keys, 1))
+                    code = bytes.fromhex(contract['code_hex'][2:])
+                    self.assertEqual(len(code), 308)
+                    result = execute(code, state, p['transaction_gas_limit'])
+                    reads = [(0, 1, True)]
+                    for key in keys: reads.extend([(key, 1, True), (key, 2, False)])
+                    reads.append((0, n + 1, False))
+                    self.assertEqual(result['reads'], reads)
+                    self.assertEqual(result['writes'], [(k, 1, 2, 1, False) for k in keys] + [(0, 1, n + 1, 1, False)])
+                    self.assertEqual(state, {0: n + 1, **dict.fromkeys(keys, 2)})
+                    self.assertEqual(result['stack'], [])
+                    self.assertEqual(result['terminal'], 0)
+                    self.assertEqual(result['refund'], 0)
+                    self.assertEqual(result['applied'], 0)
+                    self.assertEqual(result['gas'], 5270 * n + 26271)
+                    self.assertEqual(result['charged'], result['gas'])
+                    self.assertEqual(p['expected_user_charged_gas'], result['charged'])
+                    self.assertEqual(p['transaction_gas_limit'], result['charged'] + 1000)
+                    self.assertEqual(int.from_bytes(result['memory'][:32], 'big'), n)
+                    self.assertEqual(int.from_bytes(result['memory'][32:64], 'big'), 2 * n)
+                    self.assertEqual(result['counts'], +Counter(program['expected_route_counts']))
+                    prefixed = m.make_prefixed_update_case(users=1, mutations_per_user=n,
+                        raw_key_layout=layout, ordinal_shift=shift)
+                    self.assertEqual(prefixed['request']['program']['prestate_contracts'], program['prestate_contracts'])
+                    self.assertEqual(prefixed['request']['program']['transactions']['counts_by_block'], [0, 1])
+        # Default ordinals follow their existing cheaper kernel; no new layout field.
+        for n in (65, 128):
+            row = m.make_sized_update_case(users=1, mutations_per_user=n)
+            SizedStorageUpdateTests().qualify_sized(row, 1, n, None)
+            prefixed = m.make_prefixed_update_case(users=1, mutations_per_user=n)
+            self.assertEqual(prefixed['request']['program']['prestate_contracts'], row['request']['program']['prestate_contracts'])
+            self.assertEqual(prefixed['request']['program']['transactions']['counts_by_block'], [0, 1])
+
+    def test_extended_update_strict_count_boundary(self):
+        m = self.load()
+        for build in (m.make_sized_update_case, m.make_prefixed_update_case):
+            for n in (-1, 129, True, 128.0, None, '128'):
+                with self.subTest(build=build.__name__, n=n), self.assertRaises(ValueError):
+                    build(users=1, mutations_per_user=n)
+            for users in (0, 65, True, 1.0):
+                with self.subTest(users=users), self.assertRaises(ValueError):
+                    build(users=users, mutations_per_user=128)
+
+    def test_extended_update_infeasible_maximum_rejected_before_request(self):
+        m = self.load(); previous = m.original.make_case; calls = []
+        def forbidden(*args, **kwargs):
+            calls.append((args, kwargs))
+            raise AssertionError('infeasible recipe reached request constructor')
+        m.original.make_case = forbidden
+        try:
+            for build in (m.make_sized_update_case, m.make_prefixed_update_case):
+                with self.subTest(build=build.__name__), self.assertRaisesRegex(ValueError, 'admission envelope'):
+                    build(users=64, mutations_per_user=128, raw_key_layout={'L1': 0, 'L3': 0}, ordinal_shift=24)
+        finally:
+            m.original.make_case = previous
+        self.assertEqual(calls, [])
 
 
 if __name__ == '__main__': unittest.main()

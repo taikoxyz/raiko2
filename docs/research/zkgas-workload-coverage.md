@@ -379,3 +379,41 @@ The original pair is [published as immutable data](https://github.com/taikoxyz/r
 with independent real-download README/CI integrity checks; no repricing or
 reconstruction of the closed pair occurs. Lower-prefix variants and many-small-TX
 packing remain explicit follow-ups; ordinary coverage is not worst-case coverage.
+
+## Genuine-prefix storage-transition deficit on 2026-11-07
+
+The separate [two-block prefix panel](2026-11-07-prefixed-storage-transitions.md)
+is complete: one real Anchor-only block followed by64 users updating64 initialized
+body slots each. Total charged gas23,541,753 includes both Anchors and prefix.
+Reference actual363,477,553 is covered. Sole successor actual3,550,141,992 exceeds
+literal node998,599,458 by2,551,542,534 and full1,301,217,353 by2,248,924,639 PGU;
+this crosses the >2B/<=30M priority screen without extrapolation.
+
+Independent canonical/actual/resource/local gates pass. Both inputs' own observed
+G=e57d314eeb7f77cf agrees; all62 sampled successor body full hashes are0.
+This realizes local concentration, not4096 observed placements or a whole-map
+cost attribution. Complete canonical PGU is separate from the successor's capped
+400M optional observation. No third input or repeated measurement follows.
+
+Source/design review supports an independent block-local storage-transition
+reserve: per-owner cumulative all-physical journal-key union, C32 population/
+low32 concentration, two changed-slot passes at the inherited384PGU/unit.
+Transaction-local storage_journal and other prices stay unchanged. Implementation,
+independent actual-diff/behavior checks and82 retained-input requotes now pass for
+candidate3e335de2. The stressed successor is covered at7,647,153,954node and
+7,949,771,849full PGU, respectively2.15404x/2.23928x actual. The artificial
+reference's21.04x overquote is retained. Across29 original actuals, full covers all;
+four node gaps remain, maximum153,346,391PGU and no residual>2B. The separate
+50-proposal/9600-block price-sensitivity cohort changes+0.032639% node and
++0.018942% full; maximum block uplift0.091275%. These older-program prices do
+not certify current-program actual accuracy or an admission limit. Read-only cache work,
+end-bundle margin, custom prefilled/backend/pre-system paths and other layouts
+remain explicit scope limits. No global closure, normal-history compatibility
+or activation is claimed.
+The [new immutable prefix fixture](https://github.com/taikoxyz/raiko2-atlas/releases/tag/fixture-unzen-prefixed-storage-transitions-v1)
+retains the two original inputs/actuals and unchanged0222 quotes; independent
+source/local behavior and actual remote integrity checks passed. It does not
+rewrite the earlier single-block fixture; its0222 baseline quotes remain unchanged
+while fresh3e335de2 quotes form the separate correction evidence above. The next
+finite source candidate is the read-filled block-long PlainStorage map at smallX;
+it is unmeasured, and no additional tariff or deficit is asserted.

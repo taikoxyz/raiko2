@@ -122,12 +122,16 @@ pub struct PricingBreakdownSnapshot {
     pub account_journal_work_units: u64,
     /// Progressive block-cache work, separate from the transaction-local journal.
     pub account_cache_work_units: u64,
+    /// Progressive per-owner storage-transition reserve, separate from TX journal work.
+    pub storage_transition_work_units: u64,
     /// Independent normalized contribution; add once, outside operations.
     pub storage_journal_scaled: i128,
     /// Independent empirical Account-journal work or normalized contribution.
     pub account_journal_scaled: i128,
     /// Independent normalized block-cache contribution, added exactly once.
     pub account_cache_scaled: i128,
+    /// Independent normalized storage-transition contribution, added exactly once.
+    pub storage_transition_scaled: i128,
     /// Normally priced opcode/confirmed-spawn events in this observation prefix.
     pub normal_dispatch_count: u64,
     /// Dispatch reserve already included in `operations_scaled`; never add it again.
@@ -206,12 +210,16 @@ pub struct NodePricingBreakdownSnapshot {
     pub account_journal_work_units: u64,
     /// Progressive block-cache work, separate from the transaction-local journal.
     pub account_cache_work_units: u64,
+    /// Progressive per-owner storage-transition reserve, separate from TX journal work.
+    pub storage_transition_work_units: u64,
     /// Independent normalized contribution; add once, outside operations.
     pub storage_journal_scaled: i128,
     /// Independent empirical Account-journal work or normalized contribution.
     pub account_journal_scaled: i128,
     /// Independent normalized block-cache contribution, added exactly once.
     pub account_cache_scaled: i128,
+    /// Independent normalized storage-transition contribution, added exactly once.
+    pub storage_transition_scaled: i128,
     /// Normally priced opcode/confirmed-spawn events visible to the node.
     pub normal_dispatch_count: u64,
     /// Dispatch reserve already included in `operations_scaled`; never add it again.
@@ -247,9 +255,11 @@ impl From<ZkGasKnownBlockBreakdown> for NodePricingBreakdownSnapshot {
             storage_journal_work_units: value.storage_journal_work_units(),
             account_journal_work_units: value.account_journal_work_units(),
             account_cache_work_units: value.account_cache_work_units(),
+            storage_transition_work_units: value.storage_transition_work_units(),
             storage_journal_scaled: value.storage_journal_scaled(),
             account_journal_scaled: value.account_journal_scaled(),
             account_cache_scaled: value.account_cache_scaled(),
+            storage_transition_scaled: value.storage_transition_scaled(),
             normal_dispatch_count: value.normal_dispatch_count(),
             normal_dispatch_scaled: value.normal_dispatch_scaled(),
             feature_error_scaled: value.feature_error_scaled(),
@@ -282,9 +292,11 @@ impl TryFrom<PricingBreakdown> for PricingBreakdownSnapshot {
             storage_journal_work_units: value.storage_journal_work_units,
             account_journal_work_units: value.account_journal_work_units,
             account_cache_work_units: value.account_cache_work_units,
+            storage_transition_work_units: value.storage_transition_work_units,
             storage_journal_scaled: value.storage_journal_scaled,
             account_journal_scaled: value.account_journal_scaled,
             account_cache_scaled: value.account_cache_scaled,
+            storage_transition_scaled: value.storage_transition_scaled,
             normal_dispatch_count: value.normal_dispatch_count,
             normal_dispatch_scaled: value.normal_dispatch_scaled,
             feature_error_scaled: value.feature_error_scaled,
@@ -541,6 +553,7 @@ fn complete_block_pricing(
         attempted_priced.storage_journal_scaled,
         attempted_priced.account_journal_scaled,
         attempted_priced.account_cache_scaled,
+        attempted_priced.storage_transition_scaled,
         committed_priced.resources_scaled,
         committed_priced.mpt_scaled,
         committed_priced.transaction_payload_scaled,
@@ -563,9 +576,11 @@ fn complete_block_pricing(
         storage_journal_work_units: attempted_priced.storage_journal_work_units,
         account_journal_work_units: attempted_priced.account_journal_work_units,
         account_cache_work_units: attempted_priced.account_cache_work_units,
+        storage_transition_work_units: attempted_priced.storage_transition_work_units,
         storage_journal_scaled: attempted_priced.storage_journal_scaled,
         account_journal_scaled: attempted_priced.account_journal_scaled,
         account_cache_scaled: attempted_priced.account_cache_scaled,
+        storage_transition_scaled: attempted_priced.storage_transition_scaled,
         normal_dispatch_count: attempted_priced.normal_dispatch_count,
         normal_dispatch_scaled: attempted_priced.normal_dispatch_scaled,
         feature_error_scaled: attempted_priced.feature_error_scaled,
@@ -1011,6 +1026,22 @@ mod tests {
     }
 
     #[test]
+    fn storage_transition_report_fields_are_required_without_zero_fallback() {
+        let node = serde_json::to_value(NodePricingBreakdownSnapshot::default()).unwrap();
+        let prove = serde_json::to_value(PricingBreakdownSnapshot::default()).unwrap();
+        for field in ["storage_transition_work_units", "storage_transition_scaled"] {
+            assert!(node.get(field).is_some(), "node must expose {field}");
+            assert!(prove.get(field).is_some(), "prove must expose {field}");
+            let mut missing = node.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<NodePricingBreakdownSnapshot>(missing).is_err());
+            let mut missing = prove.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<PricingBreakdownSnapshot>(missing).is_err());
+        }
+    }
+
+    #[test]
     fn account_cache_report_fields_are_required_without_zero_fallback() {
         let node = serde_json::to_value(NodePricingBreakdownSnapshot::default()).unwrap();
         let prove = serde_json::to_value(PricingBreakdownSnapshot::default()).unwrap();
@@ -1171,6 +1202,7 @@ mod tests {
                 + block.node.pricing.storage_journal_scaled
                 + block.node.pricing.account_journal_scaled
                 + block.node.pricing.account_cache_scaled
+                + block.node.pricing.storage_transition_scaled
                 + block.node.pricing.evm_local_resources_scaled
                 + block.node.pricing.transaction_payload_scaled,
         );
@@ -1187,6 +1219,7 @@ mod tests {
                 + block.prove.pricing.storage_journal_scaled
                 + block.prove.pricing.account_journal_scaled
                 + block.prove.pricing.account_cache_scaled
+                + block.prove.pricing.storage_transition_scaled
                 + block.prove.pricing.resources_scaled
                 + block.prove.pricing.mpt_scaled
                 + block.prove.pricing.transaction_payload_scaled,
@@ -1500,6 +1533,7 @@ mod tests {
                 + node.storage_journal_scaled
                 + node.account_journal_scaled
                 + node.account_cache_scaled
+                + node.storage_transition_scaled
                 + node.evm_local_resources_scaled
                 + node.transaction_payload_scaled
         );
@@ -1578,6 +1612,7 @@ mod tests {
                 + prove.storage_journal_scaled
                 + prove.account_journal_scaled
                 + prove.account_cache_scaled
+                + prove.storage_transition_scaled
                 + prove.resources_scaled
                 + prove.transaction_payload_scaled
         );
@@ -1626,6 +1661,7 @@ mod tests {
                 + node.storage_journal_scaled
                 + node.account_journal_scaled
                 + node.account_cache_scaled
+                + node.storage_transition_scaled
         );
         assert_eq!(
             prove.total_scaled,
@@ -1633,6 +1669,7 @@ mod tests {
                 + prove.storage_journal_scaled
                 + prove.account_journal_scaled
                 + prove.account_cache_scaled
+                + prove.storage_transition_scaled
         );
         let once = ZkGasModel
             .price_proposal_once(&ProposalPricingInput {
@@ -1697,11 +1734,17 @@ mod tests {
         assert_eq!(prove.account_journal_scaled, 7 * 128 * FIXED_POINT_SCALE);
         assert_eq!(
             node.known_subtotal_scaled,
-            node.fixed_scaled + node.account_journal_scaled + node.account_cache_scaled
+            node.fixed_scaled
+                + node.account_journal_scaled
+                + node.account_cache_scaled
+                + node.storage_transition_scaled
         );
         assert_eq!(
             prove.total_scaled,
-            prove.fixed_scaled + prove.account_journal_scaled + prove.account_cache_scaled
+            prove.fixed_scaled
+                + prove.account_journal_scaled
+                + prove.account_cache_scaled
+                + prove.storage_transition_scaled
         );
         let broken = ZkGasBlockSnapshot {
             account_journal: AccountJournalDiagnostics {
@@ -1721,6 +1764,128 @@ mod tests {
                 MptSelectors::default()
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn storage_transition_is_transported_once_and_incomplete_receipts_fail_closed() {
+        use alethia_reth_evm::zk_gas::pricing::{
+            StorageTransitionDiagnostics, StorageTransitionIncompleteness,
+        };
+        // Repeated changed receipts for one owner/key; each pays the two forward passes.
+        let report = |changes| {
+            ZkGasBlockSnapshot {
+                storage_transition: StorageTransitionDiagnostics {
+                    physical_slot_receipts: changes,
+                    changed_slots: changes,
+                    observed_storage_slots: 1,
+                    max_owner_slots: 1,
+                    max_low32_group: 1,
+                    comparison_equivalents: 1,
+                    query_budget: 2 * changes,
+                    work_units: 2 * changes,
+                    completed_transactions: changes,
+                    incomplete: None,
+                },
+                ..Default::default()
+            }
+            .shadow_report()
+        };
+        let (node, prove, ..) = complete_block_pricing(
+            0,
+            &report(1),
+            &report(3),
+            ProposalPayloadSelectors::default(),
+            ResourceSelectors::default(),
+            MptSelectors::default(),
+        )
+        .unwrap();
+        assert_eq!(node.storage_transition_work_units, 2);
+        assert_eq!(prove.storage_transition_work_units, 6);
+        let node_scaled = 2 * 384 * FIXED_POINT_SCALE;
+        let prove_scaled = 6 * 384 * FIXED_POINT_SCALE;
+        assert_eq!(node.storage_transition_scaled, node_scaled);
+        assert_eq!(prove.storage_transition_scaled, prove_scaled);
+        assert_eq!(node.known_subtotal_scaled, node.fixed_scaled + node_scaled);
+        assert_eq!(prove.total_scaled, prove.fixed_scaled + prove_scaled);
+        assert_eq!(node.operations_scaled, 0);
+        assert_eq!(prove.operations_scaled, 0);
+        assert_eq!(node.storage_journal_scaled, 0);
+        assert_eq!(prove.storage_journal_scaled, 0);
+
+        for bad in [
+            StorageTransitionDiagnostics {
+                incomplete: Some(StorageTransitionIncompleteness::MissingPopulation),
+                ..Default::default()
+            },
+            StorageTransitionDiagnostics {
+                physical_slot_receipts: 1,
+                changed_slots: 1,
+                observed_storage_slots: 1,
+                max_owner_slots: 1,
+                max_low32_group: 1,
+                comparison_equivalents: 1,
+                query_budget: 2,
+                work_units: 1_000_000_000_001,
+                completed_transactions: 1,
+                incomplete: None,
+            },
+        ] {
+            let broken = ZkGasBlockSnapshot {
+                storage_transition: bad,
+                ..Default::default()
+            }
+            .shadow_report();
+            for (committed, attempted) in [(&broken, &report(3)), (&report(1), &broken)] {
+                assert!(
+                    complete_block_pricing(
+                        0,
+                        committed,
+                        attempted,
+                        ProposalPayloadSelectors::default(),
+                        ResourceSelectors::default(),
+                        MptSelectors::default(),
+                    )
+                    .is_err()
+                );
+            }
+        }
+
+        let readonly = ZkGasBlockSnapshot {
+            storage_transition: StorageTransitionDiagnostics {
+                physical_slot_receipts: 2,
+                observed_storage_slots: 2,
+                max_owner_slots: 2,
+                max_low32_group: 1,
+                comparison_equivalents: 2,
+                completed_transactions: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+        .shadow_report();
+        let (node, prove, ..) = complete_block_pricing(
+            0,
+            &readonly,
+            &readonly,
+            ProposalPayloadSelectors::default(),
+            ResourceSelectors::default(),
+            MptSelectors::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                node.storage_transition_work_units,
+                node.storage_transition_scaled
+            ),
+            (0, 0)
+        );
+        assert_eq!(
+            (
+                prove.storage_transition_work_units,
+                prove.storage_transition_scaled
+            ),
+            (0, 0)
         );
     }
 
@@ -2141,6 +2306,38 @@ mod tests {
         assert_eq!(quote.prove.proposal_once.account_cache_work_units, 0);
         assert_eq!(quote.prove.proposal_once.account_cache_scaled, 0);
 
+        // Retain every inherited golden below and itemize only the new transition price.
+        // This assertion is also exercised by the real192-block replay, not fabricated slots.
+        let transition_units = quote
+            .blocks
+            .iter()
+            .map(|block| {
+                let node = &block.node.pricing;
+                let prove = &block.prove.pricing;
+                assert_eq!(
+                    node.storage_transition_work_units,
+                    prove.storage_transition_work_units
+                );
+                let expected =
+                    i128::from(node.storage_transition_work_units) * 384 * FIXED_POINT_SCALE;
+                assert_eq!(node.storage_transition_scaled, expected);
+                assert_eq!(prove.storage_transition_scaled, expected);
+                assert_eq!(
+                    ZkGasModel
+                        .price_storage_transition_work(node.storage_transition_work_units)
+                        .unwrap(),
+                    expected
+                );
+                node.storage_transition_work_units
+            })
+            .sum::<u64>();
+        assert!(transition_units > 0);
+        assert_eq!(transition_units, 1_622);
+        let transition_scaled = i128::from(transition_units) * 384 * FIXED_POINT_SCALE;
+        let transition_pgu = u128::from(transition_units) * 384;
+        assert_eq!(quote.prove.proposal_once.storage_transition_work_units, 0);
+        assert_eq!(quote.prove.proposal_once.storage_transition_scaled, 0);
+
         assert_eq!(
             quote
                 .blocks
@@ -2273,25 +2470,31 @@ mod tests {
                     + operation_uplift
                     + journal_scaled
                     + account_scaled
-                    + cache_scaled,
+                    + cache_scaled
+                    + transition_scaled,
                 block_local_known_pgu: ceil_scaled(
                     3_579_273_824_904_407_953_889_126_534
                         + operation_uplift
                         + journal_scaled
                         + account_scaled
                         + cache_scaled
+                        + transition_scaled
                 )
                 .unwrap(),
-                sum_of_block_known_pgu: 3_765_339_140 + journal_pgu + account_pgu + cache_pgu,
+                sum_of_block_known_pgu: 3_765_339_140
+                    + journal_pgu
+                    + account_pgu
+                    + cache_pgu
+                    + transition_pgu,
             }
         );
         assert_eq!(
             quote.node.block_local_known_pgu,
-            3_769_697_881 + account_pgu + cache_pgu
+            3_769_697_881 + account_pgu + cache_pgu + transition_pgu
         );
         assert_eq!(
             quote.node.sum_of_block_known_pgu,
-            3_769_697_924 + account_pgu + cache_pgu
+            3_769_697_924 + account_pgu + cache_pgu + transition_pgu
         );
         assert_eq!(
             quote.prove.selectors,
@@ -2337,9 +2540,11 @@ mod tests {
                 storage_journal_work_units: 0,
                 account_journal_work_units: 0,
                 account_cache_work_units: 0,
+                storage_transition_work_units: 0,
                 storage_journal_scaled: 0,
                 account_journal_scaled: 0,
                 account_cache_scaled: 0,
+                storage_transition_scaled: 0,
                 normal_dispatch_count: 0,
                 normal_dispatch_scaled: 0,
                 feature_error_scaled: 0,
@@ -2360,6 +2565,7 @@ mod tests {
                 + journal_scaled
                 + account_scaled
                 + cache_scaled
+                + transition_scaled
         );
         assert_eq!(
             quote.prove.block_local_pgu,
@@ -2369,12 +2575,13 @@ mod tests {
                     + journal_scaled
                     + account_scaled
                     + cache_scaled
+                    + transition_scaled
             )
             .unwrap()
         );
         assert_eq!(
             quote.prove.sum_of_block_local_pgu,
-            4_950_522_452 + journal_pgu + account_pgu + cache_pgu
+            4_950_522_452 + journal_pgu + account_pgu + cache_pgu + transition_pgu
         );
         assert_eq!(quote.prove.proposal_once_pgu, 160_621_711);
         assert_eq!(
@@ -2384,6 +2591,7 @@ mod tests {
                 + journal_scaled
                 + account_scaled
                 + cache_scaled
+                + transition_scaled
         );
         assert_eq!(
             quote.prove.total_pgu,
@@ -2393,6 +2601,7 @@ mod tests {
                     + journal_scaled
                     + account_scaled
                     + cache_scaled
+                    + transition_scaled
             )
             .unwrap()
         );

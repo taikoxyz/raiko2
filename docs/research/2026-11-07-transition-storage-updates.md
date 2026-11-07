@@ -5,6 +5,10 @@ full-hash-collapse stress was **not realized**. The successor's own shared hash
 parameter changed. This panel therefore does not close the block-long storage
 container frontier or justify a new tariff.
 
+A later, separate [genuine-prefix panel](2026-11-07-prefixed-storage-transitions.md)
+does realize sampled local concentration and exposes a high-priority cumulative
+transition deficit. The original measurements and release below remain unchanged.
+
 ## Fixed composition and reusable tools
 
 The [exact-sized update helper](../../bin/zkgas/bench/README.md#exact-sized-committed-updates)

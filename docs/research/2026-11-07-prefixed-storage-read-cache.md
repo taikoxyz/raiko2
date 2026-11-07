@@ -259,8 +259,9 @@ b76/SDK6.3 retain the artifact scopes and dirty-build labels above.
 The [long-prefix fixture](https://github.com/taikoxyz/raiko2-atlas/releases/tag/fixture-unzen-prefixed-storage-long-read-v1)
 and [dispersed fixture](https://github.com/taikoxyz/raiko2-atlas/releases/tag/fixture-unzen-dispersed-storage-read-v1)
 retain immutable original data and documented integrity checks. The shift24
-pair is retained locally pending the next data-only Atlas fixture checkpoint;
-it is not yet represented by either published asset. Existing release assets
+pair is included with the dirty240 pair in the later
+[layout-boundaries fixture](https://github.com/taikoxyz/raiko2-atlas/releases/tag/fixture-unzen-storage-layout-boundaries-v1).
+It is not represented by either earlier asset. Existing release assets
 are not rewritten. Bulk-zero/proof-shape and custom/preseeded/failed-backend
 paths remain explicit TODOs rather than inferred coverage.
 
@@ -298,7 +299,7 @@ and proves no owner/TX, physical-body, final-Bundle or whole-placement attributi
 Actual code-pool ordering differs between the two inputs; G was observed afresh.
 No measurement, seed, layout, count or observation window was retried or extended.
 
-The storage/account checkpoint now has94 unique inputs/9,658blocks and41
+At the dirty240 checkpoint, the storage/account set has94 unique inputs/9,658blocks and41
 numeric actuals:36 node quotes and40 full quotes cover actual. The five positive
 node gaps still peak at391,973,447PGU; the sole positive full gap is11,862,881PGU.
 No measured node gap exceeds2B. The unmeasured controls/historical-only rows and
@@ -323,9 +324,56 @@ SP1 PGU. No profiling split or metrics-on/off ablation was run. Optimizing that
 observer is a separate tool TODO, with no source or guest change in this panel.
 
 The bounded structural matrix has readonly common-byte prefixes0/3/6/30 and
-dirty prefixes6/30 measured. Dirty0/3 remain unmeasured. The next distinct
-question is fixed64×64 dirty24: the raw-low32 discount combined with all changed
-slots and final state construction. This is a new finite cell, not another point
-in a closed panel. No actual, price fix or30M worst-case bound is inferred from
-the target-only reserve arithmetic. These two dirty inputs remain locally
-retained for the next data-only Atlas checkpoint.
+dirty prefixes6/30 measured at this checkpoint. The following independent
+dirty24 pair adds the three-common-byte cell. The dirty240 inputs are now in
+the immutable layout-boundaries fixture linked above, with the readonly24 pair.
+
+## Dirty writes with the low32 concentration discount
+
+A separate fixed64×64 dirty24 pair retains the same successful initialized1→2
+trajectory and genuine[0,64] blocks, while using raw keys
+`(i<<24)|(word<<64)`. The final raw grouping is N=4,097/M=17/C=527. The
+target-only reserve is3,347,370units×384=1,285,390,080PGU. These are input
+geometry and formula arithmetic, not a physical-table or workload upper bound.
+
+| Input | Actual SP1 PGU | Literal node PGU | Full proposal PGU |
+| --- | ---: | ---: | ---: |
+|dirty24 reference|362,481,719|1,749,661,218|2,051,475,929|
+|dirty24 sole successor|2,867,980,408|1,749,661,218|2,051,886,121|
+
+Both consume23,541,753 charged gas, split167,355/23,374,398. The successor
+underquotes both surfaces: actual-minus-node is1,118,319,190PGU and
+actual-minus-full is816,094,287PGU. Actual/node is approximately1.6392x.
+This point is below the agreed high-priority screen of a node deficit strictly
+greater than2BPGU at no more than30M actual gas. It is retained as a deliberate
+low-priority residual, with EEA/J+2X/384 unchanged. It is not covered and does
+not establish that every gas-filled block remains below that screen.
+
+Independent canonical/data/actual/resource/profile checks all pass. Raw
+gas54,778,425,793 normalizes by `*10//191` to2,867,980,408PGU; the complete
+canonical execution has3,447,587,378instructions. It takes88.8545seconds with
+4,563,737,600 sampled process-tree PSS bytes, within6GiB/1,200seconds. The raw
+report SHA256 is
+`1eb1f6f9ef8c27cd32243fde0c70ffc8839bbce1956dfbb5085ee36bfe4e76c3`.
+The400M optional observation is incomplete and sample-capped. Independent raw
+reconstruction qualifies176 declared-key members with matching actual ownG and
+fullH0, then matches all185 root rows and71 conservatively excluded intervals.
+This retains the generic-input-only scope and all artifact/SDK caveats above.
+Actual code-pool ordering differs again; the chosen word did not substitute for
+fresh G/H observation. There were no measurement retries or third inputs.
+
+The storage/account checkpoint now has96 unique inputs/9,662blocks and43
+numeric actuals:37 node quotes and41 full quotes cover actual. Six positive
+node gaps peak at1,118,319,190PGU; two full gaps remain positive. The earlier
+readonly24 deficits391,973,447node/11,862,881full remain recorded. No measured
+node deficit exceeds2B. The50 historical proposals/9,600blocks without current
+actuals remain sensitivity evidence; three controls remain unmeasured. This
+checkpoint is not whole-opcode or production-SDK accuracy certification.
+
+Dirty0 remains unmeasured. The next distinct question is a fixed near-budget
+dirty24 panel rather than another sample inside this closed pair. The planned
+64×78 construction has a conservative whole-proposal source allowance of
+29,989,184gas, including two independent1M Anchor allowances. It still needs
+new tooling gates, fresh receipts and actuals; the allowance is not an actual
+gas value, a PGU prediction or a globally maximal packing claim. The dirty24
+inputs remain locally retained for a subsequent immutable Atlas checkpoint.

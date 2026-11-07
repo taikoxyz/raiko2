@@ -362,7 +362,7 @@ This retains the generic-input-only scope and all artifact/SDK caveats above.
 Actual code-pool ordering differs again; the chosen word did not substitute for
 fresh G/H observation. There were no measurement retries or third inputs.
 
-The storage/account checkpoint now has96 unique inputs/9,662blocks and43
+At the64×64 dirty24 checkpoint, the storage/account set has96 unique inputs/9,662blocks and43
 numeric actuals:37 node quotes and41 full quotes cover actual. Six positive
 node gaps peak at1,118,319,190PGU; two full gaps remain positive. The earlier
 readonly24 deficits391,973,447node/11,862,881full remain recorded. No measured
@@ -370,10 +370,55 @@ node deficit exceeds2B. The50 historical proposals/9,600blocks without current
 actuals remain sensitivity evidence; three controls remain unmeasured. This
 checkpoint is not whole-opcode or production-SDK accuracy certification.
 
-Dirty0 remains unmeasured. The next distinct question is a fixed near-budget
-dirty24 panel rather than another sample inside this closed pair. The planned
-64×78 construction has a conservative whole-proposal source allowance of
-29,989,184gas, including two independent1M Anchor allowances. It still needs
-new tooling gates, fresh receipts and actuals; the allowance is not an actual
-gas value, a PGU prediction or a globally maximal packing claim. The dirty24
-inputs remain locally retained for a subsequent immutable Atlas checkpoint.
+Dirty0 remains unmeasured. The next section records a separate near-budget
+dirty24 panel rather than another sample inside this closed pair. These inputs
+remain locally retained for a subsequent immutable Atlas checkpoint.
+
+## Larger fixed dirty24 workload
+
+The independent64×78 panel keeps the initialized1→2 trajectory, two genuine
+blocks and all prefix/Anchor/once costs. The source allowance is29,989,184gas
+including two independent1M Anchor allowances. Fresh receipts instead measure
+28,263,673 charged gas, split167,355/28,096,318. The allowance is not actual gas
+or a globally maximal packing claim. Final raw geometry is N=4,993/M=20/C=642;
+the target-only reserve4,953,063units×384=1,901,976,192PGU remains formula
+arithmetic rather than a physical-table/workload upper bound.
+
+| Input | Actual SP1 PGU | Literal node PGU | Full proposal PGU |
+| --- | ---: | ---: | ---: |
+|64×78 reference|406,488,686|2,485,121,097|2,821,378,479|
+|64×78 sole successor|4,083,089,212|2,485,121,097|2,821,506,527|
+
+The successor underquotes node by1,597,968,115PGU and full by1,261,582,685PGU.
+Actual/node is approximately1.643x. This deliberate point remains below the
+strict2B node-deficit screen at<=30M actual gas; keep EEA/J+2X/384 unchanged
+and retain the residual. It does not prove a bound for every30M-gas combination.
+Node is the integer sum7,329,931+2,477,791,166=2,485,121,097; the aggregate
+scaled ceiling2,485,121,096 is one PGU lower and is not the denominator.
+
+All independent canonical/data/actual/resource/profile checks pass. Raw
+gas77,987,003,968 normalizes by `*10//191` to4,083,089,212PGU; complete
+execution has4,964,576,846instructions and takes119.9806seconds with
+4,565,446,656 sampled process-tree PSS bytes. Raw report SHA256 is
+`5f1e99c6f07d3a95fbdd2abc3742536a96342b69860272909b1795ab6165adad`.
+The400M observation is incomplete and capped. Independent reconstruction first
+seals its result, then matches all192 root rows×19fields and64 excluded
+intervals. Its183 declared-key members have fresh matching ownG/fullH0;
+owner/TX, physical-body and whole-placement/Bundle attribution remain unknown.
+There are no measurement retries, third inputs or observation extensions.
+
+The storage/account checkpoint now has98 unique inputs/9,666blocks and45
+numeric actuals:38 node and42 full quotes cover actual. Seven node deficits
+and three full deficits remain positive; the largest node deficit is
+1,597,968,115PGU. Earlier readonly24 and64×64 dirty24 residuals stay included.
+No measured deficit passes the high-priority screen. Historical-only rows,
+unmeasured controls and frozen-artifact/SDK scope limits remain unchanged.
+
+The reusable update helper now accepts up to128 mutations per user with the
+same gas, assembler and native schema. All294 old complete row/request oracles
+remain byte-identical. The module runs45tests:44pass and one existing native
+opt-in test is skipped; independent verification covers64 tiny recipes/96 literal transactions
+and44 strict/admission rejections. The formal64×78 DATA gate separately executes
+every user's actual bytecode. No guest, SDK, ELF, observer or pricing rebuild
+was needed. These measured inputs are retained locally for a later immutable
+data-only fixture; they are not in the earlier layout-boundaries release.

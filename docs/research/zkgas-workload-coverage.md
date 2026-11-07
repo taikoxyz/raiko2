@@ -353,3 +353,21 @@ cohort and do not certify current b76 accuracy. Independent source/behavior,
 35 trace / 132 CLI tests and scoped host lint checks pass. Presystem/direct-DB
 population and other containers remain explicit follow-ups; no global bound
 or default Unzen activation is implied.
+
+## Committed storage aggregation on 2026-11-07
+
+The [64x64 committed-update panel](2026-11-07-transition-storage-updates.md)
+uses the permanent exact-sized producer and existing prestate schema, one
+initialized owner and 4,097 persistent slots at 23,434,619 actual charged gas.
+Reference/successor actuals 377,600,454 /377,807,746 PGU are both covered by
+literal node 994,000,808 and full 1,315,902,014 /1,315,402,998. Canonical,
+actual/resource and independent raw-local gates pass; each input has one native,
+quote and SP1 execution with no retry or experimental build.
+
+The intended concentration is **UNREALIZED**: the new input's own G changes from
+selected reference `0x910c11f2a55b1e09` to `0x8632ac5b84fd984b`. Each input has
+63 closed locals /62 body keys; observed body hashes are distinct and nonzero.
+This does not close the TransitionAccount.storage frontier or establish whole
+table pressure/placement. No price changes or third seed follow. Shared-seed
+source analysis, lower-prefix variants and many-small-TX packing remain explicit
+follow-ups; ordinary coverage of these two inputs is not worst-case coverage.

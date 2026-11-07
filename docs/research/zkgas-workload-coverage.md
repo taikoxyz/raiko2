@@ -334,3 +334,22 @@ absent on the original host, with peak PSS 4.56GB. Each input was constructed,
 quoted and measured once, without guest/ELF/SDK/observer rebuild. Block-aware
 pricing and retained-actual/historical requotes are the next priority; the
 earlier cold panel does not close this warm-first composition.
+
+The subsequent `02223227` observed block-cache supplement is now validated on
+the same retained actuals. It keeps Account-journal and all other prices
+unchanged, and adds a separate progressive physical-key union / query-budget
+component. The warm successor's real new node/full prices are
+17,441,782,794 / 17,606,189,513 PGU against actual 5,027,210,167; the warm
+reference's 51.507x constructed node overquote remains explicit. All 78 real
+requotes pass independent non-cache invariance and arithmetic checks. All 25
+measured full quotes cover actual; four original small node gaps remain,
+maximum 153,352,535 PGU, with no measured >2B residual. No actual is rerun.
+
+Historical 50-proposal / 9,600-block sensitivity adds only 33,858,816 literal
+node PGU (+0.03648%) and 33,859,328 full PGU (+0.02117%). All rows change; the
+largest absolute block addition is 48,128 PGU and the largest relative block
+uplift is 0.11127%. These older 416f/SDK6.1 rows have no numeric actuals in this
+cohort and do not certify current b76 accuracy. Independent source/behavior,
+35 trace / 132 CLI tests and scoped host lint checks pass. Presystem/direct-DB
+population and other containers remain explicit follow-ups; no global bound
+or default Unzen activation is implied.

@@ -61,8 +61,10 @@ fn snapshot(pricing: PricingBreakdown) -> PricingBreakdownSnapshot {
         operations_scaled: pricing.operations_scaled,
         storage_journal_work_units: pricing.storage_journal_work_units,
         account_journal_work_units: pricing.account_journal_work_units,
+        account_cache_work_units: pricing.account_cache_work_units,
         storage_journal_scaled: pricing.storage_journal_scaled,
         account_journal_scaled: pricing.account_journal_scaled,
+        account_cache_scaled: pricing.account_cache_scaled,
         normal_dispatch_count: pricing.normal_dispatch_count,
         normal_dispatch_scaled: pricing.normal_dispatch_scaled,
         feature_error_scaled: pricing.feature_error_scaled,
@@ -90,8 +92,8 @@ fn current_model_profiles() -> CompatibilityProfilesV1 {
 
 fn quote() -> CompleteQuoteV1 {
     let public_output = format!("0x{}", "00".repeat(32));
-    let node_pricing = json!({"access_list_scaled":"0","access_list_construction_pairs":0,"access_list_construction_other_pairs":0,"access_list_address_pairs":0,"access_list_construction_scaled":"0","access_list_construction_other_scaled":"0","access_list_address_scaled":"0","code_preparation_scaled":"0","authorization_scaled":"0","fixed_scaled":"0","operations_scaled":"0","storage_journal_work_units":0,"storage_journal_scaled":"0","account_journal_work_units":0,"account_journal_scaled":"0","normal_dispatch_count":0,"normal_dispatch_scaled":"0","feature_error_scaled":"0","evm_local_resources":{"unique_account_count":0,"unique_storage_slot_access_count":0,"unique_storage_slot_write_count":0,"unique_code_hash_count":0,"unique_code_bytes":0},"evm_local_resources_scaled":"0","transaction_payload":{"canonical_transaction_bytes":1,"nonempty_payload_transactions":0},"transaction_payload_scaled":"0","access_list_items":0,"code_preparation":{"nonempty_events":0,"total_bytes":0},"authorization_validations":0,"known_subtotal_scaled":"0","known_subtotal_pgu":"0"});
-    let prove_pricing = json!({"access_list_scaled":"0","access_list_construction_pairs":0,"access_list_construction_other_pairs":0,"access_list_address_pairs":0,"access_list_construction_scaled":"0","access_list_construction_other_scaled":"0","access_list_address_scaled":"0","code_preparation_scaled":"0","authorization_scaled":"0","fixed_scaled":"0","operations_scaled":"0","storage_journal_work_units":0,"storage_journal_scaled":"0","account_journal_work_units":0,"account_journal_scaled":"0","normal_dispatch_count":0,"normal_dispatch_scaled":"0","feature_error_scaled":"0","resources_scaled":"0","mpt_scaled":"0","startup_scaled":"0","transaction_payload_scaled":"0","blob_source_scaled":"0","parent_mpt_scaled":"0","total_scaled":"0","total_pgu":"0"});
+    let node_pricing = json!({"access_list_scaled":"0","access_list_construction_pairs":0,"access_list_construction_other_pairs":0,"access_list_address_pairs":0,"access_list_construction_scaled":"0","access_list_construction_other_scaled":"0","access_list_address_scaled":"0","code_preparation_scaled":"0","authorization_scaled":"0","fixed_scaled":"0","operations_scaled":"0","storage_journal_work_units":0,"storage_journal_scaled":"0","account_journal_work_units":0,"account_cache_work_units":0,"account_journal_scaled":"0","account_cache_scaled":"0","normal_dispatch_count":0,"normal_dispatch_scaled":"0","feature_error_scaled":"0","evm_local_resources":{"unique_account_count":0,"unique_storage_slot_access_count":0,"unique_storage_slot_write_count":0,"unique_code_hash_count":0,"unique_code_bytes":0},"evm_local_resources_scaled":"0","transaction_payload":{"canonical_transaction_bytes":1,"nonempty_payload_transactions":0},"transaction_payload_scaled":"0","access_list_items":0,"code_preparation":{"nonempty_events":0,"total_bytes":0},"authorization_validations":0,"known_subtotal_scaled":"0","known_subtotal_pgu":"0"});
+    let prove_pricing = json!({"access_list_scaled":"0","access_list_construction_pairs":0,"access_list_construction_other_pairs":0,"access_list_address_pairs":0,"access_list_construction_scaled":"0","access_list_construction_other_scaled":"0","access_list_address_scaled":"0","code_preparation_scaled":"0","authorization_scaled":"0","fixed_scaled":"0","operations_scaled":"0","storage_journal_work_units":0,"storage_journal_scaled":"0","account_journal_work_units":0,"account_cache_work_units":0,"account_journal_scaled":"0","account_cache_scaled":"0","normal_dispatch_count":0,"normal_dispatch_scaled":"0","feature_error_scaled":"0","resources_scaled":"0","mpt_scaled":"0","startup_scaled":"0","transaction_payload_scaled":"0","blob_source_scaled":"0","parent_mpt_scaled":"0","total_scaled":"0","total_pgu":"0"});
     let mut quote: CompleteQuoteV1 = serde_json::from_value(json!({
         "schema_version":1,"key":{"corpus_id":"corpus","sample_id":"sample","guest_input_sha256":"input"},
         "executable":executable(),"input_source":{"kind":"single","descriptor_sha256":"descriptor"},"guest_input_byte_length":12,
@@ -104,7 +106,7 @@ fn quote() -> CompleteQuoteV1 {
         }],
             "node":{"unzen_zkgas_sum":"2","block_local_known_scaled":"0","block_local_known_pgu":"0","sum_of_block_known_pgu":"0"},
             "prove":{"selectors":{"payload":{"total_transaction_count":1,"canonical_transaction_bytes":1,"nonempty_payload_transactions":0},"true_unattempted_transactions":0,"blobs":{"source_blob_counts":[1],"proposal_blob_hash_count":1,"provider_blob_count":1,"provider_commitment_count":1,"provider_proof_count":1},"parent_mpt":{"path_node_visits":0,"materialization_work_units":0,"hydration_hash_blocks":0,"dirty_encoded_nodes":0,"dirty_hash_blocks":0,"structural_branch_extension_churn_nodes":0,"dropped_trie_nodes":0}},
-                "block_local_scaled":"0","block_local_pgu":"0","sum_of_block_local_pgu":"0","proposal_once":{"access_list_scaled":"0","access_list_construction_pairs":0,"access_list_construction_other_pairs":0,"access_list_address_pairs":0,"access_list_construction_scaled":"0","access_list_construction_other_scaled":"0","access_list_address_scaled":"0","code_preparation_scaled":"0","authorization_scaled":"0","fixed_scaled":"10000000000000000000","operations_scaled":"0","storage_journal_work_units":0,"storage_journal_scaled":"0","account_journal_work_units":0,"account_journal_scaled":"0","normal_dispatch_count":0,"normal_dispatch_scaled":"0","feature_error_scaled":"0","resources_scaled":"0","mpt_scaled":"0","startup_scaled":"0","transaction_payload_scaled":"0","blob_source_scaled":"0","parent_mpt_scaled":"0","total_scaled":"10000000000000000000","total_pgu":"10"},"proposal_once_pgu":"10","total_scaled":"10000000000000000000","total_pgu":"10"}}
+                "block_local_scaled":"0","block_local_pgu":"0","sum_of_block_local_pgu":"0","proposal_once":{"access_list_scaled":"0","access_list_construction_pairs":0,"access_list_construction_other_pairs":0,"access_list_address_pairs":0,"access_list_construction_scaled":"0","access_list_construction_other_scaled":"0","access_list_address_scaled":"0","code_preparation_scaled":"0","authorization_scaled":"0","fixed_scaled":"10000000000000000000","operations_scaled":"0","storage_journal_work_units":0,"storage_journal_scaled":"0","account_journal_work_units":0,"account_cache_work_units":0,"account_journal_scaled":"0","account_cache_scaled":"0","normal_dispatch_count":0,"normal_dispatch_scaled":"0","feature_error_scaled":"0","resources_scaled":"0","mpt_scaled":"0","startup_scaled":"0","transaction_payload_scaled":"0","blob_source_scaled":"0","parent_mpt_scaled":"0","total_scaled":"10000000000000000000","total_pgu":"10"},"proposal_once_pgu":"10","total_scaled":"10000000000000000000","total_pgu":"10"}}
     })).unwrap();
     let selectors = &quote.quote.prove.selectors;
     let parent = selectors.parent_mpt;
@@ -2819,4 +2821,198 @@ fn account_journal_attempted_budget_cannot_shrink_with_self_consistent_tariffs()
         format!("{error:#}")
             .contains("attempted Account journal work does not cover committed units or price")
     );
+}
+
+fn quote_with_account_cache(committed: u64, attempted: u64) -> CompleteQuoteV1 {
+    const SCALE: i128 = 1_000_000_000_000_000_000;
+    let mut q = quote();
+    let node_scaled = ZkGasModel.price_account_cache_work(committed).unwrap();
+    let prove_scaled = ZkGasModel.price_account_cache_work(attempted).unwrap();
+    let node_pgu = u128::try_from(node_scaled / SCALE).unwrap();
+    let prove_pgu = u128::try_from(prove_scaled / SCALE).unwrap();
+    let node = &mut q.quote.blocks[0].node.pricing;
+    node.account_cache_work_units = committed;
+    node.account_cache_scaled = node_scaled;
+    node.known_subtotal_scaled += node_scaled;
+    node.known_subtotal_pgu += node_pgu;
+    q.quote.node.block_local_known_scaled += node_scaled;
+    q.quote.node.block_local_known_pgu += node_pgu;
+    q.quote.node.sum_of_block_known_pgu += node_pgu;
+    let prove = &mut q.quote.blocks[0].prove.pricing;
+    prove.account_cache_work_units = attempted;
+    prove.account_cache_scaled = prove_scaled;
+    prove.total_scaled += prove_scaled;
+    prove.total_pgu += prove_pgu;
+    q.quote.prove.block_local_scaled += prove_scaled;
+    q.quote.prove.block_local_pgu += prove_pgu;
+    q.quote.prove.sum_of_block_local_pgu += prove_pgu;
+    q.quote.prove.total_scaled += prove_scaled;
+    q.quote.prove.total_pgu += prove_pgu;
+    q
+}
+
+#[test]
+fn account_cache_price_closes_once_across_committed_and_attempted_scopes() {
+    for (committed, attempted) in [
+        (0, 0),
+        (0, 1),
+        (3, 7),
+        (1_000_000_000_000, 1_000_000_000_000),
+    ] {
+        let dir = TestDir::new();
+        let q = quote_with_account_cache(committed, attempted);
+        assert_eq!(q.quote.blocks[0].node.pricing.operations_scaled, 0);
+        assert_eq!(q.quote.blocks[0].prove.pricing.operations_scaled, 0);
+        let args = write_inputs(
+            &dir,
+            &[QuoteRowV1::Complete(Box::new(q))],
+            &[complete_observation()],
+        );
+        let run = run_compare(&args, &executable()).unwrap();
+        assert_eq!(run.manifest.counts.get(&ComparisonKind::Joined), Some(&1));
+    }
+}
+
+#[test]
+fn account_cache_rejects_price_domain_and_double_charge_forgery() {
+    for mutation in [
+        "node-count",
+        "prove-price",
+        "negative",
+        "domain",
+        "double-charge",
+        "proposal-units",
+        "proposal-price",
+    ] {
+        let mut q = quote_with_account_cache(3, 7);
+        match mutation {
+            "node-count" => q.quote.blocks[0].node.pricing.account_cache_work_units += 1,
+            "prove-price" => q.quote.blocks[0].prove.pricing.account_cache_scaled += 1,
+            "negative" => q.quote.blocks[0].node.pricing.account_cache_scaled = -1,
+            "domain" => {
+                q.quote.blocks[0].prove.pricing.account_cache_work_units = 1_000_000_000_001
+            }
+            "double-charge" => {
+                q.quote.blocks[0].prove.pricing.total_scaled +=
+                    q.quote.blocks[0].prove.pricing.account_cache_scaled
+            }
+            "proposal-units" => q.quote.prove.proposal_once.account_cache_work_units = 1,
+            "proposal-price" => {
+                q.quote.prove.proposal_once.account_cache_scaled = 128 * 1_000_000_000_000_000_000
+            }
+            _ => unreachable!(),
+        }
+        let dir = TestDir::new();
+        let args = write_inputs(
+            &dir,
+            &[QuoteRowV1::Complete(Box::new(q))],
+            &[complete_observation()],
+        );
+        assert!(
+            run_compare(&args, &executable()).is_err(),
+            "reject {mutation}"
+        );
+        assert!(!args.output.exists());
+    }
+}
+
+#[test]
+fn account_cache_attempted_budget_cannot_shrink_with_self_consistent_tariffs() {
+    let dir = TestDir::new();
+    let q = quote_with_account_cache(7, 6);
+    let args = write_inputs(
+        &dir,
+        &[QuoteRowV1::Complete(Box::new(q))],
+        &[complete_observation()],
+    );
+    let error = run_compare(&args, &executable()).unwrap_err();
+    assert!(
+        format!("{error:#}")
+            .contains("attempted account cache work does not cover committed units or price")
+    );
+}
+
+#[test]
+fn account_cache_coverage_and_domain_are_required_for_foreign_models_too() {
+    for foreign in [false, true] {
+        for outside_domain in [false, true] {
+            let mut q = quote_with_account_cache(3, 7);
+            q.quote.blocks[0].prove.pricing.account_cache_work_units =
+                if outside_domain { 1_000_000_000_001 } else { 2 };
+            if foreign {
+                q.quote.model_id = "foreign-account-cache-model".into();
+                q.calibration_profile = q.quote.model_id.clone();
+            }
+            let dir = TestDir::new();
+            let args = write_inputs(
+                &dir,
+                &[QuoteRowV1::Complete(Box::new(q))],
+                &[complete_observation()],
+            );
+            let error = run_compare(&args, &executable()).unwrap_err();
+            assert!(format!("{error:#}").contains("account cache work"));
+            assert!(!args.output.exists());
+        }
+    }
+}
+
+#[test]
+fn account_cache_tariff_rejects_a_self_consistent_component_shift() {
+    let dir = TestDir::new();
+    let mut q = quote_with_account_cache(3, 7);
+    let node = &mut q.quote.blocks[0].node.pricing;
+    node.account_cache_scaled -= 1;
+    node.fixed_scaled += 1;
+    let args = write_inputs(
+        &dir,
+        &[QuoteRowV1::Complete(Box::new(q))],
+        &[complete_observation()],
+    );
+    let error = run_compare(&args, &executable()).unwrap_err();
+    assert!(format!("{error:#}").contains("account cache work price mismatch"));
+    assert!(!args.output.exists());
+}
+
+#[test]
+fn account_cache_proposal_once_rejects_a_self_consistent_component_shift() {
+    let dir = TestDir::new();
+    let mut q = quote_with_account_cache(3, 7);
+    let once = &mut q.quote.prove.proposal_once;
+    once.account_cache_work_units = 1;
+    once.account_cache_scaled = ZkGasModel.price_account_cache_work(1).unwrap();
+    once.startup_scaled -= once.account_cache_scaled;
+    let args = write_inputs(
+        &dir,
+        &[QuoteRowV1::Complete(Box::new(q))],
+        &[complete_observation()],
+    );
+    let error = run_compare(&args, &executable()).unwrap_err();
+    assert!(format!("{error:#}").contains("proposal-only pricing contains account cache work"));
+    assert!(!args.output.exists());
+}
+
+#[test]
+fn account_cache_required_schema_roundtrips_without_silent_zero_or_field_loss() {
+    let value = serde_json::to_value(quote_with_account_cache(3, 7)).unwrap();
+    let decoded: CompleteQuoteV1 = serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(serde_json::to_value(decoded).unwrap(), value);
+    for scope in [
+        "/quote/blocks/0/node/pricing",
+        "/quote/blocks/0/prove/pricing",
+        "/quote/prove/proposal_once",
+    ] {
+        for field in ["account_cache_work_units", "account_cache_scaled"] {
+            let mut missing = value.clone();
+            missing
+                .pointer_mut(scope)
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+            assert!(
+                serde_json::from_value::<CompleteQuoteV1>(missing).is_err(),
+                "missing {scope}/{field}"
+            );
+        }
+    }
 }

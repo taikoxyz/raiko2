@@ -1,9 +1,10 @@
 # Cross-transaction account-cache concentration
 
-The current model covers both measured inputs in this finite panel. At the same
+The af30 model covers both measured inputs in this finite panel. At the same
 21,637,563 charged block gas, concentrating the addresses raises complete SP1
 workload from302,539,274 to946,126,714PGU. The successor's literal node estimate
-is3,790,845,145PGU, leaving2,844,718,431PGU of headroom. No tariff changes follow.
+is3,790,845,145PGU, leaving2,844,718,431PGU of headroom. This cold-only panel
+required no tariff change; the separate warm-first supplement is linked below.
 This is a selected-distribution experiment, not a global block-workload bound.
 
 ## Question and fixed workload

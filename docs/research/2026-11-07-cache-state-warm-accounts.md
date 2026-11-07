@@ -4,8 +4,9 @@ Model `af30` underprices the sole reference-G successor in this finite panel. On
 valid block consumes 29,669,999 EVM gas and measures 5,027,210,167 complete SP1
 PGU, against a literal node estimate of 1,354,594,058. The positive difference
 3,672,616,109 exceeds the agreed >2B PGU / <=30M gas priority screen. The full
-proposal estimate also underprices it. This finding requires a pricing fix;
-the measurements below preserve the original model, without a correction claim.
+proposal estimate also underprices it. The measurements below preserve that
+original model. The separately validated `02223227` supplement at the end
+covers this demonstrated deficit.
 
 ## Why warm-first is a separate composition
 
@@ -122,9 +123,96 @@ shared-AL output bytes remain compatible; no new guest-input schema or runner
 is introduced. Canonical inputs and original reports are retained for a
 separate data-only Atlas fixture.
 
-The immediate follow-up is a node-observable block-aware reserve, with focused
-state-lifetime and accounting tests, requotes of these retained actuals and
-historical price sensitivity checks. A global multiplier or the earlier cold
-panel's reserve is not evidence of a fix. Other container work remains open;
-this finite panel establishes neither a global 30M bound nor historical
-transaction rejection rates.
+The original finding motivated the block-aware reserve evaluated below, with
+state-lifetime tests and retained-input price comparisons. A global multiplier
+or the earlier cold panel's reserve alone is not evidence of a fix. Other
+container work remains open; this finite panel establishes neither a global
+30M bound nor historical transaction rejection rates.
+
+## Validated block-cache supplement
+
+Successor model
+`022232270da81c96dd9d7a12899d52ac011f46144d7f90d778a585aaeca5b7bd`
+adds `account_cache_work_units` and `account_cache_scaled` independently of the
+existing Account-journal contribution. All inherited prices and the existing
+discount remain unchanged.
+
+For finalized transaction account keys `J_t`, each committed/attempted block
+prefix maintains its own union `S_t` and first-four-network-byte histogram:
+
+```text
+N_t = |S_t|; M_t = largest prefix group in S_t
+C_t = ceil((N_t + 4*M_t) / 5)
+B_t = 2*|J_t| + persistent_storage_materialization_count_upper_t
+U_cache = sum_t(C_t * B_t)
+cache_scaled = 128 * 10^18 * U_cache
+```
+
+The two potential account visits cover basic loading and a possible commit;
+the latter deliberately includes untouched accounts. Storage materialization
+adds potential owner-cache visits. Across transactions, a repeated key adds
+query budget again while its union membership stays unique. Warm repetitions
+within one Journal do not all become DB-cache queries. Rejected candidates
+affect only the attempted prefix, and a fresh block resets both populations.
+This is an empirical observed-population proxy, not exact DB-cache telemetry
+or a universal lookup-cost bound.
+
+The same four retained inputs now produce the following real quotations. No
+canonical inputs or original SP1 observations are replaced or rerun.
+
+| Input | Actual PGU | Original af30 node PGU | New node PGU | New full proposal PGU |
+| --- | ---: | ---: | ---: | ---: |
+| Cold reference | 302,539,274 | 3,780,228,313 | 4,743,492,057 | 4,920,918,088 |
+| Cold successor | 946,126,714 | 3,790,845,145 | 6,825,099,481 | 7,002,537,800 |
+| Warm reference | 338,631,603 | 1,354,594,058 | 17,441,782,794 | 17,606,176,969 |
+| Warm successor | 5,027,210,167 | 1,354,594,058 | 17,441,782,794 | 17,606,189,513 |
+
+The demonstrated warm deficit is covered by the literal node estimate, about
+3.469x actual. The deliberately constructed warm reference is also charged
+conservatively, about 51.507x actual. Neither is treated as a normal historical
+transaction sample, and the large reference overquote is retained.
+
+Across 78 real requotes, all non-cache pricing components, selectors and public
+outputs remain equal to their actual af30 baselines. Total changes are exactly
+the new cache contribution at 128 PGU/unit, with both ceiling paths and zero
+proposal-once contribution checked. All 25 measured controlled inputs remain
+covered by full proposal estimates. The same four positive literal-node gaps
+remain, the largest 153,352,535 PGU; none meets the >2B priority screen. Three
+controlled inputs remain explicitly unmeasured.
+
+The separate historical cohort contains 50 proposals / 9,600 blocks:
+
+| Historical price metric | af30 | New model | Change |
+| --- | ---: | ---: | ---: |
+| Sum of integer block-node PGU | 92,823,492,832 | 92,857,351,648 | +33,858,816 (+0.03648%) |
+| Full proposal PGU sum | 159,967,003,341 | 160,000,862,669 | +33,859,328 (+0.02117%) |
+
+All 50 proposals and 9,600 blocks change. The largest proposal-node uplift is
+0.07178%; the largest full-proposal uplift is 0.02901%. The largest absolute
+block addition is 48,128 PGU, while the largest relative block uplift is
+0.11127%. Median and p95 block additions are both 3,328 PGU. The extra 512 PGU
+in full versus node totals belongs to attempted work rather than committed
+work; those prefixes remain distinct.
+
+These historical rows preserve the older `416f` / SDK6.1 provenance and have no
+numeric actual PGU attached in this sensitivity cohort. They establish the
+small price change, not current `b76` accuracy certification or a newly measured
+natural-workload error ratio. The two opened warm cases are now calibration
+and stress evidence, not untouched holdouts.
+
+Independent source, behavior and numeric gates pass: 266 EVM tests and 59
+generator tests, seven independently authored behavior cases plus two focused
+source tests, 35 trace and 132 CLI tests, and five scoped host clippy targets.
+The independent requote check validates all 78 rows and 19,256 route-component
+sums. The full Cargo workspace/all-feature and guest-build checks are not
+claimed; an unchanged upstream test triggers one strict-clippy style warning.
+New quote executable `9ba9b8f5508483b0da990fd1b308ec818f76fc6a00522eb48bd2bfe78eaee1bc`
+retains its actual dbe3563-dirty / Reth c164851-dirty build identity. A later
+change only to a test golden is separately checked as production-equivalent.
+Requoting uses native GuestInput replay, without new fixture construction,
+SP1 sampling, SDK/guest/observer builds or changing the original observations.
+
+Suspended preexecution/direct DB accesses are not claimed to enumerate the
+complete cache. Other block-long containers and wider compositions remain
+follow-ups. Unzen stays the default; this supplement does not activate a new
+mainnet admission rule.

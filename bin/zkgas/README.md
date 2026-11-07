@@ -437,11 +437,11 @@ execution; a real packaged-SP1 measurement is a separate external-producer valid
 ## Observed operation pricing components
 
 The quote consumer follows the reviewed maintained Alethia shadow-pricing branch.
-Its current explicit dependency revision is
-`e33b26d7ae8fc104c20d030f6accf1c079a2e686`, exporting model
-`5f93909ea1372eb6e10fa2b599c6087aafd4ec493ba28eb1cea4c4abb3708a11`.
-The authoritative formulas, coefficients and empirical limits remain in
-[Alethia's pricing documentation](https://github.com/taikoxyz/alethia-reth/blob/e33b26d7ae8fc104c20d030f6accf1c079a2e686/docs/zk-gas-pricing-model.md).
+The exact dependency revisions are recorded in the
+[workspace manifest](../../Cargo.toml); each quote records its actual embedded
+model in `calibration_profile` and `quote.model_id`, along with executable
+identity. The authoritative formulas, coefficients and empirical limits remain
+with [Alethia's maintained pricing implementation and documentation](https://github.com/taikoxyz/alethia-reth/pull/260).
 This source synchronization does not activate the model for consensus admission
 or replace Unzen difficulty.
 
@@ -453,6 +453,18 @@ Both quote surfaces preserve these selectors and contributions:
   added once outside `operations_scaled`, with zero contribution in proposal-once
   pricing. See [the calibration record](../../docs/research/2026-11-05-storage-journal-prefix.md)
   for the guest layout evidence, simple formula, negative control and limits.
+- `account_journal_work_units` and `account_journal_scaled`: the independent
+  transaction-local Account-journal reserve. These keep their original meaning
+  when the block-cache component is present.
+- `account_cache_work_units` and `account_cache_scaled`: progressive block-level
+  work derived from finalized physical Journal account keys and persistent
+  storage materializations. Each committed/attempted prefix owns its own observed
+  account union; revisiting an account in another transaction adds query budget
+  again. This is a conservative observed-population proxy, rather than exact DB
+  cache telemetry. Its price is added once outside `operations_scaled`, with
+  zero proposal-once contribution. The
+  [warm-first observations](../../docs/research/2026-11-07-cache-state-warm-accounts.md)
+  retain the original model's deficit; a candidate quote is not a new SP1 sample.
 - `authorization_validations` and `authorization_scaled`: raw authorization-list
   entries, including duplicates, stale entries and unsuccessful recovery. The
   prove block counts attempted entries; the node block counts committed entries.

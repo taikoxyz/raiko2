@@ -368,6 +368,10 @@ The intended concentration is **UNREALIZED**: the new input's own G changes from
 selected reference `0x910c11f2a55b1e09` to `0x8632ac5b84fd984b`. Each input has
 63 closed locals /62 body keys; observed body hashes are distinct and nonzero.
 This does not close the TransitionAccount.storage frontier or establish whole
-table pressure/placement. No price changes or third seed follow. Shared-seed
-source analysis, lower-prefix variants and many-small-TX packing remain explicit
+table pressure/placement. No price changes or third seed follow. Independent
+static ELF checks trace shared G to the first initializer's stack and one-byte
+TLSF allocation pointers; wire length/code order do not isolate its cause.
+A genuine fixed first-block witness is a new host-tool hypothesis, pending
+implementation, binary-shape and fresh own-G checks, with all prefix costs
+retained. Lower-prefix variants and many-small-TX packing remain explicit
 follow-ups; ordinary coverage of these two inputs is not worst-case coverage.

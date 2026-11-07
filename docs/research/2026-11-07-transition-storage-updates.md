@@ -118,10 +118,39 @@ is `022232270da81c96dd9d7a12899d52ac011f46144d7f90d778a585aaeca5b7bd`.
 These opened inputs are finite stress evidence, not untouched holdouts, natural
 transaction precision, a global workload bound or a production activation.
 
-No price change follows. Next, trace the frozen program's shared-seed
-initialization to understand the parameter change; two input lengths/node
-counts alone do not prove its cause. Any later stability experiment needs a new
-prospective protocol rather than a third adaptation here. Short-prefix layouts
-and many smaller committed transactions remain separate coverage questions:
-transaction-local reservations cannot automatically certify a block-long map.
-Data-only fixture publication for this storage panel remains pending.
+## Why the shared parameter can change
+
+Static inspection of this exact ELF and its declared matching sources, followed
+by independent machine-byte checks, identifies the global seed initializer. It
+mixes the first successful initialization's stack address, fixed function/global
+addresses and the returned address of a one-byte Rust heap allocation, then
+caches six words. The allocator is TLSF. The allocated byte's value, total input
+length, instruction counter and SDK getrandom are not direct inputs to this
+machine path. A changed G therefore requires changed initializer pointer
+context under the ordinary initialization assumptions; the precise earlier
+allocation responsible remains UNKNOWN. Equal G would not prove equal context.
+
+The wire deserializes witnesses before the shared proposal node pool. Within
+the first witness, state indices and code buffers precede the empty accounts
+map; that map still checks/initializes the global seed before its zero-length
+branch. Initialization can happen earlier. The raw input is read into a reserved
+region, so a shorter bincode does not itself establish a different TLSF return.
+Independent binary-pattern readback confirms code-buffer order [308,1,6656]
+versus [1,6656,308], alongside the differing witness-index counts. These are
+confounders, not an observed allocation trace or the isolated cause of changed G.
+No actual first-init stack/heap pointer was captured by this panel.
+
+This motivates a separately scoped host fixture extension: a real Anchor-only
+first block followed by the storage workload in a second block. An equivalent
+first-witness allocation sequence might initialize G before variable later work;
+that is a new hypothesis requiring actual binary-shape and fresh own-G checks.
+The first block keeps its required minimal witness and contributes all of its
+node/full/actual cost. No unused padding, seed override or guest change is
+proposed. The design passed independent source review; implementation and real
+multi-block compatibility gates remain before any fresh finite experiment.
+This closed pair is not rerun or adapted a third time.
+
+No price change follows. Short-prefix layouts and many smaller committed
+transactions remain separate coverage questions: transaction-local reservations
+cannot automatically certify a block-long map. Data-only fixture publication
+for this storage panel remains pending.

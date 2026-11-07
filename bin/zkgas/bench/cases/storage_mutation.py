@@ -61,8 +61,8 @@ def _ordinal_shift(value, mode, layout):
     if type(value) is not int or value not in (0, 24, 48, 240):
         raise ValueError('ordinal_shift must be the integer0,24,48 or240')
     if value != 48 and (layout is None or layout['L3'] != 0
-            or (mode != 'read' and not (mode == 'update' and value == 240))):
-        raise ValueError('nondefault shifts require explicit L3=0; update supports240, read supports0/24/240')
+            or mode not in ('read', 'update')):
+        raise ValueError('nondefault shifts require explicit L3=0 and read or update mode')
     return value
 
 
@@ -218,7 +218,7 @@ def make_sized_update_case(*, users, mutations_per_user, raw_key_layout=None, or
 
     The optional algebraic layout is raw slot k(i)=(i<<48)|(L1<<64)|(L3<<192),
     with L2=0 and i an ordinal1..users*N. It is not an arbitrary raw-key vector.
-    Opt-in shift240 requires explicit L3=0 and uses (i<<240)|(L1<<64).
+    Opt-in shifts0/24/240 require explicit L3=0 and use (i<<shift)|(L1<<64).
     N=0 is an engineering control. The phase itself always uses literal slot0.
     """
     original.integer(users, 1, 64, 'users')
@@ -252,8 +252,12 @@ def make_sized_update_case(*, users, mutations_per_user, raw_key_layout=None, or
     program['prestate_contracts'] = [dict(address=owner, code_hex='0x' + code.hex(),
         initial_storage={hex(key): '0x1' for key in [0] + keys})]
     parameters = dict(mode='update', users=users, mutations_per_user=n, raw_key_layout=layout,
-        raw_key_rule='ordinal' if layout is None else ('(i<<240)|(L1<<64); L0=L2=0'
-            if ordinal_shift == 240 else '(i<<48)|(L1<<64)|(L3<<192); L2=0'),
+        raw_key_rule='ordinal' if layout is None else {
+            0: 'i|(L1<<64); L2=L3=0',
+            24: '(i<<24)|(L1<<64); L2=L3=0',
+            48: '(i<<48)|(L1<<64)|(L3<<192); L2=0',
+            240: '(i<<240)|(L1<<64); L0=L2=0',
+        }[ordinal_shift],
         block_count=1, user_transactions_per_block=users, all_transactions_including_anchor=users + 1,
         transaction_kind='call', transaction_gas_limit=envelope, transaction_envelope_reserve=reserve,
         header_gas_limit=HEADER_GAS_LIMIT, charged_gas_budget=BLOCK_BUDGET, expected_anchor_gas=ANCHOR_GAS,
@@ -280,7 +284,8 @@ def make_sized_update_case(*, users, mutations_per_user, raw_key_layout=None, or
         identity_sha256=identity, holdout_only=False, actuals_used_for_fitting=False,
         data_role='exact_sized_update_engineering_recipe',
         completion_gate='Before sampling independently qualify signed user/Anchor order, concrete raw reads/writes, phase/counter/checksum, coldness/originals/refunds, exact routes, canonical witness and initial/final roots. Producer VM success alone is insufficient.',
-        scope=('Opt-in long-prefix update engineering recipe. No pricing model, observed G, placement or workload is asserted; no formal panel or sampling is performed.' if ordinal_shift == 240 else
+        scope=('Opt-in raw-layout update engineering recipe. No pricing model, observed G, placement or workload is asserted; no formal panel or sampling is performed.' if ordinal_shift in (0, 24) else
+               'Opt-in long-prefix update engineering recipe. No pricing model, observed G, placement or workload is asserted; no formal panel or sampling is performed.' if ordinal_shift == 240 else
                'Current model02223227 includes Account-cache128PGU/unit. This helper creates no formal panel, chooses no reference/successor layout and makes no workload or per-map attribution claim. Measure literal node block quotes and full proposal separately from actual SP1 if later authorized.'))
 
 
@@ -315,7 +320,8 @@ def make_prefixed_update_case(*, users, mutations_per_user, raw_key_layout=None,
     row.update(sample_id=f'storage-prefixed-update-{identity}',
                family='prefixed-storage-update', identity_sha256=identity,
                data_role='prefixed_update_engineering_recipe',
-               scope=('Two genuine blocks, first Anchor-only. Opt-in long-prefix update engineering recipe; no pricing model, allocation equivalence, observed G, placement or workload is asserted; no formal panel or sampling is performed.' if ordinal_shift == 240 else
+               scope=('Two genuine blocks, first Anchor-only. Opt-in raw-layout update engineering recipe; no pricing model, allocation equivalence, observed G, placement or workload is asserted; no formal panel or sampling is performed.' if ordinal_shift in (0, 24) else
+                      'Two genuine blocks, first Anchor-only. Opt-in long-prefix update engineering recipe; no pricing model, allocation equivalence, observed G, placement or workload is asserted; no formal panel or sampling is performed.' if ordinal_shift == 240 else
                       'Two genuine blocks, first Anchor-only. Current model02223227 includes Account-cache128PGU/unit. No claim of allocation equivalence, stable G or realized workload pressure; no reference/successor or formal sampling panel is created.'))
     return row
 

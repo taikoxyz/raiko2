@@ -4162,18 +4162,24 @@ assert row['request']['program']['transactions']['counts_by_block'] == [0, 2]
 long_update = make_prefixed_update_case(users=2, mutations_per_user=2,
     raw_key_layout={'L1': 0, 'L3': 0}, ordinal_shift=240)
 assert long_update['parameters']['raw_key_rule'] == '(i<<240)|(L1<<64); L0=L2=0'
+# Three common LE bytes, with low32 groups repeating at ordinal256:
+prefix24_update = make_prefixed_update_case(users=2, mutations_per_user=2,
+    raw_key_layout={'L1': 0, 'L3': 0}, ordinal_shift=24)
+assert prefix24_update['parameters']['raw_key_rule'] == '(i<<24)|(L1<<64); L2=L3=0'
 PY
 ```
 
 
-Both `make_sized_update_case` and `make_prefixed_update_case` accept only default48
-or opt-in240 for updates. The240 layout requires explicit strictu64 L1/L3 with
-L3=0; it uses `(ordinal<<240)|(L1<<64)`, while phase remains literal slot0 and
-continues to store an ordinal. All three body operands—initial SLOAD, SSTORE and
-post-write SLOAD—and the declared initial storage use the same transform. The
+Both `make_sized_update_case` and `make_prefixed_update_case` accept default48
+or opt-in0/24/240 for updates. Nondefault layouts require explicit strictu64
+L1/L3 with L3=0 and use `(ordinal<<shift)|(L1<<64)`; shift0 is
+`ordinal|(L1<<64)`. Phase remains literal slot0 and stores an ordinal.
+At shift24, low32 can repeat across distinct full keys, including the phase
+group at ordinal256; that grouping does not make full storage keys collide.
+All three body operands—initial SLOAD, SSTORE and post-write SLOAD—and the declared initial storage use the same transform. The
 existing308-byte fixed-PUSH3 kernel,1→2 writes, checksum2*N and zero refunds are
-unchanged. No separate assembler or gas formula is introduced. Shifts0/24 remain
-readonly-only; delete/insert/mixed do not gain nondefault layouts.
+unchanged. No separate assembler or gas formula is introduced;
+delete/insert/mixed do not gain nondefault layouts.
 
 Update bounds remain strict users1..64 and N0..64, with0only an engineering control.
 At the fixed64×64 planning size, per-user363551gas/envelope364551 plus two1M Anchor
@@ -4182,14 +4188,17 @@ upper bounds give25,267,264proposal gas, not a claimed30M measurement. Phase end
 not a formal input. Actual per-block/Anchor gas still comes from qualified receipts.
 
 Default rows, including their historical0222 scope, remain byte-identical; explicit48
-has the same output. Only new240 rows record ordinal_shift240/rawrule and a generic
-engineering scope rather than relabelling old results or choosing a pricing model.
+has the same output. Existing240 row bytes/scopes also remain unchanged.
+New0/24 rows record their ordinal_shift/rawrule and a generic engineering scope
+without a model binding, as240 already does; they do not relabel old results.
 Current-model evaluation is a separate existing quote-tool/configuration choice.
 Raw key selection is not evidence of actual hash G, owner/TX, placement or pressure;
 a separately reviewed finite protocol must obtain a new reference's qualified G
-and independently requalify its sole successor. The intended later question combines
-write-dense transition/final-bundle work with long comparison; J+2X already observes
-these keys/changes, so it tests empirical margin, not an established missed charge.
+and independently requalify its sole successor. The next finite question is
+update24: low32 pricing discount combined with write-dense transition/final-bundle
+work. Update0 is an engineering endpoint, with no formal sampling authorized here.
+J+2X already observes these keys/changes, so this tests empirical margin,
+not an established missed charge.
 No input, native/quote/SP1 run, rate fit, search or global bound is produced here.
 
 The fixture interface accepts exactly one of uniform `count_per_block` or
@@ -4265,8 +4274,8 @@ share a group without equaling each other. For the fixed89×128 scalar size,
 N=11393 including phase, M=45 and C=ceil((N+7M)/8)=1464; this is arithmetic,
 not a constructed input, placement observation or measured PGU. All ordinals
 are below2^16 and shifted ordinal bits end below the L1 mask at bit64.
-No endpoint asserts actual hash placement or PGU. Shifts0/24 remain readonly-only;
-240also supports the exact update helpers above. Other shifts, booleans/floats,
+No endpoint asserts actual hash placement or PGU. Shifts0/24/240also support
+the exact update helpers above. Other shifts, booleans/floats,
 missing layout and a nonzero L3 mask are rejected for nondefault endpoints. Default48, including explicit48,
 retains its original metadata without adding an `ordinal_shift` field. Only0/24/240
 record that field and their different raw-key rules in the sample identity.

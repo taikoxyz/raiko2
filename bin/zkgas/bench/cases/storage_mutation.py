@@ -343,7 +343,7 @@ def make_prefixed_read_case(*, users, reads_per_user, raw_key_layout=None):
         initial_storage={hex(key): '0x1' for key in [0] + keys})]
     parameters = dict(mode='read', users=users, reads_per_user=n, raw_key_layout=layout,
         raw_key_rule='ordinal' if layout is None else '(i<<48)|(L1<<64)|(L3<<192); L2=0',
-        evaluator_model_id='3e335de20582fca48f84b3df1b2ecd8d8d7281de02442ab35a134e4635431d73',
+        evaluator_model_id='eea6f1da87ee129d2d9f759ae6cef01cb8ac93988376a86efb290398e6db5da6',
         block_count=2, user_transactions_by_block=[0, users], all_transactions_including_anchor=users + 2,
         transaction_kind='call', transaction_gas_limit=envelope, transaction_envelope_reserve=reserve,
         header_gas_limit=HEADER_GAS_LIMIT, charged_gas_budget=BLOCK_BUDGET,
@@ -368,7 +368,7 @@ def make_prefixed_read_case(*, users, reads_per_user, raw_key_layout=None):
         identity_sha256=identity, holdout_only=False, actuals_used_for_fitting=False,
         data_role='prefixed_read_engineering_recipe',
         completion_gate='Qualify literal body reads/phase-only writes, originals/coldness/checksum/routes, all signatures and per-block gas/roots/minimal witnesses before a prospective finite actual protocol. VM success is not proof of PlainStorage hash placement or PGU deficiency.',
-        scope='Current evaluator3e335 includes independent storage-transition384PGU/unit; old producer MODEL and legacy helpers retain their original identities. Two genuine blocks, all prefix cost retained. No stable G, hash collision, actual workload or underpricing claim; no catalog, seed search or sampling occurs.')
+        scope='Current evaluatoreea6 includes read-through/transition reserve384PGU/unit on J+2X; old producer MODEL and legacy helpers retain their original identities. Two genuine blocks, all prefix cost retained. No stable G, hash collision, actual workload or underpricing claim; no catalog, seed search or sampling occurs.')
 
 
 def prepare(output: Path, *, model_id=MODEL):

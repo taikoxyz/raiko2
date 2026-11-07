@@ -466,14 +466,18 @@ Both quote surfaces preserve these selectors and contributions:
   [warm-first observations](../../docs/research/2026-11-07-cache-state-warm-accounts.md)
   retain the original model's deficit; a candidate quote is not a new SP1 sample.
 - `storage_transition_work_units` and `storage_transition_scaled`: an independent
-  block-local reserve for persistent storage transitions. For each actual state
+  block-local reserve for persistent storage queries and transitions. For each actual state
   owner, cumulative finalized physical journal keys determine population and raw
-  low32 concentration; only this transaction's changed slots add query budget.
+  low32 concentration. Each transaction adds query budget `J + 2X`, with J its
+  finalized physical key count and X its transaction-relative changed count.
+  This includes successful read-through query scope and two changed-slot passes.
   Committed/attempted prefixes own separate populations. The normalized term is
   added once outside `operations_scaled`, with zero proposal-once contribution.
-  This empirical forward-transition reserve preserves the transaction-local
+  This empirical query/transition reserve preserves the transaction-local
   journal price; it is not an exact census of all DB/cache work. See the
   [genuine-prefix observations and correction](../../docs/research/2026-11-07-prefixed-storage-transitions.md).
+  The separate [read-only cache panel](../../docs/research/2026-11-07-prefixed-storage-read-cache.md)
+  explains the added J term and the validation boundary.
   Both fields are required in current quote files. Preserve archived older quotes
   unchanged; replay their retained GuestInput to obtain a current quote rather
   than inventing zero values for the new component.

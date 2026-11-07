@@ -4224,7 +4224,9 @@ phase cold/warm reads, each cold body read and the final phase SSTORE, with zero
 refund. Admission uses a separate1M gas-limit upper bound for **each** real Anchor
 and checks every ordered user envelope; actual Anchor gas remains receipt data.
 Both blocks stay in node/full/actual comparisons. The new recipe explicitly binds
-current evaluator`3e335de2…`; the legacy producer `MODEL`,24-case catalog, update/
+current evaluator`eea6f1da…` with the read-through budget `J+2X`; archived rows
+keep their original`3e335de2…` binding and are never regenerated to relabel them.
+The legacy producer `MODEL`,24-case catalog, update/
 delete/insert/mixed kernels and old helper request bytes retain their identities.
 A model binding is not an accuracy claim: canonical signatures/gas/state/minimal
 witnesses and a separately reviewed actual-own-PlainStorage observation protocol

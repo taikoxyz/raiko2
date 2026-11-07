@@ -414,6 +414,31 @@ The [new immutable prefix fixture](https://github.com/taikoxyz/raiko2-atlas/rele
 retains the two original inputs/actuals and unchanged0222 quotes; independent
 source/local behavior and actual remote integrity checks passed. It does not
 rewrite the earlier single-block fixture; its0222 baseline quotes remain unchanged
-while fresh3e335de2 quotes form the separate correction evidence above. The next
-finite source candidate is the read-filled block-long PlainStorage map at smallX;
-it is unmeasured, and no additional tariff or deficit is asserted.
+while fresh3e335de2 quotes form the separate correction evidence above. At this
+checkpoint, the read-filled block-long PlainStorage map at smallX was the next
+unmeasured source candidate. Its subsequent measurements and correction follow.
+
+## Read-through storage-query scope on 2026-11-07
+
+The [read-only cache panels](2026-11-07-prefixed-storage-read-cache.md) retain
+two separately fixed reference/successor pairs. The89-user successor costs
+5,280,821,062 actual PGU at28,062,336chargedgas, versus3e335 node2,390,442,635
+and full2,770,850,065. Both deficits exceed2B. Independent data, actual/resource
+and bounded raw-local evidence pass; the panel is closed without another input.
+
+Candidateeea6 extends the existing owner-separated storage reserve budget from
+2X toJ+2X, covering successful read-through scope as well as changed-slot passes.
+C32/384/domain/inherited prices stay fixed. Independent source and focused
+behavior checks, host bridge/CLI tests and86 retained-input requotes pass.
+The target is covered at27,788,992,523node/28,169,399,953full, approximately
+5.262x/5.334x actual. Its artificial reference's52x overquote remains explicit.
+
+All33 retained numeric full estimates cover actual; four smaller node deficits
+remain, maximum153,343,319PGU. The50-proposal/9600-block historical sensitivity
+changes+0.041124% node/+0.023870% full, maximum block-node uplift0.102877%.
+That older-program cohort has no numeric actuals and supplies price sensitivity.
+The [immutable read-cache fixture](https://github.com/taikoxyz/raiko2-atlas/releases/tag/fixture-unzen-prefixed-storage-read-cache-v1)
+preserves four original inputs/actuals/3e335 quotes, independently downloaded
+and verified. Long common-byte-prefix keys, absent-zero reads, final-bundle
+margin and custom/preseeded/system paths remain distinct follow-ups; neither
+global coverage nor model activation follows from these finite panels.

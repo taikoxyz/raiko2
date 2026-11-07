@@ -633,7 +633,7 @@ class PrefixedStorageReadTests(unittest.TestCase):
                     for tx, remaining in enumerate(p['header_prefix_remaining_gas']):
                         self.assertEqual(remaining, 31_000_000 - 1_000_000 - tx * p['expected_user_charged_gas'])
                         self.assertGreaterEqual(remaining, p['transaction_gas_limit'])
-                    self.assertEqual(p['evaluator_model_id'], '3e335de20582fca48f84b3df1b2ecd8d8d7281de02442ab35a134e4635431d73')
+                    self.assertEqual(p['evaluator_model_id'], 'eea6f1da87ee129d2d9f759ae6cef01cb8ac93988376a86efb290398e6db5da6')
 
     def test_readonly_high_user_boundary_has_literal_phase_routes_and_gas(self):
         # Tiny body only; never construct the prospective89x128 point in tests.

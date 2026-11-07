@@ -8,7 +8,7 @@ license.workspace = true
 alloy = { workspace = true }
 alloy-rpc-types-eth = { workspace = true }
 alloy-sol-types = { workspace = true }
-alethia-reth-evm = { git = "https://github.com/taikoxyz/alethia-reth", rev = "5d6e2811fd4e176e92e8c945e00035a87ad03b6d", default-features = false }
+alethia-reth-evm = { git = "https://github.com/taikoxyz/alethia-reth", rev = "a8e00f00fa0e6ab15e2936b19949927df34bcd5a", default-features = false }
 anyhow = { workspace = true }
 bincode = { workspace = true }
 clap = { workspace = true }

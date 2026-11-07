@@ -122,7 +122,7 @@ pub struct PricingBreakdownSnapshot {
     pub account_journal_work_units: u64,
     /// Progressive block-cache work, separate from the transaction-local journal.
     pub account_cache_work_units: u64,
-    /// Progressive per-owner storage-transition reserve, separate from TX journal work.
+    /// Progressive owner storage-query/transition reserve, separate from TX journal work.
     pub storage_transition_work_units: u64,
     /// Independent normalized contribution; add once, outside operations.
     pub storage_journal_scaled: i128,
@@ -210,7 +210,7 @@ pub struct NodePricingBreakdownSnapshot {
     pub account_journal_work_units: u64,
     /// Progressive block-cache work, separate from the transaction-local journal.
     pub account_cache_work_units: u64,
-    /// Progressive per-owner storage-transition reserve, separate from TX journal work.
+    /// Progressive owner storage-query/transition reserve, separate from TX journal work.
     pub storage_transition_work_units: u64,
     /// Independent normalized contribution; add once, outside operations.
     pub storage_journal_scaled: i128,
@@ -1772,7 +1772,7 @@ mod tests {
         use alethia_reth_evm::zk_gas::pricing::{
             StorageTransitionDiagnostics, StorageTransitionIncompleteness,
         };
-        // Repeated changed receipts for one owner/key; each pays the two forward passes.
+        // Each repeated changed receipt pays one query and two forward passes.
         let report = |changes| {
             ZkGasBlockSnapshot {
                 storage_transition: StorageTransitionDiagnostics {
@@ -1782,8 +1782,8 @@ mod tests {
                     max_owner_slots: 1,
                     max_low32_group: 1,
                     comparison_equivalents: 1,
-                    query_budget: 2 * changes,
-                    work_units: 2 * changes,
+                    query_budget: 3 * changes,
+                    work_units: 3 * changes,
                     completed_transactions: changes,
                     incomplete: None,
                 },
@@ -1800,10 +1800,10 @@ mod tests {
             MptSelectors::default(),
         )
         .unwrap();
-        assert_eq!(node.storage_transition_work_units, 2);
-        assert_eq!(prove.storage_transition_work_units, 6);
-        let node_scaled = 2 * 384 * FIXED_POINT_SCALE;
-        let prove_scaled = 6 * 384 * FIXED_POINT_SCALE;
+        assert_eq!(node.storage_transition_work_units, 3);
+        assert_eq!(prove.storage_transition_work_units, 9);
+        let node_scaled = 3 * 384 * FIXED_POINT_SCALE;
+        let prove_scaled = 9 * 384 * FIXED_POINT_SCALE;
         assert_eq!(node.storage_transition_scaled, node_scaled);
         assert_eq!(prove.storage_transition_scaled, prove_scaled);
         assert_eq!(node.known_subtotal_scaled, node.fixed_scaled + node_scaled);
@@ -1819,6 +1819,20 @@ mod tests {
                 ..Default::default()
             },
             StorageTransitionDiagnostics {
+                // Coherent query/work diagnostics isolate the pricing domain check.
+                physical_slot_receipts: 1_000_000_000_001,
+                changed_slots: 0,
+                observed_storage_slots: 1,
+                max_owner_slots: 1,
+                max_low32_group: 1,
+                comparison_equivalents: 1,
+                query_budget: 1_000_000_000_001,
+                work_units: 1_000_000_000_001,
+                completed_transactions: 1_000_000_000_001,
+                incomplete: None,
+            },
+            // The old2X-only diagnostics must not produce a current quote.
+            StorageTransitionDiagnostics {
                 physical_slot_receipts: 1,
                 changed_slots: 1,
                 observed_storage_slots: 1,
@@ -1826,16 +1840,25 @@ mod tests {
                 max_low32_group: 1,
                 comparison_equivalents: 1,
                 query_budget: 2,
-                work_units: 1_000_000_000_001,
+                work_units: 2,
                 completed_transactions: 1,
                 incomplete: None,
             },
         ] {
-            let broken = ZkGasBlockSnapshot {
+            let snapshot = ZkGasBlockSnapshot {
                 storage_transition: bad,
                 ..Default::default()
+            };
+            if bad.work_units == 1_000_000_000_001 {
+                assert_eq!(
+                    snapshot.storage_transition_work_units(),
+                    Err(ZkGasError::SelectorOutOfRange {
+                        selector: "storage_transition_work_units",
+                        value: 1_000_000_000_001,
+                    })
+                );
             }
-            .shadow_report();
+            let broken = snapshot.shadow_report();
             for (committed, attempted) in [(&broken, &report(3)), (&report(1), &broken)] {
                 assert!(
                     complete_block_pricing(
@@ -1858,6 +1881,8 @@ mod tests {
                 max_owner_slots: 2,
                 max_low32_group: 1,
                 comparison_equivalents: 2,
+                query_budget: 2,
+                work_units: 4,
                 completed_transactions: 1,
                 ..Default::default()
             },
@@ -1878,14 +1903,14 @@ mod tests {
                 node.storage_transition_work_units,
                 node.storage_transition_scaled
             ),
-            (0, 0)
+            (4, 4 * 384 * FIXED_POINT_SCALE)
         );
         assert_eq!(
             (
                 prove.storage_transition_work_units,
                 prove.storage_transition_scaled
             ),
-            (0, 0)
+            (4, 4 * 384 * FIXED_POINT_SCALE)
         );
     }
 
@@ -2332,7 +2357,7 @@ mod tests {
             })
             .sum::<u64>();
         assert!(transition_units > 0);
-        assert_eq!(transition_units, 1_622);
+        assert_eq!(transition_units, 3_699);
         let transition_scaled = i128::from(transition_units) * 384 * FIXED_POINT_SCALE;
         let transition_pgu = u128::from(transition_units) * 384;
         assert_eq!(quote.prove.proposal_once.storage_transition_work_units, 0);

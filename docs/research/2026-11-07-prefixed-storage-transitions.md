@@ -12,6 +12,11 @@ two-input panel uses the permanent
 [genuine prefix helper](../../bin/zkgas/bench/README.md#genuine-empty-user-prefix-blocks).
 No third input, seed/count sweep or same-input measurement retry follows.
 
+A later [read-only storage panel](2026-11-07-prefixed-storage-read-cache.md)
+finds a separate high-priority deficit in the `3e335de2` correction below.
+This document retains the earlier model's formula and validation results;
+those results do not certify the later read-through query scope.
+
 ## Genuine two-block composition
 
 `counts_by_block=[0,64]` creates a real Anchor-only block, then an Anchor and

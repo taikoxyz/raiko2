@@ -146,11 +146,31 @@ first-witness allocation sequence might initialize G before variable later work;
 that is a new hypothesis requiring actual binary-shape and fresh own-G checks.
 The first block keeps its required minimal witness and contributes all of its
 node/full/actual cost. No unused padding, seed override or guest change is
-proposed. The design passed independent source review; implementation and real
-multi-block compatibility gates remain before any fresh finite experiment.
-This closed pair is not rerun or adapted a third time.
+proposed. The separately implemented
+[prefix helper and counts_by_block interface](../../bin/zkgas/bench/README.md#genuine-empty-user-prefix-blocks)
+retain real Anchor/root/nonce chaining, per-block minimal read replay for initialized
+prestate, proposal-wide read unions and summed per-block proof-node counts.
+Focused host tests pass (22 units /3 integrations), as do strict fixture lib/bin
+clippy and independent source/behavior checks: five new tiny compositions,23
+recovered signatures across13 blocks, seven old JSON/bin/native byte-compatible
+cases and34 invalid requests without final artifacts. A style-only lint correction
+produces an identical native executable; no guest/SDK/ELF/observer build occurred.
+Independent native/typed engineering checks used the tool sandbox namespace;
+these are canonical behavior checks, not original-host PGU/SHM measurements.
+No formal two-block workload has been measured by this milestone. This closed
+pair is not rerun or adapted a third time.
 
 No price change follows. Short-prefix layouts and many smaller committed
 transactions remain separate coverage questions: transaction-local reservations
-cannot automatically certify a block-long map. Data-only fixture publication
-for this storage panel remains pending.
+cannot automatically certify a block-long map.
+
+The [data-only immutable fixture](https://github.com/taikoxyz/raiko2-atlas/releases/tag/fixture-unzen-transition-storage-updates-v1)
+is published at metadata commit f58e6b82088b2d2a88a969f3dbf6f9dac787c768:
+60 regular data members (35 exact originals,21 documented JSON-pointer deletion
+projections,four generated indexes),2,258,353 compressed bytes,SHA256
+`01b430c5736cfdc7480be9becbbb29f260372a07545c4ea2801994e5e7c5dace`.
+Independent real remote downloads run both the literal README and existing CI
+integrity assertions successfully. No workloads run during packaging; all original
+reports and the unrealized concentration remain explicit. It includes no runners,
+source snapshots, ELF/SDK/binaries or private path mapping and does not rewrite
+previous fixture releases. New-head Atlas CI remains a separate current check.

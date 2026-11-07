@@ -371,7 +371,11 @@ This does not close the TransitionAccount.storage frontier or establish whole
 table pressure/placement. No price changes or third seed follow. Independent
 static ELF checks trace shared G to the first initializer's stack and one-byte
 TLSF allocation pointers; wire length/code order do not isolate its cause.
-A genuine fixed first-block witness is a new host-tool hypothesis, pending
-implementation, binary-shape and fresh own-G checks, with all prefix costs
-retained. Lower-prefix variants and many-small-TX packing remain explicit
-follow-ups; ordinary coverage of these two inputs is not worst-case coverage.
+A genuine fixed first-block witness remains an experimental hypothesis: the
+permanent nonuniform schedule/prefix helper now passes source, focused host and
+independent real tiny/old-byte gates, while formal binary-shape and fresh own-G
+checks remain before a new workload conclusion. All prefix costs stay included.
+The original pair is [published as immutable data](https://github.com/taikoxyz/raiko2-atlas/releases/tag/fixture-unzen-transition-storage-updates-v1),
+with independent real-download README/CI integrity checks; no repricing or
+reconstruction of the closed pair occurs. Lower-prefix variants and many-small-TX
+packing remain explicit follow-ups; ordinary coverage is not worst-case coverage.

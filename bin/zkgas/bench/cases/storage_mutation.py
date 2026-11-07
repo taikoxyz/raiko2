@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate 24 committed storage update/delete/insert/mixed validation inputs."""
+"""Generate the legacy24 storage catalog and opt-in phase-advancing storage recipes."""
 import argparse
 import json
 from pathlib import Path
@@ -39,8 +39,8 @@ def _check(asm, expected, times=1):
 def _key(asm, absent, times, raw_key_layout=None):
     asm.push(96, times=times); asm.op(0x51, times)
     if raw_key_layout is not None:
-        # Memory96 and the committed phase remain ordinals. Only the three actual
-        # body SLOAD/SSTORE operands receive this identical compact transform.
+        # Memory96 and the committed phase remain ordinals. Only actual body
+        # SLOAD/SSTORE operands receive this identical compact transform.
         asm.push(48, times=times); asm.op(0x1b, times)
         mask = (raw_key_layout['L1'] << 64) | (raw_key_layout['L3'] << 192)
         asm.push(mask, width=32, times=times); asm.op(0x17, times)
@@ -59,8 +59,8 @@ def _layout(value):
 def _runtime(mode, n, raw_key_layout=None):
     """One fixed-width loop; multiplicities describe one successful user."""
     raw_key_layout = _layout(raw_key_layout)
-    if raw_key_layout is not None and mode != 'update':
-        raise ValueError('compact raw layout supports update only')
+    if raw_key_layout is not None and mode not in ('update', 'read'):
+        raise ValueError('compact raw layout supports update or read only')
     asm = _Factory()
     asm.push(0); asm.op(0x54); asm.push(64); asm.op(0x52)
     for offset in (0, 32):
@@ -75,17 +75,25 @@ def _runtime(mode, n, raw_key_layout=None):
     asm.push(0, times=n); asm.op(0x51, n); asm.op(1, n)
     asm.push(96, times=n); asm.op(0x52, n)
     operations = ((False, 2),) if mode == 'update' else ((False, 0),) if mode == 'delete' else ((True, 2),) if mode == 'insert' else ((False, 0), (True, 2))
-    for absent, value in operations:
-        _key(asm, absent, n, raw_key_layout); asm.op(0x54, n); _check(asm, 0 if absent else 1, n)
-        asm.push(value, times=n); _key(asm, absent, n, raw_key_layout); asm.op(0x55, n)
-        _key(asm, absent, n, raw_key_layout); asm.op(0x54, n)
+    if mode == 'read':
+        # One actual body read, checked against initial1 and retained for checksum.
+        # The only persistent write in this mode is the common phase update below.
+        _key(asm, False, n, raw_key_layout); asm.op(0x54, n)
+        asm.op(0x80, n); _check(asm, 1, n)
         asm.push(32, times=n); asm.op(0x51, n); asm.op(1, n)
         asm.push(32, times=n); asm.op(0x52, n)
+    else:
+        for absent, value in operations:
+            _key(asm, absent, n, raw_key_layout); asm.op(0x54, n); _check(asm, 0 if absent else 1, n)
+            asm.push(value, times=n); _key(asm, absent, n, raw_key_layout); asm.op(0x55, n)
+            _key(asm, absent, n, raw_key_layout); asm.op(0x54, n)
+            asm.push(32, times=n); asm.op(0x51, n); asm.op(1, n)
+            asm.push(32, times=n); asm.op(0x52, n)
     asm.push(0, times=n); asm.op(0x51, n); asm.push(1, times=n); asm.op(1, n)
     asm.push(0, times=n); asm.op(0x52, n); asm.target('loop', n); asm.op(0x56, n)
     asm.label('done')
     asm.push(0); asm.op(0x51); _check(asm, n)
-    asm.push(32); asm.op(0x51); _check(asm, 0 if mode == 'delete' else 2 * n)
+    asm.push(32); asm.op(0x51); _check(asm, 0 if mode == 'delete' else n if mode == 'read' else 2 * n)
     asm.push(64); asm.op(0x51); asm.push(n); asm.op(1); asm.push(0); asm.op(0x55)
     asm.push(0); asm.op(0x54); asm.push(64); asm.op(0x51); asm.push(n); asm.op(1); asm.op(0x14); _require(asm)
     asm.op(0); asm.label('failure', 0); asm.op(0xfe, 0)
@@ -94,19 +102,19 @@ def _runtime(mode, n, raw_key_layout=None):
 
 def gas_accounting(mode, n, *, raw_key_layout=None):
     """Price actual instruction counts once, then cold/warm storage separately."""
-    if type(mode) is not str or mode not in MODES:
+    if type(mode) is not str or mode not in MODES + ('read',):
         raise ValueError('unknown storage mutation mode')
     original.integer(n, 0, 8192, 'mutations per user')
     _, counts = _runtime(mode, n, raw_key_layout)
     static_cost = {0: 0, 1: 3, 0x14: 3, 0x15: 3, 0x51: 3, 0x52: 3,
-                   0x17: 3, 0x1b: 3, 0x54: 0, 0x55: 0, 0x56: 8, 0x57: 10, 0x5b: 1, 0xfe: 0}
+                   0x17: 3, 0x1b: 3, 0x80: 3, 0x54: 0, 0x55: 0, 0x56: 8, 0x57: 10, 0x5b: 1, 0xfe: 0}
     ordinary = sum(count * (3 if 0x60 <= int(route[-2:], 16) <= 0x7f else static_cost[int(route[-2:], 16)])
                    for route, count in counts.items())
     words = 4 if n else 3
     memory = 3 * words + words * words // 512
     arms = 2 if mode == 'mixed' else 1
-    loads = 2200 + 2200 * n * arms  # phase cold+warm, body first-read+postcheck
-    stores = (2900 if n else 100) + n * {'update': 2900, 'delete': 2900, 'insert': 20000, 'mixed': 22900}[mode]
+    loads = 2200 + (2100 if mode == 'read' else 2200) * n * arms  # phase cold+warm; read body has no postcheck
+    stores = (2900 if n else 100) + n * {'read': 0, 'update': 2900, 'delete': 2900, 'insert': 20000, 'mixed': 22900}[mode]
     gross = 21000 + ordinary + memory + loads + stores
     refund = 4800 * n if mode in ('delete', 'mixed') else 0
     applied = min(refund, gross // 5)
@@ -292,6 +300,75 @@ def make_prefixed_update_case(*, users, mutations_per_user, raw_key_layout=None)
                data_role='prefixed_update_engineering_recipe',
                scope='Two genuine blocks, first Anchor-only. Current model02223227 includes Account-cache128PGU/unit. No claim of allocation equivalence, stable G or realized workload pressure; no reference/successor or formal sampling panel is created.')
     return row
+
+
+def make_prefixed_read_case(*, users, reads_per_user, raw_key_layout=None):
+    """One genuine empty-user prefix, then bounded phase-advancing readonly bodies.
+
+    The selected finite point is64users/128reads, not a count search. Smaller
+    users1..64/read counts0..128 are reusable engineering cases; zero is a control.
+    This creates an in-memory recipe only, without selecting seeds or sampling.
+    """
+    original.integer(users, 1, 64, 'users')
+    n = original.integer(reads_per_user, 0, 128, 'reads per user')
+    layout = _layout(raw_key_layout)
+    keys = [i if layout is None else (i << 48) | (layout['L1'] << 64) | (layout['L3'] << 192)
+            for i in range(1, users * n + 1)]
+    if (1 + len(keys) > 16384 or len(set(keys)) != users * n
+            or any(not 0 < key < 1 << 256 for key in keys)):
+        raise ValueError('readonly body exceeds distinct nonzero raw-slot prestate bounds')
+    code, counts = _runtime('read', n, layout)
+    gas = gas_accounting('read', n, raw_key_layout=layout)
+    reserve = 3000 if n == 0 else 1000  # preserve the same-value SSTORE sentry
+    envelope = gas['gross_gas'] + reserve
+    anchor_bound = 1_000_000  # actual gas is independently taken from each receipt
+    remaining = [HEADER_GAS_LIMIT - anchor_bound - j * gas['charged_gas'] for j in range(users)]
+    block_bound = anchor_bound + users * gas['charged_gas']
+    if (envelope > 15_000_000 or block_bound > BLOCK_BUDGET
+            or any(value < envelope for value in remaining)):
+        raise ValueError('prefixed read recipe exceeds conservative admission envelope')
+    # Use the base CALL schema, not a rewritten update recipe or its old identity.
+    request = original.make_case('call', 'stop', count=users, gas_limit=envelope)['request']
+    program = request['program']
+    program['block_count'] = 2
+    del program['transactions']['count_per_block']
+    program['transactions']['counts_by_block'] = [0, users]
+    routes = dict.fromkeys(program['expected_route_counts'], 0)
+    routes.update({route: count * users for route, count in counts.items()})
+    program['expected_route_counts'] = routes
+    owner = '0x3000000000000000000000000000000000010000'
+    recipients = [owner] * users
+    program['transactions']['recipients'] = recipients
+    program['prestate_contracts'] = [dict(address=owner, code_hex='0x' + code.hex(),
+        initial_storage={hex(key): '0x1' for key in [0] + keys})]
+    parameters = dict(mode='read', users=users, reads_per_user=n, raw_key_layout=layout,
+        raw_key_rule='ordinal' if layout is None else '(i<<48)|(L1<<64)|(L3<<192); L2=0',
+        evaluator_model_id='3e335de20582fca48f84b3df1b2ecd8d8d7281de02442ab35a134e4635431d73',
+        block_count=2, user_transactions_by_block=[0, users], all_transactions_including_anchor=users + 2,
+        transaction_kind='call', transaction_gas_limit=envelope, transaction_envelope_reserve=reserve,
+        header_gas_limit=HEADER_GAS_LIMIT, charged_gas_budget=BLOCK_BUDGET,
+        anchor_gas_limit_upper_bound=anchor_bound, block_charged_gas_upper_bounds=[anchor_bound, block_bound],
+        header_prefix_remaining_gas=remaining, gas_accounting_per_user=gas,
+        expected_user_gross_gas=gas['gross_gas'], expected_user_charged_gas=gas['charged_gas'],
+        expected_user_refund_counter=0, expected_user_refund_applied=0,
+        expected_distinct_storage_keys=1 + users * n, expected_initial_storage_entry_count=1 + users * n,
+        expected_final_storage_entry_count=1 + users * n, expected_body_storage_reads=users * n,
+        expected_sload_count=users * (n + 2), expected_main_storage_writes=0,
+        expected_phase_storage_writes=users, expected_storage_writes=users,
+        phase_slot=0, initial_phase=1, expected_final_phase=1 + users * n,
+        start_phase_schedule=[1 + j * n for j in range(users)],
+        final_phase_schedule=[1 + (j + 1) * n for j in range(users)],
+        expected_counter=n, expected_checksum=n, recipient_schedule=recipients.copy(),
+        runtime_bytes=len(code), runtime_sha256=digest(code), unused_primary_code_hex='0x00',
+        expected_user_success=True, expected_exceptional_instructions=0, outer_calldata_bytes=0,
+        execution_profile='evm-gas-only', preload_created_accounts_or_code=False)
+    identity = digest(encoded(dict(parameters=parameters, request=request)))
+    return dict(sample_id=f'storage-prefixed-read-{identity}', family='prefixed-storage-read',
+        role='control' if n == 0 else 'candidate', parameters=parameters, request=request,
+        identity_sha256=identity, holdout_only=False, actuals_used_for_fitting=False,
+        data_role='prefixed_read_engineering_recipe',
+        completion_gate='Qualify literal body reads/phase-only writes, originals/coldness/checksum/routes, all signatures and per-block gas/roots/minimal witnesses before a prospective finite actual protocol. VM success is not proof of PlainStorage hash placement or PGU deficiency.',
+        scope='Current evaluator3e335 includes independent storage-transition384PGU/unit; old producer MODEL and legacy helpers retain their original identities. Two genuine blocks, all prefix cost retained. No stable G, hash collision, actual workload or underpricing claim; no catalog, seed search or sampling occurs.')
 
 
 def prepare(output: Path, *, model_id=MODEL):

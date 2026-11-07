@@ -4180,3 +4180,48 @@ actual Anchor gas must come from each receipt, not a repeated single-block value
 All prefix costs remain included in node/full/actual comparisons. Minimal first
 witnesses do not by themselves establish allocation equivalence or a stable G;
 those require a separately declared experiment and fresh observations.
+
+### Phase-advancing readonly storage bodies
+
+`storage_mutation.make_prefixed_read_case(users=..., reads_per_user=...,
+raw_key_layout=None)` adds an opt-in recipe on the same fixed storage kernel.
+Each body slot starts at1 and is read **once**, checked against1 and included in
+the checksum; body slots are never written. Only raw phase slot0 advances by
+`reads_per_user` after each successful transaction. The counter and checksum both
+finish at that count. This is a readonly **body**, not a transaction with zero
+persistent changes.
+
+```sh
+"$PYTHON_BIN" -S -B - <<'PY'
+from pathlib import Path
+import sys
+sys.path.insert(0, str(Path('bin/zkgas/bench/cases')))
+from storage_mutation import make_prefixed_read_case
+row = make_prefixed_read_case(users=2, reads_per_user=2,
+                             raw_key_layout={'L1': 0, 'L3': 0})
+assert row['request']['program']['transactions']['counts_by_block'] == [0, 2]
+assert row['parameters']['expected_main_storage_writes'] == 0
+PY
+```
+
+The helper accepts strict integer users1..64 and reads0..128; zero is only an
+engineering control, with the same-value phase-SSTORE sentry accounted for.
+OptionalL1/L3 are strictu64 values, with body key
+`(ordinal<<48)|(L1<<64)|(L3<<192)` andL2=0; phase remains raw slot0 and ordinals
+advance across transactions. These bounds require at most8193 nonzero initialized
+slots, below the fixture schema's16384 entry cap. The request specifies plain
+CALL counts`[0,users]` and one storage owner. Existing native tools can materialize
+its genuine per-block witnesses after qualification. The fixed prospective point is64users/128reads; this API does not perform
+count/seed searches, create a catalog or execute any workload.
+
+Per-user gas metadata comes from emitted instruction counts, memory expansion,
+phase cold/warm reads, each cold body read and the final phase SSTORE, with zero
+refund. Admission uses a separate1M gas-limit upper bound for **each** real Anchor
+and checks every ordered user envelope; actual Anchor gas remains receipt data.
+Both blocks stay in node/full/actual comparisons. The new recipe explicitly binds
+current evaluator`3e335de2…`; the legacy producer `MODEL`,24-case catalog, update/
+delete/insert/mixed kernels and old helper request bytes retain their identities.
+A model binding is not an accuracy claim: canonical signatures/gas/state/minimal
+witnesses and a separately reviewed actual-own-PlainStorage observation protocol
+must qualify any finite experiment. Source comparison proxies are not actualPGU;
+the helper claims neither stable G, collisions nor underpricing.

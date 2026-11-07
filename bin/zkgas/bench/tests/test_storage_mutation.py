@@ -47,6 +47,9 @@ def execute(code, state, envelope, *, initial_warm_keys=None):
         op = code[pc]; pc += 1; counts[f'opcode:0x{op:02x}'] += 1
         if 0x60 <= op <= 0x7f:
             width = op - 0x5f; stack.append(int.from_bytes(code[pc:pc + width], 'big')); pc += width; gas += 3
+        elif op == 0x80:
+            assert stack, 'DUP1 stack underflow'
+            stack.append(stack[-1]); gas += 3
         elif op == 1:
             stack.append((stack.pop() + stack.pop()) & MASK); gas += 3
         elif op == 0x1b:
@@ -573,6 +576,124 @@ class SizedStorageUpdateTests(unittest.TestCase):
         # Frozen from all actual parent mutation/fanout module outputs before
         # adding this opt-in. Complete rows include the unchanged request bytes.
         self.assertEqual(digest.hexdigest(), '8158c31cbe089b5b52c82e23d02348bb100b99a4f406d9b530a382817d44ff3d')
+
+
+
+
+class PrefixedStorageReadTests(unittest.TestCase):
+    load = StorageMutationTests.load
+
+    def test_literal_readonly_body_phase_only_writes_and_exact_gas(self):
+        m = self.load()
+        for users, n in [(1, 0), (1, 1), (2, 3), (2, 128)]:
+            for layout in [None, {'L1': 0, 'L3': 0}, {'L1': 7, 'L3': (1 << 64) - 1}]:
+                with self.subTest(users=users, n=n, layout=layout):
+                    row = m.make_prefixed_read_case(users=users, reads_per_user=n, raw_key_layout=layout)
+                    p = row['parameters']; program = row['request']['program']
+                    self.assertEqual(program['block_count'], 2)
+                    self.assertEqual(program['transactions']['counts_by_block'], [0, users])
+                    self.assertNotIn('count_per_block', program['transactions'])
+                    self.assertNotIn('storage_state', program)
+                    self.assertEqual((program['code_hex'], program['input_hex']), ('0x00', '0x'))
+                    contract, = program['prestate_contracts']
+                    self.assertEqual(program['transactions']['recipients'], [contract['address']] * users)
+                    raw = lambda i: i if layout is None else (i << 48) | (layout['L1'] << 64) | (layout['L3'] << 192)
+                    keys = [raw(i) for i in range(1, users * n + 1)]
+                    state = {int(k, 16): int(v, 16) for k, v in contract['initial_storage'].items()}
+                    self.assertEqual(state, dict.fromkeys([0] + keys, 1))
+                    code = bytes.fromhex(contract['code_hex'][2:]); counts = Counter()
+                    self.assertEqual(hashlib.sha256(code).hexdigest(), p['runtime_sha256'])
+                    self.assertEqual(len(code), p['runtime_bytes'])
+                    for tx in range(users):
+                        start = 1 + tx * n; final = start + n
+                        result = execute(code, state, p['transaction_gas_limit'])
+                        self.assertEqual((result['terminal'], result['stack']), (0, []))
+                        expected_reads = [(0, start, True)] + [(raw(i), 1, True) for i in range(start, final)] + [(0, final, False)]
+                        self.assertEqual(result['reads'], expected_reads)
+                        self.assertEqual(result['writes'], [(0, start, final, start, False)])
+                        self.assertEqual((result['refund'], result['applied']), (0, 0))
+                        self.assertEqual(result['gas'], p['expected_user_gross_gas'])
+                        self.assertEqual(result['charged'], p['expected_user_charged_gas'])
+                        self.assertEqual(int.from_bytes(result['memory'][:32], 'big'), n)
+                        self.assertEqual(int.from_bytes(result['memory'][32:64], 'big'), n)
+                        self.assertEqual(int.from_bytes(result['memory'][64:96], 'big'), start)
+                        if n: self.assertEqual(int.from_bytes(result['memory'][96:128], 'big'), final - 1)
+                        self.assertEqual(len(result['memory']), 128 if n else 96)
+                        self.assertEqual(state, dict.fromkeys(keys, 1) | {0: final})
+                        counts.update(result['counts'])
+                    self.assertEqual(counts, +Counter(program['expected_route_counts']))
+                    self.assertEqual(p['expected_storage_writes'], users)
+                    self.assertEqual(p['expected_main_storage_writes'], 0)
+                    self.assertEqual(p['expected_phase_storage_writes'], users)
+                    self.assertEqual(p['expected_body_storage_reads'], users * n)
+                    self.assertEqual(p['expected_final_phase'], 1 + users * n)
+                    self.assertNotIn('expected_anchor_gas', p)
+                    self.assertNotIn('expected_block_charged_gas', p)
+                    self.assertEqual(p['block_charged_gas_upper_bounds'], [1_000_000, 1_000_000 + users * p['expected_user_charged_gas']])
+                    for tx, remaining in enumerate(p['header_prefix_remaining_gas']):
+                        self.assertEqual(remaining, 31_000_000 - 1_000_000 - tx * p['expected_user_charged_gas'])
+                        self.assertGreaterEqual(remaining, p['transaction_gas_limit'])
+                    self.assertEqual(p['evaluator_model_id'], '3e335de20582fca48f84b3df1b2ecd8d8d7281de02442ab35a134e4635431d73')
+
+    def test_readonly_strict_limits_and_layout_are_not_legacy_mode_aliases(self):
+        m = self.load()
+        for users, n in [(True, 1), (0, 1), (65, 1), (1.0, 1), (1, True), (1, -1), (1, 129), (1, 1.0)]:
+            with self.subTest(users=users, n=n), self.assertRaises(ValueError):
+                m.make_prefixed_read_case(users=users, reads_per_user=n)
+        for layout in [True, [], {}, {'L1': 0}, {'L1': 0, 'L3': 0, 'keys': []}, {'L1': True, 'L3': 0}, {'L1': 0, 'L3': 1.0}, {'L1': -1, 'L3': 0}, {'L1': 0, 'L3': 1 << 64}]:
+            with self.subTest(layout=layout), self.assertRaises(ValueError):
+                m.make_prefixed_read_case(users=1, reads_per_user=1, raw_key_layout=layout)
+        self.assertEqual(m.MODES, ('update', 'delete', 'insert', 'mixed'))
+        with self.assertRaises(ValueError): m.make_case('read', 8192, 'zero')
+        with self.assertRaises(ValueError): m.make_sized_update_case(users=1, mutations_per_user=128)
+
+    def test_readonly_bad_initial_slot_and_wrong_phase_fail_literal_guards(self):
+        m = self.load(); row = m.make_prefixed_read_case(users=2, reads_per_user=2)
+        contract, = row['request']['program']['prestate_contracts']
+        code = bytes.fromhex(contract['code_hex'][2:]); cap = row['parameters']['transaction_gas_limit']
+        state = {int(k, 16): int(v, 16) for k, v in contract['initial_storage'].items()}
+        state[1] = 2
+        self.assertEqual(execute(code, state, cap)['terminal'], 0xfe)
+        state = dict.fromkeys(range(5), 1); state[0] = 2
+        # A wrong but initialized start can pass once; the next range misses initial data.
+        self.assertEqual(execute(code, state, cap)['terminal'], 0)
+        self.assertEqual(execute(code, state, cap)['terminal'], 0xfe)
+        with self.assertRaisesRegex(AssertionError, 'underflow'): execute(bytes([0x80, 0]), {}, 30000)
+
+    def test_fixed_128_accounting_without_constructing_formal_64_user_input(self):
+        m = self.load(); gas = m.gas_accounting('read', 128, raw_key_layout={'L1': 0, 'L3': 0})
+        self.assertEqual(gas['storage_read_gas'], 2200 + 128 * 2100)
+        self.assertEqual(gas['storage_write_gas'], 2900)
+        self.assertEqual((gas['refund_counter'], gas['refund_applied']), (0, 0))
+        self.assertLess(2_000_000 + 64 * gas['charged_gas'], 30_000_000)
+
+    def test_all_78_legacy_rows_and_requests_remain_byte_identical(self):
+        m = self.load()
+        sys.path.insert(0, str(CASES))
+        import storage_fanout as f
+        rows = {}
+        for mode in m.MODES:
+            for size in m.STATE_SIZES:
+                for level in m.LEVELS:
+                    rows[f'mutation/{mode}/{size}/{level}'] = m.make_case(mode, size, level)
+        for accounts in f.ACCOUNT_COUNTS:
+            for size in f.STATE_SIZES:
+                for mode in f.MODES:
+                    for level in f.LEVELS:
+                        rows[f'fanout/{accounts}/{size}/{mode}/{level}'] = f.make_case(accounts, size, mode, level)
+        for users, n in [(1, 0), (1, 1), (2, 2), (3, 3), (2, 64)]:
+            for layout in [None, {'L1': 0, 'L3': 0}, {'L1': 7, 'L3': (1 << 64) - 1}]:
+                for prefix in [False, True]:
+                    fn = m.make_prefixed_update_case if prefix else m.make_sized_update_case
+                    label = f'{"prefixed" if prefix else "sized"}/{users}/{n}/{layout}'
+                    rows[label] = fn(users=users, mutations_per_user=n, raw_key_layout=layout)
+        frozen = {label: {'row_sha256': hashlib.sha256(m.encoded(row)).hexdigest(),
+                          'request_sha256': hashlib.sha256(m.encoded(row['request'])).hexdigest()}
+                  for label, row in rows.items()}
+        self.assertEqual(len(frozen), 78)
+        # Captured from the unmodified parent before adding the read mode.
+        self.assertEqual(hashlib.sha256(m.encoded(frozen)).hexdigest(),
+                         'ad47cc4048e7456e813ed49e436caadadfdd4fab6c0d6e3bf604583588249d90')
 
 
 if __name__ == '__main__': unittest.main()

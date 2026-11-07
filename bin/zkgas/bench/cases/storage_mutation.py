@@ -57,11 +57,11 @@ def _layout(value):
 
 
 def _ordinal_shift(value, mode, layout):
-    """Restrict the optional long layout to disjoint readonly mask/ordinal bits."""
-    if type(value) is not int or value not in (48, 240):
-        raise ValueError('ordinal_shift must be the integer48 or240')
-    if value == 240 and (mode != 'read' or layout is None or layout['L3'] != 0):
-        raise ValueError('ordinal_shift240 requires readonly explicit layout with L3=0')
+    """Restrict optional endpoints to disjoint readonly mask/ordinal bits."""
+    if type(value) is not int or value not in (0, 48, 240):
+        raise ValueError('ordinal_shift must be the integer0,48 or240')
+    if value != 48 and (mode != 'read' or layout is None or layout['L3'] != 0):
+        raise ValueError('ordinal_shift0/240 requires readonly explicit layout with L3=0')
     return value
 
 
@@ -317,7 +317,8 @@ def make_prefixed_read_case(*, users, reads_per_user, raw_key_layout=None, ordin
 
     Users1..89/read counts0..128 are reusable engineering cases; zero is a control.
     The89user bound packs the128-read kernel under two1M Anchor gas bounds.
-    Optional shift240 uses a long LE prefix; default48 retains the original metadata.
+    Optional shift0 disperses low32 bits; shift240 uses a long LE prefix.
+    Default48 retains the original metadata.
     This creates an in-memory recipe only, without selecting seeds or sampling.
     """
     original.integer(users, 1, 89, 'users')
@@ -354,8 +355,11 @@ def make_prefixed_read_case(*, users, reads_per_user, raw_key_layout=None, ordin
     program['prestate_contracts'] = [dict(address=owner, code_hex='0x' + code.hex(),
         initial_storage={hex(key): '0x1' for key in [0] + keys})]
     parameters = dict(mode='read', users=users, reads_per_user=n, raw_key_layout=layout,
-        raw_key_rule='ordinal' if layout is None else ('(i<<48)|(L1<<64)|(L3<<192); L2=0'
-            if ordinal_shift == 48 else '(i<<240)|(L1<<64); L0=L2=0'),
+        raw_key_rule='ordinal' if layout is None else {
+            0: 'i|(L1<<64); L2=L3=0',
+            48: '(i<<48)|(L1<<64)|(L3<<192); L2=0',
+            240: '(i<<240)|(L1<<64); L0=L2=0',
+        }[ordinal_shift],
         evaluator_model_id='eea6f1da87ee129d2d9f759ae6cef01cb8ac93988376a86efb290398e6db5da6',
         block_count=2, user_transactions_by_block=[0, users], all_transactions_including_anchor=users + 2,
         transaction_kind='call', transaction_gas_limit=envelope, transaction_envelope_reserve=reserve,
@@ -375,7 +379,7 @@ def make_prefixed_read_case(*, users, reads_per_user, raw_key_layout=None, ordin
         runtime_bytes=len(code), runtime_sha256=digest(code), unused_primary_code_hex='0x00',
         expected_user_success=True, expected_exceptional_instructions=0, outer_calldata_bytes=0,
         execution_profile='evm-gas-only', preload_created_accounts_or_code=False)
-    if ordinal_shift == 240:
+    if ordinal_shift != 48:
         parameters['ordinal_shift'] = ordinal_shift
     identity = digest(encoded(dict(parameters=parameters, request=request)))
     return dict(sample_id=f'storage-prefixed-read-{identity}', family='prefixed-storage-read',

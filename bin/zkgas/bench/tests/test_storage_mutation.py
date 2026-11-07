@@ -824,7 +824,7 @@ class LongPrefixStorageReadTests(unittest.TestCase):
 
     def test_long_shift_and_overlap_inputs_are_strict(self):
         m = self.load()
-        for shift in [True, False, None, 0, 47, 49, 239, 241, 255, 256, 240.0, '240']:
+        for shift in [True, False, None, -1, 1, 47, 49, 239, 241, 255, 256, 0.0, 240.0, '240']:
             with self.subTest(shift=shift), self.assertRaises(ValueError):
                 m.make_prefixed_read_case(users=1, reads_per_user=1,
                         raw_key_layout={'L1': 0, 'L3': 0}, ordinal_shift=shift)
@@ -854,6 +854,73 @@ class LongPrefixStorageReadTests(unittest.TestCase):
                     'request_sha256': hashlib.sha256(m.encoded(row['request'])).hexdigest()}
         self.assertEqual(hashlib.sha256(m.encoded(rows)).hexdigest(),
                          'cb0586f76af40bef3a19f38dac9d71124ee9d86ee8aceada999a0c121bc48169')
+
+
+class DispersedStorageReadTests(unittest.TestCase):
+    load = StorageMutationTests.load
+
+    def test_dispersed_literal_reads_keep_phase_routes_and_gas(self):
+        m = self.load()
+        for users, n in [(1, 0), (1, 1), (2, 2), (3, 7), (1, 128), (89, 1)]:
+            for shared in (0, 1, (1 << 64) - 1):
+                with self.subTest(users=users, n=n, shared=shared):
+                    layout = {'L1': shared, 'L3': 0}
+                    row = m.make_prefixed_read_case(users=users, reads_per_user=n,
+                            raw_key_layout=layout, ordinal_shift=0)
+                    p = row['parameters']; program = row['request']['program']
+                    owner, = program['prestate_contracts']
+                    key = lambda i: i | (shared << 64)
+                    state = {int(k, 16): int(v, 16) for k, v in owner['initial_storage'].items()}
+                    self.assertEqual(state, {0: 1} | {key(i): 1 for i in range(1, users * n + 1)})
+                    self.assertEqual(len({k & ((1 << 32) - 1) for k in state}), len(state))
+                    code = bytes.fromhex(owner['code_hex'][2:]); counts = Counter()
+                    for tx in range(users):
+                        start = 1 + tx * n; final = start + n
+                        result = execute(code, state, p['transaction_gas_limit'])
+                        self.assertEqual((result['terminal'], result['stack']), (0, []))
+                        self.assertEqual(result['reads'], [(0, start, True)] +
+                                [(key(i), 1, True) for i in range(start, final)] + [(0, final, False)])
+                        self.assertEqual(result['writes'], [(0, start, final, start, False)])
+                        self.assertEqual((result['refund'], result['applied']), (0, 0))
+                        self.assertEqual((result['gas'], result['charged']),
+                                         (p['expected_user_gross_gas'], p['expected_user_charged_gas']))
+                        self.assertEqual(int.from_bytes(result['memory'][:32], 'big'), n)
+                        self.assertEqual(int.from_bytes(result['memory'][32:64], 'big'), n)
+                        counts.update(result['counts'])
+                    self.assertEqual(state, {0: 1 + users * n} | {key(i): 1 for i in range(1, users * n + 1)})
+                    self.assertEqual(counts, +Counter(program['expected_route_counts']))
+                    self.assertEqual(program['transactions']['counts_by_block'], [0, users])
+                    self.assertEqual(p['expected_final_phase'], 1 + users * n)
+                    self.assertEqual(p['ordinal_shift'], 0)
+                    self.assertEqual(p['raw_key_rule'], 'i|(L1<<64); L2=L3=0')
+                    self.assertEqual(p['gas_accounting_per_user'],
+                            m.gas_accounting('read', n, raw_key_layout=layout, ordinal_shift=48))
+                    if n == 128:
+                        self.assertEqual((len(code), p['expected_user_charged_gas'],
+                                          p['transaction_gas_limit']), (215, 312223, 313223))
+
+    def test_dispersed_mode_is_explicit_readonly_and_nonoverlapping(self):
+        m = self.load()
+        for build in (m._runtime, m.gas_accounting):
+            for mode in m.MODES:
+                with self.subTest(build=build.__name__, mode=mode), self.assertRaises(ValueError):
+                    build(mode, 1, raw_key_layout={'L1': 0, 'L3': 0}, ordinal_shift=0)
+            for layout in (None, {'L1': 0, 'L3': 1}):
+                with self.subTest(build=build.__name__, layout=layout), self.assertRaises(ValueError):
+                    build('read', 1, raw_key_layout=layout, ordinal_shift=0)
+
+    def test_existing_shift240_rows_remain_byte_identical(self):
+        m = self.load(); rows = {}
+        for users, n in [(1, 0), (1, 1), (2, 2), (3, 3), (2, 128), (89, 1)]:
+            for shared in (0, 1, (1 << 64) - 1):
+                row = m.make_prefixed_read_case(users=users, reads_per_user=n,
+                        raw_key_layout={'L1': shared, 'L3': 0}, ordinal_shift=240)
+                rows[f'{users}/{n}/{shared}'] = {
+                    'row_sha256': hashlib.sha256(m.encoded(row)).hexdigest(),
+                    'request_sha256': hashlib.sha256(m.encoded(row['request'])).hexdigest()}
+        # Captured from73ea before adding the separate shift0 endpoint.
+        self.assertEqual(hashlib.sha256(m.encoded(rows)).hexdigest(),
+                         '25d5b085915849c9c52e571c55a694fcbe99a7c773061d25bad81027f81dc1f1')
 
 
 if __name__ == '__main__': unittest.main()

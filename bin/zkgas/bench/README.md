@@ -4217,10 +4217,15 @@ layout with `L3=0` and produces `(ordinal<<240)|(L1<<64)`. The mask's `L3=0` doe
 not mean the final key's top limb is zero: that limb holds `ordinal<<48`.
 With the same L1, all body keys share their first30 little-endian bytes; only
 bytes30/31 vary. All body ordinals stay below2^16, so they cannot wrap or overlap
-the mask/phase slot. Shift240 is readonly-only; other shifts, booleans/floats,
-missing layout and a nonzero L3 mask are rejected. Default48, including explicit48,
-retains its original metadata without adding an `ordinal_shift` field. Only240
-records that field and its different raw-key rule in the sample identity.
+the mask/phase slot. The other opt-in endpoint, `ordinal_shift=0`, requires the
+same explicit readonly layout with `L3=0` and produces `ordinal|(L1<<64)`.
+Its distinct body ordinals also have distinct low32 values, including when the
+L1 word is nonzero; phase remains slot0. This endpoint supports a separate test
+of the concentration discount. Neither endpoint asserts actual hash placement
+or PGU. Shifts0/240 are readonly-only; other shifts, booleans/floats, missing
+layout and a nonzero L3 mask are rejected. Default48, including explicit48,
+retains its original metadata without adding an `ordinal_shift` field. Only0/240
+record that field and their different raw-key rules in the sample identity.
 
 These bounds require at most11393 initialized slots, below the fixture schema's16384 entry cap. The request specifies plain
 CALL counts`[0,users]` and one storage owner. Existing native tools can materialize

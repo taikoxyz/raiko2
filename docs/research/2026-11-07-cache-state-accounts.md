@@ -119,7 +119,9 @@ introduced. Pure decoder details remain diagnostic artifacts. Canonical inputs
 and original reports are retained for a separate data-only Atlas fixture.
 
 Access-list-prewarmed DB loads are unmeasured here; this cold-only result must
-not be extended to that composition.
+not be extended to that composition. The separate
+[warm-first panel](2026-11-07-cache-state-warm-accounts.md) measures a high-priority
+literal-node and full-proposal deficit under the same model.
 
 Neither input has a positive literal-node or full-proposal deficit, so neither
 meets the >2BPGU/<=30Mgas high-priority screen. Other block-long containers,

@@ -311,3 +311,26 @@ measurement was rerun. Each input has one native, one quote and one complete
 SP1 estimator execution, with no SDK/guest/observer build. Production parity and
 a global 30M bound remain unclaimed; other container/fee/validation paths remain
 separate follow-ups.
+
+## Warm-first CacheState supplement on 2026-11-07
+
+The [per-TX access-list panel](2026-11-07-cache-state-warm-accounts.md) adds
+exactly two 86-user / 11,008-warm-BALANCE inputs at 29,669,999 charged block gas.
+Reference actual 338,631,603 PGU is covered by node 1,354,594,058 and full
+1,518,988,233. The sole reference-own-G successor measures 5,027,210,167 PGU
+against the same node and full 1,519,000,777. Its positive whole-node deficit
+3,672,616,109 and full deficit 3,508,209,390 establish a high-priority gap in
+model af30, without extrapolation or startup subtraction. No fix is claimed.
+
+Independent signatures, complete worlds, 11,008 absences, guard code, gas,
+Kona and literal quote checks pass. All 86 user signatures and blob contents
+change and are authenticated afresh. Each own-input profile closes 11 local
+CacheAccount calls including Anchor, with matching reference/successor local G;
+zero target hash chains close because helper captures cap before the targets.
+Whole placement/pressure and TX identity remain UNKNOWN. The successor's
+6,056,329,637 canonical instructions and PGU are complete independently of the
+400M diagnostic prefix. Both producer PIDs and all eight owned SHM objects are
+absent on the original host, with peak PSS 4.56GB. Each input was constructed,
+quoted and measured once, without guest/ELF/SDK/observer rebuild. Block-aware
+pricing and retained-actual/historical requotes are the next priority; the
+earlier cold panel does not close this warm-first composition.

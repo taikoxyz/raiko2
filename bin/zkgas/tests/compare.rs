@@ -1,3 +1,5 @@
+#![recursion_limit = "256"] // Large protocol JSON fixtures exceed the default macro depth.
+
 mod common;
 
 use alethia_reth_evm::zk_gas::pricing::{
@@ -49,8 +51,22 @@ fn snapshot(pricing: PricingBreakdown) -> PricingBreakdownSnapshot {
         fixed_scaled: pricing.fixed_scaled,
         authorization_scaled: pricing.authorization_scaled,
         access_list_scaled: pricing.access_list_scaled,
+        access_list_construction_pairs: pricing.access_list_construction_pairs,
+        access_list_construction_other_pairs: pricing.access_list_construction_other_pairs,
+        access_list_address_pairs: pricing.access_list_address_pairs,
+        access_list_construction_scaled: pricing.access_list_construction_scaled,
+        access_list_construction_other_scaled: pricing.access_list_construction_other_scaled,
+        access_list_address_scaled: pricing.access_list_address_scaled,
         code_preparation_scaled: pricing.code_preparation_scaled,
         operations_scaled: pricing.operations_scaled,
+        storage_journal_work_units: pricing.storage_journal_work_units,
+        account_journal_work_units: pricing.account_journal_work_units,
+        account_cache_work_units: pricing.account_cache_work_units,
+        storage_transition_work_units: pricing.storage_transition_work_units,
+        storage_journal_scaled: pricing.storage_journal_scaled,
+        account_journal_scaled: pricing.account_journal_scaled,
+        account_cache_scaled: pricing.account_cache_scaled,
+        storage_transition_scaled: pricing.storage_transition_scaled,
         normal_dispatch_count: pricing.normal_dispatch_count,
         normal_dispatch_scaled: pricing.normal_dispatch_scaled,
         feature_error_scaled: pricing.feature_error_scaled,
@@ -78,8 +94,8 @@ fn current_model_profiles() -> CompatibilityProfilesV1 {
 
 fn quote() -> CompleteQuoteV1 {
     let public_output = format!("0x{}", "00".repeat(32));
-    let node_pricing = json!({"access_list_scaled":"0","code_preparation_scaled":"0","authorization_scaled":"0","fixed_scaled":"0","operations_scaled":"0","normal_dispatch_count":0,"normal_dispatch_scaled":"0","feature_error_scaled":"0","evm_local_resources":{"unique_account_count":0,"unique_storage_slot_access_count":0,"unique_storage_slot_write_count":0,"unique_code_hash_count":0,"unique_code_bytes":0},"evm_local_resources_scaled":"0","transaction_payload":{"canonical_transaction_bytes":1,"nonempty_payload_transactions":0},"transaction_payload_scaled":"0","access_list_items":0,"code_preparation":{"nonempty_events":0,"total_bytes":0},"authorization_validations":0,"known_subtotal_scaled":"0","known_subtotal_pgu":"0"});
-    let prove_pricing = json!({"access_list_scaled":"0","code_preparation_scaled":"0","authorization_scaled":"0","fixed_scaled":"0","operations_scaled":"0","normal_dispatch_count":0,"normal_dispatch_scaled":"0","feature_error_scaled":"0","resources_scaled":"0","mpt_scaled":"0","startup_scaled":"0","transaction_payload_scaled":"0","blob_source_scaled":"0","parent_mpt_scaled":"0","total_scaled":"0","total_pgu":"0"});
+    let node_pricing = json!({"access_list_scaled":"0","access_list_construction_pairs":0,"access_list_construction_other_pairs":0,"access_list_address_pairs":0,"access_list_construction_scaled":"0","access_list_construction_other_scaled":"0","access_list_address_scaled":"0","code_preparation_scaled":"0","authorization_scaled":"0","fixed_scaled":"0","operations_scaled":"0","storage_journal_work_units":0,"storage_journal_scaled":"0","account_journal_work_units":0,"account_cache_work_units":0,"storage_transition_work_units":0,"account_journal_scaled":"0","account_cache_scaled":"0","storage_transition_scaled":"0","normal_dispatch_count":0,"normal_dispatch_scaled":"0","feature_error_scaled":"0","evm_local_resources":{"unique_account_count":0,"unique_storage_slot_access_count":0,"unique_storage_slot_write_count":0,"unique_code_hash_count":0,"unique_code_bytes":0},"evm_local_resources_scaled":"0","transaction_payload":{"canonical_transaction_bytes":1,"nonempty_payload_transactions":0},"transaction_payload_scaled":"0","access_list_items":0,"code_preparation":{"nonempty_events":0,"total_bytes":0},"authorization_validations":0,"known_subtotal_scaled":"0","known_subtotal_pgu":"0"});
+    let prove_pricing = json!({"access_list_scaled":"0","access_list_construction_pairs":0,"access_list_construction_other_pairs":0,"access_list_address_pairs":0,"access_list_construction_scaled":"0","access_list_construction_other_scaled":"0","access_list_address_scaled":"0","code_preparation_scaled":"0","authorization_scaled":"0","fixed_scaled":"0","operations_scaled":"0","storage_journal_work_units":0,"storage_journal_scaled":"0","account_journal_work_units":0,"account_cache_work_units":0,"storage_transition_work_units":0,"account_journal_scaled":"0","account_cache_scaled":"0","storage_transition_scaled":"0","normal_dispatch_count":0,"normal_dispatch_scaled":"0","feature_error_scaled":"0","resources_scaled":"0","mpt_scaled":"0","startup_scaled":"0","transaction_payload_scaled":"0","blob_source_scaled":"0","parent_mpt_scaled":"0","total_scaled":"0","total_pgu":"0"});
     let mut quote: CompleteQuoteV1 = serde_json::from_value(json!({
         "schema_version":1,"key":{"corpus_id":"corpus","sample_id":"sample","guest_input_sha256":"input"},
         "executable":executable(),"input_source":{"kind":"single","descriptor_sha256":"descriptor"},"guest_input_byte_length":12,
@@ -92,7 +108,7 @@ fn quote() -> CompleteQuoteV1 {
         }],
             "node":{"unzen_zkgas_sum":"2","block_local_known_scaled":"0","block_local_known_pgu":"0","sum_of_block_known_pgu":"0"},
             "prove":{"selectors":{"payload":{"total_transaction_count":1,"canonical_transaction_bytes":1,"nonempty_payload_transactions":0},"true_unattempted_transactions":0,"blobs":{"source_blob_counts":[1],"proposal_blob_hash_count":1,"provider_blob_count":1,"provider_commitment_count":1,"provider_proof_count":1},"parent_mpt":{"path_node_visits":0,"materialization_work_units":0,"hydration_hash_blocks":0,"dirty_encoded_nodes":0,"dirty_hash_blocks":0,"structural_branch_extension_churn_nodes":0,"dropped_trie_nodes":0}},
-                "block_local_scaled":"0","block_local_pgu":"0","sum_of_block_local_pgu":"0","proposal_once":{"access_list_scaled":"0","code_preparation_scaled":"0","authorization_scaled":"0","fixed_scaled":"10000000000000000000","operations_scaled":"0","normal_dispatch_count":0,"normal_dispatch_scaled":"0","feature_error_scaled":"0","resources_scaled":"0","mpt_scaled":"0","startup_scaled":"0","transaction_payload_scaled":"0","blob_source_scaled":"0","parent_mpt_scaled":"0","total_scaled":"10000000000000000000","total_pgu":"10"},"proposal_once_pgu":"10","total_scaled":"10000000000000000000","total_pgu":"10"}}
+                "block_local_scaled":"0","block_local_pgu":"0","sum_of_block_local_pgu":"0","proposal_once":{"access_list_scaled":"0","access_list_construction_pairs":0,"access_list_construction_other_pairs":0,"access_list_address_pairs":0,"access_list_construction_scaled":"0","access_list_construction_other_scaled":"0","access_list_address_scaled":"0","code_preparation_scaled":"0","authorization_scaled":"0","fixed_scaled":"10000000000000000000","operations_scaled":"0","storage_journal_work_units":0,"storage_journal_scaled":"0","account_journal_work_units":0,"account_cache_work_units":0,"storage_transition_work_units":0,"account_journal_scaled":"0","account_cache_scaled":"0","storage_transition_scaled":"0","normal_dispatch_count":0,"normal_dispatch_scaled":"0","feature_error_scaled":"0","resources_scaled":"0","mpt_scaled":"0","startup_scaled":"0","transaction_payload_scaled":"0","blob_source_scaled":"0","parent_mpt_scaled":"0","total_scaled":"10000000000000000000","total_pgu":"10"},"proposal_once_pgu":"10","total_scaled":"10000000000000000000","total_pgu":"10"}}
     })).unwrap();
     let selectors = &quote.quote.prove.selectors;
     let parent = selectors.parent_mpt;
@@ -445,6 +461,7 @@ fn complete_quotes_reject_every_inconsistent_embedded_identity_before_joining() 
         "prediction-surface",
         "calibration-model",
         "quote-model",
+        "execution-profile",
         "prediction-total",
     ] {
         let dir = TestDir::new();
@@ -494,6 +511,9 @@ fn complete_quotes_reject_every_inconsistent_embedded_identity_before_joining() 
             "prediction-surface" => q.prediction_surface = "node".into(),
             "calibration-model" => q.calibration_profile = "other".into(),
             "quote-model" => q.quote.model_id = "other".into(),
+            "execution-profile" => {
+                q.execution_profile = raiko2_zkgas_trace::ExecutionProfile::EvmGasOnly;
+            }
             "prediction-total" => q.quote.prove.total_pgu += 1,
             _ => unreachable!(),
         }
@@ -1548,6 +1568,171 @@ fn authorization_reports_reject_count_price_forgery_and_proposal_double_charge()
     }
 }
 
+fn quote_with_access_list_construction(committed: u64, attempted: u64) -> CompleteQuoteV1 {
+    const SCALE: i128 = 1_000_000_000_000_000_000;
+    let mut q = quote_with_access_list_items(u64::from(committed > 0), u64::from(attempted > 0));
+    let node_scaled = ZkGasModel
+        .price_access_list_construction_pairs(committed)
+        .unwrap();
+    let prove_scaled = ZkGasModel
+        .price_access_list_construction_pairs(attempted)
+        .unwrap();
+    let node = &mut q.quote.blocks[0].node.pricing;
+    node.access_list_construction_pairs = committed;
+    node.access_list_construction_scaled = node_scaled;
+    node.known_subtotal_scaled += node_scaled;
+    node.known_subtotal_pgu += (node_scaled / SCALE) as u128;
+    q.quote.node.block_local_known_scaled += node_scaled;
+    q.quote.node.block_local_known_pgu += (node_scaled / SCALE) as u128;
+    q.quote.node.sum_of_block_known_pgu += (node_scaled / SCALE) as u128;
+    let prove = &mut q.quote.blocks[0].prove.pricing;
+    prove.access_list_construction_pairs = attempted;
+    prove.access_list_construction_scaled = prove_scaled;
+    prove.total_scaled += prove_scaled;
+    prove.total_pgu += (prove_scaled / SCALE) as u128;
+    q.quote.prove.block_local_scaled += prove_scaled;
+    q.quote.prove.block_local_pgu += (prove_scaled / SCALE) as u128;
+    q.quote.prove.sum_of_block_local_pgu += (prove_scaled / SCALE) as u128;
+    q.quote.prove.total_scaled += prove_scaled;
+    q.quote.prove.total_pgu += (prove_scaled / SCALE) as u128;
+    q
+}
+
+#[test]
+fn access_list_construction_closes_once_in_node_attempted_prove_and_proposal_scopes() {
+    for (committed, attempted) in [(0, 0), (1, 1), (3, 13), (29_487_360, 29_487_360)] {
+        let dir = TestDir::new();
+        let q = quote_with_access_list_construction(committed, attempted);
+        let encoded = serde_json::to_value(&q).unwrap();
+        assert_eq!(
+            encoded["quote"]["blocks"][0]["node"]["pricing"]["access_list_construction_pairs"],
+            committed
+        );
+        assert!(
+            encoded["quote"]["blocks"][0]["node"]["pricing"]["access_list_construction_scaled"]
+                .is_string()
+        );
+        assert_eq!(
+            encoded["quote"]["blocks"][0]["prove"]["pricing"]["access_list_construction_pairs"],
+            attempted
+        );
+        assert_eq!(
+            q.quote.prove.proposal_once.access_list_construction_pairs,
+            0
+        );
+        assert_eq!(
+            q.quote.prove.proposal_once.access_list_construction_scaled,
+            0
+        );
+        let args = write_inputs(
+            &dir,
+            &[QuoteRowV1::Complete(Box::new(q))],
+            &[complete_observation()],
+        );
+        let result = run_compare(&args, &executable()).unwrap();
+        assert_eq!(
+            result.manifest.counts.get(&ComparisonKind::Joined),
+            Some(&1)
+        );
+    }
+}
+
+#[test]
+fn access_list_construction_rejects_closed_total_forgeries_and_missing_fields() {
+    for mutation in [
+        "node-count",
+        "prove-count",
+        "attempted-below-committed",
+        "node-price",
+        "prove-price",
+        "proposal-count",
+        "proposal-price",
+        "selector-bound",
+    ] {
+        let dir = TestDir::new();
+        let mut q = quote_with_access_list_construction(3, 13);
+        match mutation {
+            "node-count" => {
+                q.quote.blocks[0]
+                    .node
+                    .pricing
+                    .access_list_construction_pairs = 4
+            }
+            "prove-count" => {
+                q.quote.blocks[0]
+                    .prove
+                    .pricing
+                    .access_list_construction_pairs = 14
+            }
+            "attempted-below-committed" => {
+                q.quote.blocks[0]
+                    .prove
+                    .pricing
+                    .access_list_construction_pairs = 2
+            }
+            "node-price" => {
+                q.quote.blocks[0]
+                    .node
+                    .pricing
+                    .access_list_construction_scaled -= 1;
+                q.quote.blocks[0].node.pricing.fixed_scaled += 1;
+            }
+            "prove-price" => {
+                q.quote.blocks[0]
+                    .prove
+                    .pricing
+                    .access_list_construction_scaled -= 1;
+                q.quote.blocks[0].prove.pricing.fixed_scaled += 1;
+            }
+            "proposal-count" => q.quote.prove.proposal_once.access_list_construction_pairs = 1,
+            "proposal-price" => {
+                q.quote.prove.proposal_once.access_list_construction_scaled = 1;
+                q.quote.prove.proposal_once.startup_scaled -= 1;
+            }
+            "selector-bound" => {
+                q.quote.blocks[0]
+                    .node
+                    .pricing
+                    .access_list_construction_pairs = u64::MAX;
+                q.quote.blocks[0]
+                    .prove
+                    .pricing
+                    .access_list_construction_pairs = u64::MAX;
+            }
+            _ => unreachable!(),
+        }
+        let args = write_inputs(
+            &dir,
+            &[QuoteRowV1::Complete(Box::new(q))],
+            &[complete_observation()],
+        );
+        assert!(
+            run_compare(&args, &executable()).is_err(),
+            "must reject {mutation} despite closed totals"
+        );
+    }
+    let q = quote_with_access_list_construction(3, 13);
+    for scope in ["node", "prove", "proposal"] {
+        for field in [
+            "access_list_construction_pairs",
+            "access_list_construction_scaled",
+        ] {
+            let mut encoded = serde_json::to_value(&q).unwrap();
+            let pricing = match scope {
+                "node" => &mut encoded["quote"]["blocks"][0]["node"]["pricing"],
+                "prove" => &mut encoded["quote"]["blocks"][0]["prove"]["pricing"],
+                "proposal" => &mut encoded["quote"]["prove"]["proposal_once"],
+                _ => unreachable!(),
+            };
+            pricing.as_object_mut().unwrap().remove(field);
+            assert!(
+                serde_json::from_value::<CompleteQuoteV1>(encoded).is_err(),
+                "required {scope} {field}"
+            );
+        }
+    }
+}
+
 fn quote_with_access_list_items(committed: u64, attempted: u64) -> CompleteQuoteV1 {
     const SCALE: i128 = 1_000_000_000_000_000_000;
     let mut q = quote();
@@ -2032,6 +2217,1037 @@ fn code_preparation_domains_are_enforced_for_explicit_foreign_model_diagnostics(
                 "invalid foreign selectors {committed:?}/{attempted:?}"
             );
             assert!(!args.output.exists());
+        }
+    }
+}
+
+fn quote_with_storage_journal(committed: u64, attempted: u64) -> CompleteQuoteV1 {
+    const SCALE: i128 = 1_000_000_000_000_000_000;
+    let mut q = quote();
+    let node_scaled = ZkGasModel.price_storage_journal_work(committed).unwrap();
+    let prove_scaled = ZkGasModel.price_storage_journal_work(attempted).unwrap();
+    let node_pgu = u128::try_from(node_scaled / SCALE).unwrap();
+    let prove_pgu = u128::try_from(prove_scaled / SCALE).unwrap();
+    let node = &mut q.quote.blocks[0].node.pricing;
+    node.storage_journal_work_units = committed;
+    node.storage_journal_scaled = node_scaled;
+    node.known_subtotal_scaled += node_scaled;
+    node.known_subtotal_pgu += node_pgu;
+    q.quote.node.block_local_known_scaled += node_scaled;
+    q.quote.node.block_local_known_pgu += node_pgu;
+    q.quote.node.sum_of_block_known_pgu += node_pgu;
+    let prove = &mut q.quote.blocks[0].prove.pricing;
+    prove.storage_journal_work_units = attempted;
+    prove.storage_journal_scaled = prove_scaled;
+    prove.total_scaled += prove_scaled;
+    prove.total_pgu += prove_pgu;
+    q.quote.prove.block_local_scaled += prove_scaled;
+    q.quote.prove.block_local_pgu += prove_pgu;
+    q.quote.prove.sum_of_block_local_pgu += prove_pgu;
+    q.quote.prove.total_scaled += prove_scaled;
+    q.quote.prove.total_pgu += prove_pgu;
+    q
+}
+
+#[test]
+fn storage_journal_price_closes_once_across_committed_and_attempted_scopes() {
+    for (committed, attempted) in [
+        (0, 0),
+        (0, 1),
+        (3, 7),
+        (1_000_000_000_000, 1_000_000_000_000),
+    ] {
+        let dir = TestDir::new();
+        let q = quote_with_storage_journal(committed, attempted);
+        assert_eq!(q.quote.blocks[0].node.pricing.operations_scaled, 0);
+        assert_eq!(q.quote.blocks[0].prove.pricing.operations_scaled, 0);
+        let args = write_inputs(
+            &dir,
+            &[QuoteRowV1::Complete(Box::new(q))],
+            &[complete_observation()],
+        );
+        let run = run_compare(&args, &executable()).unwrap();
+        assert_eq!(run.manifest.counts.get(&ComparisonKind::Joined), Some(&1));
+    }
+}
+
+#[test]
+fn storage_journal_rejects_price_domain_and_double_charge_forgery() {
+    for mutation in [
+        "node-count",
+        "prove-price",
+        "negative",
+        "domain",
+        "double-charge",
+        "proposal-units",
+        "proposal-price",
+    ] {
+        let mut q = quote_with_storage_journal(3, 7);
+        match mutation {
+            "node-count" => q.quote.blocks[0].node.pricing.storage_journal_work_units += 1,
+            "prove-price" => q.quote.blocks[0].prove.pricing.storage_journal_scaled += 1,
+            "negative" => q.quote.blocks[0].node.pricing.storage_journal_scaled = -1,
+            "domain" => {
+                q.quote.blocks[0].prove.pricing.storage_journal_work_units = 1_000_000_000_001
+            }
+            "double-charge" => {
+                q.quote.blocks[0].prove.pricing.total_scaled +=
+                    q.quote.blocks[0].prove.pricing.storage_journal_scaled
+            }
+            "proposal-units" => q.quote.prove.proposal_once.storage_journal_work_units = 1,
+            "proposal-price" => {
+                q.quote.prove.proposal_once.storage_journal_scaled = 384 * 1_000_000_000_000_000_000
+            }
+            _ => unreachable!(),
+        }
+        let dir = TestDir::new();
+        let args = write_inputs(
+            &dir,
+            &[QuoteRowV1::Complete(Box::new(q))],
+            &[complete_observation()],
+        );
+        assert!(
+            run_compare(&args, &executable()).is_err(),
+            "reject {mutation}"
+        );
+        assert!(!args.output.exists());
+    }
+}
+
+#[test]
+fn storage_journal_attempted_work_covers_committed_for_current_and_foreign_models() {
+    for foreign in [false, true] {
+        let mut q = quote_with_storage_journal(3, 7);
+        // Keep all prices and totals unchanged; selector coverage is independently required.
+        q.quote.blocks[0].prove.pricing.storage_journal_work_units = 2;
+        if foreign {
+            q.quote.model_id = "foreign-storage-journal-model".into();
+            q.calibration_profile = q.quote.model_id.clone();
+        }
+        let dir = TestDir::new();
+        let args = write_inputs(
+            &dir,
+            &[QuoteRowV1::Complete(Box::new(q))],
+            &[complete_observation()],
+        );
+        let error = run_compare(&args, &executable()).unwrap_err();
+        assert!(format!("{error:#}").contains("attempted storage journal work"));
+        assert!(!args.output.exists());
+    }
+}
+
+#[test]
+fn storage_journal_required_schema_roundtrips_without_silent_zero_or_field_loss() {
+    let value = serde_json::to_value(quote_with_storage_journal(3, 7)).unwrap();
+    let decoded: CompleteQuoteV1 = serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(serde_json::to_value(decoded).unwrap(), value);
+    for scope in [
+        "/quote/blocks/0/node/pricing",
+        "/quote/blocks/0/prove/pricing",
+        "/quote/prove/proposal_once",
+    ] {
+        for field in ["storage_journal_work_units", "storage_journal_scaled"] {
+            let mut missing = value.clone();
+            missing
+                .pointer_mut(scope)
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+            assert!(
+                serde_json::from_value::<CompleteQuoteV1>(missing).is_err(),
+                "missing {scope}/{field}"
+            );
+        }
+    }
+}
+
+fn quote_with_other_construction_pairs(committed: u64, attempted: u64) -> CompleteQuoteV1 {
+    quote_with_construction_pair_partition(3, 13, committed, attempted)
+}
+
+fn quote_with_construction_pair_partition(
+    low_committed: u64,
+    low_attempted: u64,
+    committed: u64,
+    attempted: u64,
+) -> CompleteQuoteV1 {
+    const SCALE: i128 = 1_000_000_000_000_000_000;
+    let mut q = quote_with_access_list_construction(low_committed, low_attempted);
+    let node_scaled = ZkGasModel
+        .price_access_list_construction_other_pairs(committed)
+        .unwrap();
+    let prove_scaled = ZkGasModel
+        .price_access_list_construction_other_pairs(attempted)
+        .unwrap();
+    let node = &mut q.quote.blocks[0].node.pricing;
+    node.access_list_construction_other_pairs = committed;
+    node.access_list_construction_other_scaled = node_scaled;
+    node.known_subtotal_scaled += node_scaled;
+    node.known_subtotal_pgu += (node_scaled / SCALE) as u128;
+    q.quote.node.block_local_known_scaled += node_scaled;
+    q.quote.node.block_local_known_pgu += (node_scaled / SCALE) as u128;
+    q.quote.node.sum_of_block_known_pgu += (node_scaled / SCALE) as u128;
+    let prove = &mut q.quote.blocks[0].prove.pricing;
+    prove.access_list_construction_other_pairs = attempted;
+    prove.access_list_construction_other_scaled = prove_scaled;
+    prove.total_scaled += prove_scaled;
+    prove.total_pgu += (prove_scaled / SCALE) as u128;
+    q.quote.prove.block_local_scaled += prove_scaled;
+    q.quote.prove.block_local_pgu += (prove_scaled / SCALE) as u128;
+    q.quote.prove.sum_of_block_local_pgu += (prove_scaled / SCALE) as u128;
+    q.quote.prove.total_scaled += prove_scaled;
+    q.quote.prove.total_pgu += (prove_scaled / SCALE) as u128;
+    q
+}
+
+#[test]
+fn other_construction_pairs_are_disjoint_and_close_once_in_every_priced_scope() {
+    for (committed, attempted) in [(0, 0), (1, 1), (7, 15), (58_974_720, 58_974_720)] {
+        let dir = TestDir::new();
+        let q = quote_with_other_construction_pairs(committed, attempted);
+        let encoded = serde_json::to_value(&q).unwrap();
+        assert_eq!(
+            encoded["quote"]["blocks"][0]["node"]["pricing"]["access_list_construction_other_pairs"],
+            committed
+        );
+        assert!(encoded["quote"]["blocks"][0]["node"]["pricing"]["access_list_construction_other_scaled"].is_string());
+        assert_eq!(
+            q.quote.blocks[0]
+                .node
+                .pricing
+                .access_list_construction_pairs,
+            3
+        );
+        assert_eq!(
+            q.quote.blocks[0]
+                .prove
+                .pricing
+                .access_list_construction_pairs,
+            13
+        );
+        assert_eq!(
+            (
+                q.quote
+                    .prove
+                    .proposal_once
+                    .access_list_construction_other_pairs,
+                q.quote
+                    .prove
+                    .proposal_once
+                    .access_list_construction_other_scaled
+            ),
+            (0, 0)
+        );
+        let args = write_inputs(
+            &dir,
+            &[QuoteRowV1::Complete(Box::new(q))],
+            &[complete_observation()],
+        );
+        assert_eq!(run_compare(&args, &executable()).unwrap().exit_code(), 0);
+    }
+}
+
+#[test]
+fn other_construction_pair_tampering_domain_and_proposal_work_are_rejected() {
+    for case in [
+        "node-count",
+        "prove-count",
+        "node-price",
+        "prove-price",
+        "attempted",
+        "domain",
+        "proposal",
+    ] {
+        let dir = TestDir::new();
+        let mut q = quote_with_other_construction_pairs(7, 15);
+        match case {
+            "node-count" => {
+                q.quote.blocks[0]
+                    .node
+                    .pricing
+                    .access_list_construction_other_pairs += 1
+            }
+            "prove-count" => {
+                q.quote.blocks[0]
+                    .prove
+                    .pricing
+                    .access_list_construction_other_pairs += 1
+            }
+            "node-price" => {
+                q.quote.blocks[0]
+                    .node
+                    .pricing
+                    .access_list_construction_other_scaled -= 1
+            }
+            "prove-price" => {
+                q.quote.blocks[0]
+                    .prove
+                    .pricing
+                    .access_list_construction_other_scaled = -1
+            }
+            "attempted" => {
+                // Both scopes are independently valid five-key owner partitions:
+                // low32 bins3/1/1 => low3+other7, bins3/2 => low4+other6.
+                // All tariffs and totals close, and overall prove pricing increases.
+                q = quote_with_construction_pair_partition(3, 4, 7, 6);
+                let node = q.quote.blocks[0].node.pricing;
+                let prove = q.quote.blocks[0].prove.pricing;
+                assert_eq!(
+                    node.access_list_construction_pairs + node.access_list_construction_other_pairs,
+                    10
+                );
+                assert_eq!(
+                    prove.access_list_construction_pairs
+                        + prove.access_list_construction_other_pairs,
+                    10
+                );
+                assert!(
+                    prove.access_list_construction_pairs >= node.access_list_construction_pairs
+                );
+                assert!(prove.total_scaled >= node.known_subtotal_scaled);
+            }
+            "domain" => {
+                q.quote.blocks[0]
+                    .node
+                    .pricing
+                    .access_list_construction_other_pairs = u64::MAX
+            }
+            "proposal" => {
+                q.quote
+                    .prove
+                    .proposal_once
+                    .access_list_construction_other_pairs = 1
+            }
+            _ => unreachable!(),
+        }
+        let args = write_inputs(
+            &dir,
+            &[QuoteRowV1::Complete(Box::new(q))],
+            &[complete_observation()],
+        );
+        let error =
+            run_compare(&args, &executable()).expect_err("must reject the forged pair scope");
+        if case == "attempted" {
+            assert!(format!("{error:#}").contains(
+                "attempted different-prefix construction does not cover committed pairs or price"
+            ), "expected the independently isolated other-pair monoid guard: {error:#}");
+        }
+    }
+}
+
+#[test]
+fn other_construction_pair_fields_are_mandatory_for_node_prove_and_proposal() {
+    for scope in ["node", "prove", "proposal"] {
+        for field in [
+            "access_list_construction_other_pairs",
+            "access_list_construction_other_scaled",
+        ] {
+            let mut encoded =
+                serde_json::to_value(quote_with_other_construction_pairs(7, 15)).unwrap();
+            let pricing = match scope {
+                "node" => &mut encoded["quote"]["blocks"][0]["node"]["pricing"],
+                "prove" => &mut encoded["quote"]["blocks"][0]["prove"]["pricing"],
+                "proposal" => &mut encoded["quote"]["prove"]["proposal_once"],
+                _ => unreachable!(),
+            };
+            pricing.as_object_mut().unwrap().remove(field);
+            assert!(
+                serde_json::from_value::<CompleteQuoteV1>(encoded).is_err(),
+                "{scope} {field}"
+            );
+        }
+    }
+}
+
+#[test]
+fn address_pair_fields_are_required_and_zero_is_a_complete_quote() {
+    let mut encoded = serde_json::to_value(quote_with_other_construction_pairs(0, 0)).unwrap();
+    for pointer in [
+        "/quote/blocks/0/node/pricing",
+        "/quote/blocks/0/prove/pricing",
+        "/quote/prove/proposal_once",
+    ] {
+        let pricing = encoded
+            .pointer_mut(pointer)
+            .unwrap()
+            .as_object_mut()
+            .unwrap();
+        pricing.insert("access_list_address_pairs".into(), json!(0));
+        pricing.insert("access_list_address_scaled".into(), json!("0"));
+    }
+    let quote: CompleteQuoteV1 = serde_json::from_value(encoded.clone())
+        .expect("raw-address pair fields must be part of the complete quote contract");
+    let dir = TestDir::new();
+    let args = write_inputs(
+        &dir,
+        &[QuoteRowV1::Complete(Box::new(quote))],
+        &[complete_observation()],
+    );
+    assert_eq!(run_compare(&args, &executable()).unwrap().exit_code(), 0);
+    for pointer in [
+        "/quote/blocks/0/node/pricing",
+        "/quote/blocks/0/prove/pricing",
+        "/quote/prove/proposal_once",
+    ] {
+        for field in ["access_list_address_pairs", "access_list_address_scaled"] {
+            let mut missing = encoded.clone();
+            missing
+                .pointer_mut(pointer)
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+            assert!(
+                serde_json::from_value::<CompleteQuoteV1>(missing).is_err(),
+                "missing {pointer}/{field}"
+            );
+        }
+    }
+}
+
+fn quote_with_address_pairs(committed: u64, attempted: u64) -> CompleteQuoteV1 {
+    const SCALE: i128 = 1_000_000_000_000_000_000;
+    let mut q = quote_with_other_construction_pairs(7, 15);
+    let node_scaled = ZkGasModel
+        .price_access_list_address_pairs(committed)
+        .unwrap();
+    let prove_scaled = ZkGasModel
+        .price_access_list_address_pairs(attempted)
+        .unwrap();
+    let node = &mut q.quote.blocks[0].node.pricing;
+    node.access_list_address_pairs = committed;
+    node.access_list_address_scaled = node_scaled;
+    node.known_subtotal_scaled += node_scaled;
+    node.known_subtotal_pgu += (node_scaled / SCALE) as u128;
+    q.quote.node.block_local_known_scaled += node_scaled;
+    q.quote.node.block_local_known_pgu += (node_scaled / SCALE) as u128;
+    q.quote.node.sum_of_block_known_pgu += (node_scaled / SCALE) as u128;
+    let prove = &mut q.quote.blocks[0].prove.pricing;
+    prove.access_list_address_pairs = attempted;
+    prove.access_list_address_scaled = prove_scaled;
+    prove.total_scaled += prove_scaled;
+    prove.total_pgu += (prove_scaled / SCALE) as u128;
+    q.quote.prove.block_local_scaled += prove_scaled;
+    q.quote.prove.block_local_pgu += (prove_scaled / SCALE) as u128;
+    q.quote.prove.sum_of_block_local_pgu += (prove_scaled / SCALE) as u128;
+    q.quote.prove.total_scaled += prove_scaled;
+    q.quote.prove.total_pgu += (prove_scaled / SCALE) as u128;
+    q
+}
+
+#[test]
+fn address_pair_prices_close_in_committed_and_attempted_scopes_once() {
+    for (committed, attempted) in [(0, 0), (1, 1), (3, 9), (37_742_592, 37_742_592)] {
+        let q = quote_with_address_pairs(committed, attempted);
+        assert_eq!(
+            q.quote.blocks[0].node.pricing.access_list_address_pairs,
+            committed
+        );
+        assert_eq!(
+            q.quote.blocks[0].prove.pricing.access_list_address_pairs,
+            attempted
+        );
+        assert_eq!(q.quote.prove.proposal_once.access_list_address_pairs, 0);
+        assert_eq!(q.quote.prove.proposal_once.access_list_address_scaled, 0);
+        // Existing inner-owner storage-key partitions are separate, even for empty outer keys.
+        assert_eq!(
+            q.quote.blocks[0]
+                .node
+                .pricing
+                .access_list_construction_other_pairs,
+            7
+        );
+        let dir = TestDir::new();
+        let args = write_inputs(
+            &dir,
+            &[QuoteRowV1::Complete(Box::new(q))],
+            &[complete_observation()],
+        );
+        assert_eq!(run_compare(&args, &executable()).unwrap().exit_code(), 0);
+    }
+}
+
+#[test]
+fn address_pair_forged_counts_prices_domains_and_proposal_work_are_rejected() {
+    for case in [
+        "node-count",
+        "prove-count",
+        "node-price",
+        "prove-price",
+        "attempted",
+        "domain",
+        "proposal-count",
+        "proposal-price",
+    ] {
+        let mut q = quote_with_address_pairs(3, 9);
+        match case {
+            "node-count" => q.quote.blocks[0].node.pricing.access_list_address_pairs += 1,
+            "prove-count" => q.quote.blocks[0].prove.pricing.access_list_address_pairs += 1,
+            "node-price" => q.quote.blocks[0].node.pricing.access_list_address_scaled -= 1,
+            "prove-price" => q.quote.blocks[0].prove.pricing.access_list_address_scaled = -1,
+            "attempted" => {
+                // All tariffs/totals close; only the committed/attempted pair relation is wrong.
+                q = quote_with_address_pairs(3, 2);
+            }
+            "domain" => {
+                q.quote.blocks[0].node.pricing.access_list_address_pairs = 1_000_000_000_001
+            }
+            "proposal-count" => q.quote.prove.proposal_once.access_list_address_pairs = 1,
+            "proposal-price" => {
+                q.quote.prove.proposal_once.access_list_address_scaled =
+                    128 * 1_000_000_000_000_000_000
+            }
+            _ => unreachable!(),
+        }
+        let dir = TestDir::new();
+        let args = write_inputs(
+            &dir,
+            &[QuoteRowV1::Complete(Box::new(q))],
+            &[complete_observation()],
+        );
+        let error =
+            run_compare(&args, &executable()).expect_err("invalid address-pair scope must fail");
+        if case == "attempted" {
+            assert!(format!("{error:#}").contains(
+                "attempted address-table construction does not cover committed pairs or price"
+            ));
+        }
+    }
+}
+
+fn quote_with_account_journal(committed: u64, attempted: u64) -> CompleteQuoteV1 {
+    const SCALE: i128 = 1_000_000_000_000_000_000;
+    let mut q = quote();
+    let node_scaled = ZkGasModel.price_account_journal_work(committed).unwrap();
+    let prove_scaled = ZkGasModel.price_account_journal_work(attempted).unwrap();
+    let node_pgu = u128::try_from(node_scaled / SCALE).unwrap();
+    let prove_pgu = u128::try_from(prove_scaled / SCALE).unwrap();
+    let node = &mut q.quote.blocks[0].node.pricing;
+    node.account_journal_work_units = committed;
+    node.account_journal_scaled = node_scaled;
+    node.known_subtotal_scaled += node_scaled;
+    node.known_subtotal_pgu += node_pgu;
+    q.quote.node.block_local_known_scaled += node_scaled;
+    q.quote.node.block_local_known_pgu += node_pgu;
+    q.quote.node.sum_of_block_known_pgu += node_pgu;
+    let prove = &mut q.quote.blocks[0].prove.pricing;
+    prove.account_journal_work_units = attempted;
+    prove.account_journal_scaled = prove_scaled;
+    prove.total_scaled += prove_scaled;
+    prove.total_pgu += prove_pgu;
+    q.quote.prove.block_local_scaled += prove_scaled;
+    q.quote.prove.block_local_pgu += prove_pgu;
+    q.quote.prove.sum_of_block_local_pgu += prove_pgu;
+    q.quote.prove.total_scaled += prove_scaled;
+    q.quote.prove.total_pgu += prove_pgu;
+    q
+}
+
+#[test]
+fn account_journal_price_closes_once_across_committed_and_attempted_scopes() {
+    for (committed, attempted) in [
+        (0, 0),
+        (0, 1),
+        (3, 7),
+        (1_000_000_000_000, 1_000_000_000_000),
+    ] {
+        let dir = TestDir::new();
+        let q = quote_with_account_journal(committed, attempted);
+        assert_eq!(q.quote.blocks[0].node.pricing.operations_scaled, 0);
+        assert_eq!(q.quote.blocks[0].prove.pricing.operations_scaled, 0);
+        let args = write_inputs(
+            &dir,
+            &[QuoteRowV1::Complete(Box::new(q))],
+            &[complete_observation()],
+        );
+        let run = run_compare(&args, &executable()).unwrap();
+        assert_eq!(run.manifest.counts.get(&ComparisonKind::Joined), Some(&1));
+    }
+}
+
+#[test]
+fn account_journal_rejects_price_domain_and_double_charge_forgery() {
+    for mutation in [
+        "node-count",
+        "prove-price",
+        "negative",
+        "domain",
+        "double-charge",
+        "proposal-units",
+        "proposal-price",
+    ] {
+        let mut q = quote_with_account_journal(3, 7);
+        match mutation {
+            "node-count" => q.quote.blocks[0].node.pricing.account_journal_work_units += 1,
+            "prove-price" => q.quote.blocks[0].prove.pricing.account_journal_scaled += 1,
+            "negative" => q.quote.blocks[0].node.pricing.account_journal_scaled = -1,
+            "domain" => {
+                q.quote.blocks[0].prove.pricing.account_journal_work_units = 1_000_000_000_001
+            }
+            "double-charge" => {
+                q.quote.blocks[0].prove.pricing.total_scaled +=
+                    q.quote.blocks[0].prove.pricing.account_journal_scaled
+            }
+            "proposal-units" => q.quote.prove.proposal_once.account_journal_work_units = 1,
+            "proposal-price" => {
+                q.quote.prove.proposal_once.account_journal_scaled = 128 * 1_000_000_000_000_000_000
+            }
+            _ => unreachable!(),
+        }
+        let dir = TestDir::new();
+        let args = write_inputs(
+            &dir,
+            &[QuoteRowV1::Complete(Box::new(q))],
+            &[complete_observation()],
+        );
+        assert!(
+            run_compare(&args, &executable()).is_err(),
+            "reject {mutation}"
+        );
+        assert!(!args.output.exists());
+    }
+}
+
+#[test]
+fn account_journal_attempted_budget_cannot_shrink_with_self_consistent_tariffs() {
+    let dir = TestDir::new();
+    let q = quote_with_account_journal(7, 6);
+    let args = write_inputs(
+        &dir,
+        &[QuoteRowV1::Complete(Box::new(q))],
+        &[complete_observation()],
+    );
+    let error = run_compare(&args, &executable()).unwrap_err();
+    assert!(
+        format!("{error:#}")
+            .contains("attempted Account journal work does not cover committed units or price")
+    );
+}
+
+fn quote_with_account_cache(committed: u64, attempted: u64) -> CompleteQuoteV1 {
+    const SCALE: i128 = 1_000_000_000_000_000_000;
+    let mut q = quote();
+    let node_scaled = ZkGasModel.price_account_cache_work(committed).unwrap();
+    let prove_scaled = ZkGasModel.price_account_cache_work(attempted).unwrap();
+    let node_pgu = u128::try_from(node_scaled / SCALE).unwrap();
+    let prove_pgu = u128::try_from(prove_scaled / SCALE).unwrap();
+    let node = &mut q.quote.blocks[0].node.pricing;
+    node.account_cache_work_units = committed;
+    node.account_cache_scaled = node_scaled;
+    node.known_subtotal_scaled += node_scaled;
+    node.known_subtotal_pgu += node_pgu;
+    q.quote.node.block_local_known_scaled += node_scaled;
+    q.quote.node.block_local_known_pgu += node_pgu;
+    q.quote.node.sum_of_block_known_pgu += node_pgu;
+    let prove = &mut q.quote.blocks[0].prove.pricing;
+    prove.account_cache_work_units = attempted;
+    prove.account_cache_scaled = prove_scaled;
+    prove.total_scaled += prove_scaled;
+    prove.total_pgu += prove_pgu;
+    q.quote.prove.block_local_scaled += prove_scaled;
+    q.quote.prove.block_local_pgu += prove_pgu;
+    q.quote.prove.sum_of_block_local_pgu += prove_pgu;
+    q.quote.prove.total_scaled += prove_scaled;
+    q.quote.prove.total_pgu += prove_pgu;
+    q
+}
+
+#[test]
+fn account_cache_price_closes_once_across_committed_and_attempted_scopes() {
+    for (committed, attempted) in [
+        (0, 0),
+        (0, 1),
+        (3, 7),
+        (1_000_000_000_000, 1_000_000_000_000),
+    ] {
+        let dir = TestDir::new();
+        let q = quote_with_account_cache(committed, attempted);
+        assert_eq!(q.quote.blocks[0].node.pricing.operations_scaled, 0);
+        assert_eq!(q.quote.blocks[0].prove.pricing.operations_scaled, 0);
+        let args = write_inputs(
+            &dir,
+            &[QuoteRowV1::Complete(Box::new(q))],
+            &[complete_observation()],
+        );
+        let run = run_compare(&args, &executable()).unwrap();
+        assert_eq!(run.manifest.counts.get(&ComparisonKind::Joined), Some(&1));
+    }
+}
+
+#[test]
+fn account_cache_rejects_price_domain_and_double_charge_forgery() {
+    for mutation in [
+        "node-count",
+        "prove-price",
+        "negative",
+        "domain",
+        "double-charge",
+        "proposal-units",
+        "proposal-price",
+    ] {
+        let mut q = quote_with_account_cache(3, 7);
+        match mutation {
+            "node-count" => q.quote.blocks[0].node.pricing.account_cache_work_units += 1,
+            "prove-price" => q.quote.blocks[0].prove.pricing.account_cache_scaled += 1,
+            "negative" => q.quote.blocks[0].node.pricing.account_cache_scaled = -1,
+            "domain" => {
+                q.quote.blocks[0].prove.pricing.account_cache_work_units = 1_000_000_000_001
+            }
+            "double-charge" => {
+                q.quote.blocks[0].prove.pricing.total_scaled +=
+                    q.quote.blocks[0].prove.pricing.account_cache_scaled
+            }
+            "proposal-units" => q.quote.prove.proposal_once.account_cache_work_units = 1,
+            "proposal-price" => {
+                q.quote.prove.proposal_once.account_cache_scaled = 128 * 1_000_000_000_000_000_000
+            }
+            _ => unreachable!(),
+        }
+        let dir = TestDir::new();
+        let args = write_inputs(
+            &dir,
+            &[QuoteRowV1::Complete(Box::new(q))],
+            &[complete_observation()],
+        );
+        assert!(
+            run_compare(&args, &executable()).is_err(),
+            "reject {mutation}"
+        );
+        assert!(!args.output.exists());
+    }
+}
+
+#[test]
+fn account_cache_attempted_budget_cannot_shrink_with_self_consistent_tariffs() {
+    let dir = TestDir::new();
+    let q = quote_with_account_cache(7, 6);
+    let args = write_inputs(
+        &dir,
+        &[QuoteRowV1::Complete(Box::new(q))],
+        &[complete_observation()],
+    );
+    let error = run_compare(&args, &executable()).unwrap_err();
+    assert!(
+        format!("{error:#}")
+            .contains("attempted account cache work does not cover committed units or price")
+    );
+}
+
+#[test]
+fn account_cache_coverage_and_domain_are_required_for_foreign_models_too() {
+    for foreign in [false, true] {
+        for outside_domain in [false, true] {
+            let mut q = quote_with_account_cache(3, 7);
+            q.quote.blocks[0].prove.pricing.account_cache_work_units =
+                if outside_domain { 1_000_000_000_001 } else { 2 };
+            if foreign {
+                q.quote.model_id = "foreign-account-cache-model".into();
+                q.calibration_profile = q.quote.model_id.clone();
+            }
+            let dir = TestDir::new();
+            let args = write_inputs(
+                &dir,
+                &[QuoteRowV1::Complete(Box::new(q))],
+                &[complete_observation()],
+            );
+            let error = run_compare(&args, &executable()).unwrap_err();
+            assert!(format!("{error:#}").contains("account cache work"));
+            assert!(!args.output.exists());
+        }
+    }
+}
+
+#[test]
+fn account_cache_tariff_rejects_a_self_consistent_component_shift() {
+    let dir = TestDir::new();
+    let mut q = quote_with_account_cache(3, 7);
+    let node = &mut q.quote.blocks[0].node.pricing;
+    node.account_cache_scaled -= 1;
+    node.fixed_scaled += 1;
+    let args = write_inputs(
+        &dir,
+        &[QuoteRowV1::Complete(Box::new(q))],
+        &[complete_observation()],
+    );
+    let error = run_compare(&args, &executable()).unwrap_err();
+    assert!(format!("{error:#}").contains("account cache work price mismatch"));
+    assert!(!args.output.exists());
+}
+
+#[test]
+fn account_cache_proposal_once_rejects_a_self_consistent_component_shift() {
+    let dir = TestDir::new();
+    let mut q = quote_with_account_cache(3, 7);
+    let once = &mut q.quote.prove.proposal_once;
+    once.account_cache_work_units = 1;
+    once.account_cache_scaled = ZkGasModel.price_account_cache_work(1).unwrap();
+    once.startup_scaled -= once.account_cache_scaled;
+    let args = write_inputs(
+        &dir,
+        &[QuoteRowV1::Complete(Box::new(q))],
+        &[complete_observation()],
+    );
+    let error = run_compare(&args, &executable()).unwrap_err();
+    assert!(format!("{error:#}").contains("proposal-only pricing contains account cache work"));
+    assert!(!args.output.exists());
+}
+
+#[test]
+fn account_cache_required_schema_roundtrips_without_silent_zero_or_field_loss() {
+    let value = serde_json::to_value(quote_with_account_cache(3, 7)).unwrap();
+    let decoded: CompleteQuoteV1 = serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(serde_json::to_value(decoded).unwrap(), value);
+    for scope in [
+        "/quote/blocks/0/node/pricing",
+        "/quote/blocks/0/prove/pricing",
+        "/quote/prove/proposal_once",
+    ] {
+        for field in ["account_cache_work_units", "account_cache_scaled"] {
+            let mut missing = value.clone();
+            missing
+                .pointer_mut(scope)
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+            assert!(
+                serde_json::from_value::<CompleteQuoteV1>(missing).is_err(),
+                "missing {scope}/{field}"
+            );
+        }
+    }
+}
+
+fn quote_with_storage_transition(committed: u64, attempted: u64) -> CompleteQuoteV1 {
+    const SCALE: i128 = 1_000_000_000_000_000_000;
+    let mut q = quote();
+    let node_scaled = ZkGasModel.price_storage_transition_work(committed).unwrap();
+    let prove_scaled = ZkGasModel.price_storage_transition_work(attempted).unwrap();
+    let node_pgu = u128::try_from(node_scaled / SCALE).unwrap();
+    let prove_pgu = u128::try_from(prove_scaled / SCALE).unwrap();
+    let node = &mut q.quote.blocks[0].node.pricing;
+    node.storage_transition_work_units = committed;
+    node.storage_transition_scaled = node_scaled;
+    node.known_subtotal_scaled += node_scaled;
+    node.known_subtotal_pgu += node_pgu;
+    q.quote.node.block_local_known_scaled += node_scaled;
+    q.quote.node.block_local_known_pgu += node_pgu;
+    q.quote.node.sum_of_block_known_pgu += node_pgu;
+    let prove = &mut q.quote.blocks[0].prove.pricing;
+    prove.storage_transition_work_units = attempted;
+    prove.storage_transition_scaled = prove_scaled;
+    prove.total_scaled += prove_scaled;
+    prove.total_pgu += prove_pgu;
+    q.quote.prove.block_local_scaled += prove_scaled;
+    q.quote.prove.block_local_pgu += prove_pgu;
+    q.quote.prove.sum_of_block_local_pgu += prove_pgu;
+    q.quote.prove.total_scaled += prove_scaled;
+    q.quote.prove.total_pgu += prove_pgu;
+    q
+}
+
+#[test]
+fn storage_transition_price_closes_once_across_committed_and_attempted_scopes() {
+    for (committed, attempted) in [
+        (0, 0),
+        (0, 1),
+        (3, 7),
+        (1_000_000_000_000, 1_000_000_000_000),
+    ] {
+        let dir = TestDir::new();
+        let q = quote_with_storage_transition(committed, attempted);
+        assert_eq!(q.quote.blocks[0].node.pricing.operations_scaled, 0);
+        assert_eq!(q.quote.blocks[0].prove.pricing.operations_scaled, 0);
+        let args = write_inputs(
+            &dir,
+            &[QuoteRowV1::Complete(Box::new(q))],
+            &[complete_observation()],
+        );
+        let run = run_compare(&args, &executable()).unwrap();
+        assert_eq!(run.manifest.counts.get(&ComparisonKind::Joined), Some(&1));
+    }
+}
+
+#[test]
+fn storage_transition_rejects_price_domain_and_double_charge_forgery() {
+    for mutation in [
+        "node-count",
+        "prove-price",
+        "negative",
+        "domain",
+        "double-charge",
+        "proposal-units",
+        "proposal-price",
+    ] {
+        let mut q = quote_with_storage_transition(3, 7);
+        match mutation {
+            "node-count" => q.quote.blocks[0].node.pricing.storage_transition_work_units += 1,
+            "prove-price" => q.quote.blocks[0].prove.pricing.storage_transition_scaled += 1,
+            "negative" => q.quote.blocks[0].node.pricing.storage_transition_scaled = -1,
+            "domain" => {
+                q.quote.blocks[0]
+                    .prove
+                    .pricing
+                    .storage_transition_work_units = 1_000_000_000_001
+            }
+            "double-charge" => {
+                q.quote.blocks[0].prove.pricing.total_scaled +=
+                    q.quote.blocks[0].prove.pricing.storage_transition_scaled
+            }
+            "proposal-units" => q.quote.prove.proposal_once.storage_transition_work_units = 1,
+            "proposal-price" => {
+                q.quote.prove.proposal_once.storage_transition_scaled =
+                    384 * 1_000_000_000_000_000_000
+            }
+            _ => unreachable!(),
+        }
+        let dir = TestDir::new();
+        let args = write_inputs(
+            &dir,
+            &[QuoteRowV1::Complete(Box::new(q))],
+            &[complete_observation()],
+        );
+        assert!(
+            run_compare(&args, &executable()).is_err(),
+            "reject {mutation}"
+        );
+        assert!(!args.output.exists());
+    }
+}
+
+#[test]
+fn storage_transition_attempted_budget_cannot_shrink_with_self_consistent_tariffs() {
+    let dir = TestDir::new();
+    let q = quote_with_storage_transition(7, 6);
+    let args = write_inputs(
+        &dir,
+        &[QuoteRowV1::Complete(Box::new(q))],
+        &[complete_observation()],
+    );
+    let error = run_compare(&args, &executable()).unwrap_err();
+    assert!(
+        format!("{error:#}")
+            .contains("attempted storage transition work does not cover committed units or price")
+    );
+}
+
+#[test]
+fn storage_transition_coverage_and_domain_are_required_for_foreign_models_too() {
+    for foreign in [false, true] {
+        for outside_domain in [false, true] {
+            let mut q = quote_with_storage_transition(3, 7);
+            q.quote.blocks[0]
+                .prove
+                .pricing
+                .storage_transition_work_units = if outside_domain { 1_000_000_000_001 } else { 2 };
+            if foreign {
+                q.quote.model_id = "foreign-storage-transition-model".into();
+                q.calibration_profile = q.quote.model_id.clone();
+            }
+            let dir = TestDir::new();
+            let args = write_inputs(
+                &dir,
+                &[QuoteRowV1::Complete(Box::new(q))],
+                &[complete_observation()],
+            );
+            let error = run_compare(&args, &executable()).unwrap_err();
+            assert!(format!("{error:#}").contains("storage transition work"));
+            assert!(!args.output.exists());
+        }
+    }
+}
+
+#[test]
+fn storage_transition_tariff_rejects_a_self_consistent_component_shift() {
+    let dir = TestDir::new();
+    let mut q = quote_with_storage_transition(3, 7);
+    let node = &mut q.quote.blocks[0].node.pricing;
+    node.storage_transition_scaled -= 1;
+    node.fixed_scaled += 1;
+    let args = write_inputs(
+        &dir,
+        &[QuoteRowV1::Complete(Box::new(q))],
+        &[complete_observation()],
+    );
+    let error = run_compare(&args, &executable()).unwrap_err();
+    assert!(format!("{error:#}").contains("storage transition work price mismatch"));
+    assert!(!args.output.exists());
+}
+
+#[test]
+fn storage_transition_proposal_once_rejects_a_self_consistent_component_shift() {
+    let dir = TestDir::new();
+    let mut q = quote_with_storage_transition(3, 7);
+    let once = &mut q.quote.prove.proposal_once;
+    once.storage_transition_work_units = 1;
+    once.storage_transition_scaled = ZkGasModel.price_storage_transition_work(1).unwrap();
+    once.startup_scaled -= once.storage_transition_scaled;
+    let args = write_inputs(
+        &dir,
+        &[QuoteRowV1::Complete(Box::new(q))],
+        &[complete_observation()],
+    );
+    let error = run_compare(&args, &executable()).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("proposal-only pricing contains storage transition work")
+    );
+    assert!(!args.output.exists());
+}
+
+#[test]
+fn storage_transition_required_schema_roundtrips_without_silent_zero_or_field_loss() {
+    let value = serde_json::to_value(quote_with_storage_transition(3, 7)).unwrap();
+    let decoded: CompleteQuoteV1 = serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(serde_json::to_value(decoded).unwrap(), value);
+    for scope in [
+        "/quote/blocks/0/node/pricing",
+        "/quote/blocks/0/prove/pricing",
+        "/quote/prove/proposal_once",
+    ] {
+        for field in ["storage_transition_work_units", "storage_transition_scaled"] {
+            let mut missing = value.clone();
+            missing
+                .pointer_mut(scope)
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+            assert!(
+                serde_json::from_value::<CompleteQuoteV1>(missing).is_err(),
+                "missing {scope}/{field}"
+            );
+        }
+    }
+}
+
+#[test]
+fn storage_transition_schema_rejects_null_and_incorrect_field_types() {
+    let value = serde_json::to_value(quote_with_storage_transition(3, 7)).unwrap();
+    for scope in [
+        "/quote/blocks/0/node/pricing",
+        "/quote/blocks/0/prove/pricing",
+        "/quote/prove/proposal_once",
+    ] {
+        for (field, invalid) in [
+            ("storage_transition_work_units", json!(null)),
+            ("storage_transition_work_units", json!(-1)),
+            ("storage_transition_work_units", json!("3")),
+            ("storage_transition_work_units", json!(1.5)),
+            ("storage_transition_scaled", json!(null)),
+            ("storage_transition_scaled", json!({})),
+            ("storage_transition_scaled", json!("1.5")),
+        ] {
+            let mut bad = value.clone();
+            bad.pointer_mut(scope)
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .insert(field.into(), invalid);
+            assert!(
+                serde_json::from_value::<CompleteQuoteV1>(bad).is_err(),
+                "invalid {scope}/{field}"
+            );
         }
     }
 }

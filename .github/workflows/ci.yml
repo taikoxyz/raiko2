@@ -220,6 +220,12 @@ jobs:
       - name: test stateless MPT metrics
         run: cargo test -p raiko2-stateless --features mpt-metrics --lib
 
+      - name: test offline workload fixture producer
+        run: cargo test --locked -p zkgas --features fixture --test fixture
+
+      - name: test workload harness and finite generators
+        run: python3 -m unittest discover -s bin/zkgas/bench/tests -v
+
       - name: test protocol shasta net feature
         run: cargo test -p raiko2-protocol-shasta --features net --test net_feature
 

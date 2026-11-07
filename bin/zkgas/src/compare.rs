@@ -102,8 +102,15 @@ fn validate_pricing_breakdown(
             pricing.fixed_scaled,
             pricing.authorization_scaled,
             pricing.access_list_scaled,
+            pricing.access_list_construction_scaled,
+            pricing.access_list_construction_other_scaled,
+            pricing.access_list_address_scaled,
             pricing.code_preparation_scaled,
             pricing.operations_scaled,
+            pricing.storage_journal_scaled,
+            pricing.account_journal_scaled,
+            pricing.account_cache_scaled,
+            pricing.storage_transition_scaled,
             pricing.normal_dispatch_scaled,
             pricing.feature_error_scaled,
             pricing.resources_scaled,
@@ -134,8 +141,15 @@ fn validate_pricing_breakdown(
                 pricing.fixed_scaled,
                 pricing.authorization_scaled,
                 pricing.access_list_scaled,
+                pricing.access_list_construction_scaled,
+                pricing.access_list_construction_other_scaled,
+                pricing.access_list_address_scaled,
                 pricing.code_preparation_scaled,
                 pricing.operations_scaled,
+                pricing.storage_journal_scaled,
+                pricing.account_journal_scaled,
+                pricing.account_cache_scaled,
+                pricing.storage_transition_scaled,
                 pricing.resources_scaled,
                 pricing.mpt_scaled,
                 pricing.startup_scaled,
@@ -191,8 +205,24 @@ fn snapshot_matches_pricing(
     snapshot.fixed_scaled == pricing.fixed_scaled
         && snapshot.authorization_scaled == pricing.authorization_scaled
         && snapshot.access_list_scaled == pricing.access_list_scaled
+        && snapshot.access_list_construction_pairs == pricing.access_list_construction_pairs
+        && snapshot.access_list_construction_scaled == pricing.access_list_construction_scaled
+        && snapshot.access_list_construction_other_pairs
+            == pricing.access_list_construction_other_pairs
+        && snapshot.access_list_construction_other_scaled
+            == pricing.access_list_construction_other_scaled
+        && snapshot.access_list_address_pairs == pricing.access_list_address_pairs
+        && snapshot.access_list_address_scaled == pricing.access_list_address_scaled
         && snapshot.code_preparation_scaled == pricing.code_preparation_scaled
         && snapshot.operations_scaled == pricing.operations_scaled
+        && snapshot.storage_journal_work_units == pricing.storage_journal_work_units
+        && snapshot.account_journal_work_units == pricing.account_journal_work_units
+        && snapshot.account_cache_work_units == pricing.account_cache_work_units
+        && snapshot.storage_transition_work_units == pricing.storage_transition_work_units
+        && snapshot.storage_journal_scaled == pricing.storage_journal_scaled
+        && snapshot.account_journal_scaled == pricing.account_journal_scaled
+        && snapshot.account_cache_scaled == pricing.account_cache_scaled
+        && snapshot.storage_transition_scaled == pricing.storage_transition_scaled
         && snapshot.feature_error_scaled == pricing.feature_error_scaled
         && snapshot.resources_scaled == pricing.resources_scaled
         && snapshot.mpt_scaled == pricing.mpt_scaled
@@ -306,8 +336,15 @@ fn validate_complete_quote(complete: &CompleteQuoteV1) -> Result<()> {
                 node.fixed_scaled,
                 node.authorization_scaled,
                 node.access_list_scaled,
+                node.access_list_construction_scaled,
+                node.access_list_construction_other_scaled,
+                node.access_list_address_scaled,
                 node.code_preparation_scaled,
                 node.operations_scaled,
+                node.storage_journal_scaled,
+                node.account_journal_scaled,
+                node.account_cache_scaled,
+                node.storage_transition_scaled,
                 node.normal_dispatch_scaled,
                 node.feature_error_scaled,
                 node.evm_local_resources_scaled,
@@ -328,8 +365,15 @@ fn validate_complete_quote(complete: &CompleteQuoteV1) -> Result<()> {
                     node.fixed_scaled,
                     node.authorization_scaled,
                     node.access_list_scaled,
+                    node.access_list_construction_scaled,
+                    node.access_list_construction_other_scaled,
+                    node.access_list_address_scaled,
                     node.code_preparation_scaled,
                     node.operations_scaled,
+                    node.storage_journal_scaled,
+                    node.account_journal_scaled,
+                    node.account_cache_scaled,
+                    node.storage_transition_scaled,
                     node.evm_local_resources_scaled,
                     node.transaction_payload_scaled,
                 ])?,
@@ -341,10 +385,169 @@ fn validate_complete_quote(complete: &CompleteQuoteV1) -> Result<()> {
         );
         let prove = &block.prove.pricing;
         ensure!(
+            prove.access_list_construction_pairs >= node.access_list_construction_pairs
+                && prove.access_list_construction_scaled >= node.access_list_construction_scaled,
+            "attempted access-list construction does not cover committed pairs or price"
+        );
+        for (pairs, scaled) in [
+            (
+                node.access_list_construction_pairs,
+                node.access_list_construction_scaled,
+            ),
+            (
+                prove.access_list_construction_pairs,
+                prove.access_list_construction_scaled,
+            ),
+        ] {
+            let expected = ZkGasModel
+                .price_access_list_construction_pairs(pairs)
+                .context("access-list construction selector domain is invalid")?;
+            if current_model {
+                ensure!(
+                    scaled == expected,
+                    "access-list construction price mismatch"
+                );
+            }
+        }
+        ensure!(
+            prove.access_list_construction_other_pairs >= node.access_list_construction_other_pairs
+                && prove.access_list_construction_other_scaled
+                    >= node.access_list_construction_other_scaled,
+            "attempted different-prefix construction does not cover committed pairs or price"
+        );
+        for (pairs, scaled) in [
+            (
+                node.access_list_construction_other_pairs,
+                node.access_list_construction_other_scaled,
+            ),
+            (
+                prove.access_list_construction_other_pairs,
+                prove.access_list_construction_other_scaled,
+            ),
+        ] {
+            let expected = ZkGasModel
+                .price_access_list_construction_other_pairs(pairs)
+                .context("different-prefix construction selector domain is invalid")?;
+            if current_model {
+                ensure!(
+                    scaled == expected,
+                    "different-prefix construction price mismatch"
+                );
+            }
+        }
+        ensure!(
+            prove.access_list_address_pairs >= node.access_list_address_pairs
+                && prove.access_list_address_scaled >= node.access_list_address_scaled,
+            "attempted address-table construction does not cover committed pairs or price"
+        );
+        for (pairs, scaled) in [
+            (
+                node.access_list_address_pairs,
+                node.access_list_address_scaled,
+            ),
+            (
+                prove.access_list_address_pairs,
+                prove.access_list_address_scaled,
+            ),
+        ] {
+            let expected = ZkGasModel
+                .price_access_list_address_pairs(pairs)
+                .context("address-table construction selector domain is invalid")?;
+            if current_model {
+                ensure!(
+                    scaled == expected,
+                    "address-table construction price mismatch"
+                );
+            }
+        }
+        ensure!(
             prove.normal_dispatch_count >= node.normal_dispatch_count
                 && prove.normal_dispatch_scaled >= node.normal_dispatch_scaled,
             "attempted normal dispatches do not cover committed occurrences or price"
         );
+        ensure!(
+            prove.storage_journal_work_units >= node.storage_journal_work_units
+                && prove.storage_journal_scaled >= node.storage_journal_scaled,
+            "attempted storage journal work does not cover committed units or price"
+        );
+        // Reject out-of-domain work even for foreign-model diagnostics; reconcile the tariff
+        // only for this executable's current model identity.
+        for (units, scaled) in [
+            (node.storage_journal_work_units, node.storage_journal_scaled),
+            (
+                prove.storage_journal_work_units,
+                prove.storage_journal_scaled,
+            ),
+        ] {
+            let expected = ZkGasModel
+                .price_storage_journal_work(units)
+                .context("storage journal work selector domain is invalid")?;
+            if current_model {
+                ensure!(scaled == expected, "storage journal work price mismatch");
+            }
+        }
+        ensure!(
+            prove.account_journal_work_units >= node.account_journal_work_units
+                && prove.account_journal_scaled >= node.account_journal_scaled,
+            "attempted Account journal work does not cover committed units or price"
+        );
+        // Reject out-of-domain work even for foreign-model diagnostics; reconcile the tariff
+        // only for this executable's current model identity.
+        for (units, scaled) in [
+            (node.account_journal_work_units, node.account_journal_scaled),
+            (
+                prove.account_journal_work_units,
+                prove.account_journal_scaled,
+            ),
+        ] {
+            let expected = ZkGasModel
+                .price_account_journal_work(units)
+                .context("Account journal work selector domain is invalid")?;
+            if current_model {
+                ensure!(scaled == expected, "Account journal work price mismatch");
+            }
+        }
+
+        ensure!(
+            prove.account_cache_work_units >= node.account_cache_work_units
+                && prove.account_cache_scaled >= node.account_cache_scaled,
+            "attempted account cache work does not cover committed units or price"
+        );
+        for (units, scaled) in [
+            (node.account_cache_work_units, node.account_cache_scaled),
+            (prove.account_cache_work_units, prove.account_cache_scaled),
+        ] {
+            let expected = ZkGasModel
+                .price_account_cache_work(units)
+                .context("account cache work selector domain is invalid")?;
+            if current_model {
+                ensure!(scaled == expected, "account cache work price mismatch");
+            }
+        }
+
+        ensure!(
+            prove.storage_transition_work_units >= node.storage_transition_work_units
+                && prove.storage_transition_scaled >= node.storage_transition_scaled,
+            "attempted storage transition work does not cover committed units or price"
+        );
+        for (units, scaled) in [
+            (
+                node.storage_transition_work_units,
+                node.storage_transition_scaled,
+            ),
+            (
+                prove.storage_transition_work_units,
+                prove.storage_transition_scaled,
+            ),
+        ] {
+            let expected = ZkGasModel
+                .price_storage_transition_work(units)
+                .context("storage transition work selector domain is invalid")?;
+            if current_model {
+                ensure!(scaled == expected, "storage transition work price mismatch");
+            }
+        }
+
         for (count, dispatch, operations, feature_errors) in [
             (
                 node.normal_dispatch_count,
@@ -443,7 +646,14 @@ fn validate_complete_quote(complete: &CompleteQuoteV1) -> Result<()> {
                     native_value_transfers: 0,
                     authorization_validations: node.authorization_validations,
                     access_list_items: node.access_list_items,
+                    access_list_construction_pairs: node.access_list_construction_pairs,
+                    access_list_construction_other_pairs: node.access_list_construction_other_pairs,
+                    access_list_address_pairs: node.access_list_address_pairs,
                     code_preparation: node.code_preparation.into(),
+                    storage_journal_work_units: node.storage_journal_work_units,
+                    account_journal_work_units: node.account_journal_work_units,
+                    account_cache_work_units: node.account_cache_work_units,
+                    storage_transition_work_units: node.storage_transition_work_units,
                     operation_routes: &[],
                     resources: resource_selectors(node.evm_local_resources),
                     transaction_payload: Default::default(),
@@ -460,7 +670,15 @@ fn validate_complete_quote(complete: &CompleteQuoteV1) -> Result<()> {
                     native_value_transfers: 0,
                     authorization_validations: block.prove.authorization_validations,
                     access_list_items: block.prove.access_list_items,
+                    access_list_construction_pairs: prove.access_list_construction_pairs,
+                    access_list_construction_other_pairs: prove
+                        .access_list_construction_other_pairs,
+                    access_list_address_pairs: prove.access_list_address_pairs,
                     code_preparation: block.prove.code_preparation.into(),
+                    storage_journal_work_units: prove.storage_journal_work_units,
+                    account_journal_work_units: prove.account_journal_work_units,
+                    account_cache_work_units: prove.account_cache_work_units,
+                    storage_transition_work_units: prove.storage_transition_work_units,
                     operation_routes: &[],
                     resources: resource_selectors(block.prove.exact_resources),
                     transaction_payload: Default::default(),
@@ -532,6 +750,10 @@ fn validate_complete_quote(complete: &CompleteQuoteV1) -> Result<()> {
         !quote.model_id.is_empty() && complete.calibration_profile == quote.model_id,
         "prediction model identity mismatch"
     );
+    ensure!(
+        complete.execution_profile == quote.execution_profile,
+        "quote execution profile mismatch"
+    );
     let unzen_sum = quote
         .blocks
         .iter()
@@ -584,8 +806,51 @@ fn validate_complete_quote(complete: &CompleteQuoteV1) -> Result<()> {
         "proposal-only pricing contains access-list items"
     );
     ensure!(
+        quote.prove.proposal_once.access_list_construction_pairs == 0
+            && quote.prove.proposal_once.access_list_construction_scaled == 0,
+        "proposal-only pricing contains access-list construction"
+    );
+    ensure!(
+        quote
+            .prove
+            .proposal_once
+            .access_list_construction_other_pairs
+            == 0
+            && quote
+                .prove
+                .proposal_once
+                .access_list_construction_other_scaled
+                == 0,
+        "proposal-only pricing contains different-prefix access-list construction"
+    );
+    ensure!(
+        quote.prove.proposal_once.access_list_address_pairs == 0
+            && quote.prove.proposal_once.access_list_address_scaled == 0,
+        "proposal-only pricing contains address-table construction"
+    );
+    ensure!(
         quote.prove.proposal_once.code_preparation_scaled == 0,
         "proposal-only pricing contains code preparation"
+    );
+    ensure!(
+        quote.prove.proposal_once.storage_journal_work_units == 0
+            && quote.prove.proposal_once.storage_journal_scaled == 0,
+        "proposal-only pricing contains storage journal work"
+    );
+    ensure!(
+        quote.prove.proposal_once.account_journal_work_units == 0
+            && quote.prove.proposal_once.account_journal_scaled == 0,
+        "proposal-only pricing contains Account journal work"
+    );
+    ensure!(
+        quote.prove.proposal_once.account_cache_work_units == 0
+            && quote.prove.proposal_once.account_cache_scaled == 0,
+        "proposal-only pricing contains account cache work"
+    );
+    ensure!(
+        quote.prove.proposal_once.storage_transition_work_units == 0
+            && quote.prove.proposal_once.storage_transition_scaled == 0,
+        "proposal-only pricing contains storage transition work"
     );
     let block_scaled = checked_sum(quote.blocks.iter().map(|b| b.prove.pricing.total_scaled))?;
     ensure!(

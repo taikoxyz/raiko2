@@ -5,6 +5,12 @@ proposal workload pricing. They exchange files and may be used independently. Pr
 `raiko2-zkgas-trace::quote_shasta_proposal`; quote performs native proposal replay, while compare
 and report consume saved results.
 
+For offline workload construction and local SP1 measurement, see the
+[reproducible workload toolkit](bench/README.md): optional `zkgas-fixture`, an independent
+explicit-input SP1 sampler, finite case generators, and guarded screening/measurement/report
+commands. These are separate developer tools; the quote/compare/report contracts below remain
+usable with inputs and observations from any producer.
+
 The alethia-reth shadow-pricing APIs come from the maintained internal branch tracked by
 [alethia-reth PR #260](https://github.com/taikoxyz/alethia-reth/pull/260). Cargo manifests pin a
 reviewed commit from that branch; updating the branch does not automatically update raiko2.
@@ -19,6 +25,46 @@ data, reconstruct historical inputs, translate old input schemas, run guests, or
 They add no server configuration or deployment behavior. Comparison checks the asserted join and
 compatibility, **not the truth of a producer's measurement**. Reports make no capacity, admission,
 or model promotion claim.
+
+Offline `zkgas-fixture` and `zkgas-quote` accept `--execution-profile legacy-unzen`
+(the default) or `--execution-profile evm-gas-only`. The latter preserves the EVM fork,
+gas limits, transaction rules and full proposal validation while relaxing only the old
+Unzen admission cap. It is an explicitly labelled workload experiment, not a change to
+node or production-guest policy. The guarded workload harness freezes one profile and
+rejects mismatched stage reports. SP1 measurement needs the matching
+[dedicated workload program](../../guests/workload-sp1/README.md), a manifest bound to
+its ELF, and a fresh campaign with controls measured against that same program.
+
+## Explicit offline transaction envelopes
+
+The optional `program.transactions` descriptor extends ProgramRequest with repeated calls or
+ordinary top-level creations. For example:
+
+```json
+{"kind":"create","count_per_block":2,"gas_limit":100000,"expected_runtime_hex":"0x"}
+```
+
+For `create`, `code_hex` is initcode (0..49152 bytes), `input_hex` must be empty, and no
+future account or runtime is inserted into the initial witness. `expected_runtime_hex` requires
+a block-final created account with nonce 1 and that code hash; `"0x"` explicitly expects a
+present account with empty runtime. Omitting the expectation requires the created address to be
+absent, including after failed creation or SELFDESTRUCT in the same transaction. Calls require
+1..24576 runtime bytes and cannot specify a runtime expectation. This descriptor cannot yet be
+combined with storage-state, authorization or access-list descriptors.
+
+`count_per_block` is 1..2048 and `gas_limit` is 21000..15000000. All users share a signer with
+contiguous nonces across blocks. Explicit envelopes use the protocol maximum base fee as their
+fee cap and a fee-neutral 10^18 wei sender balance. Omission retains the original one-call/15M
+transaction, fee cap, balance, canonical bytes and report shape. The 31M block and 30M manifest
+gas budgets remain enforced. Every signed candidate must be included in order; filtering,
+receipt/status mismatches and a compressed manifest exceeding one Kona blob fail before output
+publication. These are tool envelope/transport bounds, not measured proving-capacity limits.
+
+The optional `transactions` report records each actual included transaction's hash, nonce, gas
+limit, destination/create address and **block-final** account state. Each block and proposal gas
+total sums every user receipt, excluding Anchor. Opcode observations include every user and
+exclude Anchor, including exceptional/reverted execution and implicit STOP when REVM executes
+one. Actual committed generated code is carried into subsequent explicit-envelope witnesses.
 
 ## Build and command workflows
 
@@ -246,6 +292,38 @@ Incompatible strata expose series-shape diagnostics only: Pearson, average-tie S
 Kendall tau-b, and predeclared prediction-bucket actual-workload amplification. Insufficient or
 constant series carry explicit unavailability reasons. No cross-unit direct ratio is created.
 
+The reviewed Alethia authorization-validation tariff is part of both quote surfaces. Node block
+pricing records `authorization_validations` from the committed Shadow snapshot and the normalized
+`authorization_scaled` contribution. Each prove block separately records the attempted authorization
+count and prices that count once, alongside the existing attempted execution and committed-resource
+terms. Duplicate authorities, stale authorizations, failed signature recovery and included user
+REVERTs retain their raw entry counts. Proposal-once pricing adds no authorization term.
+
+The raw access-list address-item tariff follows the same ownership split. Node block pricing records
+`access_list_items` from the committed sealed snapshot and `access_list_scaled`. The prove block uses
+the attempted raw count and its contribution once. Every raw address item counts, including duplicates;
+key multiplicity, ignored authorizations and receipt success do not reduce that count. Non-legacy
+Anchor items count when carried. Proposal-once pricing adds zero access-list contribution. The
+current-model comparator checks each count against the shared tariff, attempted counts/prices covering
+committed ones, and all total boundaries.
+
+Successful nonempty code preparation is counted per occurrence, including CREATE/CREATE2 results
+whose work is later reverted by an ancestor. Node pricing records committed outer-scope selectors
+`code_preparation.{nonempty_events,total_bytes}` and `code_preparation_scaled`; the prove block uses
+the attempted prefix, retaining preparations in discarded outer candidates. The shared model prices
+that term once per block as `8192 × nonempty_events + 32 × total_bytes` PGU. It separately prices
+unique code bytes at 64 PGU/byte; unique code resources do not replace the per-occurrence term.
+Proposal-once preparation is zero. The comparator checks both selector domains, attempted coverage,
+the shared tariff and every subtotal. Missing selectors or contributions are rejected.
+
+These fields are required by the initial schema; missing counts or contributions are rejected rather
+than inferred as zero. The current-model comparator validates each count against the shared model and
+checks all block/proposal sum boundaries. Authorization recovery for outer input transactions filtered
+before an EVM scope begins remains outside these committed/attempted prefixes. Updating the reviewed
+source pin changes declared guest source fingerprints; host quote validation does not rebuild or
+establish alignment of existing production guest binaries. Frozen experiment ELF identities retain
+their original source manifests and must be verified against the corresponding frozen source tree.
+
 ## Contracts, units, and compatibility
 
 The authoritative types are in [`src/contracts.rs`](src/contracts.rs). All eight contracts have
@@ -359,16 +437,50 @@ execution; a real packaged-SP1 measurement is a separate external-producer valid
 ## Observed operation pricing components
 
 The quote consumer follows the reviewed maintained Alethia shadow-pricing branch.
-Its current explicit dependency revision is
-`e01c43ff2e79ef75ac9089bb8692093e9c5cbda3`, exporting model
-`c8936124c1b074b57abf36873e1c37e01f9bc49fa6c9bb161a92542f1e6551ef`.
-The authoritative formulas, coefficients and empirical limits remain in
-[Alethia's pricing documentation](https://github.com/taikoxyz/alethia-reth/blob/e01c43ff2e79ef75ac9089bb8692093e9c5cbda3/docs/zk-gas-pricing-model.md).
+The exact dependency revisions are recorded in the
+[workspace manifest](../../Cargo.toml); each quote records its actual embedded
+model in `calibration_profile` and `quote.model_id`, along with executable
+identity. The authoritative formulas, coefficients and empirical limits remain
+with [Alethia's maintained pricing implementation and documentation](https://github.com/taikoxyz/alethia-reth/pull/260).
 This source synchronization does not activate the model for consensus admission
 or replace Unzen difficulty.
 
 Both quote surfaces preserve these selectors and contributions:
 
+- `storage_journal_work_units` and `storage_journal_scaled`: conservative per-transaction,
+  per-owner raw-slot comparison work and its independent normalized PGU price. The
+  node report keeps committed scopes; prove keeps all attempted scopes. This is
+  added once outside `operations_scaled`, with zero contribution in proposal-once
+  pricing. See [the calibration record](../../docs/research/2026-11-05-storage-journal-prefix.md)
+  for the guest layout evidence, simple formula, negative control and limits.
+- `account_journal_work_units` and `account_journal_scaled`: the independent
+  transaction-local Account-journal reserve. These keep their original meaning
+  when the block-cache component is present.
+- `account_cache_work_units` and `account_cache_scaled`: progressive block-level
+  work derived from finalized physical Journal account keys and persistent
+  storage materializations. Each committed/attempted prefix owns its own observed
+  account union; revisiting an account in another transaction adds query budget
+  again. This is a conservative observed-population proxy, rather than exact DB
+  cache telemetry. Its price is added once outside `operations_scaled`, with
+  zero proposal-once contribution. The
+  [warm-first observations](../../docs/research/2026-11-07-cache-state-warm-accounts.md)
+  retain the original model's deficit; a candidate quote is not a new SP1 sample.
+- `storage_transition_work_units` and `storage_transition_scaled`: an independent
+  block-local reserve for persistent storage queries and transitions. For each actual state
+  owner, cumulative finalized physical journal keys determine population and raw
+  low32 concentration. Each transaction adds query budget `J + 2X`, with J its
+  finalized physical key count and X its transaction-relative changed count.
+  This includes successful read-through query scope and two changed-slot passes.
+  Committed/attempted prefixes own separate populations. The normalized term is
+  added once outside `operations_scaled`, with zero proposal-once contribution.
+  This empirical query/transition reserve preserves the transaction-local
+  journal price; it is not an exact census of all DB/cache work. See the
+  [genuine-prefix observations and correction](../../docs/research/2026-11-07-prefixed-storage-transitions.md).
+  The separate [read-only cache panel](../../docs/research/2026-11-07-prefixed-storage-read-cache.md)
+  explains the added J term and the validation boundary.
+  Both fields are required in current quote files. Preserve archived older quotes
+  unchanged; replay their retained GuestInput to obtain a current quote rather
+  than inventing zero values for the new component.
 - `authorization_validations` and `authorization_scaled`: raw authorization-list
   entries, including duplicates, stale entries and unsuccessful recovery. The
   prove block counts attempted entries; the node block counts committed entries.

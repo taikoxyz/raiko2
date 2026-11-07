@@ -240,6 +240,7 @@ fn complete_quote_preserves_full_width_embedded_pricing_and_rejects_malformed_va
     use raiko2_zkgas_trace::*;
     let quote = CompleteQuoteV1 {
         schema_version: 1,
+        execution_profile: ExecutionProfile::LegacyUnzen,
         key: QuoteKey {
             corpus_id: "corpus".into(),
             sample_id: "sample".into(),
@@ -271,6 +272,7 @@ fn complete_quote_preserves_full_width_embedded_pricing_and_rejects_malformed_va
         calibration_profile: "profile".into(),
         quote: ProposalWorkloadQuote {
             schema_version: 1,
+            execution_profile: ExecutionProfile::LegacyUnzen,
             model_id: "model".into(),
             guest_input_sha256: "input".into(),
             guest_input_bincode_length: 1,

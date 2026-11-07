@@ -158,8 +158,16 @@ pub fn read_parent_storage_with_witness_resources(
     ancestor_headers: &[WitnessHeader],
     shared_state_nodes: &[WitnessStateNode],
 ) -> Result<U256, StatelessValidationError> {
-    read_parent_storage_core(address, slot, witness, ancestor_headers, shared_state_nodes)
-        .map(|(value, _)| value)
+    read_parent_storage_core(
+        address,
+        slot,
+        witness,
+        ancestor_headers,
+        shared_state_nodes,
+        #[cfg(feature = "mpt-metrics")]
+        false,
+    )
+    .map(|(value, _)| value)
 }
 
 /// Reads a parent-state slot and returns MPT work measured by that same sparse-state read.
@@ -175,8 +183,14 @@ pub fn read_parent_storage_with_mpt_metrics(
     ancestor_headers: &[WitnessHeader],
     shared_state_nodes: &[WitnessStateNode],
 ) -> Result<(U256, MptWorkloadMetrics), StatelessValidationError> {
-    let (value, trie) =
-        read_parent_storage_core(address, slot, witness, ancestor_headers, shared_state_nodes)?;
+    let (value, trie) = read_parent_storage_core(
+        address,
+        slot,
+        witness,
+        ancestor_headers,
+        shared_state_nodes,
+        true,
+    )?;
     Ok((value, trie.mpt_workload_metrics()))
 }
 
@@ -186,10 +200,16 @@ fn read_parent_storage_core(
     witness: &ExecutionWitness,
     ancestor_headers: &[WitnessHeader],
     shared_state_nodes: &[WitnessStateNode],
+    #[cfg(feature = "mpt-metrics")] observe_mpt: bool,
 ) -> Result<(U256, SparseState), StatelessValidationError> {
     let pre_state_root = determine_pre_state_root(ancestor_headers)?;
-    let (mut trie, _) =
-        SparseState::new_with_state_pool(witness, shared_state_nodes, pre_state_root)?;
+    let (mut trie, _) = SparseState::new_with_observation(
+        witness,
+        shared_state_nodes,
+        pre_state_root,
+        #[cfg(feature = "mpt-metrics")]
+        observe_mpt,
+    )?;
     let value = trie
         .storage_from_witness(address, slot)
         .map_err(|err| StatelessValidationError::StatelessExecutionFailed(err.to_string()))?;
@@ -298,7 +318,7 @@ pub struct FilteredBlockExecutionOutcome {
 }
 
 #[cfg(feature = "mpt-metrics")]
-type ReconstructionCoreOutput = (FilteredBlockExecutionOutcome, MptWorkloadMetrics);
+type ReconstructionCoreOutput = (FilteredBlockExecutionOutcome, Option<MptWorkloadMetrics>);
 #[cfg(not(feature = "mpt-metrics"))]
 type ReconstructionCoreOutput = FilteredBlockExecutionOutcome;
 
@@ -413,6 +433,8 @@ where
         chain_spec,
         evm_config,
         executor,
+        #[cfg(feature = "mpt-metrics")]
+        false,
     )?;
     #[cfg(feature = "mpt-metrics")]
     return Ok(output.0);
@@ -447,7 +469,9 @@ pub fn reconstruct_block_from_transactions_with_mpt_metrics(
         chain_spec,
         evm_config,
         &mut AlethiaDerivedBlockExecutor,
+        true,
     )
+    .and_then(require_mpt_observation)
 }
 
 /// Reconstructs with an injected executor and returns host-only MPT workload counters.
@@ -481,7 +505,19 @@ where
         chain_spec,
         evm_config,
         executor,
+        true,
     )
+    .and_then(require_mpt_observation)
+}
+
+#[cfg(feature = "mpt-metrics")]
+fn require_mpt_observation(
+    (outcome, metrics): ReconstructionCoreOutput,
+) -> Result<(FilteredBlockExecutionOutcome, MptWorkloadMetrics), StatelessValidationError> {
+    let metrics = metrics.ok_or(StatelessValidationError::Custom(
+        "measured reconstruction requires MPT observation",
+    ))?;
+    Ok((outcome, metrics))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -495,6 +531,7 @@ fn reconstruct_block_from_transactions_core<E>(
     chain_spec: &Arc<TaikoChainSpec>,
     evm_config: &TaikoEvmConfig,
     executor: &mut E,
+    #[cfg(feature = "mpt-metrics")] observe_mpt: bool,
 ) -> Result<ReconstructionCoreOutput, StatelessValidationError>
 where
     E: DerivedBlockExecutor,
@@ -507,8 +544,13 @@ where
     let ancestor_hashes = compute_next_block_ancestor_hashes(ancestor_headers)?;
     let derived_block = build_derived_block(&parent_header, anchor_tx, transactions, block_env);
 
-    let (mut trie, bytecode) =
-        SparseState::new_with_state_pool(witness, shared_state_nodes, pre_state_root)?;
+    let (mut trie, bytecode) = SparseState::new_with_observation(
+        witness,
+        shared_state_nodes,
+        pre_state_root,
+        #[cfg(feature = "mpt-metrics")]
+        observe_mpt,
+    )?;
 
     let db = WitnessDatabase::new(&trie, bytecode, ancestor_hashes);
     let execution_outcome = executor
@@ -517,7 +559,7 @@ where
     ensure_anchor_receipt_success(&execution_outcome.execution_result.receipts)?;
     let state_root = trie.calculate_state_root(execution_outcome.hashed_state.clone())?;
     #[cfg(feature = "mpt-metrics")]
-    let mpt_workload_metrics = trie.mpt_workload_metrics();
+    let mpt_workload_metrics = observe_mpt.then(|| trie.mpt_workload_metrics());
     let filtered_block = assemble_filtered_block(
         evm_config,
         &parent_header,

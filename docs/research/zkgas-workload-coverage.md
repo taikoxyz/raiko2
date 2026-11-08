@@ -1,5 +1,7 @@
 # zkGas workload coverage status
 
+The active finite worklist is the [block-aware stage closure plan](../superpowers/plans/2026-11-08-block-zkgas-stage-closure.md). The chronological evidence below is retained history, not an instruction to keep extending every experimental family. The plan freezes selection and measurement budgets before further sampling; low-priority TODOs do not automatically block this research stage.
+
 The research is converging on specific failure modes and bounded severity in measured families. Substantial interaction and production-validation work remains. A pricing route, a sampled input family and certification of an exact production program are three different statuses; none implies the next. This inventory is a research working list, not an estimated completion percentage or a mandatory production merge gate. The [evaluation standard](../zkgas-evaluation-standard.md) remains draft and nonbinding.
 
 ## What the recent storage evidence establishes

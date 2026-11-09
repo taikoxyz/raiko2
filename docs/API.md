@@ -238,6 +238,33 @@ Proof submission response shape:
 - Submission responses return the root task ID, root task status, root proof, and root error. Use
   `GET /v4/tasks/{id}` for proposal and aggregate stage inspection.
 
+### RISC0 Client Compatibility
+
+The restored RISC0 client in [taiko-mono#22346](https://github.com/taikoxyz/taiko-mono/pull/22346)
+uses this existing v4 interface. Both proposal and aggregation requests go to
+`POST /v4/proof/proposal`, selected by `aggregate=false` or `aggregate=true`.
+The client sends numeric proposal/block IDs, an explicit `prover` address, and optional
+checkpoints whose `block_hash` and `state_root` are 64 hex characters without `0x`.
+
+Polling repeats the same POST body. Successful proof-submission responses use HTTP 200,
+echo `proof_type="risc0"`, and return `data.status="registered"` or `"work_in_progress"`
+while pending. A completed RISC0 response contains a nonempty `0x`-prefixed `data.proof`; an aggregate request
+returns the root aggregation proof rather than a component proposal proof.
+
+Built-in configuration defaults leave RISC0 disabled; the existing
+[config.example.toml](../config.example.toml) explicitly enables local RISC0. Enable
+`prover.risc0.enabled` only on an instance with a ready, configured RISC0 prover.
+Public request compatibility does not configure
+an internal GPU-service connection; that transport is separate and introduces no
+GPU URL or new request field here.
+
+The client checks backlog state through `GET /v4/prover/status?proof_type=risc0` and
+reads `data.clean`. An empty backlog is clean even when RISC0 is disabled; this is not
+a backend-readiness check. `POST /v4/prover/clear` with `{"proof_type":"risc0"}` retains
+the existing `prover.clear`/`admin` ACL requirement and clear skip/report rules.
+The client's configured API key must have that permission to clear backlog. RISC0-scoped
+clear preserves SP1 tasks.
+
 ### Submit Proof
 
 ```http

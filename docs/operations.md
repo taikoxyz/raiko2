@@ -167,7 +167,16 @@ Host requirements: x86_64, an NVIDIA driver that supports CUDA 12.8 (R570 or new
 nvidia-container-toolkit. The image needs no GPU to build; the `cuda-image` workflow builds it
 on every relevant PR.
 
-Publish it next to the CPU image through the same release entrypoint:
+Publish it from CI with the `Release - runtime image` workflow (`release-image.yml`): dispatch it
+from `main` with `flavor=cuda`, `backend=all` and a new tag. It runs the same xtask entrypoint as
+below and writes the pushed `raiko2-cuda@sha256:…` reference to the job summary; see
+[Publish From CI](#publish-from-ci).
+
+```bash
+gh workflow run release-image.yml --ref main -f flavor=cuda -f backend=all -f tag=release-20260507-1013
+```
+
+To publish by hand, use the same release entrypoint as the CPU image:
 
 ```bash
 just release-image-cuda all release-20260507-1013
@@ -789,6 +798,39 @@ variables.
 The root runtime `Dockerfile` uses BuildKit cache mounts, `sccache`, and `mold` by default, and
 `release-image` prints the Docker build elapsed time before pushing so release logs can compare
 cold and warm cache runs.
+
+### Publish From CI
+
+`.github/workflows/release-image.yml` (`Release - runtime image`) runs the same
+`cargo run -r -p xtask -- release-image <backend> [--cuda] --tag <tag>` entrypoint on a GitHub
+hosted runner, so no local registry credentials are needed. Dispatch it from `main`:
+
+```bash
+gh workflow run release-image.yml --ref main -f flavor=cuda -f backend=all -f tag=release-20260507-1013
+gh workflow run release-image.yml --ref main -f flavor=cpu -f backend=risc0 -f tag=release-20260507-1013
+```
+
+| Input | Values | Effect |
+|---|---|---|
+| `flavor` | `cuda` (default), `cpu` | `cuda` adds `--cuda` and pushes `raiko2-cuda`; `cpu` pushes `raiko2`. |
+| `backend` | `all` (default), `risc0`, `sp1`, `host` | Passed to `release-image`. `host` is CPU only. |
+| `tag` | new image tag | Rejected if it already exists in the repository, or if it is `latest`. |
+
+The job:
+
+1. Refuses any ref other than `refs/heads/main`.
+2. Runs `xtask-build-guest <backend> --check` and fails if the checked-in guest ELFs are stale.
+   CI never rebuilds or commits guest ELFs: refresh them with `just build-guest <backend>`,
+   merge, then dispatch again. `release-image` keeps its own check and
+   still stops if a refresh would dirty the tree.
+3. Authenticates keylessly through Workload Identity Federation (pool `github-raiko2-images` in
+   project `evmchain`) as `raiko2-image-publisher@evmchain.iam.gserviceaccount.com`, which can
+   only write to the `images` Artifact Registry repository. The pool's provider only accepts
+   tokens from this workflow file on `refs/heads/main`, so a fork, branch or PR cannot publish.
+   The GCP side lives in `taiko-infra-mono` under `terraform/evmchain/iam` and
+   `terraform/evmchain/data`.
+4. Publishes and writes the pushed `<repository>@sha256:…` reference, flavor, backend and source
+   commit to the job summary. Deploy by that digest, not by the tag.
 
 Avoid ad-hoc `docker build` for releases. The runtime image packages the existing
 `crates/guests/elf` artifacts at `/app/crates/guests/elf`; `raiko2` loads those files when the

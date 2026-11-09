@@ -1,0 +1,191 @@
+name: Release - runtime image
+
+# Publishes a raiko2 runtime image to us-docker.pkg.dev/evmchain/images through the same xtask
+# entrypoint as a manual release (`just release-image-cuda <backend> <tag>` /
+# `just release-image <backend> <tag>`), so guest ELF provenance and digest capture are identical.
+#
+# Authentication is keyless: GitHub OIDC -> Workload Identity Federation pool
+# `github-raiko2-images` -> `raiko2-image-publisher`, which holds artifactregistry.writer on the
+# `images` repository only. The pool's provider only accepts tokens whose job_workflow_ref is this
+# file on refs/heads/main (taiko-infra-mono terraform/evmchain/iam/wif.tf), so the workflow must be
+# dispatched from main.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Image tag to publish, for example release-20261109-1200. Existing tags are never overwritten."
+        required: true
+        type: string
+      flavor:
+        description: "cuda publishes raiko2-cuda (Dockerfile.cuda); cpu publishes raiko2 (Dockerfile)."
+        required: true
+        default: cuda
+        type: choice
+        options:
+          - cuda
+          - cpu
+      backend:
+        description: "xtask image backend. host is CPU-only and skips guest ELF checks."
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - risc0
+          - sp1
+          - host
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-image
+  cancel-in-progress: false
+
+env:
+  GCP_WORKLOAD_IDENTITY_PROVIDER: projects/790288402401/locations/global/workloadIdentityPools/github-raiko2-images/providers/github
+  GCP_IMAGE_PUBLISHER_SA: raiko2-image-publisher@evmchain.iam.gserviceaccount.com
+  IMAGE_REGISTRY: us-docker.pkg.dev
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    timeout-minutes: 330
+    env:
+      CARGO_TERM_COLOR: always
+      # Host-side xtask only needs risc0-zkvm for image IDs, never the prover kernels.
+      RISC0_SKIP_BUILD_KERNELS: "1"
+      INPUT_TAG: ${{ inputs.tag }}
+      INPUT_FLAVOR: ${{ inputs.flavor }}
+      INPUT_BACKEND: ${{ inputs.backend }}
+    steps:
+      - name: Validate dispatch inputs
+        id: inputs
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "::error::Release images must be dispatched from refs/heads/main (got $GITHUB_REF)"
+            exit 1
+          fi
+          if [[ ! "$INPUT_TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
+            echo "::error::Invalid image tag: $INPUT_TAG"
+            exit 1
+          fi
+          if [ "$INPUT_TAG" = "latest" ]; then
+            echo "::error::Refusing to publish the mutable 'latest' tag; use a release tag"
+            exit 1
+          fi
+          case "$INPUT_FLAVOR" in
+            cuda)
+              if [ "$INPUT_BACKEND" = "host" ]; then
+                echo "::error::The cuda flavor needs a backend with local provers (all, risc0 or sp1)"
+                exit 1
+              fi
+              repository="$IMAGE_REGISTRY/evmchain/images/raiko2-cuda"
+              ;;
+            cpu)
+              repository="$IMAGE_REGISTRY/evmchain/images/raiko2"
+              ;;
+            *)
+              echo "::error::Unknown flavor: $INPUT_FLAVOR"
+              exit 1
+              ;;
+          esac
+          echo "repository=$repository" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The CUDA devel base image, the buildx layer cache and a release build of xtask need more
+      # disk than the hosted runner leaves free by default.
+      - name: Free disk space
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+          df -h /
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable @ 2026-03-27
+        with:
+          toolchain: "1.95.0"
+
+      - name: Install protobuf compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
+      # Fail fast instead of letting release-image rebuild stale guests for hours and then stop on
+      # the dirty tree. release-image re-checks provenance itself before building.
+      - name: Verify guest ELF provenance
+        if: inputs.backend != 'host'
+        run: cargo run -p xtask-build-guest --bin xtask-build-guest -- "$INPUT_BACKEND" --check
+
+      - id: auth
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.GCP_IMAGE_PUBLISHER_SA }}
+
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker "$IMAGE_REGISTRY" --quiet
+
+      - name: Refuse to overwrite an existing tag
+        env:
+          REPOSITORY: ${{ steps.inputs.outputs.repository }}
+        run: |
+          set -euo pipefail
+          if docker buildx imagetools inspect "$REPOSITORY:$INPUT_TAG" >/dev/null 2>&1; then
+            echo "::error::$REPOSITORY:$INPUT_TAG already exists; pick a new tag"
+            exit 1
+          fi
+
+      - name: Build and push image
+        id: release
+        env:
+          REPOSITORY: ${{ steps.inputs.outputs.repository }}
+        run: |
+          set -euo pipefail
+          args=(release-image "$INPUT_BACKEND" --tag "$INPUT_TAG" --repository "$REPOSITORY")
+          if [ "$INPUT_FLAVOR" = "cuda" ]; then
+            args+=(--cuda)
+          fi
+          if [ "$INPUT_BACKEND" = "host" ]; then
+            features=(--no-default-features --features image-release)
+          else
+            features=()
+          fi
+
+          log="$RUNNER_TEMP/release-image.log"
+          cargo run -r -p xtask "${features[@]}" -- "${args[@]}" 2>&1 | tee "$log"
+
+          digest_ref="$(sed -n 's/^\[INFO\] Image pushed: //p' "$log" | tail -n 1)"
+          if [[ ! "$digest_ref" =~ ^"$REPOSITORY"@sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::release-image did not report a pushed digest for $REPOSITORY"
+            exit 1
+          fi
+          echo "digest_ref=$digest_ref" >> "$GITHUB_OUTPUT"
+
+      - name: Job summary
+        env:
+          REPOSITORY: ${{ steps.inputs.outputs.repository }}
+          DIGEST_REF: ${{ steps.release.outputs.digest_ref }}
+        run: |
+          {
+            echo "## Published $REPOSITORY:$INPUT_TAG"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Digest | \`$DIGEST_REF\` |"
+            echo "| Flavor | $INPUT_FLAVOR |"
+            echo "| Backend | $INPUT_BACKEND |"
+            echo "| Source | \`$GITHUB_SHA\` |"
+            echo
+            echo "Pin deployments to the digest, not the tag."
+          } >> "$GITHUB_STEP_SUMMARY"

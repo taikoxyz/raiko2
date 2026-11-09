@@ -2,7 +2,8 @@ name: cuda-image
 
 # Builds the NVIDIA GPU runtime image (Dockerfile.cuda) without pushing, so the `cuda` feature
 # (RISC0 CUDA kernels via nvcc, SP1 sp1-gpu-server wiring) keeps compiling on GPU-less runners.
-# Publishing stays on the canonical path: `just release-image-cuda <backend> <tag>`.
+# Publishing goes through the same xtask entrypoint: the `release-image.yml` workflow
+# (flavor=cuda) or `just release-image-cuda <backend> <tag>`.
 
 on:
   pull_request:

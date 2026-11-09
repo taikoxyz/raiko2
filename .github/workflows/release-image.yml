@@ -39,9 +39,12 @@ on:
 permissions:
   contents: read
 
+# One publish per repository at a time. queue: max keeps every dispatch waiting instead of letting a
+# newer dispatch cancel the pending one.
 concurrency:
-  group: release-image
+  group: release-image-${{ inputs.flavor }}
   cancel-in-progress: false
+  queue: max
 
 env:
   GCP_WORKLOAD_IDENTITY_PROVIDER: projects/790288402401/locations/global/workloadIdentityPools/github-raiko2-images/providers/github
@@ -123,7 +126,7 @@ jobs:
       # the dirty tree. release-image re-checks provenance itself before building.
       - name: Verify guest ELF provenance
         if: inputs.backend != 'host'
-        run: cargo run -p xtask-build-guest --bin xtask-build-guest -- "$INPUT_BACKEND" --check
+        run: cargo run --locked -p xtask-build-guest --bin xtask-build-guest -- "$INPUT_BACKEND" --check
 
       - id: auth
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
@@ -140,7 +143,9 @@ jobs:
       # (MANIFEST_UNKNOWN / NAME_UNKNOWN, also returned before the first push of a package) means
       # the tag is absent. 200 means it exists. Anything else (401/403, 429, 5xx, curl or network
       # errors) is retried and then fails the job, so a lookup error can never lead to a push.
-      # release-image repeats a docker-based absence check right before `docker push`.
+      # release-image repeats the check (docker buildx imagetools inspect, which also only accepts an
+      # all-hosts 404) before the build and right before `docker push`, then verifies the pushed tag
+      # resolves to the pushed digest.
       - name: Refuse to overwrite an existing tag
         env:
           REPOSITORY: ${{ steps.inputs.outputs.repository }}
@@ -194,7 +199,7 @@ jobs:
           fi
 
           log="$RUNNER_TEMP/release-image.log"
-          cargo run -r -p xtask "${features[@]}" -- "${args[@]}" 2>&1 | tee "$log"
+          cargo run --locked -r -p xtask "${features[@]}" -- "${args[@]}" 2>&1 | tee "$log"
 
           digest_ref="$(sed -n 's/^\[INFO\] Image pushed: //p' "$log" | tail -n 1)"
           if [[ ! "$digest_ref" =~ ^"$REPOSITORY"@sha256:[0-9a-f]{64}$ ]]; then

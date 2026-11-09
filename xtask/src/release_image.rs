@@ -4,7 +4,7 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Instant;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 use clap::{Args, ValueEnum};
 
 use crate::util;
@@ -80,7 +80,7 @@ pub(crate) fn run(root: &std::path::Path, args: ReleaseImageArgs) -> Result<()> 
     ensure_clean_source_tree(root, "before release-image starts")?;
 
     let image_ref = format!("{repository}:{}", args.tag);
-    ensure_remote_tag_absent(&image_ref)?;
+    util::ensure_remote_tag_absent(&image_ref)?;
     let buildx_cache_root = util::target_root(root)
         .join("buildx-cache")
         .join(if args.cuda { "raiko2-cuda" } else { "raiko2" });
@@ -156,13 +156,14 @@ pub(crate) fn run(root: &std::path::Path, args: ReleaseImageArgs) -> Result<()> 
     promote_local_cache(&buildx_cache_current, &buildx_cache_next)?;
 
     // Re-check after the (long) build so a tag published meanwhile is never overwritten.
-    ensure_remote_tag_absent(&image_ref)?;
+    util::ensure_remote_tag_absent(&image_ref)?;
     println!("[INFO] Pushing runtime image `{image_ref}`...");
     let mut push_cmd = Command::new("docker");
     push_cmd.arg("push").arg(&image_ref);
     util::run(push_cmd)?;
 
-    let digest_ref = resolve_repo_digest(&image_ref, &repository)?;
+    let digest_ref = util::resolve_repo_digest(&image_ref, &repository)?;
+    util::ensure_remote_tag_digest_matches_expected(&image_ref, &digest_ref)?;
     write_release_summary(io::stdout(), &digest_ref)?;
 
     Ok(())
@@ -361,118 +362,6 @@ fn ensure_clean_source_tree(root: &Path, requirement: &str) -> Result<()> {
     Ok(())
 }
 
-fn resolve_repo_digest(image_ref: &str, repository: &str) -> Result<String> {
-    let output = Command::new("docker")
-        .arg("image")
-        .arg("inspect")
-        .arg("--format")
-        .arg("{{json .RepoDigests}}")
-        .arg(image_ref)
-        .output()
-        .with_context(|| format!("failed to inspect pushed image {image_ref}"))?;
-    if !output.status.success() {
-        bail!("docker image inspect failed for {image_ref}");
-    }
-
-    let repo_digests: Vec<String> = serde_json::from_slice(&output.stdout)
-        .with_context(|| format!("failed to parse RepoDigests for {image_ref}"))?;
-    repo_digests
-        .into_iter()
-        .find(|value| value.starts_with(&format!("{repository}@sha256:")))
-        .ok_or_else(|| anyhow!("missing pushed digest for repository {repository}"))
-}
-
-/// Registry output that conclusively means the tag (or the whole package) does not exist.
-const TAG_ABSENT_MARKERS: &[&str] = &[
-    "no such manifest",
-    "manifest unknown",
-    "name unknown",
-    "requested entity was not found",
-];
-
-/// Output that means the lookup itself failed, so absence is not proven. Checked before the
-/// absent markers: a lookup that mentions both is treated as a failure.
-const TAG_LOOKUP_FAILURE_MARKERS: &[&str] = &[
-    "authenticat",
-    "authoriz",
-    "credential",
-    "denied",
-    "forbidden",
-    "permission",
-    "login",
-    "unauthorized",
-    "service unavailable",
-    "too many requests",
-    "timeout",
-    "timed out",
-    "deadline",
-    "request canceled",
-    "connection",
-    "temporary failure",
-    "network is unreachable",
-    "no route to host",
-    "dial tcp",
-    "tls handshake",
-    "certificate",
-    "unexpected eof",
-    "internal server error",
-    "bad gateway",
-    "gateway timeout",
-];
-
-#[derive(Debug, PartialEq, Eq)]
-enum TagLookup {
-    Absent,
-    Exists,
-    Inconclusive,
-}
-
-fn classify_tag_lookup(lookup_succeeded: bool, output: &str) -> TagLookup {
-    if lookup_succeeded {
-        return TagLookup::Exists;
-    }
-    let output = output.to_ascii_lowercase();
-    if TAG_LOOKUP_FAILURE_MARKERS
-        .iter()
-        .any(|marker| output.contains(marker))
-    {
-        return TagLookup::Inconclusive;
-    }
-    if TAG_ABSENT_MARKERS
-        .iter()
-        .any(|marker| output.contains(marker))
-    {
-        return TagLookup::Absent;
-    }
-    TagLookup::Inconclusive
-}
-
-/// Fail closed unless the registry clearly reports that `image_ref` does not exist yet.
-/// Releases never overwrite a published tag.
-fn ensure_remote_tag_absent(image_ref: &str) -> Result<()> {
-    let output = Command::new("docker")
-        .arg("manifest")
-        .arg("inspect")
-        .arg(image_ref)
-        .output()
-        .with_context(|| format!("failed to look up image tag {image_ref}"))?;
-    let combined = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    match classify_tag_lookup(output.status.success(), &combined) {
-        TagLookup::Absent => Ok(()),
-        TagLookup::Exists => bail!(
-            "image tag {image_ref} already exists; releases never overwrite a published tag, use a new tag"
-        ),
-        TagLookup::Inconclusive => bail!(
-            "could not confirm that image tag {image_ref} is absent; refusing to publish:\n{}",
-            combined.trim_end()
-        ),
-    }
-}
-
 fn reset_dir(path: &Path) -> Result<()> {
     if path.exists() {
         fs::remove_dir_all(path).with_context(|| format!("failed to remove {path:?}"))?;
@@ -509,57 +398,9 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        GuestBackend, ImageBackend, TagLookup, build_image_flags, build_metadata_flags,
-        classify_tag_lookup, release_summary_lines, resolve_guest_refresh_backend,
-        resolve_repository, write_release_summary,
+        GuestBackend, ImageBackend, build_image_flags, build_metadata_flags, release_summary_lines,
+        resolve_guest_refresh_backend, resolve_repository, write_release_summary,
     };
-
-    #[test]
-    fn tag_lookup_success_means_tag_exists() {
-        assert_eq!(
-            classify_tag_lookup(true, "{\"schemaVersion\": 2}"),
-            TagLookup::Exists
-        );
-    }
-
-    #[test]
-    fn tag_lookup_accepts_only_conclusive_not_found() {
-        for output in [
-            "no such manifest: us-docker.pkg.dev/evmchain/images/raiko2-cuda:release-1",
-            "manifest unknown: Failed to fetch \"release-1\"",
-            "name unknown: Repository \"raiko2-cuda\" not found",
-            "Requested entity was not found.",
-        ] {
-            assert_eq!(
-                classify_tag_lookup(false, output),
-                TagLookup::Absent,
-                "{output}"
-            );
-        }
-    }
-
-    #[test]
-    fn tag_lookup_fails_closed_on_lookup_errors() {
-        for output in [
-            "unauthorized: authentication failed",
-            "denied: Permission \"artifactregistry.repositories.downloadArtifacts\" denied",
-            "Get \"https://us-docker.pkg.dev/v2/\": dial tcp: lookup us-docker.pkg.dev: no such host",
-            "net/http: TLS handshake timeout",
-            "received unexpected HTTP status: 503 Service Unavailable",
-            "toomanyrequests: too many requests",
-            "error getting credentials - err: exit status 1",
-            "",
-            "something nobody anticipated",
-            // Error text that mentions both must not be read as "absent".
-            "no such manifest: unauthorized: authentication required",
-        ] {
-            assert_eq!(
-                classify_tag_lookup(false, output),
-                TagLookup::Inconclusive,
-                "{output}"
-            );
-        }
-    }
 
     #[test]
     fn release_summary_lines_do_not_reference_rollout() {

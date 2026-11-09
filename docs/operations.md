@@ -798,10 +798,17 @@ variables.
 The root runtime `Dockerfile` uses BuildKit cache mounts, `sccache`, and `mold` by default, and
 `release-image` prints the Docker build elapsed time before pushing so release logs can compare
 cold and warm cache runs.
-`release-image` never overwrites a published tag. It runs `docker manifest inspect <image>:<tag>`
-before the build and again right before `docker push`, and continues only when the registry
-conclusively reports the tag as absent (`no such manifest`, `manifest unknown`, `name unknown`).
-An existing tag, or any authentication, network, rate-limit or server error, stops the release.
+`release-image` never overwrites a published tag. It runs
+`docker buildx imagetools inspect <image>:<tag>` before the build and again right before
+`docker push`, and continues only on the resolver's `<image>:<tag>: not found`, which imagetools
+prints only when every registry host answered HTTP 404 (also the answer for a package that was
+never pushed). An existing tag, an authentication or authorization failure, a 403, 429 or 5xx,
+a network error, or any output it does not recognise stops the release. The image reference is
+removed from the output before the error markers are matched, so a tag such as
+`release-login-fix` is not misread as a login failure. After the push it checks that the remote
+tag resolves to the pushed digest. `release-tee-providers` uses the same check.
+`docker manifest inspect` is not used for this: it reports a manifest-endpoint 401 or an
+unparseable 4xx as a plain `no such manifest`, which cannot be told apart from a missing tag.
 
 ### Publish From CI
 
@@ -824,6 +831,7 @@ The job:
 
 1. Refuses any ref other than `refs/heads/main`.
 2. Runs `xtask-build-guest <backend> --check` and fails if the checked-in guest ELFs are stale.
+   This step is skipped for `backend=host`, which packages no guest ELFs.
    CI never rebuilds or commits guest ELFs: refresh them with `just build-guest <backend>`,
    merge, then dispatch again. `release-image` keeps its own check and
    still stops if a refresh would dirty the tree.
@@ -837,7 +845,8 @@ The job:
    only on HTTP 404 (also what Artifact Registry returns before a package's first push). HTTP 200
    fails the job because the tag exists. Any other result (401/403, 429, 5xx, network errors) is
    retried up to five times and then fails the job; it never falls through to a push.
-   `release-image` repeats its own check before the build and before `docker push`.
+   `release-image` repeats its own check before the build and before `docker push`, and verifies
+   the pushed tag resolves to the pushed digest.
 5. Publishes and writes the pushed `<repository>@sha256:…` reference, flavor, backend and source
    commit to the job summary. Deploy by that digest, not by the tag.
 

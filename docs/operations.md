@@ -798,6 +798,10 @@ variables.
 The root runtime `Dockerfile` uses BuildKit cache mounts, `sccache`, and `mold` by default, and
 `release-image` prints the Docker build elapsed time before pushing so release logs can compare
 cold and warm cache runs.
+`release-image` never overwrites a published tag. It runs `docker manifest inspect <image>:<tag>`
+before the build and again right before `docker push`, and continues only when the registry
+conclusively reports the tag as absent (`no such manifest`, `manifest unknown`, `name unknown`).
+An existing tag, or any authentication, network, rate-limit or server error, stops the release.
 
 ### Publish From CI
 
@@ -829,7 +833,12 @@ The job:
    tokens from this workflow file on `refs/heads/main`, so a fork, branch or PR cannot publish.
    The GCP side lives in `taiko-infra-mono` under `terraform/evmchain/iam` and
    `terraform/evmchain/data`.
-4. Publishes and writes the pushed `<repository>@sha256:…` reference, flavor, backend and source
+4. Fails closed on the tag check. It asks the registry's v2 API for the manifest and continues
+   only on HTTP 404 (also what Artifact Registry returns before a package's first push). HTTP 200
+   fails the job because the tag exists. Any other result (401/403, 429, 5xx, network errors) is
+   retried up to five times and then fails the job; it never falls through to a push.
+   `release-image` repeats its own check before the build and before `docker push`.
+5. Publishes and writes the pushed `<repository>@sha256:…` reference, flavor, backend and source
    commit to the job summary. Deploy by that digest, not by the tag.
 
 Avoid ad-hoc `docker build` for releases. The runtime image packages the existing

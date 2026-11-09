@@ -136,15 +136,46 @@ jobs:
       - name: Configure Docker for Artifact Registry
         run: gcloud auth configure-docker "$IMAGE_REGISTRY" --quiet
 
+      # Fail closed: ask the registry's v2 API for the tag and act on the HTTP status. Only 404
+      # (MANIFEST_UNKNOWN / NAME_UNKNOWN, also returned before the first push of a package) means
+      # the tag is absent. 200 means it exists. Anything else (401/403, 429, 5xx, curl or network
+      # errors) is retried and then fails the job, so a lookup error can never lead to a push.
+      # release-image repeats a docker-based absence check right before `docker push`.
       - name: Refuse to overwrite an existing tag
         env:
           REPOSITORY: ${{ steps.inputs.outputs.repository }}
         run: |
           set -euo pipefail
-          if docker buildx imagetools inspect "$REPOSITORY:$INPUT_TAG" >/dev/null 2>&1; then
-            echo "::error::$REPOSITORY:$INPUT_TAG already exists; pick a new tag"
-            exit 1
-          fi
+          registry="${REPOSITORY%%/*}"
+          path="${REPOSITORY#*/}"
+          url="https://$registry/v2/$path/manifests/$INPUT_TAG"
+          accept="application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json"
+
+          for attempt in 1 2 3 4 5; do
+            token="$(gcloud auth print-access-token)"
+            echo "::add-mask::$token"
+            status="$(curl --silent --show-error --head --output /dev/null \
+              --write-out '%{http_code}' --max-time 30 \
+              --header "Accept: $accept" \
+              --header "Authorization: Bearer $token" \
+              "$url")" || status="curl-error"
+            case "$status" in
+              404)
+                echo "$REPOSITORY:$INPUT_TAG does not exist yet (HTTP 404)"
+                exit 0
+                ;;
+              200)
+                echo "::error::$REPOSITORY:$INPUT_TAG already exists; pick a new tag"
+                exit 1
+                ;;
+            esac
+            echo "::warning::Tag lookup attempt $attempt/5 for $REPOSITORY:$INPUT_TAG returned $status"
+            if [ "$attempt" -lt 5 ]; then
+              sleep $((attempt * 10))
+            fi
+          done
+          echo "::error::Could not confirm that $REPOSITORY:$INPUT_TAG is absent (last result: $status); refusing to publish"
+          exit 1
 
       - name: Build and push image
         id: release

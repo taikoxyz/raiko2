@@ -1084,35 +1084,13 @@ git fetch --no-tags origin main
 test "$(git rev-parse 'origin/main^{commit}')" = "${HOST_SHA}"
 
 mkdir -p target/release-image-logs
-export IMAGE_REF RELEASE_LOG TAG_INSPECT_LOG
+export IMAGE_REF RELEASE_LOG
 IMAGE_REF="${IMAGE_REPOSITORY}:${IMAGE_TAG}"
 RELEASE_LOG="target/release-image-logs/${IMAGE_TAG}.log"
-TAG_INSPECT_LOG=$(mktemp \
-  "target/release-image-logs/tag-inspect.${IMAGE_TAG}.XXXXXXXX")
 
-# The absence preflight is fail-closed against operator mistakes. The pushed digest, not the
-# mutable tag, is the release handoff. The post-push digest check below verifies the registry tag
-# resolves to the recorded digest at publication time.
-if docker manifest inspect "${IMAGE_REF}" >"${TAG_INSPECT_LOG}" 2>&1; then
-  echo "image tag already exists: ${IMAGE_REF}" >&2
-  exit 1
-fi
-
-# Accept only a registry response that conclusively means the tag is absent. Authentication,
-# authorization, connectivity, rate-limit, and server failures must stop the release.
-BLOCKING_TAG_ERROR_PATTERN='authenticat|authoriz|credential|denied|forbidden|permission|reauthentication|login|service unavailable|too many requests|timeout|timed out|deadline|request canceled|connection|temporary failure|network is unreachable|no route to host|dial tcp|i/o timeout|tls handshake|certificate|unexpected eof|500 internal server error|502 bad gateway|504 gateway timeout|(^|[[:space:]:])(429|503)([[:space:]:]|$)'
-if grep -Eqi "${BLOCKING_TAG_ERROR_PATTERN}" "${TAG_INSPECT_LOG}"; then
-  cat "${TAG_INSPECT_LOG}" >&2
-  exit 1
-fi
-
-if ! grep -Eqi \
-  'manifest unknown|no such manifest|name unknown|requested entity was not found|manifest .* not found' \
-  "${TAG_INSPECT_LOG}"; then
-  cat "${TAG_INSPECT_LOG}" >&2
-  exit 1
-fi
-
+# release-image refuses to publish unless the registry reports the tag absent (before the build and
+# again before the push), and after the push verifies that the tag resolves to the pushed digest.
+# The pushed digest, not the mutable tag, is the release handoff.
 just release-image host "${IMAGE_TAG}" "${IMAGE_REPOSITORY}" \
   --skip-guest-refresh 2>&1 | tee "${RELEASE_LOG}"
 
@@ -1120,19 +1098,14 @@ export DIGEST_REF
 DIGEST_REF=$(sed -n 's/^\[INFO\] Image pushed: //p' "${RELEASE_LOG}")
 test -n "${DIGEST_REF}"
 
-# Resolve the mutable tag's manifest directly from the registry and compare exactly.
-export TAG_MANIFEST_DIGEST
-TAG_MANIFEST_DIGEST=$(docker buildx imagetools inspect "${IMAGE_REF}" \
-  --format '{{json .Manifest}}' | jq -er '.digest')
-test "${IMAGE_REPOSITORY}@${TAG_MANIFEST_DIGEST}" = "${DIGEST_REF}"
-
 docker buildx imagetools inspect "${DIGEST_REF}"
 ```
 
 `host` already skips guest refresh by default; the explicit flag documents the composition
-decision. This SOP supports the default Google Artifact Registry repository shown above. A different
-registry requires an equivalent fail-closed absence preflight and post-push tag digest
-reconciliation. Do not use `--refresh-guest-elves` or an ad-hoc `docker build`.
+decision. The absence check and the post-push digest check are the ones described under
+[Release Images](#release-images); they rely on `docker buildx imagetools inspect` reporting
+`<image>:<tag>: not found` for a missing tag, which Google Artifact Registry does. Do not use
+`--refresh-guest-elves` or an ad-hoc `docker build`.
 
 #### 7. Verify The Published Image
 

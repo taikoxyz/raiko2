@@ -1,6 +1,8 @@
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::thread;
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 
@@ -219,6 +221,11 @@ pub(crate) fn resolve_repo_digest(image_ref: &str, repository: &str) -> Result<S
         .ok_or_else(|| anyhow!("missing pushed digest for repository {repository}"))
 }
 
+/// Lookups of a freshly pushed tag before giving up. Only lookup errors are retried; a digest
+/// mismatch fails at once.
+const REMOTE_DIGEST_VERIFY_ATTEMPTS: u32 = 5;
+const REMOTE_DIGEST_VERIFY_BACKOFF: Duration = Duration::from_secs(5);
+
 /// Verify after a push that the remote tag resolves to the digest that was just pushed.
 pub(crate) fn ensure_remote_tag_digest_matches_expected(
     image_ref: &str,
@@ -228,13 +235,49 @@ pub(crate) fn ensure_remote_tag_digest_matches_expected(
         .split_once("@sha256:")
         .map(|(repository, _)| repository)
         .ok_or_else(|| anyhow!("expected pushed digest is not a sha256 repository digest"))?;
-    let actual_digest = resolve_remote_tag_digest(image_ref, repository)?;
-    if actual_digest != expected_digest {
-        bail!(
-            "remote image tag digest mismatch for {image_ref}: expected {expected_digest}, got {actual_digest}",
-        );
+    verify_remote_tag_digest(
+        image_ref,
+        expected_digest,
+        REMOTE_DIGEST_VERIFY_ATTEMPTS,
+        || resolve_remote_tag_digest(image_ref, repository),
+        |attempt| thread::sleep(REMOTE_DIGEST_VERIFY_BACKOFF * attempt),
+    )
+}
+
+fn verify_remote_tag_digest(
+    image_ref: &str,
+    expected_digest: &str,
+    attempts: u32,
+    mut lookup: impl FnMut() -> Result<String>,
+    mut backoff: impl FnMut(u32),
+) -> Result<()> {
+    let mut last_error = None;
+    for attempt in 1..=attempts {
+        match lookup() {
+            Ok(actual_digest) if actual_digest == expected_digest => return Ok(()),
+            Ok(actual_digest) => bail!(
+                "remote image tag digest mismatch for {image_ref}: expected {expected_digest}, got {actual_digest}",
+            ),
+            Err(err) => {
+                eprintln!(
+                    "[WARN] remote digest lookup {attempt}/{attempts} for {image_ref} failed: {err:#}"
+                );
+                last_error = Some(err);
+                if attempt < attempts {
+                    backoff(attempt);
+                }
+            }
+        }
     }
-    Ok(())
+    let last_error = last_error.map_or_else(
+        || "no lookup attempted".to_string(),
+        |err| format!("{err:#}"),
+    );
+    bail!(
+        "image tag {image_ref} WAS pushed (local digest {expected_digest}), but its remote digest \
+         could not be verified after {attempts} attempts: {last_error}\n\
+         Do not reuse this tag. Verify it with `docker buildx imagetools inspect {image_ref}`."
+    )
 }
 
 fn resolve_remote_tag_digest(image_ref: &str, repository: &str) -> Result<String> {
@@ -278,9 +321,13 @@ fn parse_remote_tag_manifest_digest(output: &str) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
+    use anyhow::anyhow;
+
     use super::{
         RemoteTagLookup, classify_remote_tag_lookup, parse_remote_tag_manifest_digest,
-        remote_tag_inspect_command,
+        remote_tag_inspect_command, verify_remote_tag_digest,
     };
 
     const IMAGE_REF: &str = "us-docker.pkg.dev/evmchain/images/raiko2-cuda:release-1";
@@ -409,5 +456,76 @@ mod tests {
                 "{output}"
             );
         }
+    }
+
+    const PUSHED_DIGEST: &str = "us-docker.pkg.dev/evmchain/images/raiko2-cuda@sha256:aaaa";
+
+    #[test]
+    fn remote_digest_verification_retries_lookup_errors() {
+        let calls = Cell::new(0);
+        let backoffs = Cell::new(0);
+        let result = verify_remote_tag_digest(
+            IMAGE_REF,
+            PUSHED_DIGEST,
+            5,
+            || {
+                calls.set(calls.get() + 1);
+                if calls.get() < 3 {
+                    Err(anyhow!("503 Service Unavailable"))
+                } else {
+                    Ok(PUSHED_DIGEST.to_string())
+                }
+            },
+            |_| backoffs.set(backoffs.get() + 1),
+        );
+
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(calls.get(), 3);
+        assert_eq!(backoffs.get(), 2);
+    }
+
+    #[test]
+    fn remote_digest_verification_never_retries_a_mismatch() {
+        let calls = Cell::new(0);
+        let err = verify_remote_tag_digest(
+            IMAGE_REF,
+            PUSHED_DIGEST,
+            5,
+            || {
+                calls.set(calls.get() + 1);
+                Ok("us-docker.pkg.dev/evmchain/images/raiko2-cuda@sha256:bbbb".to_string())
+            },
+            |_| panic!("a digest mismatch must not be retried"),
+        )
+        .expect_err("a digest mismatch must fail");
+
+        assert_eq!(calls.get(), 1);
+        assert!(err.to_string().contains("digest mismatch"), "{err}");
+    }
+
+    #[test]
+    fn remote_digest_verification_reports_the_pushed_tag_when_lookups_keep_failing() {
+        let calls = Cell::new(0);
+        let err = verify_remote_tag_digest(
+            IMAGE_REF,
+            PUSHED_DIGEST,
+            3,
+            || {
+                calls.set(calls.get() + 1);
+                Err(anyhow!("dial tcp: i/o timeout"))
+            },
+            |_| {},
+        )
+        .expect_err("persistent lookup errors must fail");
+        let message = err.to_string();
+
+        assert_eq!(calls.get(), 3);
+        assert!(
+            message.contains(&format!("{IMAGE_REF} WAS pushed")),
+            "{message}"
+        );
+        assert!(message.contains(PUSHED_DIGEST), "{message}");
+        assert!(message.contains("Do not reuse this tag"), "{message}");
+        assert!(message.contains("dial tcp: i/o timeout"), "{message}");
     }
 }

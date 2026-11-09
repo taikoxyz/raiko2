@@ -396,6 +396,23 @@ jobs:
       - name: test xtask TEE provider release
         run: cargo test -p xtask --no-default-features --features tee-provider-release release_tee
 
+      # Shared registry helpers (fail-closed tag absence check, post-push digest verification) used
+      # by both release paths. A test filter that matches nothing still exits 0, so require at least
+      # the known number of passing tests; raise the floor when adding util tests.
+      - name: test xtask shared release helpers
+        env:
+          MIN_UTIL_TESTS: "11"
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/xtask-util-tests.log"
+          cargo test -p xtask --no-default-features util:: 2>&1 | tee "$log"
+          passed="$(sed -n 's/^test result: ok\. \([0-9][0-9]*\) passed.*/\1/p' "$log" | awk '{ sum += $1 } END { print sum + 0 }')"
+          if [ "$passed" -lt "$MIN_UTIL_TESTS" ]; then
+            echo "::error::xtask util:: ran $passed passing tests, expected at least $MIN_UTIL_TESTS"
+            exit 1
+          fi
+          echo "xtask util:: passed $passed tests"
+
       - name: test fixture server feature
         run: cargo test -p raiko2 --bin raiko2 --features fixture-server
 

@@ -3455,6 +3455,7 @@ mod tests {
         views: Vec<(EngineTaskId, EngineQueueTaskState)>,
         active_owners: HashSet<raiko2_queue::RootOwner>,
         list_calls: AtomicUsize,
+        detach_calls: Mutex<Vec<(RootOwner, raiko2_queue::DetachMode)>>,
     }
 
     impl ListingEngine {
@@ -3463,6 +3464,7 @@ mod tests {
                 views,
                 active_owners: HashSet::new(),
                 list_calls: AtomicUsize::new(0),
+                detach_calls: Mutex::new(Vec::new()),
             }
         }
 
@@ -3474,6 +3476,7 @@ mod tests {
                 views,
                 active_owners,
                 list_calls: AtomicUsize::new(0),
+                detach_calls: Mutex::new(Vec::new()),
             }
         }
     }
@@ -3517,11 +3520,17 @@ mod tests {
 
         fn detach_execution(
             &self,
-            _owner: raiko2_queue::RootOwner,
+            owner: raiko2_queue::RootOwner,
             mode: raiko2_queue::DetachMode,
         ) -> BoxFuture<'_, Result<raiko2_queue::DetachOutcome<EngineTaskKey>, TaskStoreError>>
         {
-            Box::pin(async move { Ok(raiko2_queue::DetachOutcome::not_attached(mode)) })
+            Box::pin(async move {
+                self.detach_calls
+                    .lock()
+                    .expect("detach calls")
+                    .push((owner, mode));
+                Ok(raiko2_queue::DetachOutcome::not_attached(mode))
+            })
         }
     }
 
@@ -7129,6 +7138,485 @@ mod tests {
         };
         assert_eq!(err.status, StatusCode::NOT_FOUND);
         assert_eq!(err.code, "task_not_found");
+        Ok(())
+    }
+
+    // Wire shape emitted by taiko-client's restored RISC0 composer at PR #22346.
+    // Keep this as JSON: serializing Rust wire types would add hash prefixes and
+    // could hide a mismatch with Go's numeric IDs and unprefixed checkpoint hashes.
+    fn risc0_client_v4_payload(aggregate: bool, checkpoint: bool) -> serde_json::Value {
+        let proposals = (0..=u64::from(aggregate))
+            .map(|offset| {
+                let mut proposal = serde_json::json!({
+                    "proposal_id": 42 + offset,
+                    "l1_inclusion_block_number": 1000 + offset,
+                    "l2_block_number_start": if offset == 0 { 2000 } else { 2011 },
+                    "l2_block_number_end": 2010 + offset * 10,
+                    "last_anchor_block_number": if offset == 0 { 1999 } else { 2010 }
+                });
+                if checkpoint {
+                    proposal["checkpoint"] = serde_json::json!({
+                        "block_number": 2010 + offset * 10,
+                        "block_hash": if offset == 0 { "11" } else { "44" }.repeat(32),
+                        "state_root": if offset == 0 { "22" } else { "55" }.repeat(32)
+                    });
+                }
+                proposal
+            })
+            .collect::<Vec<_>>();
+        serde_json::json!({
+            "proof_type": "risc0",
+            "aggregate": aggregate,
+            "proposals": proposals,
+            "prover": "0x3333333333333333333333333333333333333333"
+        })
+    }
+
+    async fn client_v4_http(
+        app: &axum::Router,
+        method: &str,
+        uri: &str,
+        payload: Option<serde_json::Value>,
+        api_key: Option<&str>,
+    ) -> Result<(StatusCode, serde_json::Value)> {
+        use tower::ServiceExt;
+
+        let mut request = Request::builder().method(method).uri(uri);
+        if let Some(api_key) = api_key {
+            request = request.header("x-api-key", api_key);
+        }
+        let body = if let Some(payload) = payload {
+            request = request.header("content-type", "application/json");
+            Body::from(serde_json::to_vec(&payload)?)
+        } else {
+            Body::empty()
+        };
+        let response = app.clone().oneshot(request.body(body)?).await?;
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024).await?;
+        Ok((status, serde_json::from_slice(&bytes)?))
+    }
+
+    fn client_v4_app(
+        runtime: Arc<RuntimeManager>,
+        engine: Arc<RecordingEngine>,
+        enabled: bool,
+    ) -> axum::Router {
+        let mut config = Config::default();
+        config.prover.risc0.enabled = enabled;
+        let mut factory = StaticPipelineFactory::default();
+        let pair = config
+            .rpc
+            .resolved_pairs()
+            .expect("configured network pair")[0]
+            .key
+            .clone();
+        factory.insert(pair, PipelineKey::ShastaRisc0, engine);
+        crate::server::app::build_router(AppState::from_parts(
+            Arc::new(config),
+            Arc::new(factory),
+            runtime,
+        ))
+    }
+
+    fn assert_client_v4_proof_response(
+        status: StatusCode,
+        response: &serde_json::Value,
+        aggregate: bool,
+        expected_status: &str,
+    ) -> String {
+        assert_eq!(status, StatusCode::OK, "{response}");
+        assert_eq!(response["proof_type"], "risc0", "{response}");
+        assert_eq!(response["proposal_id_start"], 42);
+        assert_eq!(response["proposal_id_end"], if aggregate { 43 } else { 42 });
+        assert_eq!(response["data"]["status"], expected_status, "{response}");
+        assert!(response.get("error").is_none(), "{response}");
+        assert!(response.get("message").is_none(), "{response}");
+        response["data"]["task_id"]
+            .as_str()
+            .expect("client task id")
+            .to_string()
+    }
+
+    async fn post_risc0_client_v4(
+        app: &axum::Router,
+        payload: &serde_json::Value,
+        aggregate: bool,
+        expected_status: &str,
+    ) -> Result<serde_json::Value> {
+        let (status, response) = client_v4_http(
+            app,
+            "POST",
+            "/v4/proof/proposal",
+            Some(payload.clone()),
+            None,
+        )
+        .await?;
+        assert_client_v4_proof_response(status, &response, aggregate, expected_status);
+        Ok(response)
+    }
+
+    async fn client_v4_backlog_status(
+        app: &axum::Router,
+        proof_type: &str,
+    ) -> Result<serde_json::Value> {
+        let (status, response) = client_v4_http(
+            app,
+            "GET",
+            &format!("/v4/prover/status?proof_type={proof_type}"),
+            None,
+            None,
+        )
+        .await?;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        assert_eq!(response["proof_type"], proof_type, "{response}");
+        Ok(response["data"].clone())
+    }
+
+    fn assert_client_v4_admitted_inputs(
+        engine: &RecordingEngine,
+        metadata: &TaskMetadata,
+        aggregate: bool,
+        checkpoint: bool,
+    ) {
+        let proposals = engine.proposals.lock().expect("recorded proposals");
+        assert_eq!(proposals.len(), if aggregate { 2 } else { 1 });
+        assert_eq!(metadata.requested_proof_type.as_deref(), Some("risc0"));
+        assert_eq!(metadata.aggregate_requested, aggregate);
+        for (offset, (request, _)) in proposals.iter().enumerate() {
+            let offset = u64::try_from(offset).expect("small proposal offset");
+            assert_eq!(request.proposal_id, 42 + offset);
+            assert_eq!(request.l1_inclusion_block_number, 1000 + offset);
+            assert_eq!(
+                request.last_anchor_block_number,
+                if offset == 0 { 1999 } else { 2010 }
+            );
+            assert_eq!(
+                request.l2_block_range,
+                Some(L2BlockRange {
+                    start: if offset == 0 { 2000 } else { 2011 },
+                    end: 2010 + offset * 10,
+                })
+            );
+            assert_eq!(
+                request.prover.as_deref(),
+                Some("0x3333333333333333333333333333333333333333")
+            );
+            assert_eq!(
+                request.checkpoint,
+                checkpoint.then_some(raiko2_primitives::ShastaCheckpoint {
+                    block_number: 2010 + offset * 10,
+                    block_hash: alloy_primitives::B256::repeat_byte(if offset == 0 {
+                        0x11
+                    } else {
+                        0x44
+                    }),
+                    state_root: alloy_primitives::B256::repeat_byte(if offset == 0 {
+                        0x22
+                    } else {
+                        0x55
+                    }),
+                })
+            );
+        }
+        let inputs = engine.aggregate_inputs.lock().expect("aggregate inputs");
+        assert_eq!(inputs.len(), if aggregate { 2 } else { 0 });
+        if aggregate {
+            assert_eq!(
+                metadata
+                    .aggregate_request
+                    .as_ref()
+                    .expect("aggregate request")
+                    .proposal_ids,
+                vec![42, 43]
+            );
+            for (input, (request, _)) in inputs.iter().zip(proposals.iter()) {
+                let AggregateProofInput::PendingProofArtifact {
+                    artifact,
+                    dependency,
+                } = input
+                else {
+                    panic!("client supplies proposal metadata, not ready-made proofs");
+                };
+                assert_eq!(artifact.pipeline_key, PipelineKey::ShastaRisc0);
+                assert_eq!(artifact.route, PipelineKey::ShastaRisc0.route());
+                assert_eq!(
+                    artifact.proof_ref,
+                    proposal_task_ref(PipelineKey::ShastaRisc0, request)
+                );
+                assert_eq!(
+                    dependency.as_ref(),
+                    &proposal_task_id(PipelineKey::ShastaRisc0, request.clone())
+                );
+            }
+        } else {
+            assert!(metadata.aggregate_request.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn risc0_client_v4_disabled_rejects_before_admission_and_status_is_backlog_only()
+    -> Result<()> {
+        assert!(!Config::default().prover.risc0.enabled);
+        let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
+            "client-v4-disabled",
+        ))?);
+        let engine = Arc::new(RecordingEngine::new());
+        let app = client_v4_app(Arc::clone(&runtime), Arc::clone(&engine), false);
+        for (aggregate, checkpoint) in [(false, true), (false, false), (true, true)] {
+            let (status, response) = client_v4_http(
+                &app,
+                "POST",
+                "/v4/proof/proposal",
+                Some(risc0_client_v4_payload(aggregate, checkpoint)),
+                None,
+            )
+            .await?;
+            assert_eq!(status, StatusCode::OK, "{response}");
+            assert_eq!(response["error"], "unsupported_proof_type", "{response}");
+        }
+        assert!(runtime.list_tasks().await?.is_empty());
+        assert!(engine.attached.lock().expect("attached roots").is_empty());
+        assert!(
+            engine
+                .proposals
+                .lock()
+                .expect("recorded proposals")
+                .is_empty()
+        );
+        let (status, response) = client_v4_http(
+            &app,
+            "GET",
+            "/v4/prover/status?proof_type=risc0",
+            None,
+            None,
+        )
+        .await?;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        assert_eq!(response["data"]["clean"], true);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn risc0_client_v4_proposal_and_aggregation_poll_to_root_proof() -> Result<()> {
+        for (aggregate, checkpoint) in [(false, true), (false, false), (true, true)] {
+            let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
+                "client-v4-poll",
+            ))?);
+            let engine = Arc::new(RecordingEngine::new());
+            let app = client_v4_app(Arc::clone(&runtime), Arc::clone(&engine), true);
+            let payload = risc0_client_v4_payload(aggregate, checkpoint);
+            let registered = post_risc0_client_v4(&app, &payload, aggregate, "registered").await?;
+            let task_id = registered["data"]["task_id"]
+                .as_str()
+                .expect("root task id")
+                .to_string();
+            assert!(registered["data"]["proof"].is_null());
+            let mut record = runtime.get_task(&task_id).await?.expect("admitted root");
+            assert_eq!(record.pipeline_key, PipelineKey::ShastaRisc0);
+            let mut metadata =
+                parse_task_metadata(&record).map_err(|error| anyhow!(error.message))?;
+            assert_client_v4_admitted_inputs(&engine, &metadata, aggregate, checkpoint);
+
+            let repeated = post_risc0_client_v4(&app, &payload, aggregate, "registered").await?;
+            assert_eq!(repeated["data"]["task_id"], task_id);
+            assert_eq!(runtime.list_tasks().await?.len(), 1);
+            assert_eq!(engine.attached.lock().expect("attached roots").len(), 1);
+
+            metadata.runtime.active_stage =
+                Some(if aggregate { "aggregate" } else { "prove" }.to_string());
+            metadata.runtime.last_event = Some("started:client-contract".to_string());
+            record.runner_status = RuntimeRunnerStatus::Running;
+            record.metadata = serde_json::to_value(&metadata)?;
+            runtime.upsert_task(&record).await?;
+            let running =
+                post_risc0_client_v4(&app, &payload, aggregate, "work_in_progress").await?;
+            assert_eq!(running["data"]["task_id"], task_id);
+            assert!(running["data"]["proof"].is_null());
+
+            // Synthetic stored payloads test HTTP projection, not proof validity or GPU execution.
+            for proposal in &metadata.proposals {
+                write_test_proof_artifact_for_route(
+                    &runtime,
+                    &record.network_pair,
+                    record.pipeline_key,
+                    record.route,
+                    &proposal.task_id,
+                    &Proof {
+                        proof: Some("0xaabb".to_string()),
+                        ..Proof::default()
+                    },
+                )
+                .await?;
+            }
+            if let Some(aggregate_ref) = metadata.aggregate_task_id.as_ref() {
+                let waiting =
+                    post_risc0_client_v4(&app, &payload, aggregate, "work_in_progress").await?;
+                assert_eq!(waiting["data"]["task_id"], task_id);
+                assert!(
+                    waiting["data"]["proof"].is_null(),
+                    "completed children cannot replace the aggregate proof"
+                );
+                write_test_proof_artifact_for_route(
+                    &runtime,
+                    &record.network_pair,
+                    record.pipeline_key,
+                    record.route,
+                    aggregate_ref,
+                    &Proof {
+                        proof: Some("0xccdd".to_string()),
+                        ..Proof::default()
+                    },
+                )
+                .await?;
+            }
+            for _ in 0..2 {
+                let completed =
+                    post_risc0_client_v4(&app, &payload, aggregate, "completed").await?;
+                assert_eq!(completed["data"]["task_id"], task_id);
+                let proof = completed["data"]["proof"]
+                    .as_str()
+                    .expect("RISC0 requires proof bytes");
+                assert_eq!(proof, if aggregate { "0xccdd" } else { "0xaabb" });
+                assert!(
+                    !hex::decode(proof.strip_prefix("0x").expect("client proof prefix"))?
+                        .is_empty()
+                );
+            }
+            assert_eq!(engine.attached.lock().expect("attached roots").len(), 1);
+        }
+        Ok(())
+    }
+
+    type ClientV4BacklogSpies = HashMap<PipelineKey, (Arc<ListingEngine>, RootOwner)>;
+
+    async fn client_v4_backlog_fixture(
+        runtime: Arc<RuntimeManager>,
+    ) -> Result<(axum::Router, ClientV4BacklogSpies)> {
+        let mut engines = Vec::new();
+        let mut spies = HashMap::new();
+        for (pipeline, proof_type, task_id) in [
+            (PipelineKey::ShastaRisc0, "risc0", "client-risc0-root"),
+            (PipelineKey::ShastaSp1, "sp1", "client-sp1-root"),
+        ] {
+            let mut metadata = task_metadata_with_stage(Some("prove"));
+            metadata.requested_proof_type = Some(proof_type.to_string());
+            upsert_test_record(
+                &runtime,
+                task_id,
+                RuntimeRunnerStatus::Running,
+                &metadata,
+                pipeline,
+            )
+            .await?;
+            let record = runtime.get_task(task_id).await?.expect("backlog root");
+            let metadata = parse_task_metadata(&record).map_err(|error| anyhow!(error.message))?;
+            let owner = RootOwner::new(task_id.to_string(), record.incarnation_id);
+            let engine = Arc::new(ListingEngine::with_active_owners(
+                vec![(
+                    metadata.proposals[0].engine_task_id(pipeline),
+                    EngineQueueTaskState::Running,
+                )],
+                HashSet::from([owner.clone()]),
+            ));
+            engines.push((pipeline, Arc::clone(&engine) as Arc<dyn EngineHandle>));
+            spies.insert(pipeline, (engine, owner));
+        }
+        let app = crate::server::app::build_router(test_state_with_acl(runtime, engines));
+        Ok((app, spies))
+    }
+
+    #[tokio::test]
+    async fn risc0_client_v4_backlog_clear_requires_acl_and_preserves_sp1() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
+            "client-v4-clear",
+        ))?);
+        let (app, spies) = client_v4_backlog_fixture(Arc::clone(&runtime)).await?;
+        let (risc0_engine, risc0_owner) = spies.get(&PipelineKey::ShastaRisc0).expect("RISC0 spy");
+        let (sp1_engine, _) = spies.get(&PipelineKey::ShastaSp1).expect("SP1 spy");
+        let backlog = client_v4_backlog_status(&app, "risc0").await?;
+        assert_eq!(backlog["clean"], false);
+        assert_eq!(backlog["tasks"]["running"], 1);
+
+        let clear = serde_json::json!({ "proof_type": "risc0" });
+        let (status, denied) =
+            client_v4_http(&app, "POST", "/v4/prover/clear", Some(clear.clone()), None).await?;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{denied}");
+        for task_id in ["client-risc0-root", "client-sp1-root"] {
+            assert_eq!(
+                runtime
+                    .get_task(task_id)
+                    .await?
+                    .expect("untouched root")
+                    .runner_status,
+                RuntimeRunnerStatus::Running
+            );
+        }
+        assert!(
+            risc0_engine
+                .detach_calls
+                .lock()
+                .expect("RISC0 detach calls")
+                .is_empty()
+        );
+        assert!(
+            sp1_engine
+                .detach_calls
+                .lock()
+                .expect("SP1 detach calls")
+                .is_empty()
+        );
+        for expected_cancelled in [1, 0] {
+            let (status, response) = client_v4_http(
+                &app,
+                "POST",
+                "/v4/prover/clear",
+                Some(clear.clone()),
+                Some("secret"),
+            )
+            .await?;
+            assert_eq!(status, StatusCode::OK, "{response}");
+            assert_eq!(response["status"], "ok");
+            assert_eq!(response["proof_type"], "risc0");
+            assert_eq!(response["data"]["cancelled"], expected_cancelled);
+            assert_eq!(response["data"]["failed"], 0);
+        }
+        assert_eq!(
+            runtime
+                .get_task("client-risc0-root")
+                .await?
+                .expect("cancelled RISC0 root")
+                .runner_status,
+            RuntimeRunnerStatus::Cancelled
+        );
+        assert_eq!(
+            runtime
+                .get_task("client-sp1-root")
+                .await?
+                .expect("live SP1 root")
+                .runner_status,
+            RuntimeRunnerStatus::Running
+        );
+        assert_eq!(
+            risc0_engine
+                .detach_calls
+                .lock()
+                .expect("RISC0 detach calls")
+                .as_slice(),
+            &[(risc0_owner.clone(), raiko2_queue::DetachMode::Cancel)]
+        );
+        assert!(
+            sp1_engine
+                .detach_calls
+                .lock()
+                .expect("SP1 detach calls")
+                .is_empty()
+        );
+        let backlog_after = client_v4_backlog_status(&app, "risc0").await?;
+        assert_eq!(backlog_after["clean"], true);
+        let sp1 = client_v4_backlog_status(&app, "sp1").await?;
+        assert_eq!(sp1["clean"], false);
+        assert_eq!(sp1["tasks"]["running"], 1);
         Ok(())
     }
 

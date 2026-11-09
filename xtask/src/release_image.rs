@@ -4,7 +4,7 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Instant;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 use clap::{Args, ValueEnum};
 
 use crate::util;
@@ -80,6 +80,7 @@ pub(crate) fn run(root: &std::path::Path, args: ReleaseImageArgs) -> Result<()> 
     ensure_clean_source_tree(root, "before release-image starts")?;
 
     let image_ref = format!("{repository}:{}", args.tag);
+    util::ensure_remote_tag_absent(&image_ref)?;
     let buildx_cache_root = util::target_root(root)
         .join("buildx-cache")
         .join(if args.cuda { "raiko2-cuda" } else { "raiko2" });
@@ -154,12 +155,15 @@ pub(crate) fn run(root: &std::path::Path, args: ReleaseImageArgs) -> Result<()> 
     );
     promote_local_cache(&buildx_cache_current, &buildx_cache_next)?;
 
+    // Re-check after the (long) build so a tag published meanwhile is never overwritten.
+    util::ensure_remote_tag_absent(&image_ref)?;
     println!("[INFO] Pushing runtime image `{image_ref}`...");
     let mut push_cmd = Command::new("docker");
     push_cmd.arg("push").arg(&image_ref);
     util::run(push_cmd)?;
 
-    let digest_ref = resolve_repo_digest(&image_ref, &repository)?;
+    let digest_ref = util::resolve_repo_digest(&image_ref, &repository)?;
+    util::ensure_remote_tag_digest_matches_expected(&image_ref, &digest_ref)?;
     write_release_summary(io::stdout(), &digest_ref)?;
 
     Ok(())
@@ -356,27 +360,6 @@ fn ensure_clean_source_tree(root: &Path, requirement: &str) -> Result<()> {
         );
     }
     Ok(())
-}
-
-fn resolve_repo_digest(image_ref: &str, repository: &str) -> Result<String> {
-    let output = Command::new("docker")
-        .arg("image")
-        .arg("inspect")
-        .arg("--format")
-        .arg("{{json .RepoDigests}}")
-        .arg(image_ref)
-        .output()
-        .with_context(|| format!("failed to inspect pushed image {image_ref}"))?;
-    if !output.status.success() {
-        bail!("docker image inspect failed for {image_ref}");
-    }
-
-    let repo_digests: Vec<String> = serde_json::from_slice(&output.stdout)
-        .with_context(|| format!("failed to parse RepoDigests for {image_ref}"))?;
-    repo_digests
-        .into_iter()
-        .find(|value| value.starts_with(&format!("{repository}@sha256:")))
-        .ok_or_else(|| anyhow!("missing pushed digest for repository {repository}"))
 }
 
 fn reset_dir(path: &Path) -> Result<()> {

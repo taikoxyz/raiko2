@@ -14,7 +14,7 @@ pub use crate::sp1_config::{
     Sp1RemoteVerifyConfig, Sp1RequestContext, Sp1SystemConfig,
 };
 #[cfg(feature = "cuda")]
-pub use cuda::{cuda_device_failures, shutdown_cuda_devices};
+pub use cuda::{cuda_device_failures, shutdown_cuda_devices, validate_cuda_server_binary};
 pub use types::{Sp1ExecutionMetadata, Sp1Response};
 
 use alloy::{providers::ProviderBuilder, sol};

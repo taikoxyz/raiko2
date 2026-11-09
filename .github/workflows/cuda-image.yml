@@ -16,6 +16,7 @@ on:
       - 'crates/**'
       - '!crates/guests/elf/**'
       - 'bin/**'
+      - 'tests/fixtures/cuda-sdk-smoke/**'
       - 'xtask/**'
       - 'config/**'
       - '.github/workflows/cuda-image.yml'
@@ -32,6 +33,7 @@ on:
       - 'crates/**'
       - '!crates/guests/elf/**'
       - 'bin/**'
+      - 'tests/fixtures/cuda-sdk-smoke/**'
       - 'xtask/**'
       - 'config/**'
       - '.github/workflows/cuda-image.yml'
@@ -81,10 +83,12 @@ jobs:
           # cannot start on this GPU-less runner. Fail on any other unresolved shared library.
           docker run --rm --entrypoint sh raiko2-cuda:ci -c '
             set -eu
-            ldd /usr/local/bin/raiko2
-            missing="$(ldd /usr/local/bin/raiko2 | grep "not found" | grep -v "libcuda.so.1" || true)"
-            if [ -n "$missing" ]; then
-              echo "raiko2 has unresolved shared libraries:" >&2
-              echo "$missing" >&2
-              exit 1
-            fi'
+            for binary in raiko2 guest-launcher; do
+              ldd "/usr/local/bin/$binary"
+              missing="$(ldd "/usr/local/bin/$binary" | grep "not found" | grep -v "libcuda.so.1" || true)"
+              if [ -n "$missing" ]; then
+                echo "$binary has unresolved shared libraries:" >&2
+                echo "$missing" >&2
+                exit 1
+              fi
+            done'

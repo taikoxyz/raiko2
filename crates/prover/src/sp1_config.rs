@@ -30,6 +30,10 @@ pub enum Sp1ConfigError {
     ExecuteModeDoesNotSupportNetworkProver,
     MainnetRequiresAuction(Sp1FulfillmentStrategy),
     ReservedRequiresReservedOrHosted(Sp1FulfillmentStrategy),
+    CudaDeviceRequiresCudaBuild,
+    CudaDeviceIdOutOfRange(u32),
+    CudaTimeoutRequiresCudaBuild,
+    CudaTimeoutSecsOutOfRange(u64),
 }
 
 impl std::fmt::Display for Sp1ConfigError {
@@ -91,6 +95,20 @@ impl std::fmt::Display for Sp1ConfigError {
                 f,
                 "sp1.network_mode=reserved requires sp1.fulfillment_strategy=reserved or hosted, got {strategy}"
             ),
+            Self::CudaDeviceRequiresCudaBuild => f.write_str(
+                "sp1.cuda_device_id requires a raiko2 binary built with the `cuda` feature",
+            ),
+            Self::CudaTimeoutRequiresCudaBuild => f.write_str(
+                "sp1.cuda_timeout_secs requires a raiko2 binary built with the `cuda` feature",
+            ),
+            Self::CudaTimeoutSecsOutOfRange(timeout_secs) => write!(
+                f,
+                "sp1.cuda_timeout_secs must be between 1 and {MAX_CUDA_TIMEOUT_SECS}, got {timeout_secs}"
+            ),
+            Self::CudaDeviceIdOutOfRange(device_id) => write!(
+                f,
+                "sp1.cuda_device_id must be at most {MAX_CUDA_DEVICE_ID}, got {device_id}"
+            ),
         }
     }
 }
@@ -149,7 +167,25 @@ pub struct Sp1Config {
     /// Optional remote verifier contract configuration for hosted SP1 verification.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_verify: Option<Sp1RemoteVerifyConfig>,
+    /// CUDA device index used by `prover = "local"` in `cuda` builds. Defaults to device 0.
+    /// Only valid when the binary is built with the `cuda` feature.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cuda_device_id: Option<u32>,
+    /// Deadline in seconds for one SP1 GPU setup or proof in `cuda` builds. A request that
+    /// exceeds it is treated as a hung `sp1-gpu-server`, which is killed and restarted.
+    /// Defaults to [`DEFAULT_CUDA_TIMEOUT_SECS`]. Only valid in `cuda` builds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cuda_timeout_secs: Option<u64>,
 }
+
+/// Highest accepted `sp1.cuda_device_id`; far above any real host's GPU count.
+pub const MAX_CUDA_DEVICE_ID: u32 = 255;
+
+/// Default `sp1.cuda_timeout_secs`: matches the network proof timeout.
+pub const DEFAULT_CUDA_TIMEOUT_SECS: u64 = 7_200;
+
+/// Highest accepted `sp1.cuda_timeout_secs` (seven days); keeps deadline arithmetic in range.
+pub const MAX_CUDA_TIMEOUT_SECS: u64 = 7 * 24 * 60 * 60;
 
 const fn default_true() -> bool {
     true
@@ -190,6 +226,8 @@ impl Default for Sp1Config {
             auction_timeout_secs: None,
             rpc_url: None,
             remote_verify: None,
+            cuda_device_id: None,
+            cuda_timeout_secs: None,
         }
     }
 }
@@ -264,6 +302,8 @@ impl Sp1Config {
             auction_timeout_secs: overrides.auction_timeout_secs.or(self.auction_timeout_secs),
             rpc_url: self.rpc_url.clone(),
             remote_verify: self.remote_verify.clone(),
+            cuda_device_id: self.cuda_device_id,
+            cuda_timeout_secs: self.cuda_timeout_secs,
         }
     }
 
@@ -364,6 +404,22 @@ impl Sp1Config {
         }
         if self.mode == ExecutionMode::Execute && self.prover == ProverMode::Network {
             return Err(Sp1ConfigError::ExecuteModeDoesNotSupportNetworkProver);
+        }
+        if let Some(device_id) = self.cuda_device_id {
+            if !cfg!(feature = "cuda") {
+                return Err(Sp1ConfigError::CudaDeviceRequiresCudaBuild);
+            }
+            if device_id > MAX_CUDA_DEVICE_ID {
+                return Err(Sp1ConfigError::CudaDeviceIdOutOfRange(device_id));
+            }
+        }
+        if let Some(timeout_secs) = self.cuda_timeout_secs {
+            if !cfg!(feature = "cuda") {
+                return Err(Sp1ConfigError::CudaTimeoutRequiresCudaBuild);
+            }
+            if !(1..=MAX_CUDA_TIMEOUT_SECS).contains(&timeout_secs) {
+                return Err(Sp1ConfigError::CudaTimeoutSecsOutOfRange(timeout_secs));
+            }
         }
         if self.prover == ProverMode::Network {
             match (self.network_mode, self.fulfillment_strategy) {
@@ -613,6 +669,86 @@ mod tests {
             err,
             Sp1ConfigError::MainnetRequiresAuction(Sp1FulfillmentStrategy::Reserved)
         );
+    }
+
+    #[test]
+    fn sp1_cuda_device_id_requires_cuda_build() {
+        let config = Sp1Config {
+            prover: ProverMode::Local,
+            cuda_device_id: Some(1),
+            ..Sp1Config::default()
+        };
+
+        let result = config.validate();
+        if cfg!(feature = "cuda") {
+            assert!(result.is_ok(), "cuda builds accept a device id: {result:?}");
+        } else {
+            assert_eq!(result, Err(Sp1ConfigError::CudaDeviceRequiresCudaBuild));
+        }
+    }
+
+    #[test]
+    fn sp1_cuda_device_id_is_bounded_in_cuda_builds() {
+        let config = Sp1Config {
+            prover: ProverMode::Local,
+            cuda_device_id: Some(u32::MAX),
+            ..Sp1Config::default()
+        };
+
+        let expected = if cfg!(feature = "cuda") {
+            Sp1ConfigError::CudaDeviceIdOutOfRange(u32::MAX)
+        } else {
+            Sp1ConfigError::CudaDeviceRequiresCudaBuild
+        };
+        assert_eq!(config.validate(), Err(expected));
+    }
+
+    #[test]
+    fn sp1_cuda_timeout_is_validated() {
+        let zero = Sp1Config {
+            cuda_timeout_secs: Some(0),
+            ..Sp1Config::default()
+        };
+        let set = Sp1Config {
+            cuda_timeout_secs: Some(600),
+            ..Sp1Config::default()
+        };
+
+        if cfg!(feature = "cuda") {
+            assert_eq!(
+                zero.validate(),
+                Err(Sp1ConfigError::CudaTimeoutSecsOutOfRange(0))
+            );
+            assert!(set.validate().is_ok());
+            let huge = Sp1Config {
+                cuda_timeout_secs: Some(u64::MAX),
+                ..Sp1Config::default()
+            };
+            assert_eq!(
+                huge.validate(),
+                Err(Sp1ConfigError::CudaTimeoutSecsOutOfRange(u64::MAX))
+            );
+        } else {
+            assert_eq!(
+                set.validate(),
+                Err(Sp1ConfigError::CudaTimeoutRequiresCudaBuild)
+            );
+        }
+    }
+
+    #[test]
+    fn sp1_cuda_device_id_survives_request_overrides() {
+        let config = Sp1Config {
+            cuda_device_id: Some(1),
+            ..Sp1Config::default()
+        };
+
+        let merged = config.merged_with(&Sp1ConfigOverrides {
+            prover: Some(ProverMode::Local),
+            ..Sp1ConfigOverrides::default()
+        });
+
+        assert_eq!(merged.cuda_device_id, Some(1));
     }
 
     #[test]

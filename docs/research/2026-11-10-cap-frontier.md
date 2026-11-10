@@ -130,6 +130,10 @@ visible alongside the five intended expensive exclusions.
 
 ## Reproduction and verification
 
+The [published Atlas fixture](https://github.com/taikoxyz/raiko2-atlas/tree/fixture-unzen-cap-frontier-v1/fixtures/benchmarks/unzen-cap-frontier-v1)
+retains original data and portable manifests; its [case CSV](https://github.com/taikoxyz/raiko2-atlas/blob/fixture-unzen-cap-frontier-v1/fixtures/benchmarks/unzen-cap-frontier-v1/cases.csv)
+contains all89 rows and both offline cap classifications.
+
 The reusable [cap-frontier CLI](../../bin/zkgas/bench/cap_frontier_report.py) accepts explicit
 hash-bound input/native/quote/actual manifests. Its [usage](../../bin/zkgas/bench/README.md#offline-cap-frontier-reports)
 retains original inputs and reports, validates program/model/public joins and per-block

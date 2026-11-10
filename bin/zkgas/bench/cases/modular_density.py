@@ -110,10 +110,16 @@ def full_repetitions(operation, modulus_class):
     return low
 
 
-def make_case(operation='mulmod', modulus_class='limb3', level='full'):
+def make_case(operation='mulmod', modulus_class='limb3', level='full', *, repetitions=None):
     _validate(operation, modulus_class)
     if type(level) is not str or level not in LEVELS: raise ValueError('level must be zero or full')
-    maximum = full_repetitions(operation, modulus_class); repetitions = 0 if level == 'zero' else maximum
+    maximum = full_repetitions(operation, modulus_class)
+    if repetitions is None:
+        repetitions = 0 if level == 'zero' else maximum
+    else:
+        if level != 'full': raise ValueError('explicit repetitions require level=full')
+        original.integer(repetitions, 0, maximum, 'repetitions')
+        level = 'explicit'
     gas = gas_accounting(operation, modulus_class, repetitions); envelope = gas_accounting(operation, modulus_class, maximum)['gross_gas'] + 1000
     runtimes = [_runtime(operation, modulus_class, repetitions, tag) for tag in range(USERS)]
     codes = [code for code, _ in runtimes]; counts = runtimes[0][1]; assert runtimes[1][1] == counts

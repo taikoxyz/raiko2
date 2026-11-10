@@ -134,10 +134,16 @@ def full_repetitions(pattern, length):
     return low
 
 
-def make_case(pattern='a5', length=64, level='full'):
+def make_case(pattern='a5', length=64, level='full', *, repetitions=None):
     _validate(pattern, length)
     if type(level) is not str or level not in LEVELS: raise ValueError('level must be zero, single or full')
-    maximum = full_repetitions(pattern, length); repetitions = {'zero': 0, 'single': 1, 'full': maximum}[level]
+    maximum = full_repetitions(pattern, length)
+    if repetitions is None:
+        repetitions = {'zero': 0, 'single': 1, 'full': maximum}[level]
+    else:
+        if level != 'full': raise ValueError('explicit repetitions require level=full')
+        original.integer(repetitions, 0, maximum, 'repetitions')
+        level = 'explicit'
     gas = gas_accounting(pattern, length, repetitions); full_gas = gas_accounting(pattern, length, maximum); envelope = _envelope(full_gas)
     runtimes = [_runtime(pattern, length, repetitions, tag) for tag in range(USERS)]
     codes = [code for code, _ in runtimes]; counts = runtimes[0][1]

@@ -65,6 +65,42 @@ def qualify(test, row):
 
 
 class DivisionDensityTests(unittest.TestCase):
+    def test_explicit_repetitions_drive_bytes_counts_guards_and_gas(self):
+        m = producer(); from division_density_vm import execute
+        for operation, limb in itertools.product(OPS, CLASSES):
+            maximum = m.full_repetitions(operation, limb)
+            full = m.make_case(operation, limb)
+            with self.assertRaises(ValueError): m.make_case(operation, limb, repetitions=maximum + 1)
+            for repetitions in (0, 3, maximum // 2, maximum):
+                with self.subTest(operation=operation, limb=limb, repetitions=repetitions):
+                    row = m.make_case(operation, limb, repetitions=repetitions)
+                    p = row['parameters']; results = qualify(self, row)
+                    self.assertEqual(p['workload_level'], 'explicit')
+                    self.assertEqual(p['repetitions'], repetitions)
+                    self.assertEqual(p['expected_counter'], repetitions)
+                    self.assertEqual(p['full_repetitions'], maximum)
+                    self.assertEqual(row['role'], 'control' if repetitions == 0 else 'candidate')
+                    self.assertEqual(p['transaction_gas_limit'], full['parameters']['transaction_gas_limit'])
+                    self.assertEqual(row['request']['program']['transactions']['gas_limit'], p['transaction_gas_limit'])
+                    if repetitions == 3:
+                        for tag, contract in enumerate(row['request']['program']['prestate_contracts']):
+                            code = bytes.fromhex(contract['code_hex'][2:])
+                            self.assertEqual(results[tag], execute(code, p['transaction_gas_limit'],
+                                operation=operation, divisor_class=limb, repetitions=3, tag=tag, cache=False))
+                    if repetitions in (0, maximum):
+                        expected = m.make_case(operation, limb, 'zero' if repetitions == 0 else 'full')
+                        expected['parameters']['workload_level'] = 'explicit'
+                        self.assertEqual(row, expected)
+        self.assertEqual(m.make_case(), m.make_case(repetitions=None))
+
+    def test_explicit_repetitions_reject_invalid_or_ambiguous_overrides(self):
+        m = producer(); maximum = m.full_repetitions('div', 'limb1')
+        for repetitions in (True, False, -1, 1.0, '1', [], maximum + 1):
+            with self.subTest(repetitions=repetitions), self.assertRaises(ValueError):
+                m.make_case(repetitions=repetitions)
+        with self.assertRaises(ValueError): m.make_case(level='zero', repetitions=0)
+        with self.assertRaises(TypeError): m.make_case('div', 'limb1', 'full', 3)
+
     def test_all_32_two_owner_programs(self):
         m = producer()
         for args in GRID:

@@ -4498,3 +4498,73 @@ gas and minimized witnesses. Native reports expose receipt gas/status rather tha
 raw log arrays, so successful native construction alone is not an independent
 payload/topic decoding check. Whole-proposal actual PGU, node block sums and full
 proposal quotes remain separate observations.
+
+### Explicit repetitions for retained density and SHA-256 producers
+
+The Python `make_case` helpers in `cases/modular_density.py`,
+`cases/division_density.py` and `cases/sha256_bulk.py` accept keyword-only
+`repetitions=R`. With the default `level='full'`, R must be an integer other
+than bool in `0..full_repetitions` for that operation and operand class or
+SHA-256 pattern and existing input length. For example,
+`modular_density.make_case('mulmod', 'limb3', repetitions=128)` or
+`sha256_bulk.make_case('a5', 4096, repetitions=16)` returns the usual row and
+ProgramRequest with `workload_level='explicit'`. Explicit R cannot be combined
+with `level='zero'` or SHA-256's `level='single'`.
+
+Omitting R or passing `None` preserves the existing levels, requests and row
+metadata. Explicit R changes the emitted loop and completion guards, route
+counts, SHA-256 XOR guards and actual gas metadata together. `near_full` uses
+the resulting charged block gas; it is not implied by explicit mode. The
+original maximal signed transaction envelope remains unchanged at every R.
+No execution, native acceptance, node quote or SP1 PGU measurement follows
+from constructing a request.
+
+### Offline cap-frontier reports
+
+`cap_frontier_report.py` reads a version1 evidence manifest and writes a fresh,
+exclusive JSON report without executing a backend or changing artifacts:
+
+```sh
+"$PYTHON_BIN" bin/zkgas/bench/cap_frontier_report.py \
+  --manifest /tmp/cap-evidence/manifest.json --output /tmp/cap-frontier.json
+```
+
+The manifest header `contract` supplies `execution_profile`, `model_id` and
+`identities.quote`, `.sp1`, `.elf`, `.program_manifest` SHA256 values. Each
+`samples` entry has a unique report `sample_id`, `role`, `status` and exact
+`quote_key` (`corpus_id`, original quote `sample_id`, `guest_input_sha256`).
+A `complete` entry additionally binds `input`, `native`, `quote` and `actual`
+files. The latter three use `{path, sha256}`; input uses
+`{path, sha256, byte_length, compression, file_sha256}`, where `compression` is
+`none` or `gzip` and `sha256`/`byte_length` describe decoded canonical bytes.
+Paths are relative to the evidence manifest. `failed`, `screened` and
+`not_attempted` entries retain their optional `failure` without numeric actuals.
+All source files and decoded inputs are bounded to64MiB and must be regular
+files. No artifact is restored or rewritten.
+
+The tool reuses workload and receipt validators, verifies raw
+`execution_report.gas` normalization to whole-proposal SP1 PGU, and preserves
+complete quote, actual and native reports with their source hashes. Raw Unzen
+is a separate unit. Single-block observations using at most30000000 receipt gas
+contribute to the raw Unzen cap frontier and an independent node PGU cap sweep;
+equality admits. Empty maxima are null. Multiblock actuals remain proposal
+measurements and are excluded from block maxima. These finite sampled maxima
+are neither upper bounds nor production-cap recommendations.
+
+`--unzen-limit` defaults to100000000. Repeated `--node-limit PGU` arguments
+replace the default grid of0,100M,250M,500M,1B,2B,3.6B,5B,10B,20B,30B.
+An optional `natural` object binds `input_manifest` and JSONL `quotes` files,
+each by `{path, sha256}`. The former is the existing StandardInputManifestV1;
+its canonical input paths resolve relative to its own parent. Natural input
+identities, unique exact quote keys, profile/model/tool identities, public-output
+agreement, block ceilings and raw Unzen totals are checked without consuming
+historical actuals. Sensitivity reports existing block/proposal counts and exact
+acceptance ratios. It adds the minimum node threshold covering the retained
+blocks admitted under the raw Unzen cap to the sweep. This describes the retained
+old-admitted block set and does not estimate rejection after transaction repacking.
+With no natural rows, sensitivity is null.
+
+```sh
+"$PYTHON_BIN" -m unittest discover -s bin/zkgas/bench/tests \
+  -p test_cap_frontier_report.py
+```

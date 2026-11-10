@@ -59,8 +59,13 @@ def producer():
 def qualify(test, row):
     from sha256_bulk_vm import run_users
     p = row['parameters']; program = row['request']['program']
-    test.assertIn((p['pattern'], p['input_bytes'], p['workload_level']), GRID + LINEAR_GRID)
-    test.assertEqual(p['repetitions'], {'zero': 0, 'single': 1, 'full': p['full_repetitions']}[p['workload_level']])
+    if p['workload_level'] == 'explicit':
+        test.assertIn((p['pattern'], p['input_bytes']), tuple(itertools.product(('zero', 'a5'), (64, 4096, 1048576) + LINEAR_LENGTHS)))
+        test.assertIs(type(p['repetitions']), int)
+        test.assertGreaterEqual(p['repetitions'], 0); test.assertLessEqual(p['repetitions'], p['full_repetitions'])
+    else:
+        test.assertIn((p['pattern'], p['input_bytes'], p['workload_level']), GRID + LINEAR_GRID)
+        test.assertEqual(p['repetitions'], {'zero': 0, 'single': 1, 'full': p['full_repetitions']}[p['workload_level']])
     contracts = program['prestate_contracts']; owners = [c['address'] for c in contracts]
     test.assertEqual(len(set(owners)), 2)
     test.assertEqual(program['transactions'], dict(kind='call', count_per_block=2,
@@ -104,6 +109,47 @@ def qualify(test, row):
 
 
 class Sha256BulkTests(unittest.TestCase):
+    def test_explicit_repetitions_drive_literal_calls_xor_guards_and_gas(self):
+        m = producer()
+        for pattern, length in itertools.product(('zero', 'a5'), (64, 4096, 1048576) + LINEAR_LENGTHS):
+            full = m.make_case(pattern, length); maximum = full['parameters']['full_repetitions']
+            with self.assertRaises(ValueError): m.make_case(pattern, length, repetitions=maximum + 1)
+            for repetitions in (0, 3, maximum):
+                with self.subTest(pattern=pattern, length=length, repetitions=repetitions):
+                    row = m.make_case(pattern, length, repetitions=repetitions); p = row['parameters']
+                    self.assertEqual(p['workload_level'], 'explicit')
+                    self.assertEqual(p['repetitions'], repetitions)
+                    self.assertEqual(p['expected_counter'], repetitions)
+                    self.assertEqual(p['full_repetitions'], maximum)
+                    self.assertEqual(row['role'], 'control' if repetitions == 0 else 'candidate')
+                    self.assertEqual(p['transaction_gas_limit'], full['parameters']['transaction_gas_limit'])
+                    self.assertEqual(p['transaction_envelope_reserve'], full['parameters']['transaction_envelope_reserve'])
+                    self.assertEqual(p['expected_precompile_calls_per_user'], repetitions)
+                    if repetitions in (0, 3):
+                        records = qualify(self, row)
+                        for tag, result in enumerate(records):
+                            expected_xor = 0
+                            for index in range(repetitions):
+                                data = ((tag << 128) | index).to_bytes(32, 'big') + bytes([0 if pattern == 'zero' else 0xa5]) * (length - 32)
+                                expected_xor ^= int.from_bytes(hashlib.sha256(data).digest(), 'big')
+                            self.assertEqual(p['expected_xor_hex'][tag], f'0x{expected_xor:064x}')
+                            self.assertEqual(result['accumulator'], expected_xor)
+                    if repetitions in (0, maximum):
+                        expected = m.make_case(pattern, length, 'zero' if repetitions == 0 else 'full')
+                        expected['parameters']['workload_level'] = 'explicit'
+                        self.assertEqual(row, expected)
+        self.assertEqual(m.make_case(), m.make_case(repetitions=None))
+
+    def test_explicit_repetitions_reject_invalid_or_ambiguous_overrides(self):
+        m = producer(); maximum = m.full_repetitions('a5', 64)
+        for repetitions in (True, False, -1, 1.0, '1', [], maximum + 1):
+            with self.subTest(repetitions=repetitions), self.assertRaises(ValueError):
+                m.make_case(repetitions=repetitions)
+        for level in ('zero', 'single'):
+            with self.subTest(level=level), self.assertRaises(ValueError):
+                m.make_case(level=level, repetitions=0)
+        with self.assertRaises(TypeError): m.make_case('a5', 64, 'full', 3)
+
     def test_all_eighteen_actual_byte_trajectories(self):
         m = producer()
         for args in GRID:

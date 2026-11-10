@@ -4568,3 +4568,18 @@ With no natural rows, sensitivity is null.
 "$PYTHON_BIN" -m unittest discover -s bin/zkgas/bench/tests \
   -p test_cap_frontier_report.py
 ```
+
+### SHA256 fixed-floor calibration fixture
+
+The [SHA256 calibration record](../../../docs/research/2026-11-10-sha256-floor.md)
+traces the earlier20M minimum, the81,024 PGU replacement and the retained42 PGU/native-gas
+slope. It reports literal node and full-proposal estimates separately, including small
+absolute gaps and the limitations of already-opened calibration data.
+
+The [Atlas SHA fixture](https://github.com/taikoxyz/raiko2-atlas/releases/tag/fixture-unzen-sha256-floor-v1)
+retains40 canonical inputs, original reports and explicit standard derived views. After
+checksum verification/extraction, use its `input-manifest.json` with `zkgas-quote`, then
+`derived/observations.json`, `derived/candidate-profiles.toml` and `derived/report-config.json`
+with the existing compare/report commands. The fixture README gives the exact commands.
+No new SP1 observations are required to reproduce the archived comparison; rerunning
+actuals additionally requires the original program and compatible observer artifacts.

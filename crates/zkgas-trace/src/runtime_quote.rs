@@ -2249,11 +2249,16 @@ mod tests {
         // The accepted c0877d65 ordinary tariffs reduce this fixture's operation
         // subtotal by this exact integer PGU golden; other components stay unchanged.
         let ordinary_tariff_reduction_pgu = 328_629_708_u128;
+        // The e8e574db PC02-only update reduces this fixture by ten fixed-floor
+        // deltas: 10 * (20,000,000 - 81,024) = 199,189,760 PGU. The unchanged
+        // 42 PGU/native-gas structural term does not increase that new quote.
+        let sha256_floor_reduction_pgu = 10 * (20_000_000_u128 - 81_024);
+        let tariff_reduction_pgu = ordinary_tariff_reduction_pgu + sha256_floor_reduction_pgu;
         let operation_uplift = (6_000 * FIXED_POINT_SCALE - 3_841_906_721_059_316_908_619)
             * i128::from(delegatecall)
             + (700 * FIXED_POINT_SCALE - 32_117_684_584_888_432_025) * i128::from(blockhash)
             + 64 * FIXED_POINT_SCALE * i128::from(normal)
-            - i128::try_from(ordinary_tariff_reduction_pgu).unwrap() * FIXED_POINT_SCALE;
+            - i128::try_from(tariff_reduction_pgu).unwrap() * FIXED_POINT_SCALE;
         let expected_operations = 3_187_806_573_010_541_525_400_160_675 + operation_uplift;
         let journal_scaled = quote
             .blocks
@@ -2510,7 +2515,7 @@ mod tests {
                         + transition_scaled
                 )
                 .unwrap(),
-                sum_of_block_known_pgu: 3_765_339_140 - ordinary_tariff_reduction_pgu
+                sum_of_block_known_pgu: 3_765_339_140 - tariff_reduction_pgu
                     + journal_pgu
                     + account_pgu
                     + cache_pgu
@@ -2519,17 +2524,11 @@ mod tests {
         );
         assert_eq!(
             quote.node.block_local_known_pgu,
-            3_769_697_881 - ordinary_tariff_reduction_pgu
-                + account_pgu
-                + cache_pgu
-                + transition_pgu
+            3_769_697_881 - tariff_reduction_pgu + account_pgu + cache_pgu + transition_pgu
         );
         assert_eq!(
             quote.node.sum_of_block_known_pgu,
-            3_769_697_924 - ordinary_tariff_reduction_pgu
-                + account_pgu
-                + cache_pgu
-                + transition_pgu
+            3_769_697_924 - tariff_reduction_pgu + account_pgu + cache_pgu + transition_pgu
         );
         assert_eq!(
             quote.prove.selectors,
@@ -2616,7 +2615,7 @@ mod tests {
         );
         assert_eq!(
             quote.prove.sum_of_block_local_pgu,
-            4_950_522_452 - ordinary_tariff_reduction_pgu
+            4_950_522_452 - tariff_reduction_pgu
                 + journal_pgu
                 + account_pgu
                 + cache_pgu

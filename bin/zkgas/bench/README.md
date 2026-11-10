@@ -4447,3 +4447,54 @@ The frozen generic PlainStorage observation may yield no transient-body members:
 generic process G and conditional source hash algebra do not establish transient
 ownership, H0 placement, Journal depth or whole-map pressure. Independent canonical,
 signature/world/witness, native gas and current quote gates still precede actuals.
+
+### Controlled ordinary-opcode recipes
+
+`cases/ordinary_tariffs.py` exposes
+`make_case(operation, *, repetitions, length=0, lane='target')` for explicit
+`codesize`, `codecopy`, `log3` and `staticcall` programs. The paired `scaffold`
+lane retains operand preparation, loop checks and completion guards, substituting
+POPs or a known result for the target operation. Exact opcode counts and gas
+accounting disclose those differences; paired deltas include the declared
+scaffolding and result checks. Each runtime is1024 bytes with fixed PUSH widths,
+empty calldata, one signed CALL and explicit prestate contracts. The standard
+constructor therefore minimizes actual-read witnesses and requires full/minimized
+native replay equality. CODESIZE checks1024, CODECOPY checks known nonzero embedded
+bytes and untouched memory, and STATICCALL checks success/empty return data against
+a nonempty STOP child after an identical successful cold warmup, including at N0.
+LOG3 topics are ordered `(iteration, 0x22, 0x33)` and its nonzero payload is fixed.
+
+From the repository root, generate the exclusive94-row catalog without execution:
+
+```sh
+"$PYTHON_BIN" bin/zkgas/bench/cases/ordinary_tariffs.py --output-dir /tmp/ordinary-tariffs
+```
+
+The API `prepare(output, *, model_id=MODEL)` records exact source/request hashes,
+paired/N0 references and frozen count roles. Its default is the EEA parent used
+for this calibration; pass `--model-id` to bind a new campaign to another model,
+using fresh output roots. Fit counts
+are0/4096/65536 for CODESIZE and CODECOPY,0/1/2048 for LOG3, and0/256/4096 for
+STATICCALL. Reserved counts are8192/32768,256/512 and1024/16384 respectively.
+COPY lengths0/32/64/96 cost3/6/9/12 raw gas with preallocated memory; length97
+(15 raw gas) has separate reserved N0/N1 pairs. LOG lengths are0/32/256.
+The fixed15M user envelope and30M block budget reject oversized recipes; neither
+cap is increased. `make_case` also supports engineering counts0..65536 within
+those gas limits. Reserved inputs must stay outside fitting, and failed native
+qualifications must be retained as rejected observations before selecting a
+bounded measurement subset. Generation assigns no PGU price and runs no SP1.
+
+Focused qualification, using an already built native executable:
+
+```sh
+NATIVE_FIXTURE_BIN="$NATIVE_FIXTURE_BIN" "$PYTHON_BIN" -m unittest discover \
+  -s bin/zkgas/bench/tests -p test_ordinary_tariffs.py
+```
+
+Without `NATIVE_FIXTURE_BIN`, only the real-native test is skipped. Literal test
+execution independently checks log ordering/payload and result failure mutations;
+native qualification checks successful receipts, exact attempted/completed routes,
+gas and minimized witnesses. Native reports expose receipt gas/status rather than
+raw log arrays, so successful native construction alone is not an independent
+payload/topic decoding check. Whole-proposal actual PGU, node block sums and full
+proposal quotes remain separate observations.

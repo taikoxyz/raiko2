@@ -2246,10 +2246,14 @@ mod tests {
         );
         // Independent inspector counts close the inherited F4/BLOCKHASH changes and reserve;
         // no historical fixture bytes or original public output are replaced.
+        // The accepted c0877d65 ordinary tariffs reduce this fixture's operation
+        // subtotal by this exact integer PGU golden; other components stay unchanged.
+        let ordinary_tariff_reduction_pgu = 328_629_708_u128;
         let operation_uplift = (6_000 * FIXED_POINT_SCALE - 3_841_906_721_059_316_908_619)
             * i128::from(delegatecall)
             + (700 * FIXED_POINT_SCALE - 32_117_684_584_888_432_025) * i128::from(blockhash)
-            + 64 * FIXED_POINT_SCALE * i128::from(normal);
+            + 64 * FIXED_POINT_SCALE * i128::from(normal)
+            - i128::try_from(ordinary_tariff_reduction_pgu).unwrap() * FIXED_POINT_SCALE;
         let expected_operations = 3_187_806_573_010_541_525_400_160_675 + operation_uplift;
         let journal_scaled = quote
             .blocks
@@ -2506,7 +2510,7 @@ mod tests {
                         + transition_scaled
                 )
                 .unwrap(),
-                sum_of_block_known_pgu: 3_765_339_140
+                sum_of_block_known_pgu: 3_765_339_140 - ordinary_tariff_reduction_pgu
                     + journal_pgu
                     + account_pgu
                     + cache_pgu
@@ -2515,11 +2519,17 @@ mod tests {
         );
         assert_eq!(
             quote.node.block_local_known_pgu,
-            3_769_697_881 + account_pgu + cache_pgu + transition_pgu
+            3_769_697_881 - ordinary_tariff_reduction_pgu
+                + account_pgu
+                + cache_pgu
+                + transition_pgu
         );
         assert_eq!(
             quote.node.sum_of_block_known_pgu,
-            3_769_697_924 + account_pgu + cache_pgu + transition_pgu
+            3_769_697_924 - ordinary_tariff_reduction_pgu
+                + account_pgu
+                + cache_pgu
+                + transition_pgu
         );
         assert_eq!(
             quote.prove.selectors,
@@ -2606,7 +2616,11 @@ mod tests {
         );
         assert_eq!(
             quote.prove.sum_of_block_local_pgu,
-            4_950_522_452 + journal_pgu + account_pgu + cache_pgu + transition_pgu
+            4_950_522_452 - ordinary_tariff_reduction_pgu
+                + journal_pgu
+                + account_pgu
+                + cache_pgu
+                + transition_pgu
         );
         assert_eq!(quote.prove.proposal_once_pgu, 160_621_711);
         assert_eq!(

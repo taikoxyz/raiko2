@@ -167,7 +167,16 @@ Host requirements: x86_64, an NVIDIA driver that supports CUDA 12.8 (R570 or new
 nvidia-container-toolkit. The image needs no GPU to build; the `cuda-image` workflow builds it
 on every relevant PR.
 
-Publish it next to the CPU image through the same release entrypoint:
+Publish it from CI with the `Release - runtime image` workflow (`release-image.yml`): dispatch it
+from `main` with `flavor=cuda`, `backend=all` and a new tag. It runs the same xtask entrypoint as
+below and writes the pushed `raiko2-cuda@sha256:…` reference to the job summary; see
+[Publish From CI](#publish-from-ci).
+
+```bash
+gh workflow run release-image.yml --ref main -f flavor=cuda -f backend=all -f tag=release-20260507-1013
+```
+
+To publish by hand, use the same release entrypoint as the CPU image:
 
 ```bash
 just release-image-cuda all release-20260507-1013
@@ -789,6 +798,57 @@ variables.
 The root runtime `Dockerfile` uses BuildKit cache mounts, `sccache`, and `mold` by default, and
 `release-image` prints the Docker build elapsed time before pushing so release logs can compare
 cold and warm cache runs.
+`release-image` never overwrites a published tag. It runs
+`docker buildx imagetools inspect <image>:<tag>` before the build and again right before
+`docker push`, and continues only on the resolver's `<image>:<tag>: not found`, which imagetools
+prints only when every registry host answered HTTP 404 (also the answer for a package that was
+never pushed). An existing tag, an authentication or authorization failure, a 403, 429 or 5xx,
+a network error, or any output it does not recognise stops the release. The image reference is
+removed from the output before the error markers are matched, so a tag such as
+`release-login-fix` is not misread as a login failure. After the push it checks that the remote
+tag resolves to the pushed digest. `release-tee-providers` uses the same check.
+`docker manifest inspect` is not used for this: it reports a manifest-endpoint 401 or an
+unparseable 4xx as a plain `no such manifest`, which cannot be told apart from a missing tag.
+
+### Publish From CI
+
+`.github/workflows/release-image.yml` (`Release - runtime image`) runs the same
+`cargo run -r -p xtask -- release-image <backend> [--cuda] --tag <tag>` entrypoint on a GitHub
+hosted runner, so no local registry credentials are needed. Dispatch it from `main`:
+
+```bash
+gh workflow run release-image.yml --ref main -f flavor=cuda -f backend=all -f tag=release-20260507-1013
+gh workflow run release-image.yml --ref main -f flavor=cpu -f backend=risc0 -f tag=release-20260507-1013
+```
+
+| Input | Values | Effect |
+|---|---|---|
+| `flavor` | `cuda` (default), `cpu` | `cuda` adds `--cuda` and pushes `raiko2-cuda`; `cpu` pushes `raiko2`. |
+| `backend` | `all` (default), `risc0`, `sp1`, `host` | Passed to `release-image`. `host` is CPU only. |
+| `tag` | new image tag | Rejected if it already exists in the repository, or if it is `latest`. |
+
+The job:
+
+1. Refuses any ref other than `refs/heads/main`.
+2. Runs `xtask-build-guest <backend> --check` and fails if the checked-in guest ELFs are stale.
+   This step is skipped for `backend=host`, which packages no guest ELFs.
+   CI never rebuilds or commits guest ELFs: refresh them with `just build-guest <backend>`,
+   merge, then dispatch again. `release-image` keeps its own check and
+   still stops if a refresh would dirty the tree.
+3. Authenticates keylessly through Workload Identity Federation (pool `github-raiko2-images` in
+   project `evmchain`) as `raiko2-image-publisher@evmchain.iam.gserviceaccount.com`, which can
+   only write to the `images` Artifact Registry repository. The pool's provider only accepts
+   tokens from this workflow file on `refs/heads/main`, so a fork, branch or PR cannot publish.
+   The GCP side lives in `taiko-infra-mono` under `terraform/evmchain/iam` and
+   `terraform/evmchain/data`.
+4. Fails closed on the tag check. It asks the registry's v2 API for the manifest and continues
+   only on HTTP 404 (also what Artifact Registry returns before a package's first push). HTTP 200
+   fails the job because the tag exists. Any other result (401/403, 429, 5xx, network errors) is
+   retried up to five times and then fails the job; it never falls through to a push.
+   `release-image` repeats its own check before the build and before `docker push`, and verifies
+   the pushed tag resolves to the pushed digest.
+5. Publishes and writes the pushed `<repository>@sha256:…` reference, flavor, backend and source
+   commit to the job summary. Deploy by that digest, not by the tag.
 
 Avoid ad-hoc `docker build` for releases. The runtime image packages the existing
 `crates/guests/elf` artifacts at `/app/crates/guests/elf`; `raiko2` loads those files when the
@@ -1024,35 +1084,13 @@ git fetch --no-tags origin main
 test "$(git rev-parse 'origin/main^{commit}')" = "${HOST_SHA}"
 
 mkdir -p target/release-image-logs
-export IMAGE_REF RELEASE_LOG TAG_INSPECT_LOG
+export IMAGE_REF RELEASE_LOG
 IMAGE_REF="${IMAGE_REPOSITORY}:${IMAGE_TAG}"
 RELEASE_LOG="target/release-image-logs/${IMAGE_TAG}.log"
-TAG_INSPECT_LOG=$(mktemp \
-  "target/release-image-logs/tag-inspect.${IMAGE_TAG}.XXXXXXXX")
 
-# The absence preflight is fail-closed against operator mistakes. The pushed digest, not the
-# mutable tag, is the release handoff. The post-push digest check below verifies the registry tag
-# resolves to the recorded digest at publication time.
-if docker manifest inspect "${IMAGE_REF}" >"${TAG_INSPECT_LOG}" 2>&1; then
-  echo "image tag already exists: ${IMAGE_REF}" >&2
-  exit 1
-fi
-
-# Accept only a registry response that conclusively means the tag is absent. Authentication,
-# authorization, connectivity, rate-limit, and server failures must stop the release.
-BLOCKING_TAG_ERROR_PATTERN='authenticat|authoriz|credential|denied|forbidden|permission|reauthentication|login|service unavailable|too many requests|timeout|timed out|deadline|request canceled|connection|temporary failure|network is unreachable|no route to host|dial tcp|i/o timeout|tls handshake|certificate|unexpected eof|500 internal server error|502 bad gateway|504 gateway timeout|(^|[[:space:]:])(429|503)([[:space:]:]|$)'
-if grep -Eqi "${BLOCKING_TAG_ERROR_PATTERN}" "${TAG_INSPECT_LOG}"; then
-  cat "${TAG_INSPECT_LOG}" >&2
-  exit 1
-fi
-
-if ! grep -Eqi \
-  'manifest unknown|no such manifest|name unknown|requested entity was not found|manifest .* not found' \
-  "${TAG_INSPECT_LOG}"; then
-  cat "${TAG_INSPECT_LOG}" >&2
-  exit 1
-fi
-
+# release-image refuses to publish unless the registry reports the tag absent (before the build and
+# again before the push), and after the push verifies that the tag resolves to the pushed digest.
+# The pushed digest, not the mutable tag, is the release handoff.
 just release-image host "${IMAGE_TAG}" "${IMAGE_REPOSITORY}" \
   --skip-guest-refresh 2>&1 | tee "${RELEASE_LOG}"
 
@@ -1060,19 +1098,14 @@ export DIGEST_REF
 DIGEST_REF=$(sed -n 's/^\[INFO\] Image pushed: //p' "${RELEASE_LOG}")
 test -n "${DIGEST_REF}"
 
-# Resolve the mutable tag's manifest directly from the registry and compare exactly.
-export TAG_MANIFEST_DIGEST
-TAG_MANIFEST_DIGEST=$(docker buildx imagetools inspect "${IMAGE_REF}" \
-  --format '{{json .Manifest}}' | jq -er '.digest')
-test "${IMAGE_REPOSITORY}@${TAG_MANIFEST_DIGEST}" = "${DIGEST_REF}"
-
 docker buildx imagetools inspect "${DIGEST_REF}"
 ```
 
 `host` already skips guest refresh by default; the explicit flag documents the composition
-decision. This SOP supports the default Google Artifact Registry repository shown above. A different
-registry requires an equivalent fail-closed absence preflight and post-push tag digest
-reconciliation. Do not use `--refresh-guest-elves` or an ad-hoc `docker build`.
+decision. The absence check and the post-push digest check are the ones described under
+[Release Images](#release-images); they rely on `docker buildx imagetools inspect` reporting
+`<image>:<tag>: not found` for a missing tag, which Google Artifact Registry does. Do not use
+`--refresh-guest-elves` or an ad-hoc `docker build`.
 
 #### 7. Verify The Published Image
 

@@ -1,6 +1,41 @@
 # zkGas workload coverage status
 
-The active finite worklist is the [block-aware stage closure plan](../superpowers/plans/2026-11-08-block-zkgas-stage-closure.md). The chronological evidence below is retained history, not an instruction to keep extending every experimental family. The plan freezes selection and measurement budgets before further sampling; low-priority TODOs do not automatically block this research stage.
+
+## Ordered coverage follow-up, 2026-11-11
+
+The approved bounded follow-up completed **87 new SP1 execute-only observations** on research
+b76/SDK 6.3: 36 inputs covering twelve additional precompile addresses, 14 isolated signed-payload
+inputs and 37 ECMUL success/intermediate/mixed/failure/reserved inputs. The first two panels
+required no repricing. The ECMUL refinement changes one existing coefficient; it introduces no
+new collector, selector, public version flag or admission policy.
+
+- [Precompile and payload report](2026-11-11-current-program-coverage.md): twelve valid nontrivial
+  vectors at 0/1/8 calls; payload lengths 0/32/4096/65536, zero/sequence bytes and one/eight users.
+  All full quotes cover these actuals; literal node startup/control gaps remain explicit.
+- [ECMUL report](2026-11-11-ecmul-incremental.md): 33 opened development observations support
+  candidate `80160649`; four previously reserved actuals validate the sealed policy without refit.
+  The full accepted constant/native slope and 572936-PGU scalar-work slope are retained while the
+  29901-PGU/native-gas incremental coefficient becomes zero. Full deficits are 0/37; literal node
+  deficits rise 17 to 27 with unchanged maximum 153407027 PGU. All 35 count contrasts cover.
+- All 18 numeric precompile addresses now have recent targeted or composition evidence in this
+  inventory. This is finite branch/value coverage, not an exhaustive operand, batch or gas-packing
+  guarantee. The twelve new vectors and pure payload refresh have explicit current-program data.
+- All 192 candidate quotes are fresh native replays: the fixed 155 pressure/ordinary/natural
+  regression inputs plus 37 ECMUL inputs. The pressure panel retains 9 node/3 full deficits,
+  maxima 1597968115/1261582685 PGU; no new pressure gap appears. The original 18/55/3 Hoodi
+  split is unchanged, with training-scaled WAPE 2.793784% node and 2.683576% full versus Unzen
+  6.283565%. Raw Unzen remains a separate score; normalized shape metrics never replace literal
+  node/full/actual residuals or establish admission protection.
+
+Pricing routes remain 150 ordinary opcodes, six wrapper routes and 18 precompile addresses.
+The new measurements do not increase the historical count of opcode keys with controlled or
+joint-equation evidence, or certify every branch. The draft evaluation standard and severity/complexity tradeoff remain
+unchanged. Research artifacts retain their model/program identities; no production ELF/SDK,
+GPU throughput or selected capacity limit is certified. Exact node-side MPT topology, accepted
+sub-2B residuals and conservative KZG/BLS synthetic quotes remain scoped follow-ups.
+
+
+The original finite worklist is the [block-aware stage closure plan](../superpowers/plans/2026-11-08-block-zkgas-stage-closure.md). The chronological evidence below is retained history, not an instruction to keep extending every experimental family. The plan freezes selection and measurement budgets before further sampling; low-priority TODOs do not automatically block this research stage.
 
 The research is converging on specific failure modes and bounded severity in measured families. Substantial interaction and production-validation work remains. A pricing route, a sampled input family and certification of an exact production program are three different statuses; none implies the next. This inventory is a research working list, not an estimated completion percentage or a mandatory production merge gate. The [evaluation standard](../zkgas-evaluation-standard.md) remains draft and nonbinding.
 

@@ -936,6 +936,7 @@ mod tests {
         OperationRoute, OperationRoutePricingInput, ZkGasBlockSnapshot, ZkGasShadowDiagnostic,
         ZkGasShadowReport,
     };
+    use alloy_primitives::U256;
     use raiko2_protocol_shasta::libhash::hash_shasta_subproof_input;
     use std::{
         collections::BTreeMap,
@@ -2224,7 +2225,105 @@ mod tests {
         let expected_output = hash_shasta_subproof_input(&input.proof_carry_data);
 
         crate::reconstruct::take_fixture_opcode_counts();
+        crate::reconstruct::take_fixture_ecmul_calls();
         let quote = quote_shasta_proposal(&input).expect("complete proposal workload quote");
+        let (ecmul_calls, call_hooks, call_ends) = crate::reconstruct::take_fixture_ecmul_calls();
+        assert_eq!(
+            call_hooks, call_ends,
+            "all PC07 and non-PC07 callbacks balance"
+        );
+        assert!(
+            call_hooks > ecmul_calls.len() as u64,
+            "non-PC07 calls are balanced too"
+        );
+        assert_eq!(ecmul_calls.len(), 10);
+        assert!(
+            ecmul_calls
+                .iter()
+                .all(|call| call.input.len() == 96 && call.succeeded && call.native_gas == 6_000)
+        );
+        assert_eq!(
+            ecmul_calls
+                .iter()
+                .map(|call| call.work_units)
+                .collect::<Vec<_>>(),
+            vec![191, 195, 191, 199, 373, 191, 195, 206, 191, 373]
+        );
+        let expected_scalars = [
+            "0000000000000000000000000000000041af18736dc9d7921c859fc95ac84da5",
+            "00000000000000000000000000000000561f8c992a424deb37ccdf4e19c0e7db",
+            "00000000000000000000000000000000553d9bd933a2145372a28c0d7e4ff708",
+            "000000000000000000000000000000007930efbbb44f9f5a08b791ac9e0b5dbb",
+            "04446e66d300eb7fb45c9726bb53c793dda407a62e9601618bb43c5c14657ac0",
+            "0000000000000000000000000000000041af18736dc9d7921c859fc95ac84da5",
+            "00000000000000000000000000000000561f8c992a424deb37ccdf4e19c0e7db",
+            "00000000000000000000000000000000d0fb7edc7b4e0159ff963e8ccefdd7e8",
+            "00000000000000000000000000000000ca022ca3a82b56eb5009755e04dfff59",
+            "04446e66d300eb7fb45c9726bb53c793dda407a62e9601618bb43c5c14657ac0",
+        ];
+        for (call, expected) in ecmul_calls.iter().zip(expected_scalars) {
+            assert_eq!(
+                call.reduced_scalar,
+                U256::from_str_radix(expected, 16).unwrap()
+            );
+        }
+        assert_eq!(
+            quote
+                .blocks
+                .iter()
+                .fold((0_u64, 0_u64, 0_u64), |totals, block| (
+                    totals.0 + block.prove.input_transaction_count,
+                    totals.1 + block.prove.consumed_candidate_count,
+                    totals.2 + block.prove.attempted_transaction_count,
+                )),
+            (199, 199, 199),
+            "fixture has no discarded candidate whose route work would need a separate scope"
+        );
+        let mut ecmul_by_block = BTreeMap::<u64, (u64, u64, u64, i128, i128, i128)>::new();
+        let mut eventwise_reduction = 0_i128;
+        for call in &ecmul_calls {
+            let accepted = (20_000_000 * FIXED_POINT_SCALE)
+                .max(i128::from(call.native_gas) * 131_390_224_983_920_708_487);
+            let incremental = i128::from(call.native_gas) * 29_901 * FIXED_POINT_SCALE;
+            let structural = i128::from(call.work_units) * 572_936 * FIXED_POINT_SCALE;
+            let block = ecmul_by_block.entry(call.block_number).or_default();
+            block.0 += 1;
+            block.1 += call.native_gas;
+            block.2 += call.work_units;
+            block.3 += accepted;
+            block.4 += incremental;
+            block.5 += structural;
+            eventwise_reduction +=
+                accepted.max(incremental).max(structural) - accepted.max(structural);
+        }
+        assert_eq!(
+            ecmul_by_block.keys().copied().collect::<Vec<_>>(),
+            vec![12_556_194]
+        );
+        let actual_ecmul = ecmul_by_block[&12_556_194];
+        assert_eq!(
+            (actual_ecmul.0, actual_ecmul.1, actual_ecmul.2),
+            (10, 60_000, 2_305)
+        );
+        assert_eq!(actual_ecmul.3, 200_000_000 * FIXED_POINT_SCALE);
+        assert_eq!(actual_ecmul.4, 1_794_060_000 * FIXED_POINT_SCALE);
+        assert_eq!(actual_ecmul.5, 1_320_617_480 * FIXED_POINT_SCALE);
+        // Historical e8 charges max(sum A, sum I, sum S) within each block's PC07 route.
+        // Candidate801 sets only I=0. These independent call facts, not the observed
+        // quote difference, derive the inherited fixture's exact successor reduction.
+        let ecmul_reduction_scaled = ecmul_by_block
+            .values()
+            .map(|block| block.3.max(block.4).max(block.5) - block.3.max(block.5))
+            .sum::<i128>();
+        assert_eq!(ecmul_reduction_scaled % FIXED_POINT_SCALE, 0);
+        let ecmul_incremental_reduction_pgu =
+            u128::try_from(ecmul_reduction_scaled / FIXED_POINT_SCALE).unwrap();
+        assert_eq!(ecmul_incremental_reduction_pgu, 473_442_520);
+        assert_eq!(eventwise_reduction, 542_040_776 * FIXED_POINT_SCALE);
+        assert_ne!(
+            eventwise_reduction, ecmul_reduction_scaled,
+            "max must follow route accumulation"
+        );
 
         let (normal, blockhash, delegatecall) = crate::reconstruct::take_fixture_opcode_counts();
         assert_eq!((normal, blockhash, delegatecall), (2_385_656, 49_344, 198));
@@ -2253,7 +2352,9 @@ mod tests {
         // deltas: 10 * (20,000,000 - 81,024) = 199,189,760 PGU. The unchanged
         // 42 PGU/native-gas structural term does not increase that new quote.
         let sha256_floor_reduction_pgu = 10 * (20_000_000_u128 - 81_024);
-        let tariff_reduction_pgu = ordinary_tariff_reduction_pgu + sha256_floor_reduction_pgu;
+        let tariff_reduction_pgu = ordinary_tariff_reduction_pgu
+            + sha256_floor_reduction_pgu
+            + ecmul_incremental_reduction_pgu;
         let operation_uplift = (6_000 * FIXED_POINT_SCALE - 3_841_906_721_059_316_908_619)
             * i128::from(delegatecall)
             + (700 * FIXED_POINT_SCALE - 32_117_684_584_888_432_025) * i128::from(blockhash)

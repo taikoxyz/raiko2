@@ -202,12 +202,29 @@ impl CandidateResourceLedger {
 
 #[cfg(test)]
 std::thread_local! {
+    static FIXTURE_ECMUL_OBSERVATIONS: std::cell::RefCell<(Vec<FixtureEcmulCall>, u64, u64)> = const { std::cell::RefCell::new((Vec::new(), 0, 0)) };
     static FIXTURE_OPCODE_COUNTS: std::cell::RefCell<(u64, u64, u64)> = const { std::cell::RefCell::new((0, 0, 0)) };
 }
 
 #[cfg(test)]
 pub(crate) fn take_fixture_opcode_counts() -> (u64, u64, u64) {
     FIXTURE_OPCODE_COUNTS.with(|counts| std::mem::take(&mut *counts.borrow_mut()))
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FixtureEcmulCall {
+    pub block_number: u64,
+    pub input: Vec<u8>,
+    pub reduced_scalar: U256,
+    pub work_units: u64,
+    pub native_gas: u64,
+    pub succeeded: bool,
+}
+
+#[cfg(test)]
+pub(crate) fn take_fixture_ecmul_calls() -> (Vec<FixtureEcmulCall>, u64, u64) {
+    FIXTURE_ECMUL_OBSERVATIONS.with(|calls| std::mem::take(&mut *calls.borrow_mut()))
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -238,6 +255,8 @@ fn record_pending_step(
 
 #[derive(Clone, Debug, Default)]
 struct ResourceInspector {
+    #[cfg(test)]
+    pending_fixture_calls: Vec<Option<FixtureEcmulCall>>,
     ledger: Arc<Mutex<CandidateResourceLedger>>,
     pending: BTreeMap<usize, PendingStep>,
 }
@@ -245,6 +264,8 @@ struct ResourceInspector {
 impl ResourceInspector {
     const fn with_ledger(ledger: Arc<Mutex<CandidateResourceLedger>>) -> Self {
         Self {
+            #[cfg(test)]
+            pending_fixture_calls: Vec::new(),
             ledger,
             pending: BTreeMap::new(),
         }
@@ -355,12 +376,80 @@ impl<DB: Database> Inspector<TaikoEvmContext<DB>, EthInterpreter> for ResourceIn
         _context: &mut TaikoEvmContext<DB>,
         inputs: &mut CallInputs,
     ) -> Option<CallOutcome> {
+        // Production ignores context; the test-only observer intentionally reads it.
+        #[cfg(test)]
+        #[allow(clippy::used_underscore_binding)]
+        {
+            let observed = self
+                .ledger
+                .lock()
+                .expect("resource ledger poisoned")
+                .active
+                .is_some();
+            let captured = (observed && inputs.bytecode_address == Address::with_last_byte(7))
+                .then(|| {
+                    let input = inputs.input.as_bytes(_context).to_vec();
+                    let mut scalar_bytes = [0_u8; 32];
+                    let suffix = input.get(64..).unwrap_or_default();
+                    let copied = suffix.len().min(32);
+                    scalar_bytes[..copied].copy_from_slice(&suffix[..copied]);
+                    // Independent remainder, rather than the pricing runtime's subtraction loop.
+                    let order = U256::from_be_bytes(alloy_primitives::hex!(
+                        "30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001"
+                    ));
+                    let reduced_scalar = U256::from_be_bytes(scalar_bytes) % order;
+                    let work_units = reduced_scalar.bit_len() as u64
+                        + reduced_scalar
+                            .to_be_bytes::<32>()
+                            .iter()
+                            .map(|byte| u64::from(byte.count_ones()))
+                            .sum::<u64>();
+                    FixtureEcmulCall {
+                        block_number: u64::try_from(_context.block().number)
+                            .expect("fixture block fits u64"),
+                        input,
+                        reduced_scalar,
+                        work_units,
+                        native_gas: 0,
+                        succeeded: false,
+                    }
+                });
+            self.pending_fixture_calls.push(captured);
+            FIXTURE_ECMUL_OBSERVATIONS.with(|calls| calls.borrow_mut().1 += 1);
+        }
         let mut resources = self.ledger.lock().expect("resource ledger poisoned");
         let ledger = resources.observed()?;
         ledger.account(inputs.caller);
         ledger.account(inputs.target_address);
         ledger.account(inputs.bytecode_address);
         None
+    }
+
+    #[cfg(test)]
+    fn call_end(
+        &mut self,
+        _context: &mut TaikoEvmContext<DB>,
+        inputs: &CallInputs,
+        outcome: &mut CallOutcome,
+    ) {
+        let captured = self
+            .pending_fixture_calls
+            .pop()
+            .expect("fixture call hooks balance");
+        FIXTURE_ECMUL_OBSERVATIONS.with(|calls| {
+            let mut calls = calls.borrow_mut();
+            calls.2 += 1;
+            if let Some(mut event) = captured
+                && outcome.was_precompile_called
+            {
+                event.native_gas = inputs
+                    .gas_limit
+                    .checked_sub(outcome.result.gas.remaining())
+                    .expect("precompile cannot return more gas than supplied");
+                event.succeeded = outcome.result.result.is_ok();
+                calls.0.push(event);
+            }
+        });
     }
 
     fn create(

@@ -1,5 +1,9 @@
 # Cap-constrained zkGas workload comparison
 
+This is the original `c0877d65…` checkpoint. The
+[frozen current-model validation](2026-11-11-frozen-model-capacity.md) retains its
+matched-input comparison and expands the eligible panel after the precision adjustments.
+
 The candidate has a measured capacity-control advantage on selected hidden-state/container
 workloads. It does not dominate every workload family: several ordinary dense-opcode cases
 already fit the old Unzen cap at modest actual cost, while small SHA256 repetition is

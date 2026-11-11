@@ -1,5 +1,27 @@
 # zkGas workload coverage status
 
+The [new natural validation](2026-11-11-natural-validation.md) fixes ten Mainnet and
+ten Hoodi proposals after candidate freezing, covering 5738 blocks with ten new and
+ten reused research-program actuals. Full deficits are 0/20; node has six Mainnet
+deficits (maximum 178245194 PGU) and no Hoodi deficit. Full/actual remains about
+2.19x/2.09x. The quiet cohort has only about 1–2% actual variation; Unzen remains
+competitive on several shape metrics, so these observations are not a universal
+new-model superiority claim. Selection, fixed historical scales and failures are
+reported separately from the single-block capacity result below.
+
+## Frozen-model capacity validation, 2026-11-11
+
+The [current capacity checkpoint](2026-11-11-frozen-model-capacity.md) reuses all
+172 distinct measured capacity/coverage inputs without new SP1 sampling. At an
+illustrative 3.6B node budget, 149/160 eligible single-block inputs pass and their
+maximum observed actual is 2.246391418B PGU. Unzen's separate raw 100M condition also
+admits 149, with different input identities and a maximum actual of 5.952586609B PGU.
+The latest ECMUL adjustment admits three additional inputs on the same 160-input
+denominator, none with actual above 3.6B. Historical 50-proposal/9600-block packing
+coverage remains complete at this reference. This is a finite offline comparison,
+not a configured limit, universal bound or transaction rejection test. The 12
+multi-block actuals and their three retained full deficits remain separate.
+
 
 ## Ordered coverage follow-up, 2026-11-11
 

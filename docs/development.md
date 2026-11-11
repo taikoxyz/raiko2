@@ -103,6 +103,64 @@ curl http://127.0.0.1:8087/v4/tasks/<task_id>
 The fixture engine returns deterministic task and proof data without live RPC or prover
 dependencies.
 
+## CUDA SDK Smoke
+
+Use this manual check after preparing a GPU machine or changing a zkVM SDK. The tiny fixtures
+exercise **SDK execution, local CUDA proof generation and strict local verification only**. They do
+not validate full Taiko proposals, Taiko aggregation, outer Plonk/Groth16 wrapping, production
+throughput, memory sizing, multi-GPU scheduling or remote-service recovery.
+
+The [fixture README](../tests/fixtures/cuda-sdk-smoke/README.md) records the programs, exact expected
+journals and upstream provenance. The SP1 case reuses the small opcode-lab ELF; RISC0 uses an upstream
+loop program. Neither needs L1/L2 RPC, proving-network credentials or a running raiko2 service.
+
+First validate both fixed inputs on the CPU (no CUDA feature required):
+
+```bash
+cargo run -r -p guest-launcher -- --stage sdk-smoke --proof-type sp1 --mode execute
+cargo run -r -p guest-launcher -- --stage sdk-smoke --proof-type risc0 --mode execute
+```
+
+An execute success is a CPU fixture precheck, not a generated proof or a GPU pass.
+
+On a CUDA development host with the supported NVIDIA driver, CUDA toolkit and SDK runtime
+requirements described in [GPU operations](operations.md#nvidia-gpu-proving), run:
+
+```bash
+cargo run -r -p guest-launcher --features cuda -- \
+  --stage sdk-smoke --proof-type sp1 --mode prove
+cargo run -r -p guest-launcher --features cuda -- \
+  --stage sdk-smoke --proof-type risc0 --mode prove
+```
+
+SP1 uses its pinned `sp1-gpu-server` on device 0; RISC0 uses the first visible CUDA device. Run the
+checks separately. The SP1 server binary must be installed at the location/version required by its
+SDK. A CUDA image built from a revision containing this smoke stage includes that binary, the
+launcher and the fixtures, so it can run the same checks without installing a Rust/CUDA development
+toolchain. Older images may not include the launcher:
+
+```bash
+docker run --rm --gpus all --entrypoint guest-launcher <cuda-image-digest> \
+  --stage sdk-smoke --proof-type sp1 --mode prove
+docker run --rm --gpus all --entrypoint guest-launcher <cuda-image-digest> \
+  --stage sdk-smoke --proof-type risc0 --mode prove
+```
+
+Prove mode requires the launcher `cuda` feature and verifies a real SP1 Compressed proof or RISC0
+Succinct receipt against the program identity and exact expected journal. Network, mock and CPU
+proving are not alternatives in this stage; a CPU-only build rejects `--mode prove`. RISC0 development
+receipts are rejected even when `RISC0_DEV_MODE` is set.
+
+The default inputs are embedded; optionally select their checked-in copies with
+`--input tests/fixtures/cuda-sdk-smoke/sp1-add.json` or `--input tests/fixtures/cuda-sdk-smoke/risc0-loop.json`.
+This stage accepts only these fixed tiny cases. Use the normal launcher stages for other inputs.
+Add `--json-out <report.json>` for the result and `--output <proof.json>` to retain a generated proof.
+
+A successful image build checks CUDA compilation, not GPU execution. This manual smoke check must
+finish with successful proof verification and the expected journal before recording a GPU pass.
+Keep that result separate from CPU prechecks and full-proposal regression results. It is not run as
+an automatic GPU test in the default CI suite.
+
 ## Generate A Latest Proposal Request
 
 Use the legacy `xtask` helper to discover the latest onchain proposal and emit a

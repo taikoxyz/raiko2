@@ -73,6 +73,18 @@ const START_TIMEOUT: Duration = Duration::from_mins(5);
 /// Deadline for the pre-start `sp1-gpu-server --version` check.
 const BINARY_CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Validates the pinned local GPU server without installing or starting it.
+///
+/// Standalone SDK tools can call this before constructing a CUDA client, whose SDK builder
+/// otherwise attempts to download a missing or mismatched server binary.
+///
+/// # Errors
+///
+/// Returns an error if the pinned server is unavailable or its bounded version check fails.
+pub fn validate_cuda_server_binary() -> Result<(), String> {
+    server_process::check_server_binary(sp1_primitives::SP1_CRATE_VERSION, BINARY_CHECK_TIMEOUT)
+}
+
 /// Where local SP1 GPU proofs run: a CUDA device and the per-request deadline on its server.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct CudaTarget {

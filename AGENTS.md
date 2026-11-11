@@ -100,6 +100,11 @@ target directory while a build, test, or editor process may still be using it.
 - NVIDIA GPU image release (`Dockerfile.cuda`, default repository `us-docker.pkg.dev/evmchain/images/raiko2-cuda`):
   - `just release-image-cuda <backend> <tag>`
   - `cargo run -r -p xtask -- release-image <backend> --cuda --tag <tag>`
+- CUDA SDK smoke: use `guest-launcher --stage sdk-smoke` with the tiny fixtures and commands in
+  [the development guide](docs/development.md#cuda-sdk-smoke). This manual check can generate and
+  verify local GPU proofs; it validates SDK/CUDA wiring only. CPU execute, successful image builds,
+  and this tiny proof do not establish full proposal/aggregation correctness, production capacity,
+  or multi-GPU scheduling.
 - Do not invent `make` targets or use outdated `TARGET=... make test` workflows in this repo.
 
 ## Project Skill Rule

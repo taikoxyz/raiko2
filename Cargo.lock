@@ -5557,6 +5557,8 @@ dependencies = [
  "raiko2-primitives-shasta",
  "raiko2-protocol-shasta",
  "raiko2-prover",
+ "risc0-binfmt",
+ "risc0-zkos-v1compat",
  "risc0-zkvm",
  "serde",
  "serde_json",

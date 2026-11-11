@@ -1,3 +1,5 @@
+mod sdk_smoke;
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
@@ -5,7 +7,7 @@ use std::time::Instant;
 
 use alloy_primitives::hex;
 use anyhow::{Context, Result, bail};
-use clap::{Parser, ValueEnum};
+use clap::{CommandFactory, FromArgMatches, Parser, ValueEnum};
 use raiko2_pipeline::forks::shasta::{load_risc0_shasta_backend, load_sp1_shasta_backend};
 use raiko2_pipeline::{NativeBackend, ProofStage, ProverBackend};
 use raiko2_primitives::{
@@ -104,6 +106,8 @@ enum ProofType {
 #[derive(Clone, Copy, Debug, ValueEnum, PartialEq, Eq)]
 enum Stage {
     Proposal,
+    /// Tiny fixed SDK fixture: CPU execute or genuine local CUDA proof and verification.
+    SdkSmoke,
     #[value(name = "opcode-lab")]
     OpcodeLab,
     #[value(name = "revm-opcode-lab")]
@@ -271,6 +275,7 @@ impl Stage {
     const fn as_str(self) -> &'static str {
         match self {
             Stage::Proposal => "proposal",
+            Stage::SdkSmoke => "sdk-smoke",
             Stage::OpcodeLab => "opcode-lab",
             Stage::RevmOpcodeLab => "revm-opcode-lab",
             Stage::PrecompileLab => "precompile-lab",
@@ -452,7 +457,7 @@ fn opcode_lab_memory_labels(stage: Stage) -> OpcodeLabMemoryLabels {
             after_execute_run: "revm-opcode-lab:after_execute_run",
             after_apply_execution_metadata: "revm-opcode-lab:after_apply_execution_metadata",
         },
-        Stage::Proposal | Stage::PrecompileLab => {
+        Stage::Proposal | Stage::PrecompileLab | Stage::SdkSmoke => {
             unreachable!("not an opcode lab stage")
         }
     }
@@ -523,7 +528,14 @@ async fn main() -> Result<()> {
     // Use `RUST_LOG=info` (or `debug`) when running this binary to see them.
     setup_logger();
 
-    let args = Args::parse();
+    let matches = Args::command().get_matches();
+    let args = Args::from_arg_matches(&matches)?;
+    if args.stage == Stage::SdkSmoke {
+        sdk_smoke::validate(&args, &matches)?;
+        return tokio::task::spawn_blocking(move || sdk_smoke::run(args))
+            .await
+            .context("join SDK smoke task")?;
+    }
     args.validate_standard_guest_artifacts()?;
 
     if matches!(args.stage, Stage::OpcodeLab | Stage::RevmOpcodeLab) {
@@ -1282,6 +1294,20 @@ mod tests {
     use raiko2_primitives_shasta::{GuestInput, build_proof_carry_data_from_witness_spec};
     use raiko2_prover::sp1::Sp1ExecutionMetadata;
     use std::fs;
+
+    #[test]
+    fn parses_sdk_smoke_stage() {
+        assert!(
+            Args::try_parse_from([
+                "guest-launcher",
+                "--stage",
+                "sdk-smoke",
+                "--proof-type",
+                "sp1",
+            ])
+            .is_ok()
+        );
+    }
 
     #[test]
     fn parses_opcode_lab_stage_with_explicit_elf() {

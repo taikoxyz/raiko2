@@ -67,6 +67,7 @@ COPY xtask ./xtask
 COPY config ./config
 COPY config.example.toml ./
 COPY test/guest_inputs ./test/guest_inputs
+COPY tests/fixtures/cuda-sdk-smoke ./tests/fixtures/cuda-sdk-smoke
 
 # The pinned sp1-gpu-server must match the version sp1-cuda checks at runtime.
 RUN set -eu; \
@@ -89,8 +90,10 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     done; \
     export NVCC_APPEND_FLAGS; \
     cargo +1.95.0 build --release --locked -p raiko2 ${BIN_FEATURES}; \
+    cargo +1.95.0 build --release --locked -p guest-launcher --features cuda; \
     mkdir -p /app/build-output; \
-    cp /app/target/release/raiko2 /app/build-output/raiko2
+    cp /app/target/release/raiko2 /app/build-output/raiko2; \
+    cp /app/target/release/guest-launcher /app/build-output/guest-launcher
 
 # RISC0 Groth16 (`snark = true`) on CUDA needs the `risc0-groth16` rzup component at runtime.
 FROM toolchain AS risc0-groth16
@@ -158,6 +161,8 @@ COPY --from=risc0-groth16 /opt/risc0 /opt/risc0
 ENV CUDA_DEVICE_ORDER=PCI_BUS_ID
 
 COPY --from=builder /app/build-output/raiko2 /usr/local/bin/raiko2
+COPY --from=builder /app/build-output/guest-launcher /usr/local/bin/guest-launcher
+COPY --from=builder /app/tests/fixtures/cuda-sdk-smoke ./tests/fixtures/cuda-sdk-smoke
 COPY --from=builder /app/crates/guests/elf ./crates/guests/elf
 COPY --from=builder /app/config/chain_spec_list_default.json /etc/raiko2/chain_spec_list_default.json
 COPY --from=builder /app/config.example.toml /etc/raiko2/config.example.toml

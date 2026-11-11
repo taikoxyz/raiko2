@@ -4583,3 +4583,106 @@ checksum verification/extraction, use its `input-manifest.json` with `zkgas-quot
 with the existing compare/report commands. The fixture README gives the exact commands.
 No new SP1 observations are required to reproduce the archived comparison; rerunning
 actuals additionally requires the original program and compatible observer artifacts.
+
+## Remaining precompile boundaries
+
+Generate the compiler-free finite catalog with the managed Python environment:
+
+```sh
+~/.venv/bin/python bin/zkgas/bench/cases/precompile_boundaries.py \
+  --output-dir experiment/precompile-boundaries
+```
+
+The default36 requests cover own-zero, one-call and eight-call points for twelve addresses:
+`0x01/03/06/09/0a/0b/0d/0e/0f/10/11/100`. The full20-byte address is encoded in
+STATICCALL, including `0x100`. These are ordinary single-user, single-block ProgramRequests;
+use the existing native constructor with `--execution-profile evm-gas-only` before measuring.
+No compiler, crypto package, prover, network or wallet is used by generation. Output creation
+is exclusive, including the catalog directory; use a fresh destination for every selection.
+
+The adjacent `precompile_boundary_vectors.json` retains exact input/output bytes, native gas,
+source identities and derivation notes. Base vectors use valid nonzero signatures, non-infinity
+curve points, BLAKE2b's `abc` compression, a nontrivial KZG opening and official EIP-2537
+field-map vectors. The G2 MSM base uses scalar two; the nonidentity BLS pairing returns a
+zero word **with successful call status**, which differs from precompile failure.
+Extra vector IDs `ripemd160-4096`, `blake2f-4096`, `bls-g2-msm-dense` and `bls-pairing-k2`
+vary actual input/round/scalar/pair work. Select a finite extension explicitly, for example:
+
+```sh
+~/.venv/bin/python bin/zkgas/bench/cases/precompile_boundaries.py \
+  --output-dir experiment/precompile-growth \
+  --vectors ripemd160-4096 blake2f-4096 bls-g2-msm-dense bls-pairing-k2 \
+  --repetitions 0 1 8
+```
+
+The Python API is `make_case(vector_id, repetitions)`, `gas_accounting(vector_id, repetitions)`
+and `prepare(Path(output_dir), vector_ids=..., repetitions=(0,1,8))`. Inputs must be finite
+known vector IDs and integer counts0..4096; booleans are rejected. Generated selections require
+an own-zero count, unique entries and at most48 requests. Each request must also fit the15M
+transaction budget. Eight calls is a bounded repetition point, not a gas-saturated maximum.
+
+Each runtime checks calldata length, copies input once, preallocates distinct input/output
+ranges and sentinel words, then poisons every output word with the complement of its expected
+value before each call. Every call must succeed, return exactly the declared length and
+overwrite every expected output bit. Successful-path opcode counts and the parent STOP reject
+skipped or failed work. Memory is reused and no RETURNDATACOPY is emitted. Exact successful
+Osaka gas accounting includes intrinsic calldata gas, the EIP-7623 floor, ordinary opcodes,
+CALLDATACOPY word gas, memory expansion, native precompile gas and warm100-gas STATICCALL
+access. The transaction adds `max(1000, ceil(native_gas/63))` reserve for EIP-150 forwarding.
+Gas accounting is source-derived; native qualification must agree before any actual sampling.
+
+Run the focused tests; set `PRECOMPILE_BOUNDARY_NATIVE_BIN` to additionally qualify all36
+base cases with exact native gas/opcode counts and reject missing-copy, bad-output, short-input,
+invalid-point and truncated-address mutants. The native binary must support the explicit
+`evm-gas-only` profile. These tests do not establish SP1 measurement results or global bounds.
+
+```sh
+~/.venv/bin/python -m unittest discover -s bin/zkgas/bench/tests \
+  -p test_precompile_boundaries.py -v
+```
+
+## Pure signed-payload byte and count probes
+
+Generate the compiler-free signed-payload catalog in a fresh directory:
+
+```sh
+~/.venv/bin/python bin/zkgas/bench/cases/signed_payload.py \
+  --output-dir experiment/signed-payload
+```
+
+The14 requests vary calldata lengths0/32/4096/65536, zero or deterministic sequence bytes,
+and one or eight user transactions in one block. Sequence byte`i` is `(73*i+19)%256`;
+empty calldata has one zero-pattern control per user count. Every transaction calls the same
+one-byte STOP runtime with the same3M gas limit. There are no storage accesses, logs, precompile
+calls or deployments in the user body. Native opcode gates require exactly one STOP per user.
+The same-count empty-calldata baseline isolates byte/content changes; each row also names its
+same-payload single-user reference for separate count comparisons.
+
+The API is `make_case(length, pattern, count=1)` and `prepare(Path(output_dir))`.
+Lengths are integers0..65536, patterns are `zero` or `sequence`, and counts are integers1..8;
+booleans, unknown patterns and the duplicate empty-sequence form are rejected. Generation uses
+only Python's standard library and exclusive file/directory creation. Payload SHA256,
+zero/nonzero byte counts, per-user and total calldata lengths, user count and exact gas
+expectations remain in the catalog.
+
+With zero/nonzero calldata byte counts`Z/B`, successful user gas is exactly
+`max(21000+4*Z+16*B, 21000+10*(Z+4*B))` under Osaka's EIP-7623 floor. STOP adds no execution
+gas. Block gas adds the existing fixture anchor constant to the sum of user charged gas.
+The fixed3M transaction envelope avoids varying its RLP encoding alongside calldata. Native
+construction must confirm the gas, nonce order, inclusion and receipt status before sampling.
+
+Calldata bytes are a physical input axis. They are not the canonical signed EIP-2718 envelope
+byte count used by the node's transaction-payload selector: that count also covers envelope
+fields, signatures and the anchor transaction. Exact signed-envelope bytes must be derived
+from the resulting native/quote artifacts; the producer leaves that field unset. Keep node
+payload ownership, proposal-completion costs and whole-proposal actual PGU distinct when
+interpreting byte and count differences. This finite catalog establishes no new tariff or
+global workload bound.
+
+Run the focused suite; set `SIGNED_PAYLOAD_NATIVE_BIN` to an existing constructor supporting
+`evm-gas-only` to additionally qualify all14 cases and their exact gas/opcode/status envelopes:
+
+```sh
+~/.venv/bin/python -m unittest discover -s bin/zkgas/bench/tests \
+  -p test_signed_payload.py -v
+```

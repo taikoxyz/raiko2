@@ -106,7 +106,11 @@ def _runtime(vector, repetitions):
 
 def gas_accounting(vector_id, repetitions):
     """Exact successful Osaka gas, including EIP7623; assumes active warm precompiles."""
-    vector = _vector(vector_id)
+    return _gas_for_vector(_vector(vector_id), repetitions)
+
+
+def _gas_for_vector(vector, repetitions):
+    """Shared successful-path gas for a concrete trusted producer vector."""
     code, counts, layout = _runtime(vector, repetitions)
     payload = _hex(vector['input_hex'], 'input')
     fixed = {0x00: 0, 0x01: 3, 0x14: 3, 0x15: 3, 0x36: 2, 0x37: 3,
@@ -135,9 +139,14 @@ def gas_accounting(vector_id, repetitions):
 
 
 def make_case(vector_id, repetitions):
-    vector = _vector(vector_id)
+    return _case_for_vector(_vector(vector_id), repetitions)
+
+
+def _case_for_vector(vector, repetitions):
+    """Construct one guarded request; finite producers own vector admission."""
+    vector_id = vector['vector_id']
     code, counts, layout = _runtime(vector, repetitions)
-    gas = gas_accounting(vector_id, repetitions)
+    gas = _gas_for_vector(vector, repetitions)
     if gas['transaction_gas_limit'] > TRANSACTION_GAS_CAP or len(code) > 24576:
         raise ValueError('case exceeds finite transaction gas/runtime budget')
     row = original.make_case('call', 'stop', gas_limit=gas['transaction_gas_limit'])

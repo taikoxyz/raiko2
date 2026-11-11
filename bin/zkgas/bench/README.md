@@ -4686,3 +4686,95 @@ Run the focused suite; set `SIGNED_PAYLOAD_NATIVE_BIN` to an existing constructo
 ~/.venv/bin/python -m unittest discover -s bin/zkgas/bench/tests \
   -p test_signed_payload.py -v
 ```
+
+## Finite ECMUL scalar and point probes
+
+Prepare the fit and reserved validation catalogs separately, before opening actuals:
+
+```sh
+~/.venv/bin/python bin/zkgas/bench/cases/ecmul_tariff.py \
+  --selection fit --output-dir experiment/ecmul-fit
+~/.venv/bin/python bin/zkgas/bench/cases/ecmul_tariff.py \
+  --selection reserved --output-dir experiment/ecmul-reserved
+```
+
+The18 fit cases use points`G` and`2G`, scalars zero, two and`(3<<252)-1`, and repetitions0/1/8.
+The four reserved cases use`3G`, scalars two/dense and repetitions0/4. Reserved cases are selected
+before actual measurement and excluded from fitting; measure their actuals only after the
+candidate is sealed. Native validity checks are separate from actual measurement. Rows use
+static `data_role` values `fit` and `reserved`; these labels do not claim an artifact is unopened.
+`--selection all` prepares the combined22 requests for native qualification.
+
+The API is `make_case(point_multiple, scalar_case, repetitions)` and
+`prepare(Path(output_dir), selection='fit')`. Point multiples are integers1..3, scalar cases are
+`zero`, `two`, `dense`, and repetitions are integers0..4096 subject to the15M transaction cap.
+Booleans and unknown cases are rejected. Each family keeps the same96-byte calldata at every
+count: point`x/y` followed by the scalar. Expected coordinates are embedded in executed output
+guards. Point and output oracles reuse the existing independent affine BN254 helpers, including
+scalar reduction and the all-zero encoding of infinity.
+
+The producer reuses the guarded precompile runtime and gas accounting through two small shared
+helpers. It calls full-width address`0x07` with native gas6000, requires success and exactly64
+returned bytes, poisons both output words with their expected complements before each call,
+compares every returned word and verifies protected memory. Expected STATICCALL, returndata,
+parent STOP and all successful-path opcode counts exclude omitted work. Gas accounting includes
+calldata intrinsic/floor costs, copying, memory, warm access and EIP-150 reserve. The original
+precompile vector bank, generated requests and gas results remain unchanged.
+
+Raw point/scalar, reduced scalar, expected output, payload/output hashes, oracle provenance and
+`W=bit_length(scalar mod r)+popcount(scalar mod r)` are retained. `W` is a source-derived work
+quantity; it is not an actual PGU value or a proposed price. Own-zero controls support matched
+increments; preserve whole-proposal actual/node quantities and retained heavy/mixed regressions
+when evaluating precision. This producer changes no tariff and measures no actuals.
+
+Run the focused suite; set `ECMUL_TARIFF_NATIVE_BIN` to an existing constructor supporting
+`evm-gas-only` to additionally qualify all22 requests, their actual signed calldata and exact
+status/gas/opcode counts. Tests also check prior precompile row/request/gas parity against the
+local `f15a379c` Git baseline when available; a frozen complete-matrix digest covers shallow
+checkouts without that historical object.
+
+```sh
+~/.venv/bin/python -m unittest discover -s bin/zkgas/bench/tests \
+  -p test_ecmul_tariff.py -v
+```
+
+## Caught ECMUL failure and forwarded gas
+
+Prepare the separate six-case failed-precompile catalog:
+
+```sh
+~/.venv/bin/python bin/zkgas/bench/cases/ecmul_failures.py \
+  --output-dir experiment/ecmul-failures
+```
+
+The cases forward6000 or200000 gas at repetitions0/1/8 to full-width address`0x07`.
+Every call receives exactly96 canonical bytes: point`(1,1)` and scalar zero. This point is off
+BN254's curve because`1² != 1³+3`; empty input would instead pad to infinity and succeed.
+The child must fail, while the parent must complete successfully. These rows explicitly record
+`expected_subcall_success=false`, `expected_user_success=true` and the exact failed-call count;
+they are separate from the valid scalar-work cohort.
+
+Before each STATICCALL the parent fills both output words with distinct poison values. It
+requires status zero, empty returndata and both output words unchanged, then checks protected
+memory and the exact final counter before STOP. Full successful-path opcode counts require
+all requested failures to execute. Input is copied once and memory is preallocated even for
+own-zero controls. Failed precompiles consume the full supplied allowance, rather than only
+the6000-gas base cost; exact native qualification must confirm this behavior before actuals.
+
+The API is `make_case(allowance, repetitions)`, `gas_accounting(allowance, repetitions)` and
+`prepare(Path(output_dir))`. Allowances are integers1..1000000, repetitions are integers0..4096,
+and each generated request must fit the15M transaction cap. Booleans and other invalid values
+are rejected. Output uses exclusive creation and generation is stdlib-only. Accounting retains
+intrinsic calldata gas, the EIP-7623 floor, ordinary opcodes, copying, memory, warm100-gas access
+and the full forwarded allowance per failure. The envelope adds`ceil(allowance/63)+1000` gas
+for EIP-150 forwarding and a tail guard. This producer implements no pricing rule.
+
+Set `ECMUL_FAILURES_NATIVE_BIN` to an existing constructor supporting `evm-gas-only` to run the
+six catalog cases and native-only allowance edges5999/6000 and152218/152219. The edge tests
+check gas/status/count behavior and produce no actual PGU measurements. Successful user gas
+must match the full-allowance formula while all declared failed-call and parent guards pass.
+
+```sh
+~/.venv/bin/python -m unittest discover -s bin/zkgas/bench/tests \
+  -p test_ecmul_failures.py -v
+```

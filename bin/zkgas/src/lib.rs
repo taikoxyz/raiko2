@@ -6,3 +6,6 @@ pub mod identity;
 pub mod output;
 pub mod quote;
 pub mod report;
+
+#[cfg(feature = "fixture")]
+pub mod fixture;

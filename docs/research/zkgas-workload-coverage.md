@@ -1,0 +1,535 @@
+# zkGas workload coverage status
+
+The [new natural validation](2026-11-11-natural-validation.md) fixes ten Mainnet and
+ten Hoodi proposals after candidate freezing, covering 5738 blocks with ten new and
+ten reused research-program actuals. Full deficits are 0/20; node has six Mainnet
+deficits (maximum 178245194 PGU) and no Hoodi deficit. Full/actual remains about
+2.19x/2.09x. The quiet cohort has only about 1–2% actual variation; Unzen remains
+competitive on several shape metrics, so these observations are not a universal
+new-model superiority claim. Selection, fixed historical scales and failures are
+reported separately from the single-block capacity result below.
+
+## Frozen-model capacity validation, 2026-11-11
+
+The [current capacity checkpoint](2026-11-11-frozen-model-capacity.md) reuses all
+172 distinct measured capacity/coverage inputs without new SP1 sampling. At an
+illustrative 3.6B node budget, 149/160 eligible single-block inputs pass and their
+maximum observed actual is 2.246391418B PGU. Unzen's separate raw 100M condition also
+admits 149, with different input identities and a maximum actual of 5.952586609B PGU.
+The latest ECMUL adjustment admits three additional inputs on the same 160-input
+denominator, none with actual above 3.6B. Historical 50-proposal/9600-block packing
+coverage remains complete at this reference. This is a finite offline comparison,
+not a configured limit, universal bound or transaction rejection test. The 12
+multi-block actuals and their three retained full deficits remain separate.
+
+
+## Ordered coverage follow-up, 2026-11-11
+
+The approved bounded follow-up completed **87 new SP1 execute-only observations** on research
+b76/SDK 6.3: 36 inputs covering twelve additional precompile addresses, 14 isolated signed-payload
+inputs and 37 ECMUL success/intermediate/mixed/failure/reserved inputs. The first two panels
+required no repricing. The ECMUL refinement changes one existing coefficient; it introduces no
+new collector, selector, public version flag or admission policy.
+
+- [Precompile and payload report](2026-11-11-current-program-coverage.md): twelve valid nontrivial
+  vectors at 0/1/8 calls; payload lengths 0/32/4096/65536, zero/sequence bytes and one/eight users.
+  All full quotes cover these actuals; literal node startup/control gaps remain explicit.
+- [ECMUL report](2026-11-11-ecmul-incremental.md): 33 opened development observations support
+  candidate `80160649`; four previously reserved actuals validate the sealed policy without refit.
+  The full accepted constant/native slope and 572936-PGU scalar-work slope are retained while the
+  29901-PGU/native-gas incremental coefficient becomes zero. Full deficits are 0/37; literal node
+  deficits rise 17 to 27 with unchanged maximum 153407027 PGU. All 35 count contrasts cover.
+- All 18 numeric precompile addresses now have recent targeted or composition evidence in this
+  inventory. This is finite branch/value coverage, not an exhaustive operand, batch or gas-packing
+  guarantee. The twelve new vectors and pure payload refresh have explicit current-program data.
+- All 192 candidate quotes are fresh native replays: the fixed 155 pressure/ordinary/natural
+  regression inputs plus 37 ECMUL inputs. The pressure panel retains 9 node/3 full deficits,
+  maxima 1597968115/1261582685 PGU; no new pressure gap appears. The original 18/55/3 Hoodi
+  split is unchanged, with training-scaled WAPE 2.793784% node and 2.683576% full versus Unzen
+  6.283565%. Raw Unzen remains a separate score; normalized shape metrics never replace literal
+  node/full/actual residuals or establish admission protection.
+
+Pricing routes remain 150 ordinary opcodes, six wrapper routes and 18 precompile addresses.
+The new measurements do not increase the historical count of opcode keys with controlled or
+joint-equation evidence, or certify every branch. The draft evaluation standard and severity/complexity tradeoff remain
+unchanged. Research artifacts retain their model/program identities; no production ELF/SDK,
+GPU throughput or selected capacity limit is certified. Exact node-side MPT topology, accepted
+sub-2B residuals and conservative KZG/BLS synthetic quotes remain scoped follow-ups.
+
+
+The original finite worklist is the [block-aware stage closure plan](../superpowers/plans/2026-11-08-block-zkgas-stage-closure.md). The chronological evidence below is retained history, not an instruction to keep extending every experimental family. The plan freezes selection and measurement budgets before further sampling; low-priority TODOs do not automatically block this research stage.
+
+The research is converging on specific failure modes and bounded severity in measured families. Substantial interaction and production-validation work remains. A pricing route, a sampled input family and certification of an exact production program are three different statuses; none implies the next. This inventory is a research working list, not an estimated completion percentage or a mandatory production merge gate. The [evaluation standard](../zkgas-evaluation-standard.md) remains draft and nonbinding.
+
+## Finite mechanism inventory, 2026-11-08
+
+This inventory uses Reth source `a8e00f00`, Raiko tools `16205d2e`, current EEA pricing and the frozen b76/SDK6.3 research program. It replaces automatic expansion of the historical panels below. "Sufficient" means sufficient evidence for this finite research stage; it is not a universal workload bound. All exact input/artifact identities are frozen before new quotations or actuals.
+
+The source-to-price path is the production plain interpreter loop and inspected adapter, the transaction accumulator, and `ZkGasModel::price_block_without_mpt`. Its subtotal adds fixed costs, authorization/access-list work, code preparation, operation/dispatch/error prices, journal/cache/transition reserves, EVM-local unique resources and committed signed payload. Exact resource completion and MPT are supplied later by [Raiko's native proposal replay](../../crates/zkgas-trace/src/runtime_quote.rs). The `node` and `prove` objects remain separate.
+
+| Mechanism | Collection and pricing | Existing evidence / residual | Stage disposition |
+| --- | --- | --- | --- |
+| Dispatch, arithmetic, stack | `runtime.rs::run_metered_plain` / `PendingPricingStep::finish`, inspected `step_end`, accumulator `observe_step`; per-route accepted/incremental/structural composition plus additive dispatch and feature-error prices | Arithmetic, division, modular and EXP density; normal-dispatch correction. Generated route table independently matches its specification. | Sufficient finite evidence; retain representative controls/full inputs. |
+| Precompiles | `evm.rs` / inspected adapter record actual precompile completion, numeric address, native gas and optional scalar work; accumulator `observe_precompile` | [ECMUL mixture](2026-11-06-ecmul-scalar-mixtures.md), MODEXP/BLS value tests, pairing and SHA length regimes. Deliberate fallback tariffs are explicit, including address0x100. | Sufficient finite evidence plus intentional fallbacks; unmeasured branch variants are not new blockers by themselves. |
+| Memory, copy, return | Pre/post memory selectors, opcode gas and length facts feed the same operation routes | Memory-word, return/copy, MCOPY, KECCAK and SHA bulk panels. [CALLDATACOPY aggregation](2026-11-06-route-composition.md) bounds that price-expression difference by225M, not total actual deficit or all67 Maximum routes. | Sufficient sampled evidence; additional alignment/branch combinations remain TODO unless a consequential mechanism is identified. |
+| Signed payload / transaction preparation | Block executor records original signed-envelope length once; transaction begin counts raw authorizations and access-list entries/pairs; model adds their separate tariffs | Existing authorization/access-list corrections; node now charges256PGU/canonical byte plus16384/nonempty transaction. Pure payload actuals use an older ELF. EVM calldata floor limits bytes for a fixed gas budget; signed-envelope overhead also has node charges. | Accepted refresh TODO: no newly identified omitted byte/count growth. Older actuals are historical, not current-ELF certification. |
+| Account journal / block cache | Per-opcode query budgets plus finalized physical account keys; independent transaction and block-prefix populations | [Account density](2026-11-07-account-journal-density.md), [warm-first CacheState](2026-11-07-cache-state-warm-accounts.md). Previously large deficits are covered by the revised reserves. | Sufficient empirical evidence on the standard backend; arbitrary preseeded/custom DB populations are outside this stage. |
+| Persistent / transient journal | Attempted lookups and materializations retain effective owner and ever-seen key populations through rollback; finalization records physical receipts | Prefix, delete/miss, warm-tail/density and caught-transient pairs. Seven positive node residuals remain in the latest storage/account subset; maximum1,597,968,115PGU. Their separate maxima cannot be added without a legal shared gas budget. | Accepted low-priority residuals under the existing rule, with finite corrected-composition evidence; no claim of exact map placement or a30M global maximum. |
+| Storage finalization / MPT | Finalized physical storage union reserves `384*C*(J+2X)` in node. Exact trie path/hash/materialization/churn selectors are prove-side additions | [Transition/read-cache correction](2026-11-07-prefixed-storage-read-cache.md), root-diversity and mutation panels. Raw-key journal concentration differs from Keccak-addressed MPT paths; trie depth is not freely selected by the raw slot layout. | Transition accounting sufficient empirically. Exact node-side MPT topology remains an accepted TODO: existing unique-resource proxies and finite trie-shape tests support stage triage, not a proved residual bound. |
+| Calls, code lifecycle, receipts | Confirmed spawn wrappers, actual code preparation, logical account/code resources, executed LOG/terminal routes; attempted work is retained separately from committed state | Code/initcode/loading, multi-account shared/unique code, CALL/DELEGATECALL, LOG and rollback records; post-Unzen lifecycle contract only | Sufficient finite evidence. Extra lifecycle/composition variants and deliberately invalid bytecodes are not silently counted as successful priced execution. |
+| Proposal-only work and ordinary traffic | Prove completion adds exact committed resources/MPT and once-only startup, residual payload, blob/source and parent-MPT terms | All50 retained historical inputs pass compatibility checks;44900/45309 now have b76/SDK6.3 actuals. The other48 remain without current-program actuals. | **N1 resolved for the limited smoke claim** in the [stage report](2026-11-08-block-model-stage-closure.md); broader ordinary-traffic precision remains unqualified. No reverse allocation/shared-budget design in this stage. |
+
+### Route accounting check
+
+The frozen model has **174 distinct route keys:150 ordinary opcode routes, six confirmed-spawn wrapper routes and18 numeric precompile routes**. The six wrappers reuse their opcode bytes and must not be reported as six additional opcodes. All150 ordinary entries match defined bytes in locked `revm-bytecode43.0.0`. The four remaining defined bytes (SLOTNUM, DUPN, SWAPN, EXCHANGE) are Amsterdam-gated in locked `revm-interpreter43.0.1`, outside the current Unzen/Osaka domain. CLZ is Osaka-gated and has a route. Unknown/unsupported routes produce an explicit collector diagnostic rather than a successful zero-priced quote; this is a shadow/report behavior, not activation of a consensus filter.
+
+`generate.py --check` passes for all174 entries. This is source/routing coverage, **not174 independently measured tariffs**, nor an assertion that all future forks or every possible invalid instruction has an accepted quote.
+
+### Frozen closing selection
+
+The fixed regression contains **32 controlled inputs**:22 existing current-EEA storage/account observations (including all seven known positive residuals and both caught-transient points), plus10 retained arithmetic, memory/copy, precompile, LOG and code-loading representatives. The latter require only current-model requotes; their compatible b76/SDK6.3 actuals already exist. No new controlled hypothesis is selected just to fill the four available execution slots.
+
+All50 original historical inputs remain included. Natural SP1 smoke observations are fixed to proposal IDs **44900 and45309**, the lowest/highest IDs in that existing set, selected before opening new actuals. These are192-block whole proposals; their actuals cannot be divided into invented block truth or evaluated as30M single-block saturation samples. The selected set is opened engineering regression, not an untouched holdout or a representative normal-traffic sample.
+
+The fixed scorecard and both natural observations are complete; see the [stage decision](2026-11-08-block-model-stage-closure.md). Pure-payload refresh, further key-layout sweeps, production backend migration and new collection dates do not automatically enter this closing set. Any new blocker must remain explicit rather than extending the stage or declaring it passed at the execution cap.
+
+## What the recent storage evidence establishes
+
+Before the root-journal panel, [mutation](2026-11-02-storage-mutation.md), [fanout](2026-11-02-storage-fanout.md) and [root diversity](2026-11-03-storage-root-diversity.md) contained 80 distinct new canonical inputs, including 36 generated near-full inputs. Reused homogeneous references are excluded. The frozen prepanel snapshot records 10 full-input node gaps, a maximum full-input gap of 58,675,269 PGU, a maximum across all inputs of 164,072,990 PGU, no >2B node gap within 30M charged gas and no complete-proposal gap. This is a storage subset, not a count of all research tests.
+
+The per-panel maximum full node gaps were approximately 54.353M, 58.675M and 52.532M PGU. They do not decrease monotonically. These deliberately selected inputs are not IID samples or confidence bounds. Here, convergence means accumulating finite evidence, identifying missing accounting and refining priorities under a fixed severity rule; it does not mean a shrinking guaranteed global maximum.
+
+The [root-journal panel](2026-11-03-storage-root-journal.md) adds a separately counted 36 new inputs: 12 own-N0 controls, 12 small32 and 12 generated full points. Eight node gaps remain (four STOP controls and four STOP small points), with maximum 158,991,334 PGU; full node gaps, complete-proposal gaps and >2B/30M cases are all zero. No old actual is reused in its dataset. This new cohort is additional finite evidence. The retained four-panel historical supplemental join verifies 116 distinct canonical hashes across these four recent storage panels, with identical model/ELF/SP1 executable identities: 48 generated near-full inputs, 10 full node gaps, maximum full gap 58,675,269 PGU, no >2B/30M gap and no complete-proposal gap. No reused references are counted as new. This is still only the four-panel storage subset; it is not an IID confidence statement, a total test count, an improvement rate or a global coverage percentage.
+
+The root-REVERT observations also expose an important interpretation limit: 64 failures each receive the frozen 5M-PGU REVERT allowance, totaling 320M. A read-only subtraction still leaves the eight full REVERT node quotes above actual, with minimum margin 12,715,946 PGU; this does not select a new tariff. The panel also checks retained aggregate dispatch and unique-slot collection through root rollback, within the quote API's observability limits.
+
+The [few-long-root-REVERT panel](2026-11-03-storage-long-revert.md) adds 16 distinct inputs: eight own-N0 controls and eight generated full points, with 2/4 users visiting 2/4 different accounts once. All eight controls have node gaps (maximum 143,814,531 PGU); no full point has a node gap, no input has a complete-proposal gap and no >2B/30M case appears. The unchanged 5M/event REVERT allowance totals only 10M/20M here. The new five-panel join verifies 132 distinct canonical hashes and 56 generated full inputs under identical model/ELF/SP1 identities; the 10 full node gaps and maximum full gap 58,675,269 PGU are unchanged, with maximum across all inputs 164,072,990 PGU, no >2B/30M gap and no complete-proposal gap. This finite storage subset excludes reused references and does not revise the historical 116/48 snapshot or count all research tests. One failed pre-SP1 setup remains separately unmeasured; all 16 actual executions completed. Incremental mode-ranking deficits and all absolute control gaps remain visible.
+
+The [many-key warm-dirty panel](2026-11-03-storage-dirty-keys.md) adds 16 distinct inputs: eight own-R0 controls and eight maximal-uniform-R points across STOP/root REVERT and K=1/16/256/1024 at four accounts/users. All 16 actual executions completed once without setup or SP1 failure. Nine node gaps remain (six controls, three full REVERT points); maximum full gap is 110,649,336 PGU, maximum all-point gap 153,248,333 PGU, with no complete-proposal gap or >2B/30M case. Only seven full points are near-full: STOP/K1024 reaches 96.196% charged occupancy because its next R fails a gross-envelope prefix despite remaining below 30M charged. R0 includes seed/cleanup work. Attempted dispatch/access/write collection passes independent aggregate checks through rollback, with read-only phase excluded from literal writes; this does not prove per-opcode charging. The verified six-panel join has 148 distinct canonical inputs, 64 generated full selectors and 63 near-full inputs, 13 full node gaps with maximum 110,649,336 PGU, maximum all-point gap 164,072,990 PGU, no >2B/30M gap and no complete-proposal gap. Source-analysis hashes, config model/ELF/SP1 identities and canonical-ID deduplication were independently rechecked. Reused references are excluded; the preceding 132/56 join remains historical. Neither join counts all research tests or establishes global coverage.
+
+The [high-limb storage-key panel](2026-11-03-storage-key-shift.md) adds 24 distinct new inputs across STOP/root REVERT, K16/1024 and raw shifts 64/128/192: 12 own-R0 controls and 12 generated full points. All 24 actual executions completed once. Nine node gaps remain (six K16 controls, three full REVERT/K16 points), maximum full gap 111,328,749 PGU and maximum all-point gap 149,491,488 PGU, with no complete-proposal gap or >2B/30M case. Nine full points are near-full; three STOP/K1024 points reach 96.393% charged occupancy because R+1 fails a gross-envelope prefix despite charging below 30M. Eight exact old unshifted references are joined without rerun or recount. The independently checked seven-panel subset has 172 distinct canonical inputs, 76 generated full selectors, 72 near-full inputs, 16 full node gaps with maximum 111,328,749 PGU and maximum all-point gap 164,072,990 PGU; high-priority and complete-proposal gaps remain zero. The historical 148/64/63 snapshot is unchanged. These maxima are not monotonic and do not establish a global bound.
+
+The [caught nested CALL panel](2026-11-03-storage-caught-nesting.md) adds 16 distinct inputs: eight own-R0 controls and eight generated full points across leaf STOP/REVERT, K16/1024 and wrapper depths 1/4. All 16 actuals completed once; four user receipts always succeed, including caught leaf rollback. Six node gaps remain (four K16 controls and two full caught-REVERT/K16), maximum full gap 105,568,665 PGU and maximum all-point gap 145,680,932 PGU; complete-proposal and >2B/30M gaps remain zero. Six fulls are near-full; STOP/K1024 depths 1/4 charge 28,867,335/28,178,595 because R+1 fails an admission prefix. The eight-panel subset now has 188 distinct inputs, 84 generated full selectors, 78 near-full points and 18 full node gaps; maximum full/all-point gaps remain 111,328,749/164,072,990 PGU, with zero high-priority or complete-proposal gaps. Eight exact old direct references are joined without rerun or recount. All 32 diagnostic storage-support equality flags cover exactly four leaf owners; authenticated empty-wrapper account/code/global support remains separate. Historical 172/76/72 counts remain unchanged. These finite counts are not global coverage or a monotonic bound.
+
+The [shared-code DELEGATECALL panel](2026-11-03-storage-delegated-nesting.md) adds 16 distinct inputs: eight own-R0 controls and eight generated full points across leaf STOP/REVERT, K16/1024 and depths 1/4. All 16 actuals completed once. One leaf code account executes in four top-wrapper storage contexts with identical raw maps; logical accesses/writes remain 4(K+1)/4K despite shared code and equal roots. Six node gaps remain (four K16 controls and two full caught-REVERT/K16), maximum full gap 109,050,081 PGU and maximum all-point gap 149,088,122 PGU, with zero complete-proposal or >2B/30M gaps. Six fulls are near-full; STOP/K1024 depths 1/4 charge 28,867,323/28,178,555 because R+1 fails an admission prefix. The nine-panel subset contains 204 distinct inputs, 92 generated full selectors, 84 near-full points and 20 full node gaps; maximum full/all-point gaps remain 111,328,749/164,072,990 PGU, with zero high-priority or complete-proposal gaps. All 16 exact old CALL references are excluded from new counts. The 40 diagnostics retain per-address support equality: old CALL's four leaf-owner domain differs from the new top-owner domain, so all 16 cross-panel support flags are false even if physical hashes/roots match. The historical 188/84/78 snapshot remains unchanged. This selected interaction does not establish global coverage, IID confidence, proof or production certification.
+
+The [caller-prewarmed/ancestor-rollback panel](2026-11-03-storage-warm-rollback.md) adds32 distinct inputs:16 own-R0 controls and 16 generated full points across leaf/ancestor exit, K16/256, F4 depth 2/4 and prewarm false/true. All 32 actuals completed once without failure/retry, and all 16 full points are near-full. All 32 have node gaps; maximum full/all-point gaps are 109,265,103/128,975,075 PGU, with zero absolute complete-proposal or >2B/30M gaps. Eight K256 own-R0→full increments remain uncovered by both node and proposal increments (maximum upward-rounded exact increment gap 9,333,858 PGU), so absolute proposal coverage does not erase incremental TODOs. Checkpoint tests retain parent warmth while reverting child warmth/refund/state and preserving attempted leaf work. The ten-panel persistent-storage subset contains 236 distinct inputs,108 generated full selectors,100 near-full observations and 36 full node gaps; maximum full/all-point gaps remain 111,328,749/164,072,990 PGU, with zero high-priority or complete-proposal gaps. Historical204/92/84 counts remain unchanged. These selected observations are not the full research study, IID confidence, a global bound, proof or production certification; the separate transient pilot below is excluded.
+
+The [transient-storage pilot](2026-11-03-transient-storage.md) separately measures eight new inputs: four own-R0 controls and four generated full points across root STOP/REVERT and K16/4096, with four users sharing one owner and resetting transient state between transactions. All eight actuals completed once without failure/retry. Two K16 controls have node gaps, with maximum 144,259,073 PGU; no full point has a node gap, no input has a complete-proposal gap and no >2B/30M case appears. Only two full points are near-full; K4096 full R2 is below 99% because of uniform-R granularity, not a global packing maximum. All four own-control increments are covered, while three terminal contrasts exceed both estimate differences. The independent byte audit checks selected footprint, guarded seed/dirty/cleanup, owner/reset/journal and attempted-work retention; persistent selectors remain separate. The persistent 236 cohort and its historical counts are unchanged; no 244-input union is asserted. Full node/actual ratios 7.16462–20.16436 are conservative synthetic evidence, not natural-usability certification or a tariff recommendation.
+
+The [dense BN254 pairing panel](2026-11-03-bn254-pairing-dense.md) separately adds 18 valid finite 0x08 inputs: identity/nonidentity × K2/16/64 × own-zero/single/full, with two users sharing one code account with empty persistent storage. All actuals completed once without failure/retry. Ten node gaps remain (six controls and four singles), maximum 153,329,861 PGU; full node gaps, complete-proposal gaps and >2B/30M cases are zero. Six generated full selectors include only two near-full observations; uniform-R K16/64 packing stays below 99%. All 18 repetition increments are covered; nine signed nonidentity-minus-identity differences are negative with zero estimate differences, which is not a two-sided or isolated-result-cost guarantee. Full node/actual ratios 3.950218–7.523373 remain conservative synthetic evidence. Aggregate operations/dispatch/resources do not establish per-PC8 event charging. Persistent 236, transient 8 and pairing 18 remain separately counted; no new union or normal-usability certification is asserted.
+
+The [unique-input SHA-256 bulk panel](2026-11-04-sha256-bulk.md) separately adds 18 inputs: zero/a5 tails × 64/4096/1048576 bytes × own-zero/single/full, with two distinct code owners/tags and exact per-call unique messages. All actuals completed once without failure/retry; all six full points are near-full. Twelve node gaps remain (six controls and six singles), maximum 153,504,708 PGU; full node gaps, complete-proposal gaps and >2B/30M cases are zero. All 18 repetition increments are covered; nine signed a5-minus-zero differences include four positive and five negative with zero estimate differences, so they are not an isolated SHA cost or component bound. Full node/actual ratios span 1.72635246–1620.73580282. All measured lengths remain under the frozen 20M-PGU PC floor, with a confirmed 5M spawn wrapper; huge small-input overquotes do not certify ordinary usability. The floor/linear boundary and 2MiB point were outside this original panel; the separate follow-up below measures them. Persistent 236, transient 8, pairing 18 and this default SHA-256 18 retain their original separate identities.
+
+The [SHA-256 floor crossover and linear-length panel](2026-11-04-sha256-linear-regime.md) separately adds 18 inputs: zero/a5 tails × 1269664/1269665/2097152 bytes × own-zero/single/full. All actuals completed once without failure/retry. Twelve node gaps remain (six controls and six singles), maximum 134,146,506 PGU; full node gaps, complete-proposal gaps and >2B/30M cases are zero. Six full selectors yield only four near-full observations: uniform 2MiB/R7 reaches 28,789,785 charged gas. All 18 own-R increments and six direct crossover-length increments are covered by both exact scaled estimates. Nine signed a5-minus-zero differences include four positive and five negative with zero estimated differences; they do not establish a component bound. The 33 diagnostics retain equal-R/length/gas/full-signed-envelope/two-owner-empty-support flags totaling 15/27/9/27/33; boundary pairs differ in length, gas and envelope. Full node/actual ratios are 1.17334601631–1.41245084998. The frozen 20M floor versus 42×native-gas branch and separate 5M wrapper explain aggregate quotes without proving per-PC02 event charging. The functional CLI mode shares one producer/native guard and preserves every default 18 request/runtime/gas byte identity. Persistent 236, transient 8, pairing 18, default SHA-256 18 and new linear-regime 18 remain separate, with no new union, price change or production/usability certification.
+
+The [LOG data/topics and receipt panel](2026-11-04-log-receipt-bulk.md) separately adds 30 inputs: LOG1/LOG4 × five length/pattern domains (L0/zero, L64/zero-a5, L262144/zero-a5) × own-zero/single/full, with two distinct authenticated code owners and empty persistent storage. All actuals completed once without failure/retry; all ten full points are near-full. Twenty node gaps remain (ten controls and ten singles), maximum 153,502,123 PGU; full node gaps, complete-proposal gaps and >2B/30M cases are zero. All 30 own-R increments are covered, while six of 12 signed tail contrasts and four of 15 topic contrasts remain uncovered (maximum upward-rounded gaps 6,078/485,453 PGU). The 57 diagnostics retain R/topic/pattern/length/gas/full-signed-envelope/two-owner-empty-support true counts 24/42/45/57/17/42/57, including false R/envelope flags when topic packing differs. Full node/actual ratios span 1.07526566894–80.6074581853; LOG4/L0 overquotes do not certify natural admission usability. Independent bytecode interpretation establishes ordered log intent; native exports status/gas rather than per-log data/topics, with full/minimized execution-result replay and whole-GuestInput stage binding. This does not prove receipt roots, bloom noncollision, per-event charging or actual per-op PGU. Persistent236/transient8/pairing18/defaultSHA18/linearSHA18 and LOG30 remain separate, with no new union, price change or production certification.
+
+The [bulk MCOPY layout panel](2026-11-04-mcopy-bulk.md) separately adds12 inputs: four relative-residue/disjoint/overlap layouts at65536 bytes × own-zero/single/full, with two tagged authenticated owners and empty selected persistent storage. All12 actuals completed once without failure/retry; all four full points are near-full. Eleven node gaps remain (all four controls/four singles and three fulls); maximum full/all-point gaps are58,014,088/153,288,636 PGU, with zero complete-proposal or >2B/30M gaps. All12 own-R increments are covered, while eight of nine signed layout contrasts remain uncovered (maximum upward-rounded exact gap240,445,671 PGU). The21 diagnostics retain R/L/extent/src/dst/gas/full-signed-envelope/two-owner-selected-support equality totals7/21/12/18/12/0/12/21; equal L does not mean identical input bytes or heap alignment. Independent snapshot byte intent checks both overlap directions, preparation, gap/padding and guards; native exports status/gas/routes plus whole-input replay binding, not final memory or actual per-copy PGU. These lower-priority observations do not warrant repricing. The panel does not isolate the source of the absolute node deficits at near-full gas and neither proves nor excludes a startup-only cause. Prior cohorts remain separate and unchanged, without a new union, global bound or production/usability certification.
+
+The [division/remainder density panel](2026-11-04-division-density.md) separately adds 32 inputs: DIV/SDIV/MOD/SMOD × four positive divisor limb classes × own-zero/full, with two tagged authenticated owners and empty selected persistent storage. All actuals completed once; all 16 full points are near-full and covered by literal node estimates. All 16 controls retain node gaps, maximum 153,487,477 PGU; complete-proposal and >2B/30M gaps are zero. Full actual PGU reaches 1,964,849,706; full node/actual ratios span 1.3107023266211473–1.9874724809672075. All 16 own-R increments are covered, while 18 of 24 signed divisor-class contrasts remain uncovered by both exact scaled estimates, maximum upward-rounded deficit 562,795,259 PGU. Eight equality-flag true totals are operation/numerator/divisor/R/targets/gas/envelope/owner-support = 40/40/16/24/24/24/40/40. R0 retains one warmup target per user. The host validation cache does not shorten actual guest execution; native route/status/gas and whole-input binding do not export operands/stack or actual per-op PGU. Quote target-route counts for system/Anchor work are not exported, so DIV/MOD operation aggregates are not user-only. Absolute deficit causes remain unisolated, neither proving nor excluding startup-only cost. Prior seven cohorts remain separate and unchanged; no union, repricing, global bound or production/usability certification follows.
+
+The [unique-input KECCAK bulk panel](2026-11-04-keccak-bulk.md) separately adds 27 inputs: nine length/pattern domains (empty/zero;135/136/137/65536 zero/a5) × own-zero/single/full, with two authenticated tagged owners and empty selected persistent storage. All actuals completed once; all nine full points are near-full and covered by literal node estimates. Eighteen node gaps remain (nine controls/nine singles), maximum 153,504,011 PGU; complete-proposal and >2B/30M gaps are zero. Maximum actual is separately 2,358,803,804 PGU. All 27 own-R increments are covered, while six of 12 tail and six of 12 padding contrasts remain uncovered, maximum upward-rounded exact deficits 2,292/763,493 PGU. The 51 diagnostics retain R/hashed-L/pattern/memory-words/permutation-feature/gas/envelope/two-owner-support true counts 24/39/39/51/45/24/51/51. Empty hashing uses the constant shortcut, while nonempty messages are unique by tag/index; actual execution computes every hash despite a lazy host reference. Native gas/status/routes and whole-input binding do not export per-call messages/digests or establish user-only per-hash PGU. Prior eight cohorts remain separate and unchanged, without repricing, causal/global bounds or usability/proof/production certification.
+
+The [full-width ADDMOD/MULMOD density panel](2026-11-04-modular-density.md) separately adds 16 original inputs: two operations × four moduli (3, 2^64+1, 2^128+1, 2^192+1) × own-zero/full, with exact 257/512-bit intermediates and two tagged authenticated owners. All actuals completed once; all eight fulls are near-full and covered by literal node and complete-proposal quotes. Eight controls retain node deficits, maximum 153,485,120 PGU; complete-proposal and >2B/30M gaps are zero. Maximum actual is 2,375,928,982 PGU, distinct from maximum shortfall; full node/actual ratios span 1.30882240318–2.14617195437. All eight own-R increments are covered, while all 12 signed modulus-minus-limb1 contrasts remain uncovered by both exact scaled estimates, maximum upward-rounded deficit 775,441,834 PGU. The eight equality-flag true counts are operation/a/b/modulus/R/gas/full-signed-envelope/selected-owner-support = 20/20/20/8/12/12/20/20. Operands repeat and R0 still executes a warmup; the host body cache does not shorten actual guest execution. Equal envelopes and empty selected support do not imply equal runtime, GuestInput or account/code/global witness. Absolute margins do not establish a startup-only cause or per-operation cost. Prior nine cohorts retain separate frozen identities; no union, repricing, global bound or production/usability certification follows.
+
+The [honest cold code reads pilot](2026-11-04-cold-code-reads.md) separately adds twelve original inputs: K16/128/512 × BALANCE/EXTCODESIZE × own-zero/selected, one signed user and primary frame, unique 24,576-byte target code and no target execution. All actuals completed once; ten literal node gaps include four selected gaps, with maximum all/selected shortfalls 154,197,096/139,817,596 PGU. Complete-proposal and >2B/30M gaps are zero; maximum actual is 904,063,041 PGU. All inputs are unsaturated, at most 1,565,190 charged gas; K512 is a fixture cap, not a protocol bound or 30M maximum. Honest minimal witnesses include target bodies only for selected SIZE. The retained node Shadow collector already charges those materialized code bytes through transaction-finalization reconciliation, correcting the opcode-hook-only missing-code hypothesis; host exact completion does not backfill node selectors. All six own increments are covered, while two zero-mode SIZE−BALANCE contrasts retain 1,000/423-PGU deficits. Eight equality counts are prestate/visits/code-bytes/pattern/operation/gas/envelope/primary-empty-support = 12/6/12/12/6/6/12/12; support excludes target/account/code/global work. Prior ten cohorts remain separate. No repricing, causal/per-byte/global, live admission, production-build or usability claim follows.
+
+The [fixed-operand EXP density panel](2026-11-04-exp-density.md) separately adds ten originals: five exponent classes × own-zero/full with a fixed full-width odd base, two signed users and two tagged authenticated owners with empty selected persistent storage. All actuals completed once; all five fulls are near-full, with four full node gaps. Nine absolute node deficits remain, maximum all/full shortfalls 153,488,803/94,588,500 PGU; complete-proposal and >2B/30M gaps are zero. Maximum actual is separately 817,856,124 PGU. All five own increments are covered, while two of eight signed class contrasts remain uncovered, maximum ceiling 11,675,293 PGU, including a negative actual delta with a larger quote decrease. Thirteen diagnostics retain base/exponent/byte-length/R/targets/gas/envelope/two-owner-support true counts 13/5/7/5/5/2/7/13. Sparse24 full exceeds dense24 by 61,179,565 PGU despite equal exponent bit length, EVM gas and quotes. Retained ELF bytewise exponent-zero comparisons and aggregate opcode counts support the ranking explanation; source multiplication count alone does not rank actual PGU. This is whole-input evidence without per-bit/op causal allocation. Prior eleven cohorts remain separate; empty selected support excludes account/code/global work, and no repricing, global packing/bound, proof, production parity or usability certification follows.
+
+The [dense in-bounds word-memory panel](2026-11-04-memory-word-density.md) separately adds twelve inputs: MSTORE offsets 0/1 at 256B/1MiB plus MLOAD offset 1 at both arenas, each own-zero/full, with two tagged owners and empty selected persistent storage. All twelve actuals completed once; all six full points are near-full. Six node deficits remain, all controls, maximum 153,488,487 PGU; full-node, complete-proposal and >2B/30M deficits are zero. Full node/actual ratios span 1.01350330472–1.17464942804. All six own increments are covered, while two of four residue, three of six arena and two of four operation contrasts remain uncovered (maximum upward-rounded gaps 163,004,796/53,920,911/20,031 PGU), retaining signed negative differences. The twenty diagnostics retain eight equality-flag totals 16/14/16/9/7/4/10/20. Source-selected alignment classes and decoded alternating A/B write/read guards do not observe actual per-occurrence pointers/branches or isolate per-word PGU; runtime arena size is not encoded input payload. Existing repeat prices already include ordinary dispatch, with growth additional. Prior twelve cohorts remain separate without a union, repricing, global bound or proof/production/usability certification.
+
+## Evidence and open interactions
+
+“Route” below means a named accounting surface documented in the linked research. It does not mean every operand, boundary or interaction is accurately priced. Older reports retain their original models and program identities; they are not automatically re-certified by a newer panel.
+
+| Family | Existing accounting and finite evidence | Still open or outside that evidence |
+| --- | --- | --- |
+| Opcode, stack, arithmetic and ordinary dispatch | [Arithmetic/stack density](2026-11-01-arithmetic-density.md) identifies the ordinary-dispatch reserve and prospective finite validation; [gas-budget composition](2026-11-02-gas-budget-composition.md) samples dense stack/dispatch patterns with multiple users. The separate [division/remainder density panel](2026-11-04-division-density.md) adds four operations/four positive divisor limb classes, signed arithmetic checks, exact32 actuals and40 signed contrasts;16 own-R increments are covered while18 class contrasts remain uncovered. The separate [full-width modular panel](2026-11-04-modular-density.md) adds ADDMOD/MULMOD overflow intent across four modulus classes, exact16 actuals and20 signed contrasts; eight own-R increments are covered while all12 modulus contrasts remain uncovered. | Arbitrary operand/stack/control-flow mixtures, transaction packing and interactions with state, memory and precompiles. Covered increments do not erase absolute node startup gaps. |
+| EXP fixed operands, exponent density and compiled zero checks | [EXP density](2026-11-04-exp-density.md) samples five fixed exponents and one odd full-width base, same-bit-length sparse/dense24 and the L24→25 curve boundary, ten actuals and thirteen signed contrasts. Five own increments are covered; four full absolute node gaps and two class contrast deficits remain. Retained byte-scan and whole-input counters explain the insufficiency of source h+popcount ranking. | Other bases/exponents, compiled value/carry/cache paths, heterogeneous packing and interactions; no isolated actual per-EXP/bit PGU, worst operand, causal/global bound or production/usability certification. |
+| Memory, return data and copying | [Return-copy boundaries](2026-10-29-return-copy-boundaries.md) measures preallocated memory and return copying under the existing length/memory/frame routes. [Bulk MCOPY layouts](2026-11-04-mcopy-bulk.md) adds finite65536-byte disjoint relative residues and both overlap directions, own-zero/single/near-full counts, snapshot-byte intent and21 signed whole-proposal diagnostics. Three full absolute node gaps and eight layout increment deficits remain. The separate [word-memory panel](2026-11-04-memory-word-density.md) adds MSTORE offset 0/1 and MLOAD offset 1 at 256B/1MiB, guarded alternating A/B writes and stateful decoded-byte transitions, twelve actuals and twenty signed diagnostics. Fulls and own increments are covered; six control gaps and seven residue/arena/operation increment deficits remain. | Other copy paths, lengths/residues and actual heap placement, allocation/growth combinations, nesting, rollback, cache/order and heterogeneous payloads; no native final-memory export, isolated actual per-copy PGU or universal memory bound follows. |
+| KECCAK message length, padding and unique-input repetition | [KECCAK bulk](2026-11-04-keccak-bulk.md) adds 27 inputs across empty/135/136/137/65536-byte domains and zero/a5 tails; all nine fulls are near-full. Own-R increments are covered; six tail and six padding deficits remain. Empty shortcut and nonempty tagged/indexed messages retain distinct semantics. | Arbitrary lengths/messages/cache effects, failures, nested/state interactions and heterogeneous packing/order; no native per-hash exports, causal component bound or production/usability certification. |
+| Precompile values and lengths | [MODEXP](2026-10-30-modexp-value-boundaries.md), [BLS G1 MSM](2026-10-30-bls-msm-value-boundaries.md) and [ECMUL](2026-10-30-ecmul-capacity-pilot.md) sample selected values, lengths and repeated-call gas domains against existing routes. [Dense BN254 pairing](2026-11-03-bn254-pairing-dense.md) adds finite canonical nonzero points at K2/16/64, successful boolean results 0/1 and bounded identical-input repetition with own-zero/single controls. [Unique-input SHA-256 bulk](2026-11-04-sha256-bulk.md) adds exact unique messages at 64/4096/1MiB, zero/a5 tails and own-zero/single/near-full points under the PC floor. The separate [SHA-256 linear-regime panel](2026-11-04-sha256-linear-regime.md) adds 1269664/1269665/2MiB lengths across the floor crossover and structural branch, with six direct length-boundary contrasts, ceil-word memory and unaligned output checks. | The full operand space, malformed/failure paths, arbitrary unique-input schedules and cryptographic cache effects, other SHA-256 length/padding boundaries and larger lengths, other precompiles, deeper compositions and value/length/state/order combinations. Pairing uniform-R fullness is not global packing; conservative synthetic quotes do not certify natural admission usability. A named precompile tariff is not exhaustive operand coverage. |
+| LOG data/topics, journaled logs and receipt processing | [LOG data/topics and receipt bulk](2026-11-04-log-receipt-bulk.md) samples successful LOG1/LOG4 at empty/64/256KiB data, zero/a5 tails and own-zero/single/near-full counts with exact ordered two-owner byte intent, gas/counters and stage binding. All 30 own-R increments are covered; six tail and four topic increment deficits remain. Native status/gas and full/minimized replay are distinguished from direct per-log exports. | LOG0/2/3, arbitrary lengths/data/topic schedules, reverted logs and nested rollback, heterogeneous packing/order, cache and receipt/bloom/trie interactions. No independent receipt-root reconstruction, bloom noncollision or per-event tariff/actual-cost proof; huge LOG4/L0 overquotes do not establish ordinary usability. |
+| Transaction ingress, access lists and EIP-7702 | [Access-list preexecution](2026-10-30-access-list-preexecution.md) and [authorization validation](2026-10-30-authorization-validation.md) record source-derived missing raw-entry work, additive corrections, successor re-quotation and bounded historical sensitivity. | Arbitrary duplicate/distribution/signature patterns and heterogeneous ingress-plus-execution combinations. Old historical actuals do not certify the current experimental ELF. |
+| CALL, DELEGATECALL, CREATE and initcode | [Delegatecall repetition](2026-10-30-delegatecall-repetition.md), [top-level create](2026-10-30-top-level-create.md), [initcode preparation](2026-10-30-initcode-preparation.md) and [code preparation](2026-10-30-code-preparation-pricing.md) cover selected frame and preparation routes. [Caught nested CALLs](2026-11-03-storage-caught-nesting.md) samples separate-owner depths 1/4; [shared-code DELEGATECALL](2026-11-03-storage-delegated-nesting.md) adds four top-storage contexts through one leaf code account. [Caller prewarming and ancestor rollback](2026-11-03-storage-warm-rollback.md) samples selected F4 depth2/4 graphs. | General call graphs, broader warmth/rollback histories, create/state/code interactions and exceptional exits remain open. |
+| Code analysis and account/code loading | [Unreachable analysis tails](2026-11-02-code-analysis-tail.md) and [multi-account loading](2026-11-02-multiaccount-code-loading.md) sample selected tail contents, code sharing, cold accounts and cache reuse. The separate [cold code reads pilot](2026-11-04-cold-code-reads.md) adds honest minimized BALANCE/SIZE witnesses at K16/128/512 without target execution, and binds materialized-code observation at transaction finalization in retained Shadow source. | Larger and different code footprints, arbitrary content, storage interactions, rollback and cross-family ordering. The fixture account cap is not a protocol bound. |
+| Storage reads, insertion, deletion and committed roots | [Access growth](2026-11-01-storage-access-growth.md), [mutation](2026-11-02-storage-mutation.md), [fanout](2026-11-02-storage-fanout.md) and [root diversity](2026-11-03-storage-root-diversity.md) sample cold/present/absent entries, multiple roots and selected committed mutations. Node uses unique-resource surfaces; complete proposals also have MPT selectors. | Deliberately skewed hashed paths/depth, different split/merge topology and mutation mixtures. Distinct roots or disjoint raw domains alone do not exhaust trie topology. |
+| Trie, cache and key-lookup distributions | [Root diversity](2026-11-03-storage-root-diversity.md), [root journal](2026-11-03-storage-root-journal.md), [few long root REVERT](2026-11-03-storage-long-revert.md) and [many-key warm dirty](2026-11-03-storage-dirty-keys.md) retain authenticated selected support and quote selectors for their sequential raw-key domains. [High-limb storage keys](2026-11-03-storage-key-shift.md) adds shifts 64/128/192 under the same warm seed/pair/cleanup logic, with 64 whole-proposal contrasts and explicit per-address authenticated storage-support equality markers. These sample selected root/support and raw-key distributions, not arbitrary internal distributions. | Deliberately skewed trie paths/depth and internal lookup/hash-table key distributions, cache behavior and their mutation/rollback interactions. Further source review and bounded tests must establish relevance; these inputs do not establish exploitable hash collisions. |
+| Prewarmed dirty journaling, hashing and caught rollback | [Storage/hash composition](2026-11-01-storage-hash-composition.md) and [near-30M composition](2026-11-02-gas-budget-composition.md) sample repeated same-slot writes, restore, hashing and caught child REVERT. [Many-key warm dirty](2026-11-03-storage-dirty-keys.md) adds root STOP/REVERT with seed-all, repeated dirty pairs and cleanup-all over four footprints. [Caught nested CALLs](2026-11-03-storage-caught-nesting.md) samples K16/1024 through separate-owner depths 1/4 with successful ancestors, explicit child refunds and retained attempted counters. [Shared-code DELEGATECALL](2026-11-03-storage-delegated-nesting.md) adds common-map ownership, per-address support and rejected code-keyed resource collapse. [Caller prewarming and ancestor rollback](2026-11-03-storage-warm-rollback.md) adds optional TOP reads, mandatory postchecks and per-frame warmth/refund/state checkpoints at F4 depth2/4, retaining attempted work. | General call graphs/exceptional exits, broader cold/warm and ancestor-rollback histories, and key/cache/hash distributions. Selected CALL/F4 depths do not close arbitrary nesting. |
+| Many-key restore and top-level root rollback across heterogeneous roots | [Root journal](2026-11-03-storage-root-journal.md) samples own-N0/small/full modes at 8/64 accounts. [Few long root REVERT](2026-11-03-storage-long-revert.md) adds eight own-N0/full pairs at 2/4 users=accounts, one visit each, and 8192/16384 aggregate entries; all eight full points are covered with only 10M/20M existing terminal allowance. | [Many-key warm dirty](2026-11-03-storage-dirty-keys.md) separately samples higher per-key warm-toggle counts at root STOP/REVERT. [Caught nested CALLs](2026-11-03-storage-caught-nesting.md) separately samples four successful users and separate leaf owners at depths 1/4; [shared-code DELEGATECALL](2026-11-03-storage-delegated-nesting.md) adds common-map top-owner storage at those depths. [Caller prewarming and ancestor rollback](2026-11-03-storage-warm-rollback.md) samples four common-map TOP owners at F4 depth2/4. Broader rollback/prewarming graphs, different key distributions and heterogeneous packing remain open. Full mode/packing contrasts change N, gas, envelopes and support; they do not isolate terminal or storage costs. The 64-user journal's repeated ranges and STOP phase advancement retain their own interpretation. |
+| Transient footprint, journaling and transaction reset | [Transient storage](2026-11-03-transient-storage.md) samples K16/4096, four reset transactions at one owner, guarded seed/dirty/cleanup, root STOP/REVERT and retained attempted work. Generic persistent size metadata remains 0; explicit transient peak is K+1. Independent 100/99-gas TSTORE and full+1 checks retain finite gas/rollback limits. | General nested transient ownership/rollback and exceptional call graphs, internal key/cache/hash distributions, cross-family composition and order. Empty selected persistent-storage support does not remove authenticated account/code/global witness work. Production parity and natural-transaction usability remain separate. |
+| Cross-family composition and transaction order | [Order/cold-frame](2026-11-02-order-cold-frame.md) supplies selected shared-account order and repeated cold-frame cases; [gas-budget composition](2026-11-02-gas-budget-composition.md) mixes selected instructions within a runtime. | Arbitrary heterogeneous blocks, interactions across the preceding families, and order-dependent sharing/cache/rollback behavior. Safe-looking family labels cannot be summed into a global guarantee. |
+| Exact production program and ordinary historical usability | Linked reports bind their own model, SDK, ELF, input and quote identities and retain limited historical sensitivity where measured. | A separate promotion lane must bind the exact production ELF/SDK and representative natural historical proposals, including admission/capacity loss from overquotes. This controlled SDK6.3/ELFb76 panel provides no current deployment-version assertion or production certification. |
+
+## How to prioritize the remaining work
+
+The next interaction priorities include broader many-key nesting, warmth histories and ancestor rollback beyond the selected CALL/shared-code DELEGATECALL graphs, broader trie/cache/key-lookup distributions including deliberate hash-path skew/depth with mutation topology, broader nested transient ownership/rollback and heterogeneous workload composition/order. These are priorities, not an exhaustive list of the cases remaining.
+
+Continue recording literal whole-proposal actual PGU, literal node block estimates and their sum, and complete-proposal estimates separately, with own controls and every deficit retained. A positive actual-minus-node gap >2B PGU at <=30M charged block gas has the frozen high priority; smaller gaps may remain explicit TODOs. Instrumentation losing attempted work on REVERT would be an accounting-correctness finding distinct from a low tariff, so exposed counter retention must be checked independently. Aggregate or unique counters cannot prove per-opcode occurrence charging.
+
+Ordinary-transaction usability remains a constraint: large conservative quotes can reject useful work even when they cover the measured actual. No new node admission limit, price fit or production gate is selected by this inventory. Exact-program promotion and natural historical evaluation remain separate from whether the next synthetic panel finds a severe gap.
+
+## Snapshot provenance
+
+The prepanel snapshot is bound to source `df6cfd603c61242a20b11c9577b40394dc783337` and SHA256 `bfbb97285f97f841d923761afbcfbd521304f13adc47b01c4b026f8e0b3999a7`. The four-panel supplemental cohort summary is SHA256 `8a33d90c27df8f8fd9953c38b74ef88087aa01359b0ecb5d1f6863f0e498fb02`. The root-journal panel's source and retained evidence identities are listed in [its research record](2026-11-03-storage-root-journal.md#tools-qualification-and-retained-evidence). The five-panel summary is SHA256 `f224ff5fbc6380cf39185ba4e4bb449e52f0d81b5677d36daeb02335bdaa0508`. The long-root-REVERT increment and its separate five-panel summary are bound in [its research record](2026-11-03-storage-long-revert.md#tools-qualification-and-retained-evidence). Prior sources and reused references retain their own identities; no old cohort is relabelled as new production validation.
+
+The many-key warm-dirty increment binds its unchanged runtime identities, original quotes, raw actual/28-diagnostic audit and recovery receipts in [its research record](2026-11-03-storage-dirty-keys.md#tools-qualification-and-retained-evidence). Its six-panel storage summary is SHA256 `6e63e389a51e57135490c8845bd626f4a3d02499f5363024610a9c5ad9557453`. Its seven near-full points must not be relabelled as eight near-full inputs.
+
+The high-limb increment binds its unchanged runtime identities, original quotes, eight old references, raw24/diagnostic64 audit, seven-panel cohort and recovery receipts in [its research record](2026-11-03-storage-key-shift.md#tools-qualification-and-retained-evidence). Equal selected-support counts are not equality: the diagnostics compare canonical per-address storage-node hash sets/digests. Raw high-limb schedules do not close deliberate hashed-path skew, cache behavior or many-key nested/caught rollback.
+
+The caught-nesting increment binds its reviewed metadata-only source transition, unchanged requests/runtime artifacts, 16 original native/quote gates, raw16/diagnostic32 audit, eight old direct references and recovery receipts in [its research record](2026-11-03-storage-caught-nesting.md#tools-qualification-and-retained-evidence). Its eight-panel storage summary is SHA256 `79d5cdf73c508fda6e4cdf20424df23c1221fe194b812e8f4123080690d95b2d`. Exactly four leaf owners define storage-support equality; empty wrappers still require authenticated account/code/global support. This closes only the selected separate-owner CALL interaction, with 84 generated full points distinct from 78 near-full observations.
+
+The delegated-nesting increment binds one final producer head, unchanged default CALL identities, all16 native/quote gates, 40 whole-proposal diagnostics, its nine-panel cohort and retained recovery receipts in [its research record](2026-11-03-storage-delegated-nesting.md#tools-qualification-and-retained-evidence). Its nine-panel storage summary is SHA256 `a03fe6fcd9fe6c0af8fd99230d21be7b9061d607eb6166cef58c79bc43bf45f7`. Identical raw maps intentionally strengthen the four-owner context check; physical node deduplication does not change logical ownership. Old CALL artifacts keep their original source identities and remain references. Full selectors remain distinct from near-full observations.
+
+The caller-prewarmed/ancestor-rollback increment binds the final producer source, all 32 original native/quote gates and 128 signatures, checkpoint/counter checks, raw 32/diagnostic 64 audit, ten-panel union and host 128 closure in [its research record](2026-11-03-storage-warm-rollback.md#tools-qualification-and-retained-evidence). The ten-panel storage summary is SHA256 `99668c6585bbd517f665c030ac3b830874ec4bb5d9c828ebb759a4859c0db8ff`. All 64 support flags compare four owner-qualified selected storage domains, excluding account/code/global support. Paired exit gas and envelopes do not make input/code bytes identical or isolate opcode actual costs. The old204 snapshot remains immutable, and full selectors remain distinct from near-full observations. Exact production parity and natural-history usability require their separate lane.
+
+The transient increment binds final reviewed producer source, seven fresh native calls plus one authenticated retained original positive smoke, eight fresh original quotes, 32 signatures, semantic/counter gates, raw8/diagnostic8 audit, host32 closure and recovery receipts in [its research record](2026-11-03-transient-storage.md#qualification-and-evidence-boundary). Original smoke source/command identities remain original; missing per-call timing was not backfilled. Selected persistent-storage support compares one authenticated owner mapped to an empty set, not an empty owner domain. The ten-panel persistent 236 summary remains SHA256 `99668c6585bbd517f665c030ac3b830874ec4bb5d9c828ebb759a4859c0db8ff`; transient 8 is separate. Coverage upgrades only the selected footprint/journal/reset cases.
+
+The dense-pairing increment binds final source, all 18 canonical inputs/36 signatures, 16 fresh native invocations plus two explicitly bridged original positives, 18 fresh original quotes, raw 18-row/27-diagnostic checks, 72-name host closure and verified recovery archive in [its research record](2026-11-03-bn254-pairing-dense.md#qualification-and-retained-evidence). Selected persistent support is one authenticated owner with an empty set, excluding account/code/global support. Original 276-file and final 296-file manifests retain their separate identities. The persistent 236-input summary and transient 8-input analysis remain unchanged historical contexts. Coverage upgrades only the selected valid finite 0x08 operands and bounded repetition, without per-event pricing proof, arbitrary operand/cache/failure bounds or production parity.
+
+The SHA-256 increment binds final source, 18 canonical inputs/36 signatures, 16 fresh native calls plus two explicitly bridged original positives, 18 fresh original quotes, raw18/diagnostic27 audit, 72-name host closure and verified private recovery archive in [its research record](2026-11-04-sha256-bulk.md#qualification-and-retained-evidence). Two authenticated owners each map to empty selected storage support; equal length/envelope does not establish equal message/code bytes or account/global witness work. Original 353-file qualification and final closure manifests remain distinct. Prior persistent236/transient8/pairing18 identities are unchanged, without a new union. Coverage upgrades only the selected SHA-256 schedules and lengths, without per-event pricing proof, linear-regime measurements within that original panel, global cache/operand bounds or production parity.
+
+The separate SHA-256 linear-regime increment binds final reviewed source, default 18 byte compatibility, 18 new inputs/36 signatures, 15 fresh native invocations plus three explicitly bridged original positive smokes, 18 fresh original quotes, raw18/diagnostic33 audit, fresh host72 closure, source166 closure and the verified private recovery archive in [its research record](2026-11-04-sha256-linear-regime.md#qualification-and-retained-evidence). Original 378-file qualification and final 383-file manifests remain distinct. Every diagnostic retains exact signed rational deltas and full equality flags; identical signed user transactions in the original 27 pairs do not make code or complete GuestInput identical. Prior persistent236/transient8/pairing18/defaultSHA18 contexts remain unchanged and separate. Coverage upgrades only these selected successful crossover/linear workloads; it does not close SHA padding boundaries, arbitrary messages/cache/failures, global packing, natural admission usability or production parity.
+
+The LOG increment binds final reviewed source, 30 canonical inputs/60 signatures, 28 fresh native calls plus two explicitly bridged original positive smokes, 30 fresh original quotes, independent ordered byte intent, raw30/diagnostic57 audit, fresh host120 receipt, source169 closure and a verified private recovery archive in [its research record](2026-11-04-log-receipt-bulk.md#qualification-and-retained-evidence). Original543 and final548 artifact manifests remain distinct. Three copied controller summary counts were corrected from six to ten with original/corrected snapshots and an independently checked receipt; all measurements and other analysis fields are unchanged. Native exports no per-log data/topics; stage binding does not establish an independently reconstructed receipt root, bloom noncollision, per-event charge or actual per-op PGU. Prior cohorts remain unchanged and separate. Coverage upgrades only these finite successful LOG1/LOG4 workloads, leaving six tail/four topic increment deficits and ordinary usability/production parity open.
+
+The MCOPY increment binds final reviewed source, author native3 with excluded selfcopy mutant,10 fresh native plus two exact original positive bridges,12 fresh quotes/24 signatures, independent raw12/diagnostic21, source172, host48 closure and verified private recovery archive in [its research record](2026-11-04-mcopy-bulk.md#qualification-and-retained-evidence). Original292 and final298 manifests remain distinct. Private naming/import/historical-manifest and omitted-source-receipt corrections are retained without measurement reruns or source changes. Prior persistent236/transient8/pairing18/defaultSHA18/linearSHA18/LOG30 contexts remain separate; coverage upgrades only these selected successful MCOPY layouts, without repricing or proof/production/usability certification.
+
+The division/remainder increment binds final reviewed producer source,30 fresh native plus two exact original positive bridges,32 fresh quotes/64 signatures, independent raw32/exact-scaled40/eight flags, source175, host128 and streamed verified private archive in [its research record](2026-11-04-division-density.md#qualification-and-retained-evidence). Original590 and final593 manifests remain distinct. Full+1 fails the30M charged budget for all16 classes; uniform R does not establish global packing. Empty two-owner storage support excludes account/code/global witness work. Prior seven cohorts remain separate without a new union; absolute16 control gaps and18 class increment deficits remain explicit, with no repricing or causal/per-op/proof/production/usability claim.
+
+The KECCAK increment binds final reviewed source178, author native3 with excluded prefix mutant, 25 fresh native plus two exact original positive bridges, 27 original quotes/54 signatures, raw27/exact-scaled51/eight flags, nine both-owner full+1 capacities and verified private recovery archive in [its research record](2026-11-04-keccak-bulk.md#qualification-and-retained-evidence). Original577 and final584 manifests retain separate identities. A wrong-namespace sandbox absence receipt is preserved and excluded as host authority; corrected device27/real-host namespace evidence independently checks all108 runtime names absent without deletion or measurement rerun. Native status/gas/routes do not export per-call messages/digests. Prior eight cohorts remain separate, with absolute18 control/single gaps and12 incremental deficits retained and no repricing, per-hash/global/proof/production/usability claim.
+
+The modular16 increment binds reviewed source,14 fresh native plus two exact original positive bridges,16 fresh quotes/32 signatures, independent raw16/exact-scaled20/eight flags, current-and-committed source181, real-host64 and streamed private recovery archive in [its research record](2026-11-04-modular-density.md#frozen-identities-and-retained-evidence). Original430 remains unchanged and final436 adds stronger closure. Full+1 fails the30M charged budget in all eight domains; maximal uniform R is not global packing. The preliminary sandbox-private absence is explicitly superseded by device-matched real-host lstat evidence. Native acceptance is not an operand/stack export; the accepted same-result wrong-modulus mutant remains excluded. Eight absolute control deficits and12 modulus increment deficits remain explicit with no price/model/guest/SDK/ELF/pin change.
+
+The cold-code-read increment binds reviewed source184, author native3 with an excluded same-length wrong-tail mutant, ten fresh native plus two exact original positive bridges, twelve original quotes/signatures, independent raw12/exact-scaled12/eight flags, device-matched real-host48 closure and a streamed verified private recovery archive in [its research record](2026-11-04-cold-code-reads.md#frozen-identities-and-retained-evidence). Original369 and final384 manifests retain separate identities; immutable supplements correct private prelaunch/index bookkeeping without external retries. All six own increments are covered, but ten absolute node deficits and two zero-mode contrast deficits remain visible. Source attribution closes only retained Shadow observation of materialized target code; unsaturated selected footprints do not close arbitrary code loading, production admission, price sufficiency or usability.
+
+The EXP increment binds reviewed source187, source native3 with excluded same-gas/same-result exponent-intent mutant, eight fresh native plus two exact original positive bridges, ten fresh original quotes/twenty signatures, raw10/exact-scaled13/eight flags, first-authoritative real-host40 closure and streamed verified private recovery archive in [its research record](2026-11-04-exp-density.md#qualification-and-frozen-evidence). Original316 and final329 manifests remain distinct; all original quotes were explicitly indexed and member-bound before actual freeze. A private cold-context alias adapter preserves originals without external retries. The source/ELF explanation is separately hash-bound and does not convert aggregate instruction differences into PGU attribution. Full+1 fails the charged budget in all five classes, establishing only maximal uniform64-batch packing. Prior eleven cohorts remain unchanged and separate; all nine absolute node deficits and two signed class deficits remain visible.
+
+The word-memory increment binds reviewed source 190, author native3 with excluded internally consistent A-value mutant, ten fresh native plus two exact original positive bridges, twelve original quotes/24 signatures, independent raw12/exact-scaled20/eight flags and first-authoritative device-matched real-host 48 closure in [its research record](2026-11-04-memory-word-density.md#qualification-and-frozen-evidence). Original 354 qualification members remain immutable; final 364 closure and the streamed hash-verified private recovery archive preserve their separate identities. All current-cohort qualification and closure commands passed on their first attempts. All original quote members are explicitly indexed before actual freeze. Stateful byte-cache checks prove complete stack/read-write footprint transitions and verify entry memory while actual EVM/SP1 executes every target. Empty selected two-owner storage support excludes account/code/global witness equality. Broader memory/allocator/nesting/mixed workloads remain open; six absolute control deficits and seven signed incremental deficits remain visible.
+
+
+## Empty-storage warm-read catalog baseline
+
+The [warm-read catalog panel](2026-11-04-warm-read-catalogs.md) separately adds four canonical inputs: ordered/mixed deterministic 512-key catalogs × own-zero/full, one user visiting one authenticated empty-storage primary. All four actuals completed once. Both controls retain absolute node deficits (148,762,567/148,810,164 PGU); full-node, complete-proposal and >2B/30M gaps are zero. Both own-zero→full increments are covered, while both mixed-minus-ordered increments remain uncovered by node and complete differences (47,597/47,542 PGU). Full R2028 charges only 15,165,406 block gas: full+1 fails the single-user 15M fixture envelope, not the 30M block budget. Neither full point is near-full, and this is not a 30M capacity certificate.
+
+Reviewed source193, source native3 with excluded accepted order mutant, two fresh native plus two exact original positive bridges, four original quotes/signatures, raw4/exact4/eight flags and device-matched real-host16 closure bind this finite baseline. Original214 and final225 manifests and the verified private recovery archive retain separate identities. Private field-mapping/no-op-negative-adapter failures and a later filename-readback correction remain explicit without measurement reruns. Empty selected primary storage support excludes logical-key/account/code/global equality. Equal code/calldata shape does not establish equal complete input, numeric seed or map layout. At this historical baseline, deliberate map-distribution investigation was OPEN and unimplemented; the separate measured hash-probe follow-up below now supplies a concentrated development case. Collision/seed/per-lookup/causal/global bounds and startup-only conclusions remain unestablished. The thirteen prior contexts, including wordmemory12, remain separate and unchanged, without a new union or price/production/proof/usability claim.
+
+## Optional register-observer tool conformance
+
+The [historical register-observer record](2026-11-04-sp1-register-observer.md) qualifies the host-only optional selected-PC tool on current SDK6.3/b76: initial three diagnostics plus one separately justified EXP two-chunk boundary check passed once, with zero retries and zero new pricing samples. Canonical raw gas/PGU/public values/options/input/ELF matched retained originals; the default row exports no chunk count. Complete replay remains distinct from capped sample retention, and raw boundary snapshots are unexported. Initial59/additional24 manifests, device-matched real-host16-name absence and a streamed verified private recovery archive close the evidence; warm214/225, EXP and prior cohorts remain unchanged.
+
+The observed 512-key/seed/hash association is conditional data for future separately declared distribution tests. It does not establish direct owner identity, unseen warm lower128 bits, whole occupancy, deliberate collisions, per-lookup or causal PGU pricing, a global bound or production parity. This observer-conformance step adds no map-distribution pricing cohort, price/model/guest update or new union; the separately qualified follow-up below supplies new pricing evidence.
+
+
+## Concentrated hash-probe development case
+
+The [hash-probe catalog follow-up](2026-11-04-hash-probe-catalog.md) separately qualifies three canonical inputs and measures exactly two once: own-zero and probeR512. All512 own cold-key/full-hash observations in each measured input realize the chosen initial bucket plus seven-bit tag (17 selected bits, not full-hash collisions), with first-warm mask1023. Probe actual3,378,306,245PGU at4,894,506 charged block gas exceeds literal node159,815,076 by3,218,491,169 and complete proposal314,887,979 by3,063,418,266. This meets the >2B/<=30M priority rule and establishes serious underpricing in the historical b76/SDK6.3 local profile. The model is not closed; missing block-observable accounting and a separately validated correction take priority over the qualified, unmeasured fullR2028. No price/model change is made here.
+
+Signed probe-minus-own-zero actual/node/proposal increments are+3,183,111,547/+138,982,569/+138,982,569PGU, distinct from absolute gaps. Equal signed transactions/calldata/primary EMPTY storage do not establish equal runtime/code/genesis/final root/complete input, so these are aggregate conditional diagnostics rather than causal per-lookup costs. Canonical GasVM completes4,279,435,409 probe instructions while the observer honestly stops at a400M instruction-limit prefix with zero completed chunks. Reviewed source197, one export/native3/original quote3, immutable qualification167/final195 manifests and device-matched original-host eight-name closure retain the evidence. The V1 R512 seed-guard oracle failure and additive V2 PUSH3 memory64 correction remain explicit, with no producer/native/quote/actual retries. This development probe was not used for fitting and is not an unopened holdout, full-gas bound, IID sample, proof, production/GPU parity or practical network claim. All fourteen previous pricing contexts remain separate and unchanged; no new union is asserted.
+
+## Model5f follow-ups on 2026-11-05
+
+The preceding concentrated-probe section is a historical pre-correction snapshot. The current
+[storage-journal record](2026-11-05-storage-journal-prefix.md) explains the independently priced
+comparison reserve and384 tariff in model5f, including retained conservative controls and
+historical native repricing. The separate [account-journal case](2026-11-05-account-journal.md)
+was deferred as a crafted-input TODO at that checkpoint. The later
+[Account-density correction](2026-11-07-account-journal-density.md) genuinely reprices and closes
+that specific R1400 sample; L1 frequency and unmeasured Account paths remain open.
+
+The [pure capacity panel](2026-11-05-storage-capacity-boundaries.md) adds eight selected new inputs
+at K448/449/896/897 × R0/R512. Own-input first-warm masks511/1023/1023/2047 are observed. R512
+node quotes and all eight complete-proposal quotes cover actuals; four literal R0 node gaps,
+maximum119,862,744PGU, remain visible. There is no pricing change or full30M/global bound.
+
+The [rollback-capacity panel](2026-11-05-storage-rollback-capacity.md) separately adds eight F2
+leaf-REVERT/reaccess R0 inputs, with bodyK447/448/895/896 plus phase0 and caller prewarm on/off.
+Node/full estimates cover all212.06M–268.40M actuals; model5f remains unchanged. Its canonical
+measurements and independent byte/state/quote checks pass, while all strict register phase profiles
+remain incomplete: standalone drain markers were unhit, and prewarm lacks a matching early
+same-map seed. Those diagnostic gaps are retained without rerunning or discarding valid PGU.
+These finite cohorts do not create a global coverage percentage, a new historical union or a
+current-production SDK certificate. Full packing and other compositions remain follow-ups.
+
+A separate [repricing of32 retained synthetic warm-rollback inputs](2026-11-05-storage-warm-repricing.md)
+adds32 current5f quotes and zero new actuals. Original1998-estimator reports retain their identity;
+ELF/SDK/options match the historical program context. All16 full-R cases at29.782M–29.998M gas
+are node-covered, all32 complete-proposal estimates cover actuals, and eight K16/R0 node gaps
+remain, maximum127,894,499PGU. Changes from prior new-model snapshotc893 are exactly the journal
+reserve; c893 is not Unzen. These are previously measured fixtures, not32 additional inputs or
+an onchain historical-block survey, and no global union or workload bound follows.
+
+
+The [repricing of eight retained synthetic transient inputs](2026-11-05-transient-historical-repricing.md)
+adds eight current1390/model5f quotes and zero new native constructor/SP1 executions. Original
+1998/null b76/SDK6.3 actuals remain unchanged. All four full-R node quotes and all eight
+completed-proposal quotes cover actuals; two K16/R0 node gaps remain, maximum144,238,337PGU,
+with no >2B/<=30M gap in these observations. All real journal terms are54 work units, so
+both node and full estimates increase exactly20,736PGU from prior new-model snapshotc893;
+every non-journal quote object is unchanged. c893 is not Unzen. These are the original eight
+opened store-heavy fixtures, not new actuals, TLOAD-dominant coverage or a global30M bound.
+The [repricing Atlas release](https://github.com/taikoxyz/raiko2-atlas/releases/tag/fixture-unzen-transient-reprice-v1)
+retains the original bytes and both quote snapshots; exact evidence hashes and independent
+verification are recorded in the linked report.
+
+The [ordinary transient-read catalogs](2026-11-05-transient-read-catalogs.md) add three fresh one-user inputs with K512 direct TSTORE seeds and R0/R64/R512 repeated TLOAD. Actual PGU is165,384,479/168,650,021/191,508,491; node PGU35,425,248/71,148,121/321,208,226 and complete-proposal PGU190,367,079/226,089,951/476,150,057. R512 node and all three proposal quotes cover actual; two literal node gaps remain, maximum129,959,231 PGU, with no >2B/30M case. R0 is calldata-floor dominated. Three own-input inner-map profiles qualify, with capped register samples and QUERY-only dynamic hash capture; 512 catalog hashes are independently computed, not512 observed placements. All three native/quote/SP1 executions and12-name host closures are independently verified. No price change, production parity, full30M maximum or concentrated-bucket guarantee follows; selected-distribution work remains separate.
+
+The [selected transient-map lookup panel](2026-11-05-transient-hash-pressure.md) adds six native/quote-qualified inputs, five completed actuals and one explicitly skipped high32/full actual. Together with the preceding ordinary three, the frozen5f cohort has nine canonical inputs/eight actuals, seven literal node gaps and three proposal gaps. Long-prefix R512 uses3,860,903 block gas but actual3,244,570,251 PGU against node321,208,226 and proposal476,150,057: node deficit2,923,362,025 PGU meets the >2B/<=30M priority screen. Short-prefix fullR2180 has actual2,417,370,218/node1,252,235,583 at15,161,603 block gas. Each own-input hash profile is qualified; later instruction observations remain bounded prefixes, not complete comparison counts. Independent raw/input/resource checks cover all eight actuals and32 original-host SHM closures. Neither the earlier ordinary results nor this opened adversarial cohort certifies a global30M bound.
+
+The model923 correction adds a separate transient-map reserve with per-TX/owner distinct-key accounting, preserving the existing persistent ledger, MPT resources and numeric tariffs. Nine real successor quotes retain every nonjournal object and the complete proposal-once object. Long R512 node becomes7,066,042,274 PGU, about2.178x actual; all eight measured proposal quotes and seven node quotes cover actual. Short R0 retains a96,543,801-PGU node deficit. The ordinary synthetic R512 node overquote is36.9x and remains visible; it is not a normal-admission certificate. The fixed2026Oct27-29 mainnet50/9600-block sensitivity check changes only two blocks by16,128 PGU each, with all nonjournal/once objects identical. Historical416f/SP1v6.1 actuals are not currentb76 precision certification, and unchanged prices do not prove absence of transient execution. Independent source, actual-source host tests and raw numeric readback are recorded in the linked report; account-journal/L1-frequency TODOs remain deferred.
+
+The [immutable successor observation release](https://github.com/taikoxyz/raiko2-atlas/releases/tag/fixture-unzen-transient-ledger-reprice-v1) now retains all59 new raw quotes and independent9/50 readbacks, referencing existing canonical inputs and actuals without rewriting the frozen5f baseline. Its real remote download, existing fixture-integrity assertions and literal README unpack/checksum workflow passed; this is data retention, not additional workload sampling.
+
+The [transient prefix/size controls](2026-11-05-transient-prefix-boundaries.md) add18 canonical native inputs/18 model923 quotes and nine actuals: eight qualified pressure cases at512/1024 keys and one valid unrealized reference-G control. Nine other actuals remain unmeasured. All four R512 pressure probes are node-covered at1.221–1.337x actual; paired whole-input increments are covered. Only two512-key zero controls retain node deficits, maximum98,062,687 PGU; all nine proposal quotes cover actual and no measured >2B/<=30M gap appears. The1024 reference input's own G differed; its valid actual is retained separately and four distinct own-G inputs were requalified, without assuming a seed fixed point. All36 owned SHM objects are absent, peak actual PSS4.55GB; raw/program/options/signatures/complete worlds and typed quote math were independently verified. The reusable same-kernel/raw-key tool preserves220 original row/request byte pairs. The [published fixture](https://github.com/taikoxyz/raiko2-atlas/releases/tag/fixture-unzen-transient-prefix-boundaries-v1) passed real remote download, existing integrity assertions and literal README unpack/checksum checks. No pricing change, normal-admission certificate, arbitrary30M packing result or global bound follows from this finite panel.
+
+The [transient delete-then-miss panel](2026-11-06-transient-delete-miss.md) adds four canonical native/quote inputs and three actuals: two own-G concentrated cases and one valid unrealized reference control. The reference R512 actual remains explicitly unmeasured. The qualified R512 probe uses4,262,919 block gas and380,063,516 actual PGU against node2,273,193,897 and complete-proposal2,428,135,728; all three node/proposal quotes cover actual. The paired whole-input increment171,473,320 is covered by both estimate increments1,908,978,626. The1024-slot historical footprint remains priced after1023 physical deletions; a live same-owner sentinel avoids the empty-map fast return. Own-input miss/seed/hash/items evidence is separately qualified, with computed1024 hashes distinct from dynamic placement or tombstone traces. Public opt-in tooling preserves220 old complete row/request bytes; independent source, byte, native-world and raw-actual checks pass, all12 SHM objects are absent and peak actual PSS is2.11GB. No pricing change, full-R actual, arbitrary30M packing, normal-usability or global-bound claim follows; caught rollback remains separate.
+
+The [same-route CALLDATACOPY analysis](2026-11-06-route-composition.md) establishes a narrower arithmetic bound: at most225M PGU is lost by route-wise rather than event-wise maximization for normal successful0x37 events in one included canonical block with at most30M charged gas and the current20% refund cap. This is a difference between price expressions, not a bound on actual-minus-node PGU or all Maximum routes. It adds no measurements and supports a low-priority completion TODO for this convention alone. Caught transient rollback-to-miss also remains a low-priority composition TODO: current source retains effective ownership, attempted A/J and ever-seen N across child rollback; each implicit removal has a prior J reserve. The exact large-map caught combination is unmeasured and is not declared closed by the direct-delete panel.
+
+The [ECMUL scalar-mixture panel](2026-11-06-ecmul-scalar-mixtures.md) adds six distinct canonical/native/model923 quote inputs and exactly two actuals, mixed R0/R1. Four low/high actuals remain explicitly unmeasured. Real sealed operations confirm the attainable W0/W507 crossover; the 2,110,378,488-PGU difference between route-wise and event-wise price maxima is not an actual deficit. Mixed R1 at 416,425 block gas measures 4,700,584,886 PGU against literal node 5,725,410,834 and complete proposal 5,880,353,177: node covers at 1.218021x. Its own-control whole-input increment is covered by both estimate increments. R0 retains a 153,017,715-PGU node deficit, both full-proposal quotes cover actual and no measured >2B/<=30M gap appears. Reusable compiler-free scalar/curve/byte tooling preserves the old kernel/table; independent real-world and branch gates precede actual measurement. All eight SHM objects are absent and peak PSS is 4.54GB. No price/model/guest/SDK/runner change, full-R measurement, arbitrary mixture/packing bound or ordinary usability certification follows.
+
+## Access-list construction supplement on 2026-11-06
+
+The [warm access-list construction panel](2026-11-06-access-list-construction.md)
+adds eight distinct canonical inputs, an extra old-native empty bridge, eight
+original quotes and five actuals; three actuals remain unmeasured. The realized
+K7680 case measures 5,773,513,175 PGU at 14,782,761 block gas against model923
+node142,698,613/proposal297,640,444. Its 5,630,814,562 literal-node deficit meets
+the high-priority rule. This is separate pre-execution set construction, not a
+missing opcode, physical journal access or MPT path visit.
+
+Successor389 prices raw per-TX/per-owner low32 key-pair counts at384 PGU/pair,
+preserving all earlier numeric prices and discount treatment. Eight fresh native
+quotes give the large case node11,465,844,853/proposal11,620,786,684, approximately
+1.986x/2.013x actual. All five measured proposal quotes cover actual; the two
+remaining positive node gaps152,028,762/39,746,256 remain visible. The unrealized
+large control's54.43x conservative node overquote is also retained. Historical
+50-proposal/9600-block prices are exactly unchanged; this is sensitivity, not
+current-program certification using the old SP1 observations. Independent raw,
+source, actual-source host and 58-quote checks pass. All20 original-host SHM names
+are absent, with peak actual PSS4.55GB. Bounded optional observations remain
+separate from complete PGU, and the computed catalog is not a full placement
+trace. This empirically closes the demonstrated large gap; short-prefix/probe,
+rehash, multi-transaction packing and other container work remain follow-ups.
+
+The [short-prefix construction panel](2026-11-06-access-list-short-prefix.md)
+adds two canonical/native/model389 quote inputs and two actuals, each once. The
+realized K7680 input has distinct numeric low32 values and zero pair reserve,
+yet measures1,322,938,598 PGU at14,782,761 charged block gas against literal
+node142,698,613/proposal297,640,444. Its positive node gap1,180,239,985 remains
+below the single-example >2B screen; it does not settle full-block packing.
+The K64 actual161,465,174 is an explicitly unrealized own-G control. Independent
+signed-world, quote, raw-register and complete-actual checks pass, all eight
+owned SHM objects are absent, and no price or guest/SDK/observer change is made.
+The additive catalog helper preserves all23 old complete rows and requests.
+Legal two-transaction packing remains a separate experiment; PGU is not
+extrapolated by multiplying the single-input result.
+
+The [legal two-user packing panel](2026-11-06-access-list-packing.md) adds two
+distinct canonical/native/model389 quote inputs and two complete actuals. At
+29,398,167 charged block gas, the aligned case measures2,484,257,836 PGU against
+node207,800,835/full362,742,665: node deficit2,276,457,001 meets the priority rule.
+Its first captured map realizes the short family, while whole two-map pressure
+remains unqualified; full canonical workload establishes severity independently.
+The reference actual261,195,526 remains valid with whole-profile UNKNOWN.
+
+Successor c306 keeps384 per low32-equal raw pair and adds96 per different-low32
+raw pair in each TX/owner scope. Its62 fresh quotations cover12 controlled
+inputs/9 actuals/3 nulls and50 historical proposals/9,600 blocks. The aligned
+node/full become5,869,373,955/6,024,315,785 PGU, about2.36x/2.425x actual. All nine
+full-proposal quotes cover actual; maximum residual node gap152,615,649 remains
+explicit, with no measured >2B/<=30M row. All historical numeric values and public
+outputs are unchanged; old416f/SDK6.1 observations remain sensitivity-only.
+The large crafted reference overquote is retained. Repricing runs no new native
+constructor or SP1 sample, and existing manifests preserve all13 original corpus
+IDs. The shared CALL/access-list tool validates each signed vector/nonce and true
+block-unique versus per-TX raw counts. Independent source, actual-source behavior,
+consumer and raw numeric gates pass. The outer warm-owner AddressMap and broader
+composition boundaries remain follow-ups; no universal workload bound is claimed.
+
+
+## Account-journal density supplement on 2026-11-07
+
+The [larger Account-query composition](2026-11-07-account-journal-density.md) adds two original
+N1024/R1024 AL-warm inputs, each measured once, with reference271,360,001 and successor5,073,040,910
+actual PGU. At10,055,942charged block gas, the successor's model69 literal-node deficit2,692,755,903
+meets the >2B priority rule. Qualified local ownG/H evidence remains separate from UNKNOWN
+whole-input pressure and TX identity; no third input or seed iteration was performed.
+
+The af30 model adds an independent empirical Account-density component. Each new input captures
+137,502,913 units at128PGU/unit: fresh node19,980,657,871, reference full20,135,904,598 and successor
+full20,135,896,918 cover both finite actuals with intentional large constructed overquotes. The
+older retained5f long-R1400 sample now has real node15,387,637,502/full15,542,727,812 versus original
+actual5,952,586,609; only that specific prior TODO is closed. No all-Account or normal-admission
+claim follows.
+
+All74 retained quotes complete without new native construction/SP1/retry:24 controlled rows,
+21 actuals/3 explicit nulls, plus50 historical proposals/9600blocks. All21 full quotes cover actual;
+4 positive literal-node deficits remain, maximum153,358,679PGU, none >2B. All67 parent69 comparisons
+preserve every non-Account numeric object/public output;7 original5f Account baselines have a
+separate older-model comparison. Historical50/9600 all change: node total+0.2835%, full+0.1643%,
+maximum proposal-node+0.5106%, maximum block+0.8290% (largest absolute block delta1,543,168PGU).
+This416f/SDK6.1 cohort is sensitivity-only, not currentb76 accuracy certification.
+
+Independent269 actual-source behavior tests, fresh-ABI trace33 and defaultCLI125 pass. The complete
+installed collector is suspended/restored for systemcalls, and real inspector callbacks establish
+the population parity branch. E3 production and E4 test-only source identities remain distinct.
+External validation/authority/fee residuals and L1 frequency remain TODOs, without a proved<2B bound.
+The separate [data-only fixture](https://github.com/taikoxyz/raiko2-atlas/releases/tag/fixture-unzen-account-journal-density-v1) is published; no guest/SDK/ELF/observer was rebuilt.
+
+
+## Cross-transaction CacheState panel on 2026-11-07
+
+The [account-cache panel](2026-11-07-cache-state-accounts.md) adds exactly two
+512-user / 4096-cold-BALANCE inputs at 21,637,563 charged block gas. Reference
+actual 302,539,274 PGU is covered by literal node 3,780,228,313 and full proposal
+3,957,654,344; the sole reference-own-G successor measures 946,126,714 PGU
+versus node 3,790,845,145 and full 3,968,283,464. No tariff change follows.
+The actual paired increase exceeds the quote increase, but each literal whole
+quote covers its own complete workload; existing cold-opcode prices participate
+and are not subtracted. Large constructed overquotes remain visible.
+
+Independent signatures, full worlds, absence proofs, code, gas, Kona and quote
+checks pass. All signed user/Anchor bytes and Kona payload are equal; authenticated
+prestate/code and canonical inputs differ. Each own-input CacheAccount profile
+closes 20 local calls / eight candidate calls; the successor's observed own G
+matches its selected reference G and its eight actual target hashes equal G.
+Capped profile observations do not certify all 4096 placements, later-map/TX
+identity or whole pressure. An analysis-only header-RA assumption was corrected
+in a separate pure-reader epoch and matched independent raw reconstruction; no
+measurement was rerun. Each input has one native, one quote and one complete
+SP1 estimator execution, with no SDK/guest/observer build. Production parity and
+a global 30M bound remain unclaimed; other container/fee/validation paths remain
+separate follow-ups.
+
+## Warm-first CacheState supplement on 2026-11-07
+
+The [per-TX access-list panel](2026-11-07-cache-state-warm-accounts.md) adds
+exactly two 86-user / 11,008-warm-BALANCE inputs at 29,669,999 charged block gas.
+Reference actual 338,631,603 PGU is covered by node 1,354,594,058 and full
+1,518,988,233. The sole reference-own-G successor measures 5,027,210,167 PGU
+against the same node and full 1,519,000,777. Its positive whole-node deficit
+3,672,616,109 and full deficit 3,508,209,390 establish a high-priority gap in
+model af30, without extrapolation or startup subtraction. No fix is claimed.
+
+Independent signatures, complete worlds, 11,008 absences, guard code, gas,
+Kona and literal quote checks pass. All 86 user signatures and blob contents
+change and are authenticated afresh. Each own-input profile closes 11 local
+CacheAccount calls including Anchor, with matching reference/successor local G;
+zero target hash chains close because helper captures cap before the targets.
+Whole placement/pressure and TX identity remain UNKNOWN. The successor's
+6,056,329,637 canonical instructions and PGU are complete independently of the
+400M diagnostic prefix. Both producer PIDs and all eight owned SHM objects are
+absent on the original host, with peak PSS 4.56GB. Each input was constructed,
+quoted and measured once, without guest/ELF/SDK/observer rebuild. Block-aware
+pricing and retained-actual/historical requotes are the next priority; the
+earlier cold panel does not close this warm-first composition.
+
+The subsequent `02223227` observed block-cache supplement is now validated on
+the same retained actuals. It keeps Account-journal and all other prices
+unchanged, and adds a separate progressive physical-key union / query-budget
+component. The warm successor's real new node/full prices are
+17,441,782,794 / 17,606,189,513 PGU against actual 5,027,210,167; the warm
+reference's 51.507x constructed node overquote remains explicit. All 78 real
+requotes pass independent non-cache invariance and arithmetic checks. All 25
+measured full quotes cover actual; four original small node gaps remain,
+maximum 153,352,535 PGU, with no measured >2B residual. No actual is rerun.
+
+Historical 50-proposal / 9,600-block sensitivity adds only 33,858,816 literal
+node PGU (+0.03648%) and 33,859,328 full PGU (+0.02117%). All rows change; the
+largest absolute block addition is 48,128 PGU and the largest relative block
+uplift is 0.11127%. These older 416f/SDK6.1 rows have no numeric actuals in this
+cohort and do not certify current b76 accuracy. Independent source/behavior,
+35 trace / 132 CLI tests and scoped host lint checks pass. Presystem/direct-DB
+population and other containers remain explicit follow-ups; no global bound
+or default Unzen activation is implied.
+
+## Committed storage aggregation on 2026-11-07
+
+The [64x64 committed-update panel](2026-11-07-transition-storage-updates.md)
+uses the permanent exact-sized producer and existing prestate schema, one
+initialized owner and 4,097 persistent slots at 23,434,619 actual charged gas.
+Reference/successor actuals 377,600,454 /377,807,746 PGU are both covered by
+literal node 994,000,808 and full 1,315,902,014 /1,315,402,998. Canonical,
+actual/resource and independent raw-local gates pass; each input has one native,
+quote and SP1 execution with no retry or experimental build.
+
+The intended concentration is **UNREALIZED**: the new input's own G changes from
+selected reference `0x910c11f2a55b1e09` to `0x8632ac5b84fd984b`. Each input has
+63 closed locals /62 body keys; observed body hashes are distinct and nonzero.
+This does not close the TransitionAccount.storage frontier or establish whole
+table pressure/placement. No price changes or third seed follow. Independent
+static ELF checks trace shared G to the first initializer's stack and one-byte
+TLSF allocation pointers; wire length/code order do not isolate its cause.
+A genuine fixed first-block witness remains an experimental hypothesis: the
+permanent nonuniform schedule/prefix helper now passes source, focused host and
+independent real tiny/old-byte gates, while formal binary-shape and fresh own-G
+checks remain before a new workload conclusion. All prefix costs stay included.
+The original pair is [published as immutable data](https://github.com/taikoxyz/raiko2-atlas/releases/tag/fixture-unzen-transition-storage-updates-v1),
+with independent real-download README/CI integrity checks; no repricing or
+reconstruction of the closed pair occurs. Lower-prefix variants and many-small-TX
+packing remain explicit follow-ups; ordinary coverage is not worst-case coverage.
+
+## Genuine-prefix storage-transition deficit on 2026-11-07
+
+The separate [two-block prefix panel](2026-11-07-prefixed-storage-transitions.md)
+is complete: one real Anchor-only block followed by64 users updating64 initialized
+body slots each. Total charged gas23,541,753 includes both Anchors and prefix.
+Reference actual363,477,553 is covered. Sole successor actual3,550,141,992 exceeds
+literal node998,599,458 by2,551,542,534 and full1,301,217,353 by2,248,924,639 PGU;
+this crosses the >2B/<=30M priority screen without extrapolation.
+
+Independent canonical/actual/resource/local gates pass. Both inputs' own observed
+G=e57d314eeb7f77cf agrees; all62 sampled successor body full hashes are0.
+This realizes local concentration, not4096 observed placements or a whole-map
+cost attribution. Complete canonical PGU is separate from the successor's capped
+400M optional observation. No third input or repeated measurement follows.
+
+Source/design review supports an independent block-local storage-transition
+reserve: per-owner cumulative all-physical journal-key union, C32 population/
+low32 concentration, two changed-slot passes at the inherited384PGU/unit.
+Transaction-local storage_journal and other prices stay unchanged. Implementation,
+independent actual-diff/behavior checks and82 retained-input requotes now pass for
+candidate3e335de2. The stressed successor is covered at7,647,153,954node and
+7,949,771,849full PGU, respectively2.15404x/2.23928x actual. The artificial
+reference's21.04x overquote is retained. Across29 original actuals, full covers all;
+four node gaps remain, maximum153,346,391PGU and no residual>2B. The separate
+50-proposal/9600-block price-sensitivity cohort changes+0.032639% node and
++0.018942% full; maximum block uplift0.091275%. These older-program prices do
+not certify current-program actual accuracy or an admission limit. Read-only cache work,
+end-bundle margin, custom prefilled/backend/pre-system paths and other layouts
+remain explicit scope limits. No global closure, normal-history compatibility
+or activation is claimed.
+The [new immutable prefix fixture](https://github.com/taikoxyz/raiko2-atlas/releases/tag/fixture-unzen-prefixed-storage-transitions-v1)
+retains the two original inputs/actuals and unchanged0222 quotes; independent
+source/local behavior and actual remote integrity checks passed. It does not
+rewrite the earlier single-block fixture; its0222 baseline quotes remain unchanged
+while fresh3e335de2 quotes form the separate correction evidence above. At this
+checkpoint, the read-filled block-long PlainStorage map at smallX was the next
+unmeasured source candidate. Its subsequent measurements and correction follow.
+
+## Read-through storage-query scope on 2026-11-07
+
+The [read-only cache panels](2026-11-07-prefixed-storage-read-cache.md) retain
+two separately fixed reference/successor pairs. The89-user successor costs
+5,280,821,062 actual PGU at28,062,336chargedgas, versus3e335 node2,390,442,635
+and full2,770,850,065. Both deficits exceed2B. Independent data, actual/resource
+and bounded raw-local evidence pass; the panel is closed without another input.
+
+Candidateeea6 extends the existing owner-separated storage reserve budget from
+2X toJ+2X, covering successful read-through scope as well as changed-slot passes.
+C32/384/domain/inherited prices stay fixed. Independent source and focused
+behavior checks, host bridge/CLI tests and86 retained-input requotes pass.
+The target is covered at27,788,992,523node/28,169,399,953full, approximately
+5.262x/5.334x actual. Its artificial reference's52x overquote remains explicit.
+
+All33 retained numeric full estimates cover actual; four smaller node deficits
+remain, maximum153,343,319PGU. The50-proposal/9600-block historical sensitivity
+changes+0.041124% node/+0.023870% full, maximum block-node uplift0.102877%.
+That older-program cohort has no numeric actuals and supplies price sensitivity.
+The [immutable read-cache fixture](https://github.com/taikoxyz/raiko2-atlas/releases/tag/fixture-unzen-prefixed-storage-read-cache-v1)
+preserves four original inputs/actuals/3e335 quotes, independently downloaded
+and verified. Long common-byte-prefix keys, absent-zero reads, final-bundle
+margin and custom/preseeded/system paths remain distinct follow-ups; neither
+global coverage nor model activation follows from these finite panels.

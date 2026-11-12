@@ -101,9 +101,37 @@ pub struct PricingBreakdownSnapshot {
     pub authorization_scaled: i128,
     /// Raw access-list address-item contribution in normalized fixed-point PGU.
     pub access_list_scaled: i128,
+    /// Raw per-transaction, per-owner low32 key-pair reserve, including discarded attempts.
+    pub access_list_construction_pairs: u64,
+    /// Same-owner raw occurrence pairs with different numeric low32 bits.
+    pub access_list_construction_other_pairs: u64,
+    /// Sum of raw address-item pairs within individual attempted transaction scopes.
+    pub access_list_address_pairs: u64,
+    /// Independent normalized construction contribution; add once, outside operations.
+    pub access_list_construction_scaled: i128,
+    /// Independent normalized different-low32 construction contribution, added once.
+    pub access_list_construction_other_scaled: i128,
+    /// Independent normalized outer address-table reserve; added once without discount.
+    pub access_list_address_scaled: i128,
     /// Per-occurrence accepted code preparation, including work later reverted.
     pub code_preparation_scaled: i128,
     pub operations_scaled: i128,
+    /// Conservative raw-slot journal comparison work observed during execution.
+    pub storage_journal_work_units: u64,
+    /// Independent empirical Account-journal work or normalized contribution.
+    pub account_journal_work_units: u64,
+    /// Progressive block-cache work, separate from the transaction-local journal.
+    pub account_cache_work_units: u64,
+    /// Progressive owner storage-query/transition reserve, separate from TX journal work.
+    pub storage_transition_work_units: u64,
+    /// Independent normalized contribution; add once, outside operations.
+    pub storage_journal_scaled: i128,
+    /// Independent empirical Account-journal work or normalized contribution.
+    pub account_journal_scaled: i128,
+    /// Independent normalized block-cache contribution, added exactly once.
+    pub account_cache_scaled: i128,
+    /// Independent normalized storage-transition contribution, added exactly once.
+    pub storage_transition_scaled: i128,
     /// Normally priced opcode/confirmed-spawn events in this observation prefix.
     pub normal_dispatch_count: u64,
     /// Dispatch reserve already included in `operations_scaled`; never add it again.
@@ -156,14 +184,42 @@ pub struct NodePricingBreakdownSnapshot {
     pub authorization_validations: u64,
     /// Raw non-legacy access-list address items in committed scopes, including Anchor when carried.
     pub access_list_items: u64,
+    /// Raw per-transaction, per-owner low32 key-pair reserve in committed scopes.
+    pub access_list_construction_pairs: u64,
+    /// Same-owner raw occurrence pairs with different numeric low32 bits.
+    pub access_list_construction_other_pairs: u64,
+    /// Sum of raw address-item pairs within individual committed transaction scopes.
+    pub access_list_address_pairs: u64,
     pub fixed_scaled: i128,
     /// Normalized raw-authorization validation contribution in fixed-point PGU.
     pub authorization_scaled: i128,
     /// Raw access-list address-item contribution in normalized fixed-point PGU.
     pub access_list_scaled: i128,
+    /// Independent normalized construction contribution; add once, outside operations.
+    pub access_list_construction_scaled: i128,
+    /// Independent normalized different-low32 construction contribution, added once.
+    pub access_list_construction_other_scaled: i128,
+    /// Independent normalized outer address-table reserve; added once without discount.
+    pub access_list_address_scaled: i128,
     /// Per-occurrence accepted code preparation, including work later reverted.
     pub code_preparation_scaled: i128,
     pub operations_scaled: i128,
+    /// Conservative raw-slot journal comparison work observed during execution.
+    pub storage_journal_work_units: u64,
+    /// Independent empirical Account-journal work or normalized contribution.
+    pub account_journal_work_units: u64,
+    /// Progressive block-cache work, separate from the transaction-local journal.
+    pub account_cache_work_units: u64,
+    /// Progressive owner storage-query/transition reserve, separate from TX journal work.
+    pub storage_transition_work_units: u64,
+    /// Independent normalized contribution; add once, outside operations.
+    pub storage_journal_scaled: i128,
+    /// Independent empirical Account-journal work or normalized contribution.
+    pub account_journal_scaled: i128,
+    /// Independent normalized block-cache contribution, added exactly once.
+    pub account_cache_scaled: i128,
+    /// Independent normalized storage-transition contribution, added exactly once.
+    pub storage_transition_scaled: i128,
     /// Normally priced opcode/confirmed-spawn events visible to the node.
     pub normal_dispatch_count: u64,
     /// Dispatch reserve already included in `operations_scaled`; never add it again.
@@ -189,7 +245,21 @@ impl From<ZkGasKnownBlockBreakdown> for NodePricingBreakdownSnapshot {
             authorization_scaled: value.authorization_scaled(),
             access_list_items: value.access_list_items(),
             access_list_scaled: value.access_list_scaled(),
+            access_list_construction_pairs: value.access_list_construction_pairs(),
+            access_list_construction_other_pairs: value.access_list_construction_other_pairs(),
+            access_list_address_pairs: value.access_list_address_pairs(),
+            access_list_construction_scaled: value.access_list_construction_scaled(),
+            access_list_construction_other_scaled: value.access_list_construction_other_scaled(),
+            access_list_address_scaled: value.access_list_address_scaled(),
             operations_scaled: value.operations_scaled(),
+            storage_journal_work_units: value.storage_journal_work_units(),
+            account_journal_work_units: value.account_journal_work_units(),
+            account_cache_work_units: value.account_cache_work_units(),
+            storage_transition_work_units: value.storage_transition_work_units(),
+            storage_journal_scaled: value.storage_journal_scaled(),
+            account_journal_scaled: value.account_journal_scaled(),
+            account_cache_scaled: value.account_cache_scaled(),
+            storage_transition_scaled: value.storage_transition_scaled(),
             normal_dispatch_count: value.normal_dispatch_count(),
             normal_dispatch_scaled: value.normal_dispatch_scaled(),
             feature_error_scaled: value.feature_error_scaled(),
@@ -211,8 +281,22 @@ impl TryFrom<PricingBreakdown> for PricingBreakdownSnapshot {
             fixed_scaled: value.fixed_scaled,
             authorization_scaled: value.authorization_scaled,
             access_list_scaled: value.access_list_scaled,
+            access_list_construction_pairs: value.access_list_construction_pairs,
+            access_list_construction_other_pairs: value.access_list_construction_other_pairs,
+            access_list_address_pairs: value.access_list_address_pairs,
+            access_list_construction_scaled: value.access_list_construction_scaled,
+            access_list_construction_other_scaled: value.access_list_construction_other_scaled,
+            access_list_address_scaled: value.access_list_address_scaled,
             code_preparation_scaled: value.code_preparation_scaled,
             operations_scaled: value.operations_scaled,
+            storage_journal_work_units: value.storage_journal_work_units,
+            account_journal_work_units: value.account_journal_work_units,
+            account_cache_work_units: value.account_cache_work_units,
+            storage_transition_work_units: value.storage_transition_work_units,
+            storage_journal_scaled: value.storage_journal_scaled,
+            account_journal_scaled: value.account_journal_scaled,
+            account_cache_scaled: value.account_cache_scaled,
+            storage_transition_scaled: value.storage_transition_scaled,
             normal_dispatch_count: value.normal_dispatch_count,
             normal_dispatch_scaled: value.normal_dispatch_scaled,
             feature_error_scaled: value.feature_error_scaled,
@@ -244,6 +328,64 @@ pub struct BlockWorkloadQuote {
 pub struct NodeBlockWorkloadQuote {
     pub unzen_zkgas: u64,
     pub pricing: NodePricingBreakdownSnapshot,
+    /// Optional host-replay observations for independent baseline experiments, not live admission.
+    /// Missing on older quotes; consumers must not reinterpret absence as observed zero work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_counters: Option<NodeSemanticCountersSnapshot>,
+}
+
+/// Committed real-precompile events, independent of the model's selected price candidates.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EcmulSemanticCountersSnapshot {
+    /// Calls actually dispatched to ECMUL that completed successfully.
+    pub successful_calls: u64,
+    /// Actual consumed native gas for successful calls, before any new-model conversion.
+    pub successful_native_gas: u64,
+    /// Successful reduced-scalar bit length plus popcount, accumulated without per-event prices.
+    pub successful_scalar_work_units: u64,
+    /// Calls actually dispatched to ECMUL that failed, including invalid points or insufficient gas.
+    pub failed_calls: u64,
+    /// Actual native gas consumed by failed ECMUL calls; their input scalars are not work evidence.
+    pub failed_native_gas: u64,
+}
+
+/// Short, typed reasons that semantic observations cannot be used as a complete statistic.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SemanticCounterDiagnostic {
+    /// A count or sum exceeded its integer domain.
+    ArithmeticOverflow,
+    /// Consumed precompile gas contradicted the supplied allowance or successful ECMUL schedule.
+    NativeGasAccounting,
+    /// A candidate ended before all of its observed calls returned.
+    UnbalancedCallHooks,
+    /// An observed call end did not match its pending precompile address.
+    CallHookMismatch,
+}
+
+/// Optional node-observable semantic evidence produced by host replay of committed candidates.
+/// This export does not wire the observations into a live miner, fee meter, or admission policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NodeSemanticCountersSnapshot {
+    /// Present only when all committed ECMUL observations are complete; zero then means observed zero.
+    pub ecmul: Option<EcmulSemanticCountersSnapshot>,
+    /// A diagnostic makes ECMUL unavailable rather than publishing a partial or fabricated zero.
+    pub diagnostic: Option<SemanticCounterDiagnostic>,
+    /// Raw signed access-list storage-key occurrences in committed scopes, including duplicates.
+    /// Read directly from the existing Reth diagnostic; absence means this count was not observed.
+    pub access_list_raw_storage_keys: Option<u64>,
+}
+
+impl Default for NodeSemanticCountersSnapshot {
+    fn default() -> Self {
+        Self {
+            ecmul: Some(EcmulSemanticCountersSnapshot::default()),
+            diagnostic: None,
+            access_list_raw_storage_keys: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -301,6 +443,8 @@ pub struct ProveProposalWorkloadQuote {
 #[serde(deny_unknown_fields)]
 pub struct ProposalWorkloadQuote {
     pub schema_version: u32,
+    #[serde(default, skip_serializing_if = "execution_profile_is_legacy")]
+    pub execution_profile: crate::ExecutionProfile,
     pub model_id: String,
     pub guest_input_sha256: String,
     pub guest_input_bincode_length: usize,
@@ -308,6 +452,11 @@ pub struct ProposalWorkloadQuote {
     pub blocks: Vec<BlockWorkloadQuote>,
     pub node: NodeProposalWorkloadQuote,
     pub prove: ProveProposalWorkloadQuote,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)] // Serde's skip predicate receives a reference.
+fn execution_profile_is_legacy(profile: &crate::ExecutionProfile) -> bool {
+    *profile == crate::ExecutionProfile::LegacyUnzen
 }
 
 #[derive(Debug, Error)]
@@ -454,8 +603,15 @@ fn complete_block_pricing(
         attempted_priced.fixed_scaled,
         attempted_priced.authorization_scaled,
         attempted_priced.access_list_scaled,
+        attempted_priced.access_list_construction_scaled,
+        attempted_priced.access_list_construction_other_scaled,
+        attempted_priced.access_list_address_scaled,
         attempted_priced.code_preparation_scaled,
         attempted_priced.operations_scaled,
+        attempted_priced.storage_journal_scaled,
+        attempted_priced.account_journal_scaled,
+        attempted_priced.account_cache_scaled,
+        attempted_priced.storage_transition_scaled,
         committed_priced.resources_scaled,
         committed_priced.mpt_scaled,
         committed_priced.transaction_payload_scaled,
@@ -466,8 +622,23 @@ fn complete_block_pricing(
         fixed_scaled: attempted_priced.fixed_scaled,
         authorization_scaled: attempted_priced.authorization_scaled,
         access_list_scaled: attempted_priced.access_list_scaled,
+        access_list_construction_pairs: attempted_priced.access_list_construction_pairs,
+        access_list_construction_other_pairs: attempted_priced.access_list_construction_other_pairs,
+        access_list_address_pairs: attempted_priced.access_list_address_pairs,
+        access_list_construction_scaled: attempted_priced.access_list_construction_scaled,
+        access_list_construction_other_scaled: attempted_priced
+            .access_list_construction_other_scaled,
+        access_list_address_scaled: attempted_priced.access_list_address_scaled,
         code_preparation_scaled: attempted_priced.code_preparation_scaled,
         operations_scaled: attempted_priced.operations_scaled,
+        storage_journal_work_units: attempted_priced.storage_journal_work_units,
+        account_journal_work_units: attempted_priced.account_journal_work_units,
+        account_cache_work_units: attempted_priced.account_cache_work_units,
+        storage_transition_work_units: attempted_priced.storage_transition_work_units,
+        storage_journal_scaled: attempted_priced.storage_journal_scaled,
+        account_journal_scaled: attempted_priced.account_journal_scaled,
+        account_cache_scaled: attempted_priced.account_cache_scaled,
+        storage_transition_scaled: attempted_priced.storage_transition_scaled,
         normal_dispatch_count: attempted_priced.normal_dispatch_count,
         normal_dispatch_scaled: attempted_priced.normal_dispatch_scaled,
         feature_error_scaled: attempted_priced.feature_error_scaled,
@@ -499,6 +670,44 @@ struct ReplayedBlock {
     execution: BlockExecutionObservation,
 }
 
+/// Validates the complete canonical proposal and returns its public output without pricing it.
+///
+/// Uses the same proposal validation and state reconstruction as a quote, with MPT observation
+/// disabled because no measured selectors are consumed by this path.
+///
+/// # Errors
+///
+/// Returns an error on invalid witnesses, derivation, execution, or canonical block/output mismatch.
+pub fn validate_shasta_proposal_with_execution_profile(
+    input: &GuestInput,
+    execution_profile: crate::ExecutionProfile,
+) -> Result<B256, RuntimeQuoteError> {
+    raiko2_guest_common::prove_shasta_proposal_with_reconstructor_and_parent_reader(
+        input,
+        |request| {
+            let mut executor = raiko2_stateless::workload_lab::PlainDerivedBlockExecutor::new(execution_profile);
+            raiko2_stateless::reconstruct_block_from_transactions_with_executor_and_witness_resources(
+                request.anchor_tx,
+                request.transactions,
+                request.block_env,
+                request.witness,
+                request.ancestor_headers,
+                request.shared_state_nodes,
+                request.chain_spec,
+                request.evm_config,
+                &mut executor,
+            ).map_err(anyhow::Error::from)
+        },
+        |request| raiko2_stateless::read_parent_storage_with_witness_resources(
+            request.address,
+            request.slot,
+            request.witness,
+            request.ancestor_headers,
+            request.shared_state_nodes,
+        ).map_err(anyhow::Error::from),
+    ).map_err(|error| RuntimeQuoteError::Validation(error.to_string()))
+}
+
 /// Replays one current-format Shasta `GuestInput` and returns a complete host-only workload quote.
 ///
 /// The production guest path is unchanged. This host utility uses the same proposal validator and
@@ -510,9 +719,26 @@ struct ReplayedBlock {
 /// Returns an error when proposal validation fails, a required observation is missing, the replay
 /// topology differs from the supplied input, arithmetic overflows, or sealed pricing completion
 /// rejects the observed selectors.
-#[allow(clippy::too_many_lines)]
 pub fn quote_shasta_proposal(
     input: &GuestInput,
+) -> Result<ProposalWorkloadQuote, RuntimeQuoteError> {
+    quote_shasta_proposal_with_execution_profile(input, crate::ExecutionProfile::LegacyUnzen)
+}
+
+/// Replays a proposal under an explicitly selected offline execution profile.
+///
+/// The experimental profile only relaxes the legacy Unzen admission cap. It preserves the
+/// EVM gas envelope, fork, transaction validation, state reconstruction and pricing model.
+/// Inputs admitted only by that profile describe an experiment, not a production-valid block.
+/// The existing [`quote_shasta_proposal`] entrypoint retains legacy admission.
+///
+/// # Errors
+///
+/// Returns the same validation, observation and checked-pricing errors as the default entrypoint.
+#[allow(clippy::too_many_lines)]
+pub fn quote_shasta_proposal_with_execution_profile(
+    input: &GuestInput,
+    execution_profile: crate::ExecutionProfile,
 ) -> Result<ProposalWorkloadQuote, RuntimeQuoteError> {
     let (guest_input_sha256, guest_input_bincode_length) = guest_input_identity(input)
         .map_err(|error| RuntimeQuoteError::Validation(error.to_string()))?;
@@ -536,7 +762,7 @@ pub fn quote_shasta_proposal(
                     .and_then(|count| {
                         u64::try_from(count).context("block input transaction count exceeds u64")
                     })?;
-                let mut executor = QuoteDerivedBlockExecutor::default();
+                let mut executor = QuoteDerivedBlockExecutor::new(execution_profile);
                 let (outcome, metrics) =
                     raiko2_stateless::reconstruct_block_from_transactions_with_executor_and_mpt_metrics(
                         request.anchor_tx,
@@ -688,6 +914,7 @@ pub fn quote_shasta_proposal(
             node: NodeBlockWorkloadQuote {
                 unzen_zkgas: block.execution.finalized_block_zkgas,
                 pricing: node_pricing,
+                semantic_counters: Some(block.execution.semantic_counters),
             },
             prove: ProveBlockWorkloadQuote {
                 input_transaction_count: block.input_transaction_count,
@@ -734,6 +961,7 @@ pub fn quote_shasta_proposal(
     let total_scaled = checked_add_i128(block_local_scaled, proposal_once.total_scaled)?;
     Ok(ProposalWorkloadQuote {
         schema_version: 1,
+        execution_profile,
         model_id: RUNTIME_SPEC_SHA256.to_owned(),
         guest_input_sha256,
         guest_input_bincode_length,
@@ -767,6 +995,7 @@ mod tests {
         OperationRoute, OperationRoutePricingInput, ZkGasBlockSnapshot, ZkGasShadowDiagnostic,
         ZkGasShadowReport,
     };
+    use alloy_primitives::U256;
     use raiko2_protocol_shasta::libhash::hash_shasta_subproof_input;
     use std::{
         collections::BTreeMap,
@@ -826,6 +1055,107 @@ mod tests {
     }
 
     #[test]
+    fn storage_journal_report_fields_are_required_without_zero_fallback() {
+        let node = serde_json::to_value(NodePricingBreakdownSnapshot::default()).unwrap();
+        let prove = serde_json::to_value(PricingBreakdownSnapshot::default()).unwrap();
+        for field in ["storage_journal_work_units", "storage_journal_scaled"] {
+            assert!(node.get(field).is_some(), "node must expose {field}");
+            assert!(prove.get(field).is_some(), "prove must expose {field}");
+            let mut missing = node.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<NodePricingBreakdownSnapshot>(missing).is_err());
+            let mut missing = prove.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<PricingBreakdownSnapshot>(missing).is_err());
+        }
+    }
+
+    #[test]
+    fn semantic_wire_distinguishes_older_quotes_observed_zero_and_diagnostics() {
+        let old = NodeBlockWorkloadQuote {
+            unzen_zkgas: 0,
+            pricing: NodePricingBreakdownSnapshot::default(),
+            semantic_counters: None,
+        };
+        let encoded = serde_json::to_value(&old).unwrap();
+        assert!(encoded.get("semantic_counters").is_none());
+        assert_eq!(
+            serde_json::from_value::<NodeBlockWorkloadQuote>(encoded)
+                .unwrap()
+                .semantic_counters,
+            None
+        );
+
+        let observed = NodeSemanticCountersSnapshot {
+            access_list_raw_storage_keys: Some(0),
+            ..Default::default()
+        };
+        let encoded = serde_json::to_value(observed).unwrap();
+        assert_eq!(encoded["ecmul"]["successful_calls"], 0);
+        assert_eq!(encoded["access_list_raw_storage_keys"], 0);
+        assert!(encoded["diagnostic"].is_null());
+        let incomplete = NodeSemanticCountersSnapshot {
+            ecmul: None,
+            diagnostic: Some(SemanticCounterDiagnostic::ArithmeticOverflow),
+            access_list_raw_storage_keys: Some(3),
+        };
+        let encoded = serde_json::to_value(incomplete).unwrap();
+        assert!(encoded["ecmul"].is_null());
+        assert_eq!(encoded["diagnostic"], "arithmetic_overflow");
+        assert_eq!(
+            serde_json::from_value::<NodeSemanticCountersSnapshot>(encoded).unwrap(),
+            incomplete
+        );
+    }
+    #[test]
+    fn account_journal_report_fields_are_required_without_zero_fallback() {
+        let node = serde_json::to_value(NodePricingBreakdownSnapshot::default()).unwrap();
+        let prove = serde_json::to_value(PricingBreakdownSnapshot::default()).unwrap();
+        for field in ["account_journal_work_units", "account_journal_scaled"] {
+            assert!(node.get(field).is_some(), "node must expose {field}");
+            assert!(prove.get(field).is_some(), "prove must expose {field}");
+            let mut missing = node.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<NodePricingBreakdownSnapshot>(missing).is_err());
+            let mut missing = prove.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<PricingBreakdownSnapshot>(missing).is_err());
+        }
+    }
+
+    #[test]
+    fn storage_transition_report_fields_are_required_without_zero_fallback() {
+        let node = serde_json::to_value(NodePricingBreakdownSnapshot::default()).unwrap();
+        let prove = serde_json::to_value(PricingBreakdownSnapshot::default()).unwrap();
+        for field in ["storage_transition_work_units", "storage_transition_scaled"] {
+            assert!(node.get(field).is_some(), "node must expose {field}");
+            assert!(prove.get(field).is_some(), "prove must expose {field}");
+            let mut missing = node.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<NodePricingBreakdownSnapshot>(missing).is_err());
+            let mut missing = prove.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<PricingBreakdownSnapshot>(missing).is_err());
+        }
+    }
+
+    #[test]
+    fn account_cache_report_fields_are_required_without_zero_fallback() {
+        let node = serde_json::to_value(NodePricingBreakdownSnapshot::default()).unwrap();
+        let prove = serde_json::to_value(PricingBreakdownSnapshot::default()).unwrap();
+        for field in ["account_cache_work_units", "account_cache_scaled"] {
+            assert!(node.get(field).is_some(), "node must expose {field}");
+            assert!(prove.get(field).is_some(), "prove must expose {field}");
+            let mut missing = node.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<NodePricingBreakdownSnapshot>(missing).is_err());
+            let mut missing = prove.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<PricingBreakdownSnapshot>(missing).is_err());
+        }
+    }
+
+    #[test]
     fn normal_dispatch_report_fields_are_required_without_zero_fallback() {
         let node = serde_json::to_value(NodePricingBreakdownSnapshot::default()).unwrap();
         let prove = serde_json::to_value(PricingBreakdownSnapshot::default()).unwrap();
@@ -858,6 +1188,29 @@ mod tests {
             .unwrap()
             .remove("access_list_scaled");
         assert!(serde_json::from_value::<PricingBreakdownSnapshot>(missing).is_err());
+    }
+
+    #[test]
+    fn access_list_construction_report_fields_are_required_without_zero_fallback() {
+        let node = serde_json::to_value(NodePricingBreakdownSnapshot::default()).unwrap();
+        let prove = serde_json::to_value(PricingBreakdownSnapshot::default()).unwrap();
+        for field in [
+            "access_list_construction_pairs",
+            "access_list_construction_scaled",
+            "access_list_construction_other_pairs",
+            "access_list_construction_other_scaled",
+            "access_list_address_pairs",
+            "access_list_address_scaled",
+        ] {
+            assert!(node.get(field).is_some(), "node must expose {field}");
+            assert!(prove.get(field).is_some(), "prove must expose {field}");
+            let mut missing = node.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<NodePricingBreakdownSnapshot>(missing).is_err());
+            let mut missing = prove.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<PricingBreakdownSnapshot>(missing).is_err());
+        }
     }
 
     #[test]
@@ -939,8 +1292,15 @@ mod tests {
             block.node.pricing.fixed_scaled
                 + block.node.pricing.authorization_scaled
                 + block.node.pricing.access_list_scaled
+                + block.node.pricing.access_list_construction_scaled
+                + block.node.pricing.access_list_construction_other_scaled
+                + block.node.pricing.access_list_address_scaled
                 + block.node.pricing.code_preparation_scaled
                 + block.node.pricing.operations_scaled
+                + block.node.pricing.storage_journal_scaled
+                + block.node.pricing.account_journal_scaled
+                + block.node.pricing.account_cache_scaled
+                + block.node.pricing.storage_transition_scaled
                 + block.node.pricing.evm_local_resources_scaled
                 + block.node.pricing.transaction_payload_scaled,
         );
@@ -949,8 +1309,15 @@ mod tests {
             block.prove.pricing.fixed_scaled
                 + block.prove.pricing.authorization_scaled
                 + block.prove.pricing.access_list_scaled
+                + block.prove.pricing.access_list_construction_scaled
+                + block.prove.pricing.access_list_construction_other_scaled
+                + block.prove.pricing.access_list_address_scaled
                 + block.prove.pricing.code_preparation_scaled
                 + block.prove.pricing.operations_scaled
+                + block.prove.pricing.storage_journal_scaled
+                + block.prove.pricing.account_journal_scaled
+                + block.prove.pricing.account_cache_scaled
+                + block.prove.pricing.storage_transition_scaled
                 + block.prove.pricing.resources_scaled
                 + block.prove.pricing.mpt_scaled
                 + block.prove.pricing.transaction_payload_scaled,
@@ -979,6 +1346,22 @@ mod tests {
     }
 
     fn assert_proposal_formula_closes(quote: &ProposalWorkloadQuote) {
+        assert_eq!(quote.prove.proposal_once.access_list_construction_pairs, 0);
+        assert_eq!(quote.prove.proposal_once.access_list_construction_scaled, 0);
+        assert_eq!(
+            quote
+                .prove
+                .proposal_once
+                .access_list_construction_other_pairs,
+            0
+        );
+        assert_eq!(
+            quote
+                .prove
+                .proposal_once
+                .access_list_construction_other_scaled,
+            0
+        );
         assert_eq!(
             quote.prove.proposal_once.total_scaled,
             quote.prove.proposal_once.startup_scaled
@@ -1131,8 +1514,28 @@ mod tests {
             ..Default::default()
         };
         let committed = ZkGasBlockSnapshot {
+            storage_journal: alethia_reth_evm::zk_gas::pricing::StorageJournalDiagnostics {
+                comparison_work_units_upper: 3,
+                ..Default::default()
+            },
+            transient_storage_journal:
+                alethia_reth_evm::zk_gas::pricing::TransientStorageJournalDiagnostics {
+                    comparison_work_units_upper: 5,
+                    ..Default::default()
+                },
             authorization_validations: 4,
             access_list_items: 3,
+            access_list_construction:
+                alethia_reth_evm::zk_gas::pricing::AccessListConstructionDiagnostics {
+                    raw_address_items: 3,
+                    raw_address_pairs: 3,
+                    raw_storage_keys: 5,
+                    max_low32_group: 3,
+                    comparison_pairs: 3,
+                    other_pairs: 7,
+                    owner_pairs: 10,
+                    incomplete: None,
+                },
             code_preparation: CodePreparationSelectors {
                 nonempty_events: 1,
                 total_bytes: 32,
@@ -1147,8 +1550,28 @@ mod tests {
         }
         .shadow_report();
         let attempted = ZkGasBlockSnapshot {
+            storage_journal: alethia_reth_evm::zk_gas::pricing::StorageJournalDiagnostics {
+                comparison_work_units_upper: 7,
+                ..Default::default()
+            },
+            transient_storage_journal:
+                alethia_reth_evm::zk_gas::pricing::TransientStorageJournalDiagnostics {
+                    comparison_work_units_upper: 11,
+                    ..Default::default()
+                },
             authorization_validations: 16,
             access_list_items: 7,
+            access_list_construction:
+                alethia_reth_evm::zk_gas::pricing::AccessListConstructionDiagnostics {
+                    raw_address_items: 7,
+                    raw_address_pairs: 9,
+                    raw_storage_keys: 8,
+                    max_low32_group: 5,
+                    comparison_pairs: 13,
+                    other_pairs: 15,
+                    owner_pairs: 28,
+                    incomplete: None,
+                },
             code_preparation: CodePreparationSelectors {
                 nonempty_events: 2,
                 total_bytes: 64,
@@ -1200,15 +1623,53 @@ mod tests {
             node.fixed_scaled
                 + node.authorization_scaled
                 + node.access_list_scaled
+                + node.access_list_construction_scaled
+                + node.access_list_construction_other_scaled
+                + node.access_list_address_scaled
                 + node.code_preparation_scaled
                 + node.operations_scaled
+                + node.storage_journal_scaled
+                + node.account_journal_scaled
+                + node.account_cache_scaled
+                + node.storage_transition_scaled
                 + node.evm_local_resources_scaled
                 + node.transaction_payload_scaled
         );
+        assert_eq!(node.storage_journal_work_units, 8);
+        assert_eq!(prove.storage_journal_work_units, 18);
+        assert_eq!(node.storage_journal_scaled, 8 * 384 * FIXED_POINT_SCALE);
+        assert_eq!(prove.storage_journal_scaled, 18 * 384 * FIXED_POINT_SCALE);
         assert_eq!(node.access_list_items, 3);
         assert_eq!(access_list_items, 7);
         assert_eq!(node.access_list_scaled, 3 * 8192 * FIXED_POINT_SCALE);
         assert_eq!(prove.access_list_scaled, 7 * 8192 * FIXED_POINT_SCALE);
+        assert_eq!(node.access_list_construction_pairs, 3);
+        assert_eq!(prove.access_list_construction_pairs, 13);
+        assert_eq!(
+            node.access_list_construction_scaled,
+            3 * 384 * FIXED_POINT_SCALE
+        );
+        assert_eq!(
+            prove.access_list_construction_scaled,
+            13 * 384 * FIXED_POINT_SCALE
+        );
+        assert_eq!(node.access_list_construction_other_pairs, 7);
+        assert_eq!(prove.access_list_construction_other_pairs, 15);
+        assert_eq!(
+            node.access_list_construction_other_scaled,
+            7 * 96 * FIXED_POINT_SCALE
+        );
+        assert_eq!(
+            prove.access_list_construction_other_scaled,
+            15 * 96 * FIXED_POINT_SCALE
+        );
+        assert_eq!(node.access_list_address_pairs, 3);
+        assert_eq!(prove.access_list_address_pairs, 9);
+        assert_eq!(node.access_list_address_scaled, 3 * 128 * FIXED_POINT_SCALE);
+        assert_eq!(
+            prove.access_list_address_scaled,
+            9 * 128 * FIXED_POINT_SCALE
+        );
         assert_eq!(node.authorization_validations, 4);
         assert_eq!(authorization_validations, 16);
         assert_eq!(node.authorization_scaled, 4 * 200_000 * FIXED_POINT_SCALE);
@@ -1241,11 +1702,505 @@ mod tests {
             prove.fixed_scaled
                 + prove.authorization_scaled
                 + prove.access_list_scaled
+                + prove.access_list_construction_scaled
+                + prove.access_list_construction_other_scaled
+                + prove.access_list_address_scaled
                 + prove.code_preparation_scaled
                 + prove.operations_scaled
+                + prove.storage_journal_scaled
+                + prove.account_journal_scaled
+                + prove.account_cache_scaled
+                + prove.storage_transition_scaled
                 + prove.resources_scaled
                 + prove.transaction_payload_scaled
         );
+    }
+
+    #[test]
+    fn block_completion_transient_only_is_charged_once_without_persistent_resources() {
+        let report = |units| {
+            ZkGasBlockSnapshot {
+                transient_storage_journal:
+                    alethia_reth_evm::zk_gas::pricing::TransientStorageJournalDiagnostics {
+                        comparison_work_units_upper: units,
+                        ..Default::default()
+                    },
+                ..Default::default()
+            }
+            .shadow_report()
+        };
+        let (node, prove, ..) = complete_block_pricing(
+            0,
+            &report(5),
+            &report(11),
+            ProposalPayloadSelectors::default(),
+            ResourceSelectors::default(),
+            MptSelectors::default(),
+        )
+        .unwrap();
+        assert_eq!(node.storage_journal_work_units, 5);
+        assert_eq!(prove.storage_journal_work_units, 11);
+        assert_eq!(node.storage_journal_scaled, 5 * 384 * FIXED_POINT_SCALE);
+        assert_eq!(prove.storage_journal_scaled, 11 * 384 * FIXED_POINT_SCALE);
+        assert_eq!(
+            node.evm_local_resources,
+            ResourceSelectors::default().into()
+        );
+        assert_eq!(node.evm_local_resources_scaled, 0);
+        assert_eq!(prove.resources_scaled, 0);
+        assert_eq!(prove.mpt_scaled, 0);
+        assert_eq!(node.access_list_construction_pairs, 0);
+        assert_eq!(prove.access_list_construction_pairs, 0);
+        assert_eq!(node.access_list_construction_scaled, 0);
+        assert_eq!(prove.access_list_construction_scaled, 0);
+        assert_eq!(
+            node.known_subtotal_scaled,
+            node.fixed_scaled
+                + node.storage_journal_scaled
+                + node.account_journal_scaled
+                + node.account_cache_scaled
+                + node.storage_transition_scaled
+        );
+        assert_eq!(
+            prove.total_scaled,
+            prove.fixed_scaled
+                + prove.storage_journal_scaled
+                + prove.account_journal_scaled
+                + prove.account_cache_scaled
+                + prove.storage_transition_scaled
+        );
+        let once = ZkGasModel
+            .price_proposal_once(&ProposalPricingInput {
+                canonical_transaction_bytes: 0,
+                nonempty_payload_transactions: 0,
+                true_unattempted_transactions: 0,
+                source_blob_counts: &[1],
+                proposal_blob_hash_count: 1,
+                provider_blob_count: 1,
+                provider_commitment_count: 1,
+                provider_proof_count: 1,
+                parent_mpt: MptSelectors::default(),
+            })
+            .unwrap();
+        assert_eq!(once.storage_journal_work_units, 0);
+        assert_eq!(once.storage_journal_scaled, 0);
+        assert_eq!(once.access_list_construction_pairs, 0);
+        assert_eq!(once.access_list_construction_scaled, 0);
+        assert_eq!(once.access_list_construction_other_pairs, 0);
+        assert_eq!(once.access_list_construction_other_scaled, 0);
+        assert_eq!(once.access_list_address_pairs, 0);
+        assert_eq!(once.access_list_address_scaled, 0);
+    }
+
+    #[test]
+    fn account_journal_component_is_transported_once_and_diagnostics_fail_closed() {
+        use alethia_reth_evm::zk_gas::pricing::{
+            AccountJournalDiagnostics, AccountJournalIncompleteness,
+        };
+        let report = |units| {
+            ZkGasBlockSnapshot {
+                account_journal: AccountJournalDiagnostics {
+                    potential_query_budget: units - 1,
+                    physical_account_count: 1,
+                    max_prefix_group: 1,
+                    comparison_equivalents: 1,
+                    work_units: units,
+                    completed_transactions: 1,
+                    incomplete: None,
+                },
+                ..Default::default()
+            }
+            .shadow_report()
+        };
+        let (node, prove, ..) = complete_block_pricing(
+            0,
+            &report(3),
+            &report(7),
+            ProposalPayloadSelectors::default(),
+            ResourceSelectors::default(),
+            MptSelectors::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                node.account_journal_work_units,
+                prove.account_journal_work_units
+            ),
+            (3, 7)
+        );
+        assert_eq!(node.account_journal_scaled, 3 * 128 * FIXED_POINT_SCALE);
+        assert_eq!(prove.account_journal_scaled, 7 * 128 * FIXED_POINT_SCALE);
+        assert_eq!(
+            node.known_subtotal_scaled,
+            node.fixed_scaled
+                + node.account_journal_scaled
+                + node.account_cache_scaled
+                + node.storage_transition_scaled
+        );
+        assert_eq!(
+            prove.total_scaled,
+            prove.fixed_scaled
+                + prove.account_journal_scaled
+                + prove.account_cache_scaled
+                + prove.storage_transition_scaled
+        );
+        let broken = ZkGasBlockSnapshot {
+            account_journal: AccountJournalDiagnostics {
+                incomplete: Some(AccountJournalIncompleteness::MissingPopulation),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+        .shadow_report();
+        assert!(
+            complete_block_pricing(
+                0,
+                &broken,
+                &report(7),
+                ProposalPayloadSelectors::default(),
+                ResourceSelectors::default(),
+                MptSelectors::default()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn storage_transition_is_transported_once_and_incomplete_receipts_fail_closed() {
+        use alethia_reth_evm::zk_gas::pricing::{
+            StorageTransitionDiagnostics, StorageTransitionIncompleteness,
+        };
+        // Each repeated changed receipt pays one query and two forward passes.
+        let report = |changes| {
+            ZkGasBlockSnapshot {
+                storage_transition: StorageTransitionDiagnostics {
+                    physical_slot_receipts: changes,
+                    changed_slots: changes,
+                    observed_storage_slots: 1,
+                    max_owner_slots: 1,
+                    max_low32_group: 1,
+                    comparison_equivalents: 1,
+                    query_budget: 3 * changes,
+                    work_units: 3 * changes,
+                    completed_transactions: changes,
+                    incomplete: None,
+                },
+                ..Default::default()
+            }
+            .shadow_report()
+        };
+        let (node, prove, ..) = complete_block_pricing(
+            0,
+            &report(1),
+            &report(3),
+            ProposalPayloadSelectors::default(),
+            ResourceSelectors::default(),
+            MptSelectors::default(),
+        )
+        .unwrap();
+        assert_eq!(node.storage_transition_work_units, 3);
+        assert_eq!(prove.storage_transition_work_units, 9);
+        let node_scaled = 3 * 384 * FIXED_POINT_SCALE;
+        let prove_scaled = 9 * 384 * FIXED_POINT_SCALE;
+        assert_eq!(node.storage_transition_scaled, node_scaled);
+        assert_eq!(prove.storage_transition_scaled, prove_scaled);
+        assert_eq!(node.known_subtotal_scaled, node.fixed_scaled + node_scaled);
+        assert_eq!(prove.total_scaled, prove.fixed_scaled + prove_scaled);
+        assert_eq!(node.operations_scaled, 0);
+        assert_eq!(prove.operations_scaled, 0);
+        assert_eq!(node.storage_journal_scaled, 0);
+        assert_eq!(prove.storage_journal_scaled, 0);
+
+        for bad in [
+            StorageTransitionDiagnostics {
+                incomplete: Some(StorageTransitionIncompleteness::MissingPopulation),
+                ..Default::default()
+            },
+            StorageTransitionDiagnostics {
+                // Coherent query/work diagnostics isolate the pricing domain check.
+                physical_slot_receipts: 1_000_000_000_001,
+                changed_slots: 0,
+                observed_storage_slots: 1,
+                max_owner_slots: 1,
+                max_low32_group: 1,
+                comparison_equivalents: 1,
+                query_budget: 1_000_000_000_001,
+                work_units: 1_000_000_000_001,
+                completed_transactions: 1_000_000_000_001,
+                incomplete: None,
+            },
+            // The old2X-only diagnostics must not produce a current quote.
+            StorageTransitionDiagnostics {
+                physical_slot_receipts: 1,
+                changed_slots: 1,
+                observed_storage_slots: 1,
+                max_owner_slots: 1,
+                max_low32_group: 1,
+                comparison_equivalents: 1,
+                query_budget: 2,
+                work_units: 2,
+                completed_transactions: 1,
+                incomplete: None,
+            },
+        ] {
+            let snapshot = ZkGasBlockSnapshot {
+                storage_transition: bad,
+                ..Default::default()
+            };
+            if bad.work_units == 1_000_000_000_001 {
+                assert_eq!(
+                    snapshot.storage_transition_work_units(),
+                    Err(ZkGasError::SelectorOutOfRange {
+                        selector: "storage_transition_work_units",
+                        value: 1_000_000_000_001,
+                    })
+                );
+            }
+            let broken = snapshot.shadow_report();
+            for (committed, attempted) in [(&broken, &report(3)), (&report(1), &broken)] {
+                assert!(
+                    complete_block_pricing(
+                        0,
+                        committed,
+                        attempted,
+                        ProposalPayloadSelectors::default(),
+                        ResourceSelectors::default(),
+                        MptSelectors::default(),
+                    )
+                    .is_err()
+                );
+            }
+        }
+
+        let readonly = ZkGasBlockSnapshot {
+            storage_transition: StorageTransitionDiagnostics {
+                physical_slot_receipts: 2,
+                observed_storage_slots: 2,
+                max_owner_slots: 2,
+                max_low32_group: 1,
+                comparison_equivalents: 2,
+                query_budget: 2,
+                work_units: 4,
+                completed_transactions: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+        .shadow_report();
+        let (node, prove, ..) = complete_block_pricing(
+            0,
+            &readonly,
+            &readonly,
+            ProposalPayloadSelectors::default(),
+            ResourceSelectors::default(),
+            MptSelectors::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                node.storage_transition_work_units,
+                node.storage_transition_scaled
+            ),
+            (4, 4 * 384 * FIXED_POINT_SCALE)
+        );
+        assert_eq!(
+            (
+                prove.storage_transition_work_units,
+                prove.storage_transition_scaled
+            ),
+            (4, 4 * 384 * FIXED_POINT_SCALE)
+        );
+    }
+
+    #[test]
+    fn account_cache_component_is_transported_once_and_diagnostics_fail_closed() {
+        use alethia_reth_evm::zk_gas::pricing::{
+            AccountCacheDiagnostics, AccountCacheIncompleteness,
+        };
+        let report = |units| {
+            ZkGasBlockSnapshot {
+                account_cache: AccountCacheDiagnostics {
+                    observed_accounts: 1,
+                    max_prefix_group: 1,
+                    comparison_equivalents: 1,
+                    query_budget: units,
+                    work_units: units,
+                    completed_transactions: 1,
+                    incomplete: None,
+                },
+                ..Default::default()
+            }
+            .shadow_report()
+        };
+        let (node, prove, ..) = complete_block_pricing(
+            0,
+            &report(3),
+            &report(7),
+            ProposalPayloadSelectors::default(),
+            ResourceSelectors::default(),
+            MptSelectors::default(),
+        )
+        .unwrap();
+        let node_json: std::collections::BTreeMap<String, Box<serde_json::value::RawValue>> =
+            serde_json::from_str(&serde_json::to_string(&node).unwrap()).unwrap();
+        let prove_json: std::collections::BTreeMap<String, Box<serde_json::value::RawValue>> =
+            serde_json::from_str(&serde_json::to_string(&prove).unwrap()).unwrap();
+        assert_eq!(
+            node_json.get("account_cache_work_units").map(|v| v.get()),
+            Some("3")
+        );
+        assert_eq!(
+            prove_json.get("account_cache_work_units").map(|v| v.get()),
+            Some("7")
+        );
+        let node_cache = 3 * 128 * FIXED_POINT_SCALE;
+        let prove_cache = 7 * 128 * FIXED_POINT_SCALE;
+        assert_eq!(
+            node_json["account_cache_scaled"]
+                .get()
+                .parse::<i128>()
+                .unwrap(),
+            node_cache
+        );
+        assert_eq!(
+            prove_json["account_cache_scaled"]
+                .get()
+                .parse::<i128>()
+                .unwrap(),
+            prove_cache
+        );
+        assert_eq!(node.known_subtotal_scaled, node.fixed_scaled + node_cache);
+        assert_eq!(prove.total_scaled, prove.fixed_scaled + prove_cache);
+        let broken = ZkGasBlockSnapshot {
+            account_cache: AccountCacheDiagnostics {
+                incomplete: Some(AccountCacheIncompleteness::InvalidPopulation),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+        .shadow_report();
+        assert!(
+            complete_block_pricing(
+                0,
+                &broken,
+                &report(7),
+                ProposalPayloadSelectors::default(),
+                ResourceSelectors::default(),
+                MptSelectors::default()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn block_completion_rejects_partial_transient_and_combined_overflow() {
+        use alethia_reth_evm::zk_gas::pricing::{StorageJournalIncompleteness, ZkGasError};
+        let mut incomplete = ZkGasBlockSnapshot::default();
+        incomplete.transient_storage_journal.incomplete =
+            Some(StorageJournalIncompleteness::MissingFootprint);
+        let mut overflow = ZkGasBlockSnapshot::default();
+        overflow.storage_journal.comparison_work_units_upper = u64::MAX;
+        overflow
+            .transient_storage_journal
+            .comparison_work_units_upper = 1;
+        let mut out_of_domain = ZkGasBlockSnapshot::default();
+        out_of_domain.storage_journal.comparison_work_units_upper = 600_000_000_000;
+        out_of_domain
+            .transient_storage_journal
+            .comparison_work_units_upper = 600_000_000_000;
+        let cases = [
+            (
+                incomplete,
+                ZkGasShadowDiagnostic::StorageJournal(
+                    StorageJournalIncompleteness::MissingFootprint,
+                ),
+            ),
+            (
+                overflow,
+                ZkGasShadowDiagnostic::Pricing(ZkGasError::ArithmeticOverflow),
+            ),
+            (
+                out_of_domain,
+                ZkGasShadowDiagnostic::Pricing(ZkGasError::SelectorOutOfRange {
+                    selector: "storage_journal_work_units",
+                    value: 1_200_000_000_000,
+                }),
+            ),
+        ];
+        for (snapshot, expected) in cases {
+            let report = snapshot.shadow_report();
+            for attempted_failure in [false, true] {
+                let valid = ZkGasBlockSnapshot::default().shadow_report();
+                let (committed, attempted) = if attempted_failure {
+                    (&valid, &report)
+                } else {
+                    (&report, &valid)
+                };
+                let error = complete_block_pricing(
+                    3,
+                    committed,
+                    attempted,
+                    ProposalPayloadSelectors::default(),
+                    ResourceSelectors::default(),
+                    MptSelectors::default(),
+                )
+                .unwrap_err();
+                assert!(matches!(error, RuntimeQuoteError::BlockCompletion {
+                    block_index: 3,
+                    source: ZkGasCompletionError::ZkGasShadowDiagnostic(actual),
+                } if actual == expected));
+            }
+        }
+    }
+
+    #[test]
+    fn block_completion_rejects_partial_and_out_of_domain_access_list_construction() {
+        use alethia_reth_evm::zk_gas::pricing::AccessListConstructionIncompleteness;
+
+        let mut incomplete = ZkGasBlockSnapshot::default();
+        incomplete.access_list_construction.incomplete =
+            Some(AccessListConstructionIncompleteness::MissingCapture);
+        let mut out_of_domain = ZkGasBlockSnapshot::default();
+        out_of_domain.access_list_construction.comparison_pairs = u64::MAX;
+        let cases = [
+            (
+                incomplete,
+                ZkGasShadowDiagnostic::Pricing(ZkGasError::InvalidInput(
+                    "incomplete_access_list_construction",
+                )),
+            ),
+            (
+                out_of_domain,
+                ZkGasShadowDiagnostic::Pricing(ZkGasError::SelectorOutOfRange {
+                    selector: "access_list_construction_pairs",
+                    value: u64::MAX,
+                }),
+            ),
+        ];
+        for (snapshot, expected) in cases {
+            let report = snapshot.shadow_report();
+            for attempted_failure in [false, true] {
+                let valid = ZkGasBlockSnapshot::default().shadow_report();
+                let (committed, attempted) = if attempted_failure {
+                    (&valid, &report)
+                } else {
+                    (&report, &valid)
+                };
+                let error = complete_block_pricing(
+                    3,
+                    committed,
+                    attempted,
+                    ProposalPayloadSelectors::default(),
+                    ResourceSelectors::default(),
+                    MptSelectors::default(),
+                )
+                .unwrap_err();
+                assert!(matches!(error, RuntimeQuoteError::BlockCompletion {
+                    block_index: 3,
+                    source: ZkGasCompletionError::ZkGasShadowDiagnostic(actual),
+                } if actual == expected));
+            }
+        }
     }
 
     #[test]
@@ -1367,7 +2322,132 @@ mod tests {
         let expected_output = hash_shasta_subproof_input(&input.proof_carry_data);
 
         crate::reconstruct::take_fixture_opcode_counts();
+        crate::reconstruct::take_fixture_ecmul_calls();
         let quote = quote_shasta_proposal(&input).expect("complete proposal workload quote");
+        let (ecmul_calls, call_hooks, call_ends) = crate::reconstruct::take_fixture_ecmul_calls();
+        assert_eq!(
+            call_hooks, call_ends,
+            "all PC07 and non-PC07 callbacks balance"
+        );
+        assert!(
+            call_hooks > ecmul_calls.len() as u64,
+            "non-PC07 calls are balanced too"
+        );
+        assert_eq!(ecmul_calls.len(), 10);
+        let exported = quote
+            .blocks
+            .iter()
+            .map(|block| {
+                let snapshot = block
+                    .node
+                    .semantic_counters
+                    .expect("new host quotes observe semantic counters");
+                assert_eq!(snapshot.diagnostic, None);
+                snapshot.ecmul.expect("fixture observation is complete")
+            })
+            .fold(
+                EcmulSemanticCountersSnapshot::default(),
+                |mut sum, block| {
+                    sum.successful_calls += block.successful_calls;
+                    sum.successful_native_gas += block.successful_native_gas;
+                    sum.successful_scalar_work_units += block.successful_scalar_work_units;
+                    sum.failed_calls += block.failed_calls;
+                    sum.failed_native_gas += block.failed_native_gas;
+                    sum
+                },
+            );
+        assert_eq!(exported.successful_calls, 10);
+        assert_eq!(exported.successful_native_gas, 60_000);
+        assert_eq!(exported.successful_scalar_work_units, 2305);
+        assert_eq!(exported.failed_calls, 0);
+        assert_eq!(exported.failed_native_gas, 0);
+        assert!(
+            ecmul_calls
+                .iter()
+                .all(|call| call.input.len() == 96 && call.succeeded && call.native_gas == 6_000)
+        );
+        assert_eq!(
+            ecmul_calls
+                .iter()
+                .map(|call| call.work_units)
+                .collect::<Vec<_>>(),
+            vec![191, 195, 191, 199, 373, 191, 195, 206, 191, 373]
+        );
+        let expected_scalars = [
+            "0000000000000000000000000000000041af18736dc9d7921c859fc95ac84da5",
+            "00000000000000000000000000000000561f8c992a424deb37ccdf4e19c0e7db",
+            "00000000000000000000000000000000553d9bd933a2145372a28c0d7e4ff708",
+            "000000000000000000000000000000007930efbbb44f9f5a08b791ac9e0b5dbb",
+            "04446e66d300eb7fb45c9726bb53c793dda407a62e9601618bb43c5c14657ac0",
+            "0000000000000000000000000000000041af18736dc9d7921c859fc95ac84da5",
+            "00000000000000000000000000000000561f8c992a424deb37ccdf4e19c0e7db",
+            "00000000000000000000000000000000d0fb7edc7b4e0159ff963e8ccefdd7e8",
+            "00000000000000000000000000000000ca022ca3a82b56eb5009755e04dfff59",
+            "04446e66d300eb7fb45c9726bb53c793dda407a62e9601618bb43c5c14657ac0",
+        ];
+        for (call, expected) in ecmul_calls.iter().zip(expected_scalars) {
+            assert_eq!(
+                call.reduced_scalar,
+                U256::from_str_radix(expected, 16).unwrap()
+            );
+        }
+        assert_eq!(
+            quote
+                .blocks
+                .iter()
+                .fold((0_u64, 0_u64, 0_u64), |totals, block| (
+                    totals.0 + block.prove.input_transaction_count,
+                    totals.1 + block.prove.consumed_candidate_count,
+                    totals.2 + block.prove.attempted_transaction_count,
+                )),
+            (199, 199, 199),
+            "fixture has no discarded candidate whose route work would need a separate scope"
+        );
+        let mut ecmul_by_block = BTreeMap::<u64, (u64, u64, u64, i128, i128, i128)>::new();
+        let mut eventwise_reduction = 0_i128;
+        for call in &ecmul_calls {
+            let accepted = (20_000_000 * FIXED_POINT_SCALE)
+                .max(i128::from(call.native_gas) * 131_390_224_983_920_708_487);
+            let incremental = i128::from(call.native_gas) * 29_901 * FIXED_POINT_SCALE;
+            let structural = i128::from(call.work_units) * 572_936 * FIXED_POINT_SCALE;
+            let block = ecmul_by_block.entry(call.block_number).or_default();
+            block.0 += 1;
+            block.1 += call.native_gas;
+            block.2 += call.work_units;
+            block.3 += accepted;
+            block.4 += incremental;
+            block.5 += structural;
+            eventwise_reduction +=
+                accepted.max(incremental).max(structural) - accepted.max(structural);
+        }
+        assert_eq!(
+            ecmul_by_block.keys().copied().collect::<Vec<_>>(),
+            vec![12_556_194]
+        );
+        let actual_ecmul = ecmul_by_block[&12_556_194];
+        assert_eq!(
+            (actual_ecmul.0, actual_ecmul.1, actual_ecmul.2),
+            (10, 60_000, 2_305)
+        );
+        assert_eq!(actual_ecmul.3, 200_000_000 * FIXED_POINT_SCALE);
+        assert_eq!(actual_ecmul.4, 1_794_060_000 * FIXED_POINT_SCALE);
+        assert_eq!(actual_ecmul.5, 1_320_617_480 * FIXED_POINT_SCALE);
+        // Historical e8 charges max(sum A, sum I, sum S) within each block's PC07 route.
+        // Candidate801 sets only I=0. These independent call facts, not the observed
+        // quote difference, derive the inherited fixture's exact successor reduction.
+        let ecmul_reduction_scaled = ecmul_by_block
+            .values()
+            .map(|block| block.3.max(block.4).max(block.5) - block.3.max(block.5))
+            .sum::<i128>();
+        assert_eq!(ecmul_reduction_scaled % FIXED_POINT_SCALE, 0);
+        let ecmul_incremental_reduction_pgu =
+            u128::try_from(ecmul_reduction_scaled / FIXED_POINT_SCALE).unwrap();
+        assert_eq!(ecmul_incremental_reduction_pgu, 473_442_520);
+        assert_eq!(eventwise_reduction, 542_040_776 * FIXED_POINT_SCALE);
+        assert_ne!(
+            eventwise_reduction, ecmul_reduction_scaled,
+            "max must follow route accumulation"
+        );
 
         let (normal, blockhash, delegatecall) = crate::reconstruct::take_fixture_opcode_counts();
         assert_eq!((normal, blockhash, delegatecall), (2_385_656, 49_344, 198));
@@ -1389,11 +2469,134 @@ mod tests {
         );
         // Independent inspector counts close the inherited F4/BLOCKHASH changes and reserve;
         // no historical fixture bytes or original public output are replaced.
+        // The accepted c0877d65 ordinary tariffs reduce this fixture's operation
+        // subtotal by this exact integer PGU golden; other components stay unchanged.
+        let ordinary_tariff_reduction_pgu = 328_629_708_u128;
+        // The e8e574db PC02-only update reduces this fixture by ten fixed-floor
+        // deltas: 10 * (20,000,000 - 81,024) = 199,189,760 PGU. The unchanged
+        // 42 PGU/native-gas structural term does not increase that new quote.
+        let sha256_floor_reduction_pgu = 10 * (20_000_000_u128 - 81_024);
+        let tariff_reduction_pgu = ordinary_tariff_reduction_pgu
+            + sha256_floor_reduction_pgu
+            + ecmul_incremental_reduction_pgu;
         let operation_uplift = (6_000 * FIXED_POINT_SCALE - 3_841_906_721_059_316_908_619)
             * i128::from(delegatecall)
             + (700 * FIXED_POINT_SCALE - 32_117_684_584_888_432_025) * i128::from(blockhash)
-            + 64 * FIXED_POINT_SCALE * i128::from(normal);
+            + 64 * FIXED_POINT_SCALE * i128::from(normal)
+            - i128::try_from(tariff_reduction_pgu).unwrap() * FIXED_POINT_SCALE;
         let expected_operations = 3_187_806_573_010_541_525_400_160_675 + operation_uplift;
+        let journal_scaled = quote
+            .blocks
+            .iter()
+            .map(|block| {
+                assert_eq!(
+                    block.node.pricing.storage_journal_work_units,
+                    block.prove.pricing.storage_journal_work_units
+                );
+                let expected = ZkGasModel
+                    .price_storage_journal_work(block.node.pricing.storage_journal_work_units)
+                    .unwrap();
+                assert_eq!(block.node.pricing.storage_journal_scaled, expected);
+                assert_eq!(block.prove.pricing.storage_journal_scaled, expected);
+                expected
+            })
+            .sum::<i128>();
+        let journal_pgu = u128::try_from(journal_scaled / FIXED_POINT_SCALE).unwrap();
+        // Account-journal is a separate additive component. Keep all inherited component
+        // and old-total goldens intact, and explain the exact successor-only delta.
+        let account_units = quote
+            .blocks
+            .iter()
+            .map(|block| {
+                let node = &block.node.pricing;
+                let prove = &block.prove.pricing;
+                assert_eq!(
+                    node.account_journal_work_units,
+                    prove.account_journal_work_units
+                );
+                let expected =
+                    i128::from(node.account_journal_work_units) * 128 * FIXED_POINT_SCALE;
+                assert_eq!(node.account_journal_scaled, expected);
+                assert_eq!(prove.account_journal_scaled, expected);
+                assert_eq!(
+                    ZkGasModel
+                        .price_account_journal_work(node.account_journal_work_units)
+                        .unwrap(),
+                    expected
+                );
+                node.account_journal_work_units
+            })
+            .sum::<u64>();
+        assert_eq!(account_units, 50_396);
+        let account_scaled = i128::from(account_units) * 128 * FIXED_POINT_SCALE;
+        let account_pgu = u128::from(account_units) * 128;
+        assert_eq!(account_pgu, 6_450_688);
+        assert_eq!(quote.prove.proposal_once.account_journal_work_units, 0);
+        assert_eq!(quote.prove.proposal_once.account_journal_scaled, 0);
+
+        // Preserve the previous component and total goldens; the block-cache reserve is
+        // independently itemized and is the only additional price in this successor.
+        let cache_units = quote
+            .blocks
+            .iter()
+            .map(|block| {
+                let node = &block.node.pricing;
+                let prove = &block.prove.pricing;
+                assert_eq!(
+                    node.account_cache_work_units,
+                    prove.account_cache_work_units
+                );
+                let expected = i128::from(node.account_cache_work_units) * 128 * FIXED_POINT_SCALE;
+                assert_eq!(node.account_cache_scaled, expected);
+                assert_eq!(prove.account_cache_scaled, expected);
+                assert_eq!(
+                    ZkGasModel
+                        .price_account_cache_work(node.account_cache_work_units)
+                        .unwrap(),
+                    expected
+                );
+                node.account_cache_work_units
+            })
+            .sum::<u64>();
+        assert_eq!(cache_units, 5_712);
+        let cache_scaled = i128::from(cache_units) * 128 * FIXED_POINT_SCALE;
+        let cache_pgu = u128::from(cache_units) * 128;
+        assert_eq!(cache_pgu, 731_136);
+        assert_eq!(quote.prove.proposal_once.account_cache_work_units, 0);
+        assert_eq!(quote.prove.proposal_once.account_cache_scaled, 0);
+
+        // Retain every inherited golden below and itemize only the new transition price.
+        // This assertion is also exercised by the real192-block replay, not fabricated slots.
+        let transition_units = quote
+            .blocks
+            .iter()
+            .map(|block| {
+                let node = &block.node.pricing;
+                let prove = &block.prove.pricing;
+                assert_eq!(
+                    node.storage_transition_work_units,
+                    prove.storage_transition_work_units
+                );
+                let expected =
+                    i128::from(node.storage_transition_work_units) * 384 * FIXED_POINT_SCALE;
+                assert_eq!(node.storage_transition_scaled, expected);
+                assert_eq!(prove.storage_transition_scaled, expected);
+                assert_eq!(
+                    ZkGasModel
+                        .price_storage_transition_work(node.storage_transition_work_units)
+                        .unwrap(),
+                    expected
+                );
+                node.storage_transition_work_units
+            })
+            .sum::<u64>();
+        assert!(transition_units > 0);
+        assert_eq!(transition_units, 3_699);
+        let transition_scaled = i128::from(transition_units) * 384 * FIXED_POINT_SCALE;
+        let transition_pgu = u128::from(transition_units) * 384;
+        assert_eq!(quote.prove.proposal_once.storage_transition_work_units, 0);
+        assert_eq!(quote.prove.proposal_once.storage_transition_scaled, 0);
+
         assert_eq!(
             quote
                 .blocks
@@ -1522,13 +2725,35 @@ mod tests {
             quote.node,
             NodeProposalWorkloadQuote {
                 unzen_zkgas_sum: 259_514_910,
-                block_local_known_scaled: 3_579_273_824_904_407_953_889_126_534 + operation_uplift,
+                block_local_known_scaled: 3_579_273_824_904_407_953_889_126_534
+                    + operation_uplift
+                    + journal_scaled
+                    + account_scaled
+                    + cache_scaled
+                    + transition_scaled,
                 block_local_known_pgu: ceil_scaled(
-                    3_579_273_824_904_407_953_889_126_534 + operation_uplift
+                    3_579_273_824_904_407_953_889_126_534
+                        + operation_uplift
+                        + journal_scaled
+                        + account_scaled
+                        + cache_scaled
+                        + transition_scaled
                 )
                 .unwrap(),
-                sum_of_block_known_pgu: 3_765_339_140,
+                sum_of_block_known_pgu: 3_765_339_140 - tariff_reduction_pgu
+                    + journal_pgu
+                    + account_pgu
+                    + cache_pgu
+                    + transition_pgu,
             }
+        );
+        assert_eq!(
+            quote.node.block_local_known_pgu,
+            3_769_697_881 - tariff_reduction_pgu + account_pgu + cache_pgu + transition_pgu
+        );
+        assert_eq!(
+            quote.node.sum_of_block_known_pgu,
+            3_769_697_924 - tariff_reduction_pgu + account_pgu + cache_pgu + transition_pgu
         );
         assert_eq!(
             quote.prove.selectors,
@@ -1563,8 +2788,22 @@ mod tests {
                 fixed_scaled: 0,
                 authorization_scaled: 0,
                 access_list_scaled: 0,
+                access_list_construction_pairs: 0,
+                access_list_construction_other_pairs: 0,
+                access_list_address_pairs: 0,
+                access_list_construction_scaled: 0,
+                access_list_construction_other_scaled: 0,
+                access_list_address_scaled: 0,
                 code_preparation_scaled: 0,
                 operations_scaled: 0,
+                storage_journal_work_units: 0,
+                account_journal_work_units: 0,
+                account_cache_work_units: 0,
+                storage_transition_work_units: 0,
+                storage_journal_scaled: 0,
+                account_journal_scaled: 0,
+                account_cache_scaled: 0,
+                storage_transition_scaled: 0,
                 normal_dispatch_count: 0,
                 normal_dispatch_scaled: 0,
                 feature_error_scaled: 0,
@@ -1580,21 +2819,54 @@ mod tests {
         );
         assert_eq!(
             quote.prove.block_local_scaled,
-            4_764_457_136_904_407_953_889_126_534 + operation_uplift
+            4_764_457_136_904_407_953_889_126_534
+                + operation_uplift
+                + journal_scaled
+                + account_scaled
+                + cache_scaled
+                + transition_scaled
         );
         assert_eq!(
             quote.prove.block_local_pgu,
-            ceil_scaled(4_764_457_136_904_407_953_889_126_534 + operation_uplift).unwrap()
+            ceil_scaled(
+                4_764_457_136_904_407_953_889_126_534
+                    + operation_uplift
+                    + journal_scaled
+                    + account_scaled
+                    + cache_scaled
+                    + transition_scaled
+            )
+            .unwrap()
         );
-        assert_eq!(quote.prove.sum_of_block_local_pgu, 4_950_522_452);
+        assert_eq!(
+            quote.prove.sum_of_block_local_pgu,
+            4_950_522_452 - tariff_reduction_pgu
+                + journal_pgu
+                + account_pgu
+                + cache_pgu
+                + transition_pgu
+        );
         assert_eq!(quote.prove.proposal_once_pgu, 160_621_711);
         assert_eq!(
             quote.prove.total_scaled,
-            4_925_078_847_639_888_356_009_085_400 + operation_uplift
+            4_925_078_847_639_888_356_009_085_400
+                + operation_uplift
+                + journal_scaled
+                + account_scaled
+                + cache_scaled
+                + transition_scaled
         );
         assert_eq!(
             quote.prove.total_pgu,
-            ceil_scaled(4_925_078_847_639_888_356_009_085_400 + operation_uplift).unwrap()
+            ceil_scaled(
+                4_925_078_847_639_888_356_009_085_400
+                    + operation_uplift
+                    + journal_scaled
+                    + account_scaled
+                    + cache_scaled
+                    + transition_scaled
+            )
+            .unwrap()
         );
         quote.blocks.iter().for_each(assert_block_formula_closes);
         assert_proposal_formula_closes(&quote);

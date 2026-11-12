@@ -81,10 +81,14 @@ fn snapshot(pricing: PricingBreakdown) -> PricingBreakdownSnapshot {
     }
 }
 
-// This synthetic profile exercises current-model validation. The unchanged historical program
-// and normalization identities are fixtures for matching tests, not a new calibration claim.
+fn historical_profiles() -> CompatibilityProfilesV1 {
+    toml::from_str(include_str!("../profiles/sp1-pricing-calibration-v1.toml")).unwrap()
+}
+
+// These synthetic profiles deliberately retain the historical program and normalization to
+// exercise matching and normalization checks independently of the current default profile.
 fn current_model_profiles() -> CompatibilityProfilesV1 {
-    let mut profiles = embedded_profiles().unwrap();
+    let mut profiles = historical_profiles();
     let profile = &mut profiles.profiles[0];
     profile.profile_id = "current-model-test-profile".into();
     profile.model_id = RUNTIME_SPEC_SHA256.into();
@@ -169,7 +173,7 @@ fn observation() -> CompleteObservationV1 {
             unit: "sp1_pgu".into(),
         },
         measurement_stage: "execute".into(),
-        program: embedded_profiles().unwrap().profiles.remove(0).program,
+        program: historical_profiles().profiles.remove(0).program,
         backend_version: None,
         software_version: None,
         replicate_group: None,
@@ -248,6 +252,117 @@ fn rows(path: &Path) -> Vec<ComparisonRowV1> {
 #[test]
 fn quote_fixture_uses_current_model_for_selector_price_validation() {
     assert_eq!(quote().quote.model_id, RUNTIME_SPEC_SHA256);
+}
+
+fn research_observation() -> CompleteObservationV1 {
+    let mut observation = observation();
+    observation.program = ProgramIdentity {
+        elf_sha256: "b76baf2e0f3fa3fe6f8a20fe53dbf82f58601ed14b370dfc0f8d31db2069e034".into(),
+        serialized_vk_sha256: None,
+        sp1_vkey: None,
+        risc0_image_id: None,
+    };
+    observation.backend_version = Some("6.3.0".into());
+    observation
+}
+
+#[test]
+fn embedded_profile_binds_current_research_identity_without_historical_normalization() {
+    let profiles = embedded_profiles().unwrap();
+    assert_eq!(profiles.profiles.len(), 1);
+    let profile = &profiles.profiles[0];
+    assert_eq!(profile.profile_id, "sp1-research-current");
+    assert_eq!(profile.model_id, RUNTIME_SPEC_SHA256);
+    assert_eq!(
+        profile.runtime_spec_sha256.as_deref(),
+        Some(RUNTIME_SPEC_SHA256)
+    );
+    assert_eq!(profile.program, research_observation().program);
+    assert_eq!(profile.backend, "sp1");
+    assert_eq!(profile.backend_version.as_deref(), Some("6.3.0"));
+    assert_eq!(profile.measurement_stage, "execute");
+    assert_eq!(profile.prediction_unit, "sp1_pgu");
+    assert_eq!(profile.observation_unit, "sp1_pgu");
+    assert!(profile.normalization.is_none());
+    assert_eq!(
+        historical_profiles().profiles[0].model_id,
+        "93d04eddda3779393807808859eb36561d35aad0cdd8a8a3960ec3e279a93046"
+    );
+}
+
+#[test]
+fn default_profile_joins_exact_current_research_observation_without_normalizing_unzen() {
+    let dir = TestDir::new();
+    let mut args = write_inputs(
+        &dir,
+        &[complete_quote()],
+        &[ObservationRowV1::Complete(Box::new(research_observation()))],
+    );
+    args.profiles = None;
+    let run = run_compare(&args, &executable()).unwrap();
+    assert_eq!(run.manifest.status, RunStatus::Complete);
+    assert_eq!(run.manifest.counts.get(&ComparisonKind::Joined), Some(&1));
+    let ComparisonResultV1::Joined {
+        profile_id,
+        normalization,
+        ..
+    } = &rows(&run.run_path)[0].result
+    else {
+        panic!("matching research observation must receive direct comparison")
+    };
+    assert_eq!(profile_id, "sp1-research-current");
+    assert!(normalization.is_none());
+}
+
+#[test]
+fn default_profile_retains_identity_mismatches_as_incompatible_rows() {
+    for mismatch in [
+        "model",
+        "program",
+        "sdk",
+        "missing-sdk",
+        "stage",
+        "backend",
+        "unit",
+    ] {
+        let dir = TestDir::new();
+        let mut quote = quote();
+        let mut observation = research_observation();
+        match mismatch {
+            "model" => {
+                quote.quote.model_id = "foreign-model".into();
+                quote.calibration_profile = "foreign-model".into();
+            }
+            "program" => observation.program.elf_sha256 = "foreign-program".into(),
+            "sdk" => observation.backend_version = Some("6.8.1".into()),
+            "missing-sdk" => observation.backend_version = None,
+            "stage" => observation.measurement_stage = "prove".into(),
+            "backend" => observation.backend = "other-backend".into(),
+            "unit" => observation.workload.unit = "cycles".into(),
+            _ => unreachable!(),
+        }
+        let mut args = write_inputs(
+            &dir,
+            &[QuoteRowV1::Complete(Box::new(quote))],
+            &[ObservationRowV1::Complete(Box::new(observation))],
+        );
+        args.profiles = None;
+        let run = run_compare(&args, &executable()).unwrap();
+        assert_eq!(
+            run.manifest
+                .counts
+                .get(&ComparisonKind::IncompatibleProfile),
+            Some(&1),
+            "{mismatch}"
+        );
+        assert!(
+            matches!(
+                rows(&run.run_path)[0].result,
+                ComparisonResultV1::IncompatibleProfile { .. }
+            ),
+            "{mismatch}"
+        );
+    }
 }
 
 #[test]
@@ -1199,7 +1314,7 @@ fn ordered_file_hashes_and_ordered_row_digests_are_part_of_the_run_identity() {
 fn normalization_requires_every_named_identity_and_both_independent_artifact_hashes() {
     use zkgas::compare::verify_normalization_artifact;
     let bytes = include_bytes!("../profiles/artifacts/unzen-sp1-block-comparison-v1.json");
-    let n = embedded_profiles().unwrap().profiles[0]
+    let n = historical_profiles().profiles[0]
         .normalization
         .clone()
         .unwrap();

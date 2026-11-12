@@ -32,8 +32,8 @@ use async_trait::async_trait;
 use raiko2_pipeline::{Pipeline, PipelineSpec, PipelineStage, PipelineStageResult, ProverBackend};
 use raiko2_primitives::{AggregationGuestInput, Proof, ProofContext, ShastaRequest};
 use raiko2_prover::{
-    NetworkProverBackend, PendingProofCheckpoint, PendingProofCheckpointIdentity, Prover,
-    ProverProgress, ProverProgressObserver, SubmissionCheckpointPermit,
+    NetworkProverBackend, PendingProofCheckpoint, Prover, ProverProgress, ProverProgressObserver,
+    SubmissionCheckpointPermit,
 };
 use raiko2_provider::Provider;
 use raiko2_queue::{
@@ -412,19 +412,6 @@ pub trait EngineObserver: Send + Sync {
         Ok(None)
     }
 
-    async fn clear_pending_proof_checkpoint(
-        &self,
-        _id: &EngineTaskId,
-        _task: &EngineTask,
-        _identity: &PendingProofCheckpointIdentity,
-        _permit: &SubmissionCheckpointPermit,
-        _execution_permit: &TaskExecutionPermit,
-    ) -> Result<(), EngineObserverError> {
-        Err(EngineObserverError::ProgressRejected(
-            "provider checkpoint clearing is unsupported".to_string(),
-        ))
-    }
-
     async fn load_proof_artifact(
         &self,
         _artifact: &ProofArtifactRef,
@@ -552,33 +539,6 @@ impl ProverProgressObserver for EngineProgressObserver {
         self.observer
             .load_pending_proof_checkpoint(&self.task_id, &self.task, backend)
             .await
-    }
-
-    async fn clear_pending_proof_checkpoint(
-        &self,
-        identity: &PendingProofCheckpointIdentity,
-        permit: &SubmissionCheckpointPermit,
-    ) -> Result<(), raiko2_prover::ProgressPersistenceError> {
-        match self
-            .observer
-            .clear_pending_proof_checkpoint(
-                &self.task_id,
-                &self.task,
-                identity,
-                permit,
-                &self.execution_permit,
-            )
-            .await
-        {
-            Ok(()) => Ok(()),
-            Err(
-                EngineObserverError::RuntimeInactive(error)
-                | EngineObserverError::ProgressRejected(error),
-            ) => Err(raiko2_prover::ProgressPersistenceError::Permanent(error)),
-            Err(error) => Err(raiko2_prover::ProgressPersistenceError::Retryable(
-                error.to_string(),
-            )),
-        }
     }
 }
 
@@ -1346,11 +1306,13 @@ where
     }
 
     pub async fn shutdown_workers(&self) {
+        // Keep the stopped groups registered so `workers_healthy` keeps reporting false once the
+        // pool has been shut down, instead of treating an empty registry as "never started".
         let groups = match self.inner.worker_groups.lock() {
-            Ok(mut groups) => groups.drain(..).collect::<Vec<_>>(),
+            Ok(groups) => groups.clone(),
             Err(poisoned) => {
                 tracing::error!("worker group lock poisoned during engine shutdown");
-                poisoned.into_inner().drain(..).collect::<Vec<_>>()
+                poisoned.into_inner().clone()
             }
         };
         for group in groups {
@@ -1366,6 +1328,20 @@ where
             .load(Ordering::Acquire);
         let max_age_ms = u64::try_from(max_age.as_millis()).unwrap_or(u64::MAX);
         last_success != 0 && now_millis().saturating_sub(last_success) <= max_age_ms
+    }
+
+    /// Report whether every registered worker group is still running.
+    ///
+    /// An engine with no worker groups registered reports `true`; liveness of a never-started
+    /// pool is signalled separately by [`Self::queue_maintenance_ready`]. Once workers have been
+    /// started, this returns `false` if any group has shut down or lost a supervisor task.
+    #[must_use]
+    pub fn workers_healthy(&self) -> bool {
+        let groups = match self.inner.worker_groups.lock() {
+            Ok(groups) => groups,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        groups.iter().all(|group| group.all_alive())
     }
 
     async fn get_guest_input(
@@ -2692,9 +2668,9 @@ mod tests {
         }};
     }
 
-    fn boundless_test_engine(scheduler_config: SchedulerConfig) -> Engine<TestSpec<MockProver>> {
+    fn network_test_engine(scheduler_config: SchedulerConfig) -> Engine<TestSpec<MockProver>> {
         Engine::with_store_and_scheduler_config(
-            TestSpec::new(MockProver).with_pipeline_key(PipelineKey::ShastaRisc0Network),
+            TestSpec::new(MockProver).with_pipeline_key(PipelineKey::ShastaSp1),
             test_context(),
             raiko2_queue::MemoryStore::new(),
             scheduler_config,
@@ -3018,7 +2994,7 @@ mod tests {
                 delay: Duration::from_millis(25),
             },
         };
-        let engine = boundless_test_engine(scheduler_config.clone());
+        let engine = network_test_engine(scheduler_config.clone());
         let task_policy = raiko2_queue::TaskExecutionPolicy {
             lease_duration: scheduler_config.lease_duration,
             retry: scheduler_config.retry.clone(),
@@ -3261,6 +3237,24 @@ mod tests {
             .store(super::now_millis().saturating_sub(100), Ordering::Release);
         assert!(!engine.queue_maintenance_ready(Duration::from_millis(50)));
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn workers_healthy_reports_false_after_shutdown() {
+        let engine = Engine::with_store_and_scheduler_config(
+            TestSpec::new(MockProver),
+            test_context(),
+            raiko2_queue::MemoryStore::new(),
+            Engine::<TestSpec<MockProver>>::default_scheduler_config(),
+        );
+
+        assert!(engine.workers_healthy(), "never-started engine is healthy");
+        engine.start_workers_with_maintenance_interval(1, Duration::from_secs(60));
+        assert!(engine.workers_healthy());
+
+        engine.shutdown_workers().await;
+
+        assert!(!engine.workers_healthy());
     }
 
     #[tokio::test]

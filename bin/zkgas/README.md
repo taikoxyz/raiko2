@@ -137,15 +137,32 @@ executes a candidate that is later discarded, it emits one structured block-leve
 the input, consumed, attempted, committed, and discarded transaction counts. Set `RUST_LOG` to
 override the filter; quote JSON and pricing are unchanged by this observation.
 
-### Compare: compatible SP1 example
+### Compare: current research profile
 
 `--quotes` and `--observations` are repeatable. `--profiles` replaces the embedded profiles; it
-does not add to them. Without that option, the embedded SP1 calibration profile and sealed Unzen
-normalization are used.
+does not add to them. The default is
+[`profiles/sp1-research-current.toml`](profiles/sp1-research-current.toml): numerical model
+`80160649…`, research ELF `b76baf2e…`, SP1 SDK version `6.3.0`, execute stage and SP1 PGU.
+Every named identity must match, including the SDK version. This profile has no historical
+Unzen normalization and does not certify another production program or SDK.
 
-The following is a **synthetic schema example**, not measured SP1 truth. It requires `jq` and a
-complete single-row `quote.jsonl` from the preceding command. It deliberately asserts the known
-calibration identity and invents workload `100`; never pass this off as execution evidence:
+```sh
+target/debug/zkgas-compare --quotes quote.jsonl --observations observations.json \
+  --output comparison-store
+```
+
+The observation manifest must record a genuine matching measurement. To select the same
+current profile explicitly, pass `--profiles bin/zkgas/profiles/sp1-research-current.toml`.
+The original `93d04edd…` / `ba5ab702…` profile and its normalization remain available only
+through explicit `--profiles bin/zkgas/profiles/sp1-pricing-calibration-v1.toml`.
+
+### Historical synthetic schema example
+
+The following is a preserved **synthetic schema example**, not measured SP1 truth. It requires
+`jq` and a complete single-row archived `93d04edd…` quote. Its explicit example profile does
+not match the current model/default; use the current workflow above for current measurements.
+It deliberately asserts the historical calibration identity and invents workload `100`;
+never pass this off as execution evidence:
 
 ```sh
 jq -s '.[0] as $q | {

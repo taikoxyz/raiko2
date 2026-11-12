@@ -1054,8 +1054,7 @@ mod tests {
     async fn runtime_cleanup_cancels_orphaned_roots_without_remote_progress() -> Result<()> {
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root("orphaned"))?);
         let orphaned_task_id = encoded_proposal_task_id(10)?;
-        let remote_task_id =
-            encoded_proposal_task_id_for_pipeline(11, PipelineKey::ShastaRisc0Network)?;
+        let remote_task_id = encoded_proposal_task_id_for_pipeline(11, PipelineKey::ShastaSp1)?;
         let queued_task_id = encoded_proposal_task_id(13)?;
         let now = now_ts();
         let stale = now.saturating_sub(7_201);
@@ -1090,17 +1089,14 @@ mod tests {
             remote_metadata.proposals[0].task_id.clone(),
             TaskRuntimeMetadata {
                 provider_request_id: Some("0xremote".to_string()),
-                image_ref: Some("0ximage".to_string()),
-                deployment: Some("base".to_string()),
-                offchain: Some(false),
                 expires_at: Some(1_000),
-                lock_expires_at: Some(900),
                 submitted_at: Some(800),
-                quoted_mcycles_count: Some(1),
-                evaluated_mcycles_count: Some(1),
-                max_price_multiplier: Some(1),
-                max_price_wei: Some("1000".to_string()),
-                rebid_attempt: Some(1),
+                sp1_network_mode: Some(raiko2_prover::Sp1NetworkMode::Reserved),
+                sp1_fulfillment_strategy: Some(raiko2_prover::Sp1FulfillmentStrategy::Reserved),
+                sp1_skip_simulation: Some(false),
+                sp1_cycle_limit: Some(1_000_000),
+                sp1_timeout_secs: Some(200),
+                request_attempt: Some(1),
                 ..TaskRuntimeMetadata::default()
             },
         );
@@ -1108,7 +1104,7 @@ mod tests {
             runtime.as_ref(),
             "remote-root",
             &remote_metadata,
-            PipelineKey::ShastaRisc0Network,
+            PipelineKey::ShastaSp1,
             RunnerStatus::Running,
             stale,
         )
@@ -2956,7 +2952,11 @@ mod tests {
             .register_task(TaskRegistration {
                 task_id: task_id.to_string(),
                 pipeline_key,
-                route: pipeline_key.route(),
+                route: if pipeline_key == PipelineKey::ShastaSp1 {
+                    "sp1/network".parse().unwrap()
+                } else {
+                    pipeline_key.route()
+                },
                 task_kind: "hoodi_batch".to_string(),
                 network_pair: metadata.network_pair.clone(),
                 artifact_refs,

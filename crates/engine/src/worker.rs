@@ -52,6 +52,23 @@ pub struct WorkerGroup {
 }
 
 impl WorkerGroup {
+    /// Report whether every supervised worker in this group is still running.
+    ///
+    /// Returns `false` once the group has been shut down (handles taken) or if any supervisor
+    /// task has finished, which only happens on shutdown or an unrecoverable panic. A healthy,
+    /// running group reports `true` because supervisors restart their workers on failure and
+    /// never exit on their own.
+    #[must_use]
+    pub fn all_alive(&self) -> bool {
+        let handles = match self.handles.lock() {
+            Ok(handles) => handles,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        handles
+            .as_ref()
+            .is_some_and(|handles| !handles.is_empty() && handles.iter().all(|h| !h.is_finished()))
+    }
+
     /// Stop every worker and wait for its supervisor to exit.
     pub async fn shutdown(&self) {
         let _ = self.shutdown_tx.send(true);
@@ -297,5 +314,26 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(10)).await;
 
         assert_eq!(runnable.runs.load(Ordering::SeqCst), runs_after_shutdown);
+    }
+
+    #[tokio::test]
+    async fn all_alive_tracks_worker_group_lifecycle() {
+        let group = spawn_workers(
+            CountingRunnable::default(),
+            &WorkerConfig {
+                concurrency: 2,
+                maintenance_interval: Duration::from_secs(60),
+                ..WorkerConfig::default()
+            },
+        );
+
+        assert!(group.all_alive(), "freshly spawned workers must be alive");
+
+        group.shutdown().await;
+
+        assert!(
+            !group.all_alive(),
+            "a shut-down worker group must report unhealthy"
+        );
     }
 }

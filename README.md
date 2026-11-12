@@ -15,8 +15,8 @@ timestamps and every witness block timestamp must meet the input chain's built-i
 ## At a Glance
 
 - Typed v4 proposal-side proof endpoint
-- Canonical routes: `native/local`, `risc0/local`, `risc0/network`, `sp1/local`, `sp1/network`
-- Default binaries include RISC Zero local/network proving and SP1 proving
+- Canonical routes: `native/local`, `risc0/local`, `sp1/local`, `sp1/network`
+- Default binaries include RISC Zero local proving and SP1 proving
 - Optional remote SGX routes for configured external prover providers
 - Proposal pipeline for preflight, validation, proving, and aggregation
 - Config-driven RPC pair allowlist and optional L1 beacon overrides via `rpc.pairs`
@@ -41,16 +41,14 @@ Run the real server with an explicit config file:
 ```bash
 cp config.example.toml config.toml
 $EDITOR config.toml
-export RAIKO2_BOUNDLESS_SIGNER_KEY="replace-with-boundless-signer-key"
 cargo run -r -p raiko2 -- --config config.toml
 ```
 
 `config.example.toml` is a combined production sample. Before running, keep only the desired
 per-proof-type tables enabled and fill every setting, credential, and endpoint they require. For
 example, SP1 network proving requires `prover.sp1.enabled = true`, `prover.sp1.prover = "network"`,
-and `NETWORK_PRIVATE_KEY`, while RISC0 network proving requires `prover.risc0.enabled = true`,
-`prover.risc0.runner = "network"`, real nested Boundless credentials, and an explicit
-`prover.risc0.boundless.transaction` fee/replacement policy for on-chain submission.
+and `NETWORK_PRIVATE_KEY`. RISC0 proving runs locally with `prover.risc0.enabled = true`
+and `prover.risc0.runner = "local"`.
 
 Configuration is loaded from `--config` or `RAIKO2_CONFIG`. CLI flags and environment variables
 override values from the file. The real server checks configured RPC endpoints and hosted prover
@@ -59,13 +57,15 @@ otherwise from `crates/guests/elf`. For unreleased testing, build ELFs locally w
 `just build-guest all`. Packaged deployments can download released ELF assets with
 `cargo run -r -p xtask -- download-guest-elves --tag <tag> --dir <guest-elf-dir>`.
 
+Local RISC0 and SP1 proving can run on NVIDIA GPUs. Build with the opt-in `cuda` feature, or use
+the `raiko2-cuda` image built from `Dockerfile.cuda`, and run it with `docker run --gpus all`. The
+default build and image stay CPU-only. See
+[Operations: NVIDIA GPU Proving](docs/operations.md#nvidia-gpu-proving).
+
 A config file can keep a sensitive string outside version control by using an explicit
 environment reference:
 
 ```toml
-[prover.risc0.boundless]
-signer_key = { env = "RAIKO2_BOUNDLESS_SIGNER_KEY" }
-
 [[server.acl.keys]]
 id = "submit"
 key = { env = "RAIKO2_SUBMIT_API_KEY" }
@@ -190,18 +190,15 @@ flowchart LR
   final proofs. A standalone SP1 proposal may therefore complete with `proof = null` while its
   readable artifact carries `quote`, `input`, `uuid`, and `extra_data`; aggregate completion always
   requires a separate artifact with a non-null final `proof`.
-- `proof_type=risc0` resolves to the server's configured RISC Zero prover type. The
-  `prover_type=network` path submits to Boundless and exposes Boundless quote metadata; Boundless
-  is not a separate proof type.
-- `proof_type=boundless` is not accepted; use `proof_type=risc0` with the server configured for
-  `risc0/network` when targeting Boundless.
 
 ## Routes
+
+Boundless support has been removed. This release is used after Boundless shutdown; old orders and
+databases are handled externally. The application has no migration or cleanup path for that state.
 
 - `native/local` executes the proving pipeline locally and returns public inputs
   instead of a zk proof.
 - `risc0/local` generates RISC Zero proofs locally.
-- `risc0/network` submits RISC Zero proving directly to Boundless from the `raiko2` process.
 - `sp1/local` and `sp1/network` select the SP1 pipeline. The task `prover_type` reports whether
   SP1 ran in `mock`, `local`, or `network` mode.
 - `sgx/remote` submits proposal proving to the dedicated remote SGX runtime. This repo now ships
@@ -210,6 +207,38 @@ flowchart LR
   implementation such as `gaiko2` over the same remote protocol.
 - `docker/docker-compose.sgx.regression.yml` starts both SGX remote services and can optionally
   add a dockerized `raiko2` for regression work.
+
+### SGX Compose on kernels without MPTCP
+
+The SGX Compose files disable MPTCP through `net.mptcp.enabled=0` in each provider's network
+namespace. If the Docker daemon's kernel was built without MPTCP support, that sysctl is absent
+and the default configuration cannot start containers. On the **Docker daemon host**, verify
+that `/proc/sys/net/mptcp/enabled` does not exist before selecting the compatibility override.
+For a remote Docker context or `DOCKER_HOST`, check the remote daemon host, not the CLI machine.
+An existing knob with value `0` still requires the default container mitigation.
+
+With Docker Compose v2 supporting `!reset`, render the standalone SGX configuration as follows:
+
+```bash
+docker compose --env-file docker/.env.sgx.sample \
+  -f docker/docker-compose.sgx.yml \
+  -f docker/docker-compose.sgx.no-mptcp.yml config
+```
+
+For the combined regression stack, pair `docker/docker-compose.sgx.regression.yml` with
+`docker/docker-compose.sgx.regression.no-mptcp.yml`; see the
+[regression instructions](scripts/regression/README.md#sgx-regression-stack).
+Use the same pair for **every init and runtime Compose command**, with the compatibility file
+immediately after its base file and before any additional overrides. This order is required:
+Compose versions such as 2.32.4 can retain the original sysctl if `!reset` follows another overlay.
+The compatibility files remove only this sysctl and retain other settings, including gaiko2's
+`GODEBUG=multipathtcp=0`. Keep the default configuration on kernels that support MPTCP.
+
+The daemon-free configuration regression is:
+
+```bash
+python -m unittest discover -s docker/tests -p 'test_*.py'
+```
 
 ## Remote Prover Conformance
 
@@ -256,6 +285,15 @@ is self-consistent with the submitted proof carry data.
 
 For the first external provider migration, see
 [`docs/gaiko2-remote-prover-integration.md`](docs/gaiko2-remote-prover-integration.md).
+
+## Offline Proposal Regression
+
+Use fixed post-Unzen proposal inputs from
+[`taikoxyz/raiko2-atlas`](https://github.com/taikoxyz/raiko2-atlas). Pin a fixture revision, verify its
+checksums, then replay the cached GuestInput with the candidate software. See
+[acquisition and offline replay](docs/development.md#guestinput-replay) for Raiko commands and the
+Gaiko request adapter. Consumers own assertions and backend selection; online regression may use
+fresh chain data.
 
 ## Repository Map
 

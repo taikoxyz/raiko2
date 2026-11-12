@@ -12,6 +12,9 @@ x-raiko2-sgx-common: &raiko2-sgx-common
         target: gramine_enclave_key
   image: ${RAIKO2_SGX_IMAGE:-raiko2-sgx:local}
   restart: unless-stopped
+  # This sysctl is namespaced, so set it on the container rather than relying on the host value.
+  sysctls:
+    net.mptcp.enabled: "0"
   environment:
     RUST_LOG: ${RUST_LOG:-info}
     PCCS_HOST: ${PCCS_HOST:-host.docker.internal:8081}
@@ -33,7 +36,12 @@ x-raiko2-sgx-common: &raiko2-sgx-common
 x-gaiko2-sgxgeth-common: &gaiko2-sgxgeth-common
   image: ${GAIKO2_SGXGETH_IMAGE:-gaiko2-tee:latest}
   restart: unless-stopped
+  # This sysctl is namespaced, so set it on the container rather than relying on the host value.
+  sysctls:
+    net.mptcp.enabled: "0"
   environment:
+    # Go enables MPTCP listeners by default, so also disable the application-side attempt.
+    GODEBUG: multipathtcp=0
     GAIKO2_PROVING_MODE: tee
     GAIKO2_TEE_TYPE: ${GAIKO2_TEE_TYPE:-ego}
     GAIKO2_CONFIG_DIR: /var/lib/gaiko2/config

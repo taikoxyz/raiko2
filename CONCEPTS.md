@@ -119,7 +119,7 @@ An explicit repository result such as `Applied`, `AlreadyApplied`, `Stale`,
 reconcile instead of interpreting an ambiguous boolean.
 
 ### Pending Network Proof
-A Boundless or SP1 provider request that has been durably checkpointed but has not reached a final
+A SP1 provider request that has been durably checkpointed but has not reached a final
 proof outcome. Restart recovery resumes the recorded provider request and its attempt budget instead
 of submitting a duplicate request.
 

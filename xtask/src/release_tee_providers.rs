@@ -4,7 +4,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 use clap::Args;
 use sha2::{Digest, Sha256};
 
@@ -133,7 +133,7 @@ fn ensure_release_destination_tags_unpublished(
     providers: &BTreeMap<String, TeeProviderEntry>,
 ) -> Result<()> {
     for image_ref in release_destination_image_refs(tag, providers) {
-        ensure_remote_image_tag_unpublished(&image_ref)?;
+        util::ensure_remote_tag_absent(&image_ref)?;
     }
     Ok(())
 }
@@ -197,8 +197,8 @@ fn build_local_provider_entries(
         for entry in &mut entries {
             let image_ref = local_provider_image_ref(&entry.image.tag, DEFAULT_LOCAL_REPOSITORY);
             docker_push(&image_ref)?;
-            let digest = resolve_repo_digest(&image_ref, DEFAULT_LOCAL_REPOSITORY)?;
-            ensure_remote_tag_digest_matches_expected(&image_ref, &digest)?;
+            let digest = util::resolve_repo_digest(&image_ref, DEFAULT_LOCAL_REPOSITORY)?;
+            util::ensure_remote_tag_digest_matches_expected(&image_ref, &digest)?;
             entry.image.digest = digest;
         }
         validate_local_sgx_entries(&entries, false)?;
@@ -322,8 +322,8 @@ fn build_external_provider_entry(
         format!("{}:{}", provider.repository, tag)
     } else {
         docker_push(&image_ref)?;
-        let digest = resolve_repo_digest(&image_ref, &provider.repository)?;
-        ensure_remote_tag_digest_matches_expected(&image_ref, &digest)?;
+        let digest = util::resolve_repo_digest(&image_ref, &provider.repository)?;
+        util::ensure_remote_tag_digest_matches_expected(&image_ref, &digest)?;
         digest
     };
     let attestation = read_attestation_json(&image_ref, &provider.attestation_path)?;
@@ -561,175 +561,6 @@ fn docker_push(image_ref: &str) -> Result<()> {
     util::run(cmd)
 }
 
-fn ensure_remote_image_tag_unpublished(image_ref: &str) -> Result<()> {
-    let output = docker_manifest_inspect_command(image_ref)
-        .output()
-        .with_context(|| format!("failed to inspect remote image tag {image_ref}"))?;
-    let output_text = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    if output.status.success() {
-        bail!("release destination image tag already exists: {image_ref}");
-    }
-    match classify_docker_manifest_inspect_failure(&output_text) {
-        DockerManifestInspectFailure::Missing => Ok(()),
-        DockerManifestInspectFailure::Blocking => bail!(
-            "failed to confirm release destination image tag is unpublished: {image_ref}\n{}",
-            output_text.trim_end(),
-        ),
-    }
-}
-
-fn docker_manifest_inspect_command(image_ref: &str) -> Command {
-    let mut cmd = Command::new("docker");
-    cmd.arg("manifest").arg("inspect").arg(image_ref);
-    cmd
-}
-
-fn ensure_remote_tag_digest_matches_expected(image_ref: &str, expected_digest: &str) -> Result<()> {
-    let repository = expected_digest
-        .split_once("@sha256:")
-        .map(|(repository, _)| repository)
-        .ok_or_else(|| anyhow!("expected pushed digest is not a sha256 repository digest"))?;
-    let actual_digest = resolve_remote_tag_digest(image_ref, repository)?;
-    if actual_digest != expected_digest {
-        bail!(
-            "remote image tag digest mismatch for {image_ref}: expected {expected_digest}, got {actual_digest}",
-        );
-    }
-    Ok(())
-}
-
-fn resolve_remote_tag_digest(image_ref: &str, repository: &str) -> Result<String> {
-    let output = remote_tag_digest_inspect_command(image_ref)
-        .output()
-        .with_context(|| format!("failed to inspect remote image tag digest {image_ref}"))?;
-    if !output.status.success() {
-        let output_text = format!(
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        bail!(
-            "docker buildx imagetools inspect failed for {image_ref}\n{}",
-            output_text.trim_end(),
-        );
-    }
-
-    let manifest_digest = parse_remote_tag_manifest_digest(
-        std::str::from_utf8(&output.stdout).context("remote image manifest is not utf-8")?,
-    )?;
-    Ok(format!("{repository}@{manifest_digest}"))
-}
-
-fn remote_tag_digest_inspect_command(image_ref: &str) -> Command {
-    let mut cmd = Command::new("docker");
-    cmd.arg("buildx")
-        .arg("imagetools")
-        .arg("inspect")
-        .arg(image_ref)
-        .arg("--format")
-        .arg("{{json .Manifest}}");
-    cmd
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DockerManifestInspectFailure {
-    Missing,
-    Blocking,
-}
-
-fn classify_docker_manifest_inspect_failure(output: &str) -> DockerManifestInspectFailure {
-    if docker_manifest_inspect_reports_blocking_error(output) {
-        return DockerManifestInspectFailure::Blocking;
-    }
-    if docker_manifest_inspect_reports_missing(output) {
-        return DockerManifestInspectFailure::Missing;
-    }
-    DockerManifestInspectFailure::Blocking
-}
-
-fn docker_manifest_inspect_reports_blocking_error(output: &str) -> bool {
-    let output = output.to_ascii_lowercase();
-    [
-        "authentication",
-        "authenticate",
-        "credential",
-        "denied",
-        "forbidden",
-        "permission",
-        "reauthentication",
-        "unauthorized",
-        "login",
-        "service unavailable",
-        "too many requests",
-        "timeout",
-        "timed out",
-        "deadline",
-        "request canceled",
-        "connection",
-        "temporary failure",
-        "tls handshake",
-        "certificate",
-        "429",
-        "500 internal server error",
-        "502 bad gateway",
-        "503",
-        "504 gateway timeout",
-    ]
-    .iter()
-    .any(|needle| output.contains(needle))
-}
-
-fn docker_manifest_inspect_reports_missing(output: &str) -> bool {
-    let output = output.to_ascii_lowercase();
-    output.contains("manifest unknown")
-        || output.contains("no such manifest")
-        || output.contains("name unknown")
-        || output.contains("requested entity was not found")
-        || (output.contains("manifest for") && output.contains("not found"))
-}
-
-fn resolve_repo_digest(image_ref: &str, repository: &str) -> Result<String> {
-    let output = Command::new("docker")
-        .arg("image")
-        .arg("inspect")
-        .arg("--format")
-        .arg("{{json .RepoDigests}}")
-        .arg(image_ref)
-        .output()
-        .with_context(|| format!("failed to inspect pushed image {image_ref}"))?;
-    if !output.status.success() {
-        bail!("docker image inspect failed for {image_ref}");
-    }
-
-    let repo_digests: Vec<String> = serde_json::from_slice(&output.stdout)
-        .with_context(|| format!("failed to parse RepoDigests for {image_ref}"))?;
-    repo_digests
-        .into_iter()
-        .find(|value| value.starts_with(&format!("{repository}@sha256:")))
-        .ok_or_else(|| anyhow!("missing pushed digest for repository {repository}"))
-}
-
-fn parse_remote_tag_manifest_digest(output: &str) -> Result<String> {
-    let manifest: serde_json::Value =
-        serde_json::from_str(output).context("failed to parse remote image manifest")?;
-    let digest = manifest
-        .get("digest")
-        .and_then(|value| value.as_str())
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| anyhow!("missing remote manifest digest"))?;
-    if digest
-        .strip_prefix("sha256:")
-        .is_none_or(|value| value.is_empty())
-    {
-        bail!("remote manifest digest must be sha256: {digest}");
-    }
-    Ok(digest.to_string())
-}
-
 fn read_attestation_json(
     image_ref: &str,
     attestation_path: &str,
@@ -941,15 +772,13 @@ mod tests {
     use std::process::Command;
 
     use super::{
-        DockerManifestInspectFailure, ENV_GCP_ENCLAVE_KEY_SECRET, ENV_RAIKO2_SGX_ENCLAVE_KEY_HOST,
-        LOCAL_SGX_VARIANTS, classify_docker_manifest_inspect_failure,
-        docker_manifest_inspect_command, external_provider_docker_build_command,
-        external_source_checkout_dir, file_sha256_hex, gcp_secret_access_command,
-        local_gramine_enclave_key_path, local_provider_image_ref, local_sgx_docker_build_command,
-        local_sgx_manifest_entry, local_sgx_variant_tag, parse_attestation_json,
-        parse_remote_tag_manifest_digest, release_destination_image_refs,
-        remote_tag_digest_inspect_command, resolve_gramine_enclave_key_from_values,
-        validate_attestation_path, validate_local_sgx_entries, validate_release_tag,
+        ENV_GCP_ENCLAVE_KEY_SECRET, ENV_RAIKO2_SGX_ENCLAVE_KEY_HOST, LOCAL_SGX_VARIANTS,
+        external_provider_docker_build_command, external_source_checkout_dir, file_sha256_hex,
+        gcp_secret_access_command, local_gramine_enclave_key_path, local_provider_image_ref,
+        local_sgx_docker_build_command, local_sgx_manifest_entry, local_sgx_variant_tag,
+        parse_attestation_json, release_destination_image_refs,
+        resolve_gramine_enclave_key_from_values, validate_attestation_path,
+        validate_local_sgx_entries, validate_release_tag,
     };
     use crate::release_tee_manifest::{TeeProviderAttestation, TeeProviderManifestEntry};
     use crate::tee_provider_lock::TeeProviderEntry;
@@ -1019,114 +848,6 @@ mod tests {
         assert!(refs.contains("us-docker.pkg.dev/evmchain/images/raiko2-sgx:v1.2.3"));
         assert!(refs.contains("us-docker.pkg.dev/evmchain/images/raiko2-sgx:v1.2.3-edmm"));
         assert!(refs.contains("us-docker.pkg.dev/evmchain/images/gaiko2-sgxgeth:v1.2.3"));
-    }
-
-    #[test]
-    fn release_tee_providers_builds_manifest_inspect_command() {
-        let command =
-            docker_manifest_inspect_command("us-docker.pkg.dev/evmchain/images/raiko2-sgx:v1.2.3");
-
-        assert_eq!(command.get_program().to_string_lossy(), "docker");
-        assert_eq!(
-            command_args(&command),
-            vec![
-                "manifest",
-                "inspect",
-                "us-docker.pkg.dev/evmchain/images/raiko2-sgx:v1.2.3",
-            ]
-        );
-    }
-
-    #[test]
-    fn release_tee_providers_builds_remote_tag_digest_inspect_command() {
-        let command = remote_tag_digest_inspect_command(
-            "us-docker.pkg.dev/evmchain/images/raiko2-sgx:v1.2.3",
-        );
-
-        assert_eq!(command.get_program().to_string_lossy(), "docker");
-        assert_eq!(
-            command_args(&command),
-            vec![
-                "buildx",
-                "imagetools",
-                "inspect",
-                "us-docker.pkg.dev/evmchain/images/raiko2-sgx:v1.2.3",
-                "--format",
-                "{{json .Manifest}}",
-            ]
-        );
-    }
-
-    #[test]
-    fn release_tee_providers_parses_remote_tag_manifest_digest() {
-        let digest =
-            parse_remote_tag_manifest_digest(r#"{"digest":"sha256:abc123","mediaType":"x"}"#)
-                .expect("remote manifest digest should parse");
-
-        assert_eq!(digest, "sha256:abc123");
-    }
-
-    #[test]
-    fn release_tee_providers_rejects_missing_remote_tag_manifest_digest() {
-        let err = parse_remote_tag_manifest_digest(r#"{"mediaType":"x"}"#)
-            .expect_err("missing remote manifest digest must fail");
-
-        assert!(err.to_string().contains("missing remote manifest digest"));
-    }
-
-    #[test]
-    fn release_tee_providers_rejects_empty_remote_tag_sha256_digest() {
-        let err = parse_remote_tag_manifest_digest(r#"{"digest":"sha256:"}"#)
-            .expect_err("empty remote sha256 digest must fail");
-
-        assert!(
-            err.to_string()
-                .contains("remote manifest digest must be sha256")
-        );
-    }
-
-    #[test]
-    fn release_tee_providers_recognizes_missing_remote_manifests() {
-        for output in [
-            "manifest unknown: Failed to fetch",
-            "no such manifest: us-docker.pkg.dev/example/image:v1",
-            "name unknown: Repository does not exist",
-            "requested entity was not found",
-            "manifest for example/image:v1 not found",
-        ] {
-            assert_eq!(
-                classify_docker_manifest_inspect_failure(output),
-                DockerManifestInspectFailure::Missing,
-                "should classify missing manifest: {output}"
-            );
-        }
-    }
-
-    #[test]
-    fn release_tee_providers_does_not_treat_registry_errors_as_missing() {
-        for output in [
-            "denied: Permission \"artifactregistry.dockerimages.get\" denied",
-            "error getting credentials - err: exec: \"docker-credential-gcloud\": executable file not found in $PATH",
-            "503 service unavailable",
-            "net/http: request canceled while waiting for connection",
-        ] {
-            assert_eq!(
-                classify_docker_manifest_inspect_failure(output),
-                DockerManifestInspectFailure::Blocking,
-                "should fail closed for registry error: {output}"
-            );
-        }
-    }
-
-    #[test]
-    fn release_tee_providers_mixed_registry_error_and_missing_manifest_blocks() {
-        let output = "ERROR: (gcloud.auth) Reauthentication is needed.\n\
-            no such manifest: us-docker.pkg.dev/example/image:v1";
-
-        assert_eq!(
-            classify_docker_manifest_inspect_failure(output),
-            DockerManifestInspectFailure::Blocking
-        );
     }
 
     #[test]

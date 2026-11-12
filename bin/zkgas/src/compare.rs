@@ -30,7 +30,8 @@ pub const MAX_COMPARE_ROWS: usize = MAX_OBSERVATION_ROWS;
 pub const MAX_PROFILE_BYTES: u64 = 1024 * 1024;
 pub const MAX_PROFILES: usize = 128;
 pub const MAX_COMPARE_OUTPUT_BYTES: usize = 256 * 1024 * 1024;
-pub const EMBEDDED_PROFILES: &str = include_str!("../profiles/sp1-pricing-calibration-v1.toml");
+/// Default compatibility binds only the explicitly named execute-only research target.
+pub const EMBEDDED_PROFILES: &str = include_str!("../profiles/sp1-research-current.toml");
 const EMBEDDED_NORMALIZATION: &[u8] =
     include_bytes!("../profiles/artifacts/unzen-sp1-block-comparison-v1.json");
 

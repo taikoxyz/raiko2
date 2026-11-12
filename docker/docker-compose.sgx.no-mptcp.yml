@@ -1,0 +1,10 @@
+# Apply after docker-compose.sgx.yml only when the Docker daemon's kernel has no MPTCP support.
+# Keep the default mitigation when net.mptcp.enabled exists, even if its host value is already 0.
+# Place this file immediately after the base file and before any additional overrides.
+services:
+  raiko2-sgx-init:
+    sysctls:
+      net.mptcp.enabled: !reset null
+  raiko2-sgx:
+    sysctls:
+      net.mptcp.enabled: !reset null

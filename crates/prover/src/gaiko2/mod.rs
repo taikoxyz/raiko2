@@ -30,8 +30,14 @@ use crate::remote_prover::{
 
 const SHASTA_PROPOSAL_PATH: &str = "/prove/shasta";
 const SHASTA_AGGREGATE_PATH: &str = "/prove/shasta-aggregate";
+/// SGX provider health endpoint.
+const SGX_HEALTH_PATH: &str = "/health";
+/// SGXGETH (gaiko2) provider health endpoint; the provider registers only `/healthz`.
+const SGXGETH_HEALTH_PATH: &str = "/healthz";
 const SGX_LABEL: &str = "sgx";
 const SGXGETH_LABEL: &str = "sgxgeth";
+/// Upper bound on a readiness health probe, independent of the (much larger) proving timeout.
+const HEALTH_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Default)]
 pub struct Gaiko2Config {
@@ -51,6 +57,7 @@ pub struct Gaiko2Prover {
     client: Client,
     prove_url: Url,
     aggregate_url: Url,
+    health_url: Url,
     label: &'static str,
 }
 
@@ -97,6 +104,14 @@ impl Gaiko2Prover {
         let aggregate_url = base_url.join(SHASTA_AGGREGATE_PATH).map_err(|err| {
             RaikoError::InvalidRequestConfig(format!("invalid gaiko2 aggregate URL: {err}"))
         })?;
+        let health_path = if label == SGX_LABEL {
+            SGX_HEALTH_PATH
+        } else {
+            SGXGETH_HEALTH_PATH
+        };
+        let health_url = base_url.join(health_path).map_err(|err| {
+            RaikoError::InvalidRequestConfig(format!("invalid gaiko2 health URL: {err}"))
+        })?;
         let client = Client::builder()
             .timeout(config.timeout())
             .build()
@@ -108,8 +123,39 @@ impl Gaiko2Prover {
             client,
             prove_url,
             aggregate_url,
+            health_url,
             label,
         })
+    }
+
+    /// Probe the remote TEE prover's health endpoint (`/health` for SGX, `/healthz` for SGXGETH).
+    ///
+    /// Used by the host readiness check to confirm the SGX/SGXGETH accelerator backend is
+    /// reachable and responsive. Uses a short, fixed timeout independent of the proving timeout
+    /// so a hung backend fails readiness quickly.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request cannot be sent or the backend responds with a non-success
+    /// status code.
+    pub async fn health_check(&self) -> RaikoResult<()> {
+        let response = self
+            .client
+            .get(self.health_url.clone())
+            .timeout(HEALTH_PROBE_TIMEOUT)
+            .send()
+            .await
+            .map_err(|err| {
+                RaikoError::Guest(format!("{} health probe failed: {err}", self.label))
+            })?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(RaikoError::Guest(format!(
+                "{} health probe returned status {status}",
+                self.label
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -326,4 +372,91 @@ fn gaiko2_metadata(
         );
     }
     Value::Object(metadata)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Gaiko2Config, Gaiko2Prover};
+    use raiko2_primitives::ProofType;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    /// Spawn a one-shot HTTP server that answers `200 OK` only when the request targets
+    /// `expected_path` (otherwise `404`), or `status_line` when the path matches.
+    async fn spawn_health_server(status_line: &'static str, expected_path: &'static str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind health mock");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let read = socket.read(&mut buf).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..read]);
+                let status_line = if request.starts_with(&format!("GET {expected_path} ")) {
+                    status_line
+                } else {
+                    "404 Not Found"
+                };
+                let response = format!(
+                    "HTTP/1.1 {status_line}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.flush().await;
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    fn prover_for(base_url: String, proof_type: ProofType) -> Gaiko2Prover {
+        Gaiko2Prover::new_for_proof_type(
+            &Gaiko2Config {
+                base_url,
+                timeout_ms: 300_000,
+            },
+            proof_type,
+        )
+        .expect("build gaiko2 prover")
+    }
+
+    #[tokio::test]
+    async fn health_check_uses_health_for_sgx() {
+        let base_url = spawn_health_server("200 OK", "/health").await;
+        prover_for(base_url, ProofType::Sgx)
+            .health_check()
+            .await
+            .expect("healthy sgx backend must pass the probe");
+    }
+
+    #[tokio::test]
+    async fn health_check_uses_healthz_for_sgxgeth() {
+        let base_url = spawn_health_server("200 OK", "/healthz").await;
+        prover_for(base_url, ProofType::SgxGeth)
+            .health_check()
+            .await
+            .expect("healthy sgxgeth backend must pass the probe");
+    }
+
+    #[tokio::test]
+    async fn health_check_fails_when_path_is_not_served() {
+        let base_url = spawn_health_server("200 OK", "/healthz").await;
+        let err = prover_for(base_url, ProofType::Sgx)
+            .health_check()
+            .await
+            .expect_err("sgx must not probe the sgxgeth path");
+        assert!(err.to_string().contains("404"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn health_check_fails_on_error_status() {
+        let base_url = spawn_health_server("503 Service Unavailable", "/health").await;
+        let err = prover_for(base_url, ProofType::Sgx)
+            .health_check()
+            .await
+            .expect_err("unhealthy backend must fail the probe");
+        assert!(
+            err.to_string().contains("503"),
+            "error should surface the backend status: {err}"
+        );
+    }
 }

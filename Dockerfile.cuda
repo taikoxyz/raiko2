@@ -1,0 +1,179 @@
+# syntax=docker/dockerfile:1.7
+
+# Raiko2 runtime image with local NVIDIA GPU proving for RISC0 and SP1.
+# Run it with `docker run --gpus all` on a host with the NVIDIA driver and nvidia-container-toolkit.
+# CPU-only deployments keep using ./Dockerfile; this image is only useful on CUDA hosts.
+#
+# Version pins (keep in sync with the workspace `sp1-sdk` / `risc0-zkvm` pins):
+# - CUDA 12.8: `sp1-gpu-server` v6.8.1 links libcudart.so.12 and ships sm_80..sm_120 kernels;
+#   RISC0 3.0 kernels are compiled here for CUDA_ARCHS. The host driver must support CUDA 12.8
+#   (R570 or newer).
+# - CUDA_ARCHS defaults to 89 (Ada, NVIDIA L4). Space-separate several, e.g. "89 90". Each arch
+#   embeds SASS plus PTX, so newer GPUs can JIT the kernels; the list is recorded as a label.
+# - SP1_VERSION must equal the `sp1-primitives` / `sp1-cuda` versions in Cargo.lock: sp1-cuda
+#   compares `sp1-gpu-server --version` with sp1-primitives' crate version. On a mismatch it runs
+#   `systemctl --user stop` and downloads a server from GitHub, which fails in this image (no
+#   systemd), so SP1 GPU proving would not start. The builder stage checks this.
+# - The SP1 Plonk wrap (default `recursion = "plonk"`) downloads its circuit artifacts from
+#   SP1's S3 bucket into `/root/.sp1/circuits` on first use, as the CPU image does. Do not mount
+#   a volume over `/root/.sp1`: it would hide the pinned server binary.
+
+ARG CUDA_VERSION=12.8.1
+ARG UBUNTU_VERSION=24.04
+ARG RUST_IMAGE=rust:1.95.0-bookworm
+
+FROM ${RUST_IMAGE} AS rust
+
+FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION} AS toolchain
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    clang \
+    curl \
+    libclang-dev \
+    libprotobuf-dev \
+    libssl-dev \
+    mold \
+    pkg-config \
+    protobuf-compiler && \
+    rm -rf /var/lib/apt/lists/*
+
+ENV RUSTUP_HOME=/usr/local/rustup
+ENV CARGO_HOME=/usr/local/cargo
+ENV PATH=/usr/local/cargo/bin:${PATH}
+ENV RUSTUP_TOOLCHAIN=1.95.0-x86_64-unknown-linux-gnu
+COPY --from=rust /usr/local/rustup /usr/local/rustup
+COPY --from=rust /usr/local/cargo /usr/local/cargo
+
+WORKDIR /app
+
+FROM toolchain AS builder
+
+ARG BIN_FEATURES="--features cuda"
+ARG CUDA_ARCHS="89"
+ARG RUSTFLAGS="-C link-arg=-fuse-ld=mold"
+ARG SP1_VERSION=6.8.1
+
+ENV RUSTFLAGS="${RUSTFLAGS}"
+
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY crates ./crates
+COPY bin ./bin
+COPY xtask ./xtask
+COPY config ./config
+COPY config.example.toml ./
+COPY test/guest_inputs ./test/guest_inputs
+COPY tests/fixtures/cuda-sdk-smoke ./tests/fixtures/cuda-sdk-smoke
+
+# The pinned sp1-gpu-server must match the version sp1-cuda checks at runtime.
+RUN set -eu; \
+    for crate in sp1-primitives sp1-cuda; do \
+    locked="$(awk -v name="$crate" '$0 == "name = \"" name "\"" { getline; gsub(/version = |"/, ""); print; exit }' Cargo.lock)"; \
+    if [ "$locked" != "${SP1_VERSION}" ]; then \
+    echo "Cargo.lock has $crate $locked, but SP1_VERSION is ${SP1_VERSION}" >&2; exit 1; \
+    fi; \
+    done
+
+# RISC0's kernel build defaults to `nvcc -arch=native`, which needs a GPU at build time. Setting
+# NVCC_APPEND_FLAGS replaces that with explicit SASS targets, so the image builds on GPU-less CI.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/app/target,sharing=locked \
+    set -eu; \
+    NVCC_APPEND_FLAGS=""; \
+    for arch in ${CUDA_ARCHS}; do \
+    NVCC_APPEND_FLAGS="${NVCC_APPEND_FLAGS} --generate-code=arch=compute_${arch},code=[sm_${arch},compute_${arch}]"; \
+    done; \
+    export NVCC_APPEND_FLAGS; \
+    cargo +1.95.0 build --release --locked -p raiko2 ${BIN_FEATURES}; \
+    cargo +1.95.0 build --release --locked -p guest-launcher --features cuda; \
+    mkdir -p /app/build-output; \
+    cp /app/target/release/raiko2 /app/build-output/raiko2; \
+    cp /app/target/release/guest-launcher /app/build-output/guest-launcher
+
+# RISC0 Groth16 (`snark = true`) on CUDA needs the `risc0-groth16` rzup component at runtime.
+FROM toolchain AS risc0-groth16
+
+ARG RZUP_VERSION=0.5.1
+ARG RISC0_GROTH16_VERSION=0.1.0
+
+ENV RISC0_HOME=/opt/risc0
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    cargo +1.95.0 install --locked rzup --version ${RZUP_VERSION} --root /opt/rzup
+
+# Outside the registry cache mount, so the long download does not stall the builder stage.
+RUN /opt/rzup/bin/rzup install risc0-groth16 ${RISC0_GROTH16_VERSION} && \
+    test -d "${RISC0_HOME}/extensions"
+
+FROM toolchain AS sp1-gpu-server
+
+ARG SP1_VERSION=6.8.1
+ARG SP1_GPU_SERVER_SHA256=1116d91fb36cbc0158112c78491ff665ae43ad1dbfb95c66bea0c9d530e81ec3
+
+RUN set -eu; \
+    archive="sp1_gpu_server_v${SP1_VERSION}_x86_64.tar.gz"; \
+    curl -fsSL --retry 3 -o "/tmp/${archive}" \
+    "https://github.com/succinctlabs/sp1/releases/download/v${SP1_VERSION}/${archive}"; \
+    echo "${SP1_GPU_SERVER_SHA256}  /tmp/${archive}" | sha256sum -c -; \
+    mkdir -p /opt/sp1/bin; \
+    tar -xzf "/tmp/${archive}" -C /opt/sp1/bin sp1-gpu-server; \
+    rm "/tmp/${archive}"
+
+FROM nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu${UBUNTU_VERSION} AS runtime
+
+ARG SP1_VERSION=6.8.1
+ARG CUDA_ARCHS="89"
+ARG VCS_REF=unknown
+LABEL org.opencontainers.image.revision=$VCS_REF
+LABEL xyz.taiko.raiko2.cuda-archs="${CUDA_ARCHS}"
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    python3 && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+RUN mkdir -p /etc/raiko2
+
+# sp1-sdk starts `$HOME/.sp1/bin/sp1-gpu-server` per CUDA device; pre-installing the pinned binary
+# keeps the runtime from fetching one. Fail the build if its version would not be accepted.
+ENV HOME=/root
+COPY --from=sp1-gpu-server /opt/sp1/bin/sp1-gpu-server /root/.sp1/bin/sp1-gpu-server
+RUN test "$(/root/.sp1/bin/sp1-gpu-server --version)" = "${SP1_VERSION}"
+
+ENV RISC0_HOME=/opt/risc0
+COPY --from=risc0-groth16 /opt/risc0 /opt/risc0
+
+# Number CUDA devices like nvidia-smi (PCI bus order) instead of fastest-first, so
+# CUDA_VISIBLE_DEVICES, RISC0's device 0, sp1.cuda_device_id, and the /ready checks agree on
+# hosts with mixed GPUs. sp1-gpu-server inherits it.
+ENV CUDA_DEVICE_ORDER=PCI_BUS_ID
+
+COPY --from=builder /app/build-output/raiko2 /usr/local/bin/raiko2
+COPY --from=builder /app/build-output/guest-launcher /usr/local/bin/guest-launcher
+COPY --from=builder /app/tests/fixtures/cuda-sdk-smoke ./tests/fixtures/cuda-sdk-smoke
+COPY --from=builder /app/crates/guests/elf ./crates/guests/elf
+COPY --from=builder /app/config/chain_spec_list_default.json /etc/raiko2/chain_spec_list_default.json
+COPY --from=builder /app/config.example.toml /etc/raiko2/config.example.toml
+
+ENV RAIKO2_HOST=0.0.0.0
+ENV RAIKO2_PORT=8080
+ENV RAIKO2_CONFIG=/etc/raiko2/config.toml
+ENV RAIKO2_GUEST_ELF_DIR=/app/crates/guests/elf
+ENV RUST_LOG=info
+
+EXPOSE 8080
+
+ENTRYPOINT ["raiko2"]
+CMD []

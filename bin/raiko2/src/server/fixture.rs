@@ -12,9 +12,7 @@ use anyhow::Result;
 use axum::{Json, Router, routing::post};
 use raiko2_engine::{Engine, EngineObserver};
 #[cfg(test)]
-use raiko2_pipeline::forks::shasta::{
-    load_risc0_boundless_shasta_backend, load_risc0_shasta_backend, load_sp1_shasta_backend,
-};
+use raiko2_pipeline::forks::shasta::{load_risc0_shasta_backend, load_sp1_shasta_backend};
 use raiko2_pipeline::{
     NativeBackend, NoopManifestBuilder, NoopValidation, PipelineKey, PipelineRoute, PipelineSpec,
     Preflight, ProverBackend, Risc0ShastaBackend, Sp1ShastaBackend,
@@ -521,7 +519,6 @@ pub(crate) fn base_config() -> Config {
         l2_witness_rpc: None,
         sp1_verifier_rpc_url: None,
         sp1_verifier_address: None,
-        boundless: crate::config::BoundlessPairConfig::default(),
     }];
     config
 }
@@ -613,7 +610,7 @@ fn risc0_fixture_engine_for_pipeline(
     pipeline_key: PipelineKey,
     observer: Option<Arc<dyn EngineObserver>>,
 ) -> Risc0FixtureEngine {
-    let backend = load_risc0_backend_for_pipeline(pipeline_key);
+    let backend = load_risc0_shasta_backend().expect("load RISC0 Shasta guest ELFs");
     risc0_fixture_engine_for_pipeline_with_backend(context_config, pipeline_key, observer, backend)
 }
 
@@ -689,15 +686,6 @@ fn sp1_fixture_engine_with_backend(
         context_config,
     );
     build_engine_with_observer(spec, ctx, observer)
-}
-
-#[cfg(test)]
-fn load_risc0_backend_for_pipeline(pipeline_key: PipelineKey) -> Risc0ShastaBackend {
-    if pipeline_key == PipelineKey::ShastaRisc0Network {
-        load_risc0_boundless_shasta_backend().expect("load RISC0 Boundless Shasta guest ELFs")
-    } else {
-        load_risc0_shasta_backend().expect("load RISC0 Shasta guest ELFs")
-    }
 }
 
 #[cfg(test)]
@@ -809,37 +797,6 @@ pub(crate) fn app_with_observed_native_fixture_engine(
     factory.insert(
         "taiko_dev/ethereum".to_string(),
         PipelineKey::ShastaNative,
-        Arc::new(engine.clone()),
-    );
-    let state = AppState::from_parts(Arc::new(config), Arc::new(factory), runtime);
-
-    (app::build_router_with_legacy_v3_for_tests(state), engine)
-}
-
-#[cfg(test)]
-pub(crate) fn app_with_observed_risc0_boundless_fixture_engine(
-    config: Config,
-) -> (Router, Risc0FixtureEngine) {
-    let runtime = Arc::new(
-        RuntimeManager::new(unique_runtime_root(
-            "raiko2-e2e-observed-risc0-boundless-runtime",
-        ))
-        .expect("runtime manager"),
-    );
-    let observer = engine_observer(
-        Arc::clone(&runtime),
-        PipelineKey::ShastaRisc0Network.route(),
-    );
-    let engine = risc0_fixture_engine_for_pipeline(
-        json!({}),
-        PipelineKey::ShastaRisc0Network,
-        Some(observer),
-    );
-
-    let mut factory = StaticPipelineFactory::default();
-    factory.insert(
-        "taiko_dev/ethereum".to_string(),
-        PipelineKey::ShastaRisc0Network,
         Arc::new(engine.clone()),
     );
     let state = AppState::from_parts(Arc::new(config), Arc::new(factory), runtime);

@@ -39,17 +39,15 @@ pub enum PipelineKey {
     ShastaRisc0,
     ShastaSp1,
     ShastaNative,
-    ShastaRisc0Network,
     ShastaSgx,
     ShastaSgxGeth,
 }
 
 impl PipelineKey {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 5] = [
         Self::ShastaRisc0,
         Self::ShastaSp1,
         Self::ShastaNative,
-        Self::ShastaRisc0Network,
         Self::ShastaSgx,
         Self::ShastaSgxGeth,
     ];
@@ -60,7 +58,6 @@ impl PipelineKey {
             PipelineKey::ShastaRisc0 => "shasta-risc0-local",
             PipelineKey::ShastaSp1 => "shasta-sp1-local",
             PipelineKey::ShastaNative => "shasta-native-local",
-            PipelineKey::ShastaRisc0Network => "shasta-risc0-network",
             PipelineKey::ShastaSgx => "shasta-sgx-remote",
             PipelineKey::ShastaSgxGeth => "shasta-sgxgeth-remote",
         }
@@ -74,14 +71,13 @@ impl PipelineKey {
             Self::ShastaNative => PipelineRoute::new(GuestSystem::Native, RunnerKind::Local),
             Self::ShastaSgx => PipelineRoute::new(GuestSystem::Sgx, RunnerKind::Remote),
             Self::ShastaSgxGeth => PipelineRoute::new(GuestSystem::SgxGeth, RunnerKind::Remote),
-            Self::ShastaRisc0Network => PipelineRoute::new(GuestSystem::Risc0, RunnerKind::Network),
         }
     }
 
     #[must_use]
     pub const fn proof_type(self) -> ProofType {
         match self {
-            Self::ShastaRisc0 | Self::ShastaRisc0Network => ProofType::Risc0,
+            Self::ShastaRisc0 => ProofType::Risc0,
             Self::ShastaSp1 => ProofType::Sp1,
             Self::ShastaNative => ProofType::Native,
             Self::ShastaSgx => ProofType::Sgx,
@@ -98,12 +94,6 @@ impl PipelineKey {
                 PipelineRoute {
                     guest_system: GuestSystem::Risc0,
                     runner: RunnerKind::Local,
-                }
-            ) | (
-                Self::ShastaRisc0Network,
-                PipelineRoute {
-                    guest_system: GuestSystem::Risc0,
-                    runner: RunnerKind::Network,
                 }
             ) | (
                 Self::ShastaSp1,
@@ -168,7 +158,6 @@ impl FromStr for PipelineKey {
             "shasta-native-local" => Ok(Self::ShastaNative),
             "shasta-sgx-remote" => Ok(Self::ShastaSgx),
             "shasta-sgxgeth-remote" => Ok(Self::ShastaSgxGeth),
-            "shasta-risc0-network" => Ok(Self::ShastaRisc0Network),
             _ => Err(format!("Unknown pipeline key: {s}")),
         }
     }
@@ -300,13 +289,25 @@ mod route_tests {
     use raiko2_primitives::ProofType;
 
     #[test]
+    fn removed_risc0_network_route_is_rejected() {
+        assert!("shasta-risc0-network".parse::<PipelineKey>().is_err());
+        assert!(serde_json::from_str::<PipelineKey>("\"ShastaRisc0Network\"").is_err());
+        let route = PipelineRoute::new(GuestSystem::Risc0, RunnerKind::Network);
+        assert!(
+            !PipelineKey::ALL
+                .into_iter()
+                .any(|key| key.supports_route(route))
+        );
+    }
+
+    #[test]
     fn pipeline_key_is_the_canonical_route_owner() {
-        let pipeline_key = PipelineKey::ShastaRisc0Network;
+        let pipeline_key = PipelineKey::ShastaRisc0;
         let route = pipeline_key.route();
 
         assert!(pipeline_key.supports_route(route));
         assert_eq!(
-            "shasta-risc0-network"
+            "shasta-risc0-local"
                 .parse::<PipelineKey>()
                 .expect("parse pipeline key"),
             pipeline_key

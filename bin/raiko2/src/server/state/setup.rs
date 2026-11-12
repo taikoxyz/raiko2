@@ -95,12 +95,6 @@ pub(crate) fn sp1_scheduler_config(config: &Config) -> SchedulerConfig {
 }
 
 #[allow(clippy::missing_const_for_fn)]
-#[cfg(feature = "host")]
-pub(crate) fn boundless_scheduler_config(config: &Config) -> SchedulerConfig {
-    scheduler_config(config)
-}
-
-#[allow(clippy::missing_const_for_fn)]
 fn task_lease_duration(config: &Config) -> Duration {
     let retries = u64::from(config.rpc.client.retry.max_attempts);
     let total_attempts = retries.saturating_add(1);
@@ -140,36 +134,6 @@ pub(crate) fn sp1_prover_config(config: &Config) -> raiko2_prover::sp1::Sp1Confi
     config.prover.sp1.config.clone()
 }
 
-#[cfg(feature = "host")]
-pub(crate) fn boundless_prover_config(
-    config: &Config,
-    pair: &ResolvedNetworkPair,
-) -> raiko2_prover::boundless::BoundlessConfig {
-    let boundless = config
-        .prover
-        .risc0
-        .boundless
-        .apply_pair_override(&pair.boundless)
-        .expect("validated boundless config must merge cleanly");
-    raiko2_prover::boundless::BoundlessConfig {
-        execution_po2: config.prover.risc0.execution_po2,
-        proposal_zkgas_warning_threshold: boundless.proposal_zkgas_warning_threshold,
-        offchain: boundless.offchain,
-        rpc_url: boundless.rpc_url,
-        signer_key: boundless.signer_key,
-        transaction: boundless.transaction,
-        deployment: boundless.deployment,
-        batch_quote: boundless.batch_quote,
-        aggregation_quote: boundless.aggregation_quote,
-        offer_params: boundless.offer_params,
-        poll_interval_ms: boundless.poll_interval_ms,
-        timeout_ms: boundless.timeout_ms,
-        rebid_timeout_ms: boundless.rebid_timeout_ms,
-        rebid_price_step_bps: boundless.rebid_price_step_bps,
-        rebid_max_attempts: boundless.rebid_max_attempts,
-    }
-}
-
 pub(crate) const fn remote_sgx_prover_config(
     base_url: String,
     timeout_ms: u64,
@@ -182,12 +146,10 @@ pub(crate) const fn remote_sgx_prover_config(
 
 #[cfg(test)]
 mod tests {
-    #[cfg(feature = "local-provers")]
-    use super::sp1_scheduler_config;
     #[cfg(feature = "host")]
-    use super::{boundless_prover_config, boundless_scheduler_config};
+    use super::sp1_scheduler_config;
     use super::{build_context, scheduler_config};
-    use crate::config::{BoundlessPairConfig, Config, ResolvedNetworkPair};
+    use crate::config::{Config, ResolvedNetworkPair};
     use raiko2_primitives::{ProofType, SupportedChainSpecs};
     use raiko2_provider::L2ProviderKind;
     use raiko2_queue::RetryPolicy;
@@ -214,7 +176,7 @@ mod tests {
             l2_witness_rpc: l2_spec.rpc.clone(),
             sp1_verifier_rpc_url: None,
             sp1_verifier_address: None,
-            boundless: BoundlessPairConfig::default(),
+
             l1_spec,
             l2_spec,
         }
@@ -231,17 +193,6 @@ mod tests {
         assert_eq!(context.config["hoodi_network"], "taiko_hoodi");
         assert_eq!(context.config["hoodi_l1_network"], "hoodi");
         assert!(context.config.get("sp1").is_none());
-    }
-
-    #[cfg(feature = "host")]
-    #[test]
-    fn boundless_scheduler_uses_general_task_policy() {
-        let config = Config::default();
-
-        assert_eq!(
-            boundless_scheduler_config(&config),
-            scheduler_config(&config)
-        );
     }
 
     #[test]
@@ -263,7 +214,7 @@ mod tests {
         assert_eq!(scheduler.retry, RetryPolicy::None);
     }
 
-    #[cfg(feature = "local-provers")]
+    #[cfg(feature = "host")]
     #[test]
     fn sp1_scheduler_retries_pre_checkpoint_failures() {
         let scheduler = sp1_scheduler_config(&Config::default());
@@ -295,120 +246,6 @@ mod tests {
 
         let scheduler = scheduler_config(&config);
         assert_eq!(scheduler.lease_duration, Duration::from_secs(60));
-    }
-
-    #[cfg(feature = "host")]
-    #[test]
-    fn boundless_prover_inherits_risc0_execution_po2() {
-        let mut config = Config::default();
-        config.prover.risc0.execution_po2 = 24;
-        config.prover.risc0.boundless.offchain = true;
-        let pair = config
-            .rpc
-            .resolved_pairs()
-            .expect("resolved rpc pairs")
-            .pop()
-            .expect("default pair");
-
-        let boundless = boundless_prover_config(&config, &pair);
-
-        assert_eq!(boundless.execution_po2, 24);
-    }
-
-    #[cfg(feature = "host")]
-    #[test]
-    fn boundless_prover_applies_pair_specific_overrides() {
-        let mut config = Config::default();
-        config.prover.risc0.boundless.offchain = true;
-        config.prover.risc0.boundless.rpc_url = "https://boundless.example.com".to_string();
-        config.prover.risc0.boundless.signer_key = "configured-by-secret-store".to_string();
-        config.prover.risc0.boundless.rebid_timeout_ms = 900_000;
-        config.prover.risc0.boundless.rebid_price_step_bps = 3000;
-        config.prover.risc0.boundless.rebid_max_attempts = 5;
-        config
-            .prover
-            .risc0
-            .boundless
-            .proposal_zkgas_warning_threshold = 900_000_000;
-        config.rpc.pairs[0].boundless.batch_quote =
-            Some(raiko2_prover::boundless::QuoteSizing::Fixed { mcycles: 5_000 });
-        config.rpc.pairs[0].boundless.aggregation_quote =
-            Some(raiko2_prover::boundless::QuoteSizing::Evaluated);
-        config.rpc.pairs[0].boundless.poll_interval_ms = Some(15_000);
-        config.rpc.pairs[0].boundless.timeout_ms = Some(4_200_000);
-        config.rpc.pairs[0].boundless.rebid_timeout_ms = Some(450_000);
-        config.rpc.pairs[0].boundless.rebid_price_step_bps = Some(4000);
-        config.rpc.pairs[0].boundless.rebid_max_attempts = Some(2);
-        config.rpc.pairs[0]
-            .boundless
-            .proposal_zkgas_warning_threshold = Some(750_000_000);
-        config.rpc.pairs[0].boundless.offer_params.batch =
-            Some(raiko2_prover::boundless::BoundlessOfferParams {
-                timeouts: raiko2_prover::boundless::TimeoutPolicy::PerMcycle {
-                    lock_timeout_ms_per_mcycle: 300,
-                    timeout_ms_per_mcycle: 500,
-                    dynamic_pricing_timeout_modifier: None,
-                },
-                ..config.prover.risc0.boundless.offer_params.batch.clone()
-            });
-        config.rpc.pairs[0].boundless.offer_params.aggregation =
-            Some(raiko2_prover::boundless::BoundlessOfferParams {
-                timeouts: raiko2_prover::boundless::TimeoutPolicy::PerMcycle {
-                    lock_timeout_ms_per_mcycle: 3_000,
-                    timeout_ms_per_mcycle: 7_000,
-                    dynamic_pricing_timeout_modifier: None,
-                },
-                ..config
-                    .prover
-                    .risc0
-                    .boundless
-                    .offer_params
-                    .aggregation
-                    .clone()
-            });
-        let pair = config
-            .rpc
-            .resolved_pairs()
-            .expect("resolved rpc pairs")
-            .pop()
-            .expect("default pair");
-
-        let boundless = boundless_prover_config(&config, &pair);
-
-        assert!(boundless.offchain);
-        assert_eq!(boundless.rpc_url, "https://boundless.example.com");
-        assert_eq!(boundless.signer_key, "configured-by-secret-store");
-        assert!(boundless.deployment.is_some());
-        assert_eq!(
-            boundless.batch_quote,
-            raiko2_prover::boundless::QuoteSizing::Fixed { mcycles: 5_000 }
-        );
-        assert_eq!(
-            boundless.aggregation_quote,
-            raiko2_prover::boundless::QuoteSizing::Evaluated
-        );
-        assert_eq!(
-            boundless.offer_params.batch.timeouts,
-            raiko2_prover::boundless::TimeoutPolicy::PerMcycle {
-                lock_timeout_ms_per_mcycle: 300,
-                timeout_ms_per_mcycle: 500,
-                dynamic_pricing_timeout_modifier: None,
-            }
-        );
-        assert_eq!(
-            boundless.offer_params.aggregation.timeouts,
-            raiko2_prover::boundless::TimeoutPolicy::PerMcycle {
-                lock_timeout_ms_per_mcycle: 3_000,
-                timeout_ms_per_mcycle: 7_000,
-                dynamic_pricing_timeout_modifier: None,
-            }
-        );
-        assert_eq!(boundless.poll_interval_ms, 15_000);
-        assert_eq!(boundless.timeout_ms, 4_200_000);
-        assert_eq!(boundless.rebid_timeout_ms, 450_000);
-        assert_eq!(boundless.rebid_price_step_bps, 4000);
-        assert_eq!(boundless.rebid_max_attempts, 2);
-        assert_eq!(boundless.proposal_zkgas_warning_threshold, 750_000_000);
     }
 
     #[test]

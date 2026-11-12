@@ -328,6 +328,64 @@ pub struct BlockWorkloadQuote {
 pub struct NodeBlockWorkloadQuote {
     pub unzen_zkgas: u64,
     pub pricing: NodePricingBreakdownSnapshot,
+    /// Optional host-replay observations for independent baseline experiments, not live admission.
+    /// Missing on older quotes; consumers must not reinterpret absence as observed zero work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_counters: Option<NodeSemanticCountersSnapshot>,
+}
+
+/// Committed real-precompile events, independent of the model's selected price candidates.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EcmulSemanticCountersSnapshot {
+    /// Calls actually dispatched to ECMUL that completed successfully.
+    pub successful_calls: u64,
+    /// Actual consumed native gas for successful calls, before any new-model conversion.
+    pub successful_native_gas: u64,
+    /// Successful reduced-scalar bit length plus popcount, accumulated without per-event prices.
+    pub successful_scalar_work_units: u64,
+    /// Calls actually dispatched to ECMUL that failed, including invalid points or insufficient gas.
+    pub failed_calls: u64,
+    /// Actual native gas consumed by failed ECMUL calls; their input scalars are not work evidence.
+    pub failed_native_gas: u64,
+}
+
+/// Short, typed reasons that semantic observations cannot be used as a complete statistic.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SemanticCounterDiagnostic {
+    /// A count or sum exceeded its integer domain.
+    ArithmeticOverflow,
+    /// Consumed precompile gas contradicted the supplied allowance or successful ECMUL schedule.
+    NativeGasAccounting,
+    /// A candidate ended before all of its observed calls returned.
+    UnbalancedCallHooks,
+    /// An observed call end did not match its pending precompile address.
+    CallHookMismatch,
+}
+
+/// Optional node-observable semantic evidence produced by host replay of committed candidates.
+/// This export does not wire the observations into a live miner, fee meter, or admission policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NodeSemanticCountersSnapshot {
+    /// Present only when all committed ECMUL observations are complete; zero then means observed zero.
+    pub ecmul: Option<EcmulSemanticCountersSnapshot>,
+    /// A diagnostic makes ECMUL unavailable rather than publishing a partial or fabricated zero.
+    pub diagnostic: Option<SemanticCounterDiagnostic>,
+    /// Raw signed access-list storage-key occurrences in committed scopes, including duplicates.
+    /// Read directly from the existing Reth diagnostic; absence means this count was not observed.
+    pub access_list_raw_storage_keys: Option<u64>,
+}
+
+impl Default for NodeSemanticCountersSnapshot {
+    fn default() -> Self {
+        Self {
+            ecmul: Some(EcmulSemanticCountersSnapshot::default()),
+            diagnostic: None,
+            access_list_raw_storage_keys: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -856,6 +914,7 @@ pub fn quote_shasta_proposal_with_execution_profile(
             node: NodeBlockWorkloadQuote {
                 unzen_zkgas: block.execution.finalized_block_zkgas,
                 pricing: node_pricing,
+                semantic_counters: Some(block.execution.semantic_counters),
             },
             prove: ProveBlockWorkloadQuote {
                 input_transaction_count: block.input_transaction_count,
@@ -1009,6 +1068,44 @@ mod tests {
             missing.as_object_mut().unwrap().remove(field);
             assert!(serde_json::from_value::<PricingBreakdownSnapshot>(missing).is_err());
         }
+    }
+
+    #[test]
+    fn semantic_wire_distinguishes_older_quotes_observed_zero_and_diagnostics() {
+        let old = NodeBlockWorkloadQuote {
+            unzen_zkgas: 0,
+            pricing: NodePricingBreakdownSnapshot::default(),
+            semantic_counters: None,
+        };
+        let encoded = serde_json::to_value(&old).unwrap();
+        assert!(encoded.get("semantic_counters").is_none());
+        assert_eq!(
+            serde_json::from_value::<NodeBlockWorkloadQuote>(encoded)
+                .unwrap()
+                .semantic_counters,
+            None
+        );
+
+        let observed = NodeSemanticCountersSnapshot {
+            access_list_raw_storage_keys: Some(0),
+            ..Default::default()
+        };
+        let encoded = serde_json::to_value(observed).unwrap();
+        assert_eq!(encoded["ecmul"]["successful_calls"], 0);
+        assert_eq!(encoded["access_list_raw_storage_keys"], 0);
+        assert!(encoded["diagnostic"].is_null());
+        let incomplete = NodeSemanticCountersSnapshot {
+            ecmul: None,
+            diagnostic: Some(SemanticCounterDiagnostic::ArithmeticOverflow),
+            access_list_raw_storage_keys: Some(3),
+        };
+        let encoded = serde_json::to_value(incomplete).unwrap();
+        assert!(encoded["ecmul"].is_null());
+        assert_eq!(encoded["diagnostic"], "arithmetic_overflow");
+        assert_eq!(
+            serde_json::from_value::<NodeSemanticCountersSnapshot>(encoded).unwrap(),
+            incomplete
+        );
     }
     #[test]
     fn account_journal_report_fields_are_required_without_zero_fallback() {
@@ -2237,6 +2334,33 @@ mod tests {
             "non-PC07 calls are balanced too"
         );
         assert_eq!(ecmul_calls.len(), 10);
+        let exported = quote
+            .blocks
+            .iter()
+            .map(|block| {
+                let snapshot = block
+                    .node
+                    .semantic_counters
+                    .expect("new host quotes observe semantic counters");
+                assert_eq!(snapshot.diagnostic, None);
+                snapshot.ecmul.expect("fixture observation is complete")
+            })
+            .fold(
+                EcmulSemanticCountersSnapshot::default(),
+                |mut sum, block| {
+                    sum.successful_calls += block.successful_calls;
+                    sum.successful_native_gas += block.successful_native_gas;
+                    sum.successful_scalar_work_units += block.successful_scalar_work_units;
+                    sum.failed_calls += block.failed_calls;
+                    sum.failed_native_gas += block.failed_native_gas;
+                    sum
+                },
+            );
+        assert_eq!(exported.successful_calls, 10);
+        assert_eq!(exported.successful_native_gas, 60_000);
+        assert_eq!(exported.successful_scalar_work_units, 2305);
+        assert_eq!(exported.failed_calls, 0);
+        assert_eq!(exported.failed_native_gas, 0);
         assert!(
             ecmul_calls
                 .iter()

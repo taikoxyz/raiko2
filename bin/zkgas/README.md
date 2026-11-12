@@ -235,6 +235,17 @@ Tariff recomputation applies when the quote model matches the compare binary's s
 Schema-v1 quotes from another explicitly profiled model retain the model-independent structural,
 selector-domain, duplicated-identity, and arithmetic checks without being repriced by the wrong model.
 
+New native quotes also export optional `blocks[].node.semantic_counters` for independently
+specified baseline experiments. ECMUL counters require a real precompile dispatch and distinguish
+successful reduced-scalar work from failed calls and their native gas. The access-list count is
+raw signed storage-key occurrences, including duplicates, in committed candidates. Included
+transactions retain work even when their execution reverts; discarded candidates contribute no
+node counters. Missing fields in older reports mean unobserved work, not zero. An incomplete
+observation carries a typed diagnostic and cannot be repaired by substituting a guessed count.
+These counters come from this host replay; they do not add live miner admission or change prices.
+The [patched-Unzen comparison](bench/README.md#patched-unzen-counterfactual) consumes them without
+replaying or measuring the input itself.
+
 ### Compare: cross-program SP1 and incompatible-unit RISC0
 
 For real observations, record the actual ELF SHA-256, backend-native identifier, stage, unit,

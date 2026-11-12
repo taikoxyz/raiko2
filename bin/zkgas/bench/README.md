@@ -4778,3 +4778,110 @@ must match the full-allowance formula while all declared failed-call and parent 
 ~/.venv/bin/python -m unittest discover -s bin/zkgas/bench/tests \
   -p test_ecmul_failures.py -v
 ```
+
+## Controlled common-price follow-up
+
+Prepare the separate 23-row catalog without changing the earlier ordinary-opcode catalog:
+
+```sh
+~/.venv/bin/python bin/zkgas/bench/cases/ordinary_placeholders.py \
+  --output-dir experiment/ordinary-placeholders
+```
+
+ORIGIN has target and same-result CALLER scaffold lanes at counts 0/1/8/720. CALL and
+caught normal REVERT have target/scaffold lanes at 0/1/8. Their bytecode executes genuine
+CALL, with one fixed warmup, empty input/output, zero value and a fixed child. Every result,
+returndata length, executed opcode count and complete gas formula must pass native
+qualification. STOP and REVERT children are distinct. ECRECOVER reuses the existing valid
+vector requests at 0/1/8, preserving sample IDs so qualified actuals can be reused.
+
+Keep zero controls, scaffold controls and constructor failures. Same-target count differences
+include loop and guard work; scaffold subtraction does not identify isolated opcode PGU.
+Empty warm calls and empty normal reverts do not establish prices for cold/value/large-input
+calls or large preallocated returndata. The ORIGIN720 pair is a constructed availability
+probe, not historical application evidence. Catalog generation does not execute SP1 or select
+prices. Use the existing workload harness and resource limits for actuals.
+
+```sh
+~/.venv/bin/python -m unittest discover -s bin/zkgas/bench/tests \
+  -p test_ordinary_placeholders.py -v
+```
+
+## Patched-Unzen counterfactual
+
+`targeted_unzen.py` compares an explicitly profiled, add-only baseline with raw Unzen and
+the new node/full quotes. It reads retained reports; it performs no acquisition, execution,
+fitting of tariffs, transaction repacking or admission. Supply a frozen profile and manifests:
+
+```sh
+~/.venv/bin/python bin/zkgas/bench/targeted_unzen.py \
+  --manifest "$CAP_MANIFEST" --profile "$BASELINE_PROFILE" \
+  --output experiment/patched-unzen.json
+```
+
+Repeat `--manifest` for disjoint observer groups. Canonical input identities must remain
+unique. The ordinary cap manifest defaults to `measurement="native_receipt"`. For retained
+actuals without constructor receipts, set a sample's `measurement="quote_actual_only"`,
+replace its `native` reference with a hash-bound `headers` reference, and retain its
+canonical `input`, real `quote`, `actual` and `quote_key`. The headers file supplies
+`blocks[]` with `number`, `gas_used` and matching hexadecimal `header_fields.number` and
+`header_fields.gasUsed`, in the same contiguous order as the quote. This variant rejects a
+`native` field and remains ineligible for capacity even if it contains one block. It can
+contribute whole-proposal shape metrics; header gas alone is not receipt qualification.
+
+The schema-v1 profile requires `baseline_id`, `comparison_model_id`, `program`
+(`elf_sha256`, `sdk_version`), `conversion`, `partition`, `stages`, `tariffs`, `sources`,
+and `limits`. `partition` explicitly lists disjoint `training_inputs` and `evaluation_inputs`
+by canonical hash and declares `evaluation_status` as `opened_regression` or
+`declared_unopened`. The tool preserves that declaration; it cannot certify when someone
+first viewed the observations. Hash-bound `sources` record each coefficient/conversion
+authority and its purpose. No prices or conversion are silently supplied.
+
+`conversion.kind=training_sum_ratio` uses only the named training rows to compute
+`k=sum(actual)/sum(raw Unzen)`. Alternatively, `provided_ratio` requires an explicit positive
+`ratio` (`numerator`, `denominator`) and `purpose`. This is a whole-proposal shape conversion,
+not a marginal PGU calibration or safety guarantee. Additive reserves may overlap work
+already represented by Unzen; the tool removes no operation credit.
+
+`stages` is an ordered, nonempty prefix of the following list. `tariffs` must contain exactly
+the parameter names required by the selected prefix:
+
+| Stage | Added observation and tariff parameters |
+| --- | --- |
+| `calibrated_unzen` | `k * raw Unzen`; no additional tariff |
+| `ecmul` | Successful reduced-scalar bit length + popcount; `ecmul_scalar_work_pgu` |
+| `access_list_linear` | Raw items and storage-key occurrences; `access_list_item_pgu`, `access_list_key_pgu` |
+| `access_list_pairs` | Same-low32, other-key and address pairs; `access_list_same_low32_pair_pgu`, `access_list_other_pair_pgu`, `access_list_address_pair_pgu` |
+| `container` | Existing work selectors; `storage_journal_work_pgu`, `account_journal_work_pgu`, `account_cache_work_pgu`, `storage_transition_work_pgu` |
+
+New native quotes provide semantic ECMUL and raw access-list observations. Older missing
+observations stay unavailable; they are not zero-filled. An optional `--selectors` sidecar
+can bind separately observed ECMUL counters to the canonical input, canonical quote-object
+digest, producer and block index. It cannot override a typed incomplete native observation.
+See the focused test fixtures for the sidecar wire format.
+
+`limits.raw_unzen` retains Unzen's original score unit. For every stage the primary inherited
+budget comparison is exact `k*raw Unzen + reserves <= k*limits.raw_unzen`; the report also
+retains the conservative integer-threshold rounding sensitivity. Separately,
+`limits.counterfactual_pgu` supplies an illustrative PGU-equivalent reference. Neither
+comparison is a production limit or a multi-block proposal bandwidth guarantee.
+
+The capacity report uses only receipt-qualified, single-block proposals within 30M charged
+gas. Whole multi-block actuals remain unallocated. Every stage reports missing observations
+and uses the same available input intersection for its Unzen/patched/new-node comparison.
+Historical quote-only blocks check existing packing, not actual workload or individual
+transaction rejection. Shape metrics independently freeze a training-only multiplier for
+each score, retain a constant predictor, and report WAPE and tie-aware Spearman. Literal
+node/full deficits and ratios remain separate from these normalized shape comparisons.
+
+Default cumulative limits are 256MiB of encoded source-read references, 10,000 rows and
+100,000 blocks. Repeated paths are charged and rehashed for each read; canonical gzip inputs
+also have the existing 64MiB decoded limit. The report retains the resource receipt. For a
+larger known corpus, explicitly set `--max-source-bytes` (for example `536870912`),
+`--max-rows`, or `--max-blocks` as needed. Historical quotes are projected one at a time;
+raising the source budget does not require retaining the full quote population in memory.
+
+```sh
+~/.venv/bin/python -m unittest discover -s bin/zkgas/bench/tests \
+  -p test_targeted_unzen.py -v
+```

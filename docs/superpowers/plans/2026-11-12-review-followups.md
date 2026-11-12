@@ -34,12 +34,12 @@
 **Files:** Raiko manifests/locks, `.github/workflows/ci.yml`, `bin/guest-launcher`, `crates/guests/elf`; Reth integration conflicts.
 
 - [x] Record original remote heads and local backup refs.
-- [ ] Incorporate reviewed compatible upstream behavior, retaining tx-selection overflow semantics.
+- [x] Incorporate reviewed compatible upstream behavior, retaining tx-selection overflow semantics.
 - [x] Merge launcher optional quote and ordinary/SDK-smoke behavior; preserve main CI fixes and shadow lanes.
 - [x] Restore the entire generated ELF/VK/provenance group from the exact Raiko base without rebuilding or editing its contents.
-- [ ] Generate minimal compatible lock updates, verify dependency deltas and artifact blob identity.
-- [ ] Run focused launcher/trace/tool checks and document artifact freshness as an unclosed activation gate.
-- [ ] Independent review and verification, then update existing Draft PRs with exact remote-head guards.
+- [x] Generate minimal compatible lock updates, verify dependency deltas and artifact blob identity.
+- [x] Run focused launcher/trace/tool checks and document artifact freshness as an unclosed activation gate.
+- [x] Independently review and update #260/#284 with exact remote-head guards; #296 publication follows the additional tools below.
 
 ## Task 2: Exceptional-execution coverage
 
@@ -50,7 +50,7 @@
 - [x] Keep unsupported successful routes diagnostic and preserve actual EVM opcode/Unzen/gas/status/state behavior.
 - [x] Verify committed/attempted ownership and plain/inspected parity.
 - [x] Record extractor semantic revision separately from unchanged numerical JSON prices.
-- [ ] Independent review/test and integrate the reviewed Reth revision into Raiko.
+- [x] Independent review/test and integrate the reviewed Reth revision into Raiko.
 
 ## Task 3: Current profile and reproducible evaluation
 
@@ -59,29 +59,29 @@
 - [x] Add a current research profile binding the actual b76 program, SDK 6.3.0, execute stage and current numerical model.
 - [x] Preserve explicit historical profile access; remove the stale historical profile from the current default path.
 - [x] Test matching research input and mismatching model/program/backend/stage; never fabricate VK identities.
-- [ ] Provide reusable train/evaluation metric calculation and commands for the retained cohort.
+- [x] Provide reusable train/evaluation metric calculation and commands for the retained cohort.
 - [ ] Reproduce headline results through checked-in tools, with exact row selection and fixed scales.
 
 ## Task 4: Patched-Unzen baseline
 
 **Files:** New `bin/zkgas/bench/targeted_unzen.py`, focused tests; minimal host semantic-selector export if required.
 
-- [ ] Freeze an explicit rational conversion/profile and calibration/validation identities before evaluation.
-- [ ] Retain original raw Unzen and its original budget separately.
-- [ ] Implement declared additive stages: scalar-sensitive ECMUL; raw access-list work; optional container reserves as a separate complexity increment.
-- [ ] Obtain semantic counts from replay, including actual precompile dispatch/success/failure and committed scope; never infer history from case names or quote prices.
-- [ ] Treat missing features as unavailable with explicit coverage; compare models on named identical intersections.
+- [x] Freeze an explicit rational conversion/profile and calibration/validation identities before evaluation.
+- [x] Retain original raw Unzen and its original budget separately.
+- [x] Implement declared additive stages: scalar-sensitive ECMUL; raw access-list work; optional container reserves as a separate complexity increment.
+- [x] Obtain semantic counts from replay, including actual precompile dispatch/success/failure and committed scope; never infer history from case names or quote prices.
+- [x] Treat missing features as unavailable with explicit coverage; compare models on named identical intersections.
 - [ ] Report finite capacity/packing, workload-shape and complexity deltas without claiming hard admission or universal bounds.
-- [ ] Test units, exact arithmetic/rounding, missing data, duplicate identities and invalid training/evaluation overlap.
+- [x] Test units, exact arithmetic/rounding, missing data, duplicate identities and invalid training/evaluation overlap.
 - [ ] Independently replay retained data and evaluate against original Unzen and current node estimate.
 
 ## Task 5: Targeted pricing and completion investigation
 
 **Files:** Existing controlled producers, Reth price generators, research reports.
 
-- [ ] Retain existing prices while isolating ORIGIN/normal REVERT/CALL/ECRECOVER placeholder effects.
-- [ ] Quantify KZG/BLS availability under explicit illustrative limits; distinguish constructed extremes from historical/product requirements.
-- [ ] Attribute block-MPT completion costs and identify missing phase evidence; do not delete completion solely because the node aggregate is near actual.
+- [x] Retain existing prices while isolating ORIGIN/normal REVERT/CALL/ECRECOVER placeholder effects.
+- [x] Retain the frozen-model KZG/BLS availability figures under illustrative limits, without dismissing valid constructed inputs as application-free.
+- [x] Attribute block-MPT completion costs and identify missing phase evidence; do not delete completion solely because the node aggregate is near actual.
 - [ ] Propose only supported local price changes, preserving heavy/error/mixed regressions and precursor results.
 
 ## Task 6: Freeze, validate and retain evidence
@@ -101,3 +101,10 @@
 - Raiko #296 integration resolves only the reviewed Reth revision on main-based host locks; all three locked metadata graphs pass. Current research profile's complete comparison suite passed 71/71 after a bounded 4m14s host build.
 - Independent review found and fixed the SDK-smoke/quote bincode gate and preservation of existing RISC0 experiment CI coverage. Patched-Unzen aggregate memory bounds are being fixed before real-panel use.
 - Reclaimed one verified duplicate uncompressed archive, retaining compressed Release bytes and extracted data. No fixture, actual, guest or shared Cargo cache was deleted.
+- Semantic host counters passed 46 trace tests, 143 complete zkgas tests and independent review. Included REVERT/HALT work remains; discarded candidates and failed precompile scalars do not masquerade as successful scalar work.
+- Patched-Unzen tests passed 36/36 after independent review fixed aggregate resource bounds and early header/quote-count validation. The explicit quote/actual-only path supports whole-proposal shape comparison without inventing native receipts or capacity qualification.
+- Common-price probes produced 18 new SP1 observations, reused three qualified ECRECOVER actuals, and then measured two reserved ORIGIN720 inputs only after the 2176-PGU candidate was sealed and independently reviewed. Accepted801 remains unchanged; the reserved actuals do not retune the candidate.
+- The 322-input native-only requote selection and patched-Unzen profile were sealed before execution. They include the opened historical panels plus two qualified access-list calibration controls; no newly untouched validation claim is made.
+- Profile conversion is the 18-training-input sum ratio. Linear access-list pricing uses same-mechanism count-paired increments, not total-input residual divided by key count. ECMUL/pair/container coefficients inherit explicitly identified801 calibration priors.
+- The broad bench Python run reached its 120-second limit without a final result; focused changed suites passed. A workspace Clippy attempt is recorded separately and is not presumed passing.
+- Reclaimed five old zkGas compiler incremental caches when free disk approached the existing SP1 guard; linked executables, fixtures and all other caches were retained. This later cleanup is separate from the earlier duplicate-archive removal.

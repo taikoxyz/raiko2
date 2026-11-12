@@ -15,7 +15,10 @@
 /rendered
 /scripts
 /target
-/tests
+/tests/*
+!/tests/fixtures
+/tests/fixtures/*
+!/tests/fixtures/cuda-sdk-smoke
 /core
 /core.*
 docker/.env

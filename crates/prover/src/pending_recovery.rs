@@ -5,7 +5,6 @@ use std::num::NonZeroU32;
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NetworkProverBackend {
-    Boundless,
     Sp1,
 }
 

@@ -161,7 +161,7 @@ mod tests {
         }];
         set_routes(
             &mut config,
-            "sgxgeth/remote,sgx/remote,native/local,sp1/network,risc0/network",
+            "sgxgeth/remote,sgx/remote,native/local,sp1/network,risc0/local",
         );
         config.prover.sgx.base_url.clear();
         config.prover.sgxgeth.base_url.clear();
@@ -181,7 +181,7 @@ mod tests {
         assert_eq!(
             summary["routes"],
             serde_json::json!([
-                "risc0/network",
+                "risc0/local",
                 "sp1/network",
                 "native/local",
                 "sgx/remote",

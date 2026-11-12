@@ -21,11 +21,8 @@ use raiko2_runtime::{
     RunnerStatus as RuntimeRunnerStatus, RuntimeManager, RuntimeMutationOutcome, TaskRegistration,
     TaskRegistrationOutcome,
 };
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::{
-    collections::{HashMap, HashSet},
-    time::{SystemTime, UNIX_EPOCH},
-};
 use tracing::{info, warn};
 
 use super::super::auth::{
@@ -264,9 +261,6 @@ fn validate_request_shape(req: &BatchShastaRequest) -> Result<(), ApiError> {
     if req.proposals.is_empty() {
         return Err(ApiError::bad_request("proposals must not be empty"));
     }
-    if !req.proof_type.is_public_batch_request_type() {
-        return Err(unsupported_proof_type(req.proof_type));
-    }
     if req.aggregate && matches!(req.proof_type, BatchProofType::ZkAny) {
         return Err(ApiError::bad_request(
             "proof_type=zk_any is not supported for aggregate requests",
@@ -357,7 +351,6 @@ fn prover_type_for_proof_type(
             Ok(Some(sp1_prover_type(effective_config.prover)))
         }
         BatchProofType::Risc0 => Ok(Some(risc0_prover_type(state, route))),
-        BatchProofType::Boundless => Err(unsupported_proof_type(proof_type)),
         BatchProofType::Native | BatchProofType::Sgx | BatchProofType::SgxGeth => Ok(None),
         BatchProofType::ZkAny => Err(ApiError::bad_request(
             "proof_type=zk_any must be resolved before prover type selection",
@@ -1989,7 +1982,6 @@ async fn collect_prover_status(
     let mut skipped = ProverSkippedStatusCounts::default();
     let mut queue_groups: HashMap<ProverQueueKey, (Arc<dyn EngineHandle>, HashSet<EngineTaskId>)> =
         HashMap::new();
-    let now_secs = unix_now_secs();
 
     for record in records {
         let metadata = match parse_task_metadata(&record) {
@@ -2011,7 +2003,7 @@ async fn collect_prover_status(
         if is_terminal_runtime_status(record.runner_status) {
             continue;
         }
-        count_network_inflight(&metadata, &mut network, now_secs);
+        count_network_inflight(&metadata, &mut network);
         let engine = match resolve_engine(state, &record.network_pair, record.pipeline_key) {
             Ok(engine) => engine,
             Err(err) if err.status == StatusCode::NOT_FOUND => {
@@ -2256,16 +2248,12 @@ const fn count_queue_task_state(view: &EngineQueueTaskView, counts: &mut ProverT
     }
 }
 
-fn count_network_inflight(
-    metadata: &TaskMetadata,
-    network: &mut ProverNetworkStatus,
-    now_secs: u64,
-) {
+fn count_network_inflight(metadata: &TaskMetadata, network: &mut ProverNetworkStatus) {
     for runtime in metadata.runtime.proposals.values() {
-        count_runtime_network_inflight(runtime, network, now_secs);
+        count_runtime_network_inflight(runtime, network);
     }
     if let Some(runtime) = metadata.runtime.aggregate.as_ref() {
-        count_runtime_network_inflight(runtime, network, now_secs);
+        count_runtime_network_inflight(runtime, network);
     }
 }
 
@@ -2273,20 +2261,16 @@ fn count_network_inflight(
 fn count_runtime_network_inflight(
     runtime: &TaskRuntimeMetadata,
     network: &mut ProverNetworkStatus,
-    now_secs: u64,
 ) {
     if runtime.has_sp1_network_submission_progress() {
         network.sp1.inflight_orders = network.sp1.inflight_orders.saturating_add(1);
-    } else if runtime.has_boundless_submission_resume()
-        && matches!(runtime.expires_at, Some(expires_at) if expires_at > now_secs)
-    {
-        network.risc0.inflight_orders = network.risc0.inflight_orders.saturating_add(1);
     }
 }
 
+#[cfg(test)]
 fn unix_now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
 }
@@ -2726,18 +2710,8 @@ fn task_runtime_view(
         },
         engine_state_present,
         provider_request_id: runtime.provider_request_id,
-        remote_tx_hash: runtime.remote_tx_hash,
-        image_ref: runtime.image_ref,
-        deployment: runtime.deployment,
-        offchain: runtime.offchain,
         expires_at: runtime.expires_at,
         submitted_at: runtime.submitted_at,
-        quoted_mcycles_count: runtime.quoted_mcycles_count,
-        evaluated_mcycles_count: runtime.evaluated_mcycles_count,
-        quote_strategy: runtime.quote_strategy,
-        quote_model_id: runtime.quote_model_id,
-        max_price_multiplier: runtime.max_price_multiplier,
-        max_price_wei: runtime.max_price_wei,
         sp1_network_mode: runtime
             .sp1_network_mode
             .map(|mode| mode.as_str().to_string()),
@@ -3275,7 +3249,7 @@ mod tests {
         );
         Ok(())
     }
-    use crate::config::{BoundlessPairConfig, Config, ServerAclKey};
+    use crate::config::{Config, ServerAclKey};
     use crate::server::state::{EngineHandle, StaticPipelineFactory};
     use anyhow::{Context, Result, anyhow};
     use axum::{
@@ -3481,6 +3455,7 @@ mod tests {
         views: Vec<(EngineTaskId, EngineQueueTaskState)>,
         active_owners: HashSet<raiko2_queue::RootOwner>,
         list_calls: AtomicUsize,
+        detach_calls: Mutex<Vec<(RootOwner, raiko2_queue::DetachMode)>>,
     }
 
     impl ListingEngine {
@@ -3489,6 +3464,7 @@ mod tests {
                 views,
                 active_owners: HashSet::new(),
                 list_calls: AtomicUsize::new(0),
+                detach_calls: Mutex::new(Vec::new()),
             }
         }
 
@@ -3500,6 +3476,7 @@ mod tests {
                 views,
                 active_owners,
                 list_calls: AtomicUsize::new(0),
+                detach_calls: Mutex::new(Vec::new()),
             }
         }
     }
@@ -3543,11 +3520,17 @@ mod tests {
 
         fn detach_execution(
             &self,
-            _owner: raiko2_queue::RootOwner,
+            owner: raiko2_queue::RootOwner,
             mode: raiko2_queue::DetachMode,
         ) -> BoxFuture<'_, Result<raiko2_queue::DetachOutcome<EngineTaskKey>, TaskStoreError>>
         {
-            Box::pin(async move { Ok(raiko2_queue::DetachOutcome::not_attached(mode)) })
+            Box::pin(async move {
+                self.detach_calls
+                    .lock()
+                    .expect("detach calls")
+                    .push((owner, mode));
+                Ok(raiko2_queue::DetachOutcome::not_attached(mode))
+            })
         }
     }
 
@@ -3654,7 +3637,6 @@ mod tests {
             l2_witness_rpc: "http://l2w.example".to_string(),
             sp1_verifier_rpc_url: None,
             sp1_verifier_address: None,
-            boundless: BoundlessPairConfig::default(),
             l1_spec: specs
                 .get_chain_spec("ethereum")
                 .expect("ethereum chain spec"),
@@ -3874,7 +3856,7 @@ mod tests {
         runner_status: RuntimeRunnerStatus,
         metadata: &TaskMetadata,
     ) -> RuntimeTaskRecord {
-        let pipeline_key = PipelineKey::ShastaRisc0Network;
+        let pipeline_key = PipelineKey::ShastaSp1;
         let mut metadata = metadata.clone();
         canonicalize_test_metadata(&mut metadata, pipeline_key);
         let artifact_refs = publication_proof_artifact_refs(&metadata, pipeline_key);
@@ -3882,7 +3864,11 @@ mod tests {
             task_id: "task_public".to_string(),
             incarnation_id: uuid::Uuid::new_v4(),
             pipeline_key,
-            route: pipeline_key.route(),
+            route: if pipeline_key == PipelineKey::ShastaSp1 {
+                "sp1/network".parse().unwrap()
+            } else {
+                pipeline_key.route()
+            },
             task_kind: "hoodi_batch".to_string(),
             network_pair: metadata.network_pair.clone(),
             artifact_refs,
@@ -3914,6 +3900,7 @@ mod tests {
     }
 
     fn canonicalize_test_metadata(metadata: &mut TaskMetadata, pipeline_key: PipelineKey) {
+        metadata.proof_type = pipeline_key.proof_type();
         for proposal in &mut metadata.proposals {
             let request = &proposal.request;
             let previous_task_id = proposal.task_id.clone();
@@ -3947,7 +3934,7 @@ mod tests {
             network_pair: "taiko_dev/ethereum".to_string(),
             network: "taiko_dev".to_string(),
             l1_network: "ethereum".to_string(),
-            proof_type: ProofType::Risc0,
+            proof_type: ProofType::Sp1,
             requested_proof_type: None,
             prover_type: None,
             execution_mode: None,
@@ -3999,29 +3986,12 @@ mod tests {
         metadata.runtime.proposals.insert(task_id, runtime);
     }
 
-    fn test_boundless_runtime(
+    fn test_sp1_runtime_with_deadline(
         provider_request_id: &str,
         submitted_at: u64,
-        lock_expires_at: u64,
         expires_at: u64,
     ) -> TaskRuntimeMetadata {
-        TaskRuntimeMetadata {
-            provider_request_id: Some(provider_request_id.to_string()),
-            request_digest: Some(format!("{}", alloy_primitives::B256::repeat_byte(0x11))),
-            broadcast_from_block: Some(1),
-            image_ref: Some("0ximage".to_string()),
-            deployment: Some("base".to_string()),
-            offchain: Some(false),
-            expires_at: Some(expires_at),
-            lock_expires_at: Some(lock_expires_at),
-            submitted_at: Some(submitted_at),
-            quoted_mcycles_count: Some(1),
-            evaluated_mcycles_count: Some(1),
-            max_price_multiplier: Some(1),
-            max_price_wei: Some("1000".to_string()),
-            rebid_attempt: Some(1),
-            ..TaskRuntimeMetadata::default()
-        }
+        test_sp1_runtime(provider_request_id, submitted_at, expires_at - submitted_at)
     }
 
     fn test_sp1_runtime(
@@ -4033,7 +4003,7 @@ mod tests {
             provider_request_id: Some(provider_request_id.to_string()),
             expires_at: Some(submitted_at.saturating_add(timeout_secs)),
             submitted_at: Some(submitted_at),
-            rebid_attempt: Some(1),
+            request_attempt: Some(1),
             sp1_network_mode: Some(raiko2_prover::Sp1NetworkMode::Reserved),
             sp1_fulfillment_strategy: Some(raiko2_prover::Sp1FulfillmentStrategy::Reserved),
             sp1_skip_simulation: Some(false),
@@ -4054,29 +4024,23 @@ mod tests {
             prover_config: ProverTaskConfig::default(),
         };
         metadata.aggregate_requested = true;
-        metadata.aggregate_task_id = Some(aggregate_task_ref(
-            PipelineKey::ShastaRisc0Network,
-            &request,
-        ));
+        metadata.aggregate_task_id = Some(aggregate_task_ref(PipelineKey::ShastaSp1, &request));
         metadata.aggregate_request = Some(request);
     }
 
     #[test]
     fn network_inflight_counts_each_remote_checkpoint_for_exactly_one_backend() {
         let mut network = ProverNetworkStatus::default();
-        count_runtime_network_inflight(&test_sp1_runtime("sp1-request", 1, 100), &mut network, 10);
+        count_runtime_network_inflight(&test_sp1_runtime("sp1-request", 1, 100), &mut network);
 
         assert_eq!(network.sp1.inflight_orders, 1);
-        assert_eq!(network.risc0.inflight_orders, 0);
 
         count_runtime_network_inflight(
-            &test_boundless_runtime("0x1", 1, 50, 100),
+            &test_sp1_runtime_with_deadline("0x1", 1, 100),
             &mut network,
-            10,
         );
 
-        assert_eq!(network.sp1.inflight_orders, 1);
-        assert_eq!(network.risc0.inflight_orders, 1);
+        assert_eq!(network.sp1.inflight_orders, 2);
     }
 
     async fn upsert_test_record(
@@ -4093,7 +4057,11 @@ mod tests {
             &mut record,
             &mut canonical_metadata,
             pipeline_key,
-            pipeline_key.route(),
+            if pipeline_key == PipelineKey::ShastaSp1 {
+                "sp1/network".parse().unwrap()
+            } else {
+                pipeline_key.route()
+            },
         );
         record.request_fingerprint = format!("fingerprint-{task_id}");
         runtime.upsert_task(&record).await?;
@@ -4145,7 +4113,7 @@ mod tests {
             "missing-pipeline",
             RuntimeRunnerStatus::Running,
             &missing_pipeline_metadata,
-            PipelineKey::ShastaRisc0Network,
+            PipelineKey::ShastaSp1,
         )
         .await?;
 
@@ -4163,47 +4131,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prover_status_ignores_expired_boundless_inflight_order() -> Result<()> {
-        let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
-            "prover-status-expired-boundless",
-        ))?);
-        let mut metadata = zk_any_metadata(Some("prove"));
-        let expires_at = unix_now_secs().saturating_sub(1);
-        set_test_proposal_runtime(
-            &mut metadata,
-            test_boundless_runtime(
-                "0xexpired",
-                expires_at.saturating_sub(2),
-                expires_at.saturating_sub(1),
-                expires_at,
-            ),
-        );
-        upsert_test_record(
-            &runtime,
-            "expired-boundless",
-            RuntimeRunnerStatus::Running,
-            &metadata,
-            PipelineKey::ShastaRisc0Network,
-        )
-        .await?;
-
-        let state = test_state_with_engines(
-            runtime,
-            [(
-                PipelineKey::ShastaRisc0Network,
-                Arc::new(NoopEngine) as Arc<dyn EngineHandle>,
-            )],
-        );
-        let (_, network, skipped) = collect_prover_status(&state, ProverTaskScope::ZkAny)
-            .await
-            .map_err(|err| anyhow!(err.message))?;
-
-        assert_eq!(network.risc0.inflight_orders, 0);
-        assert!(skipped.is_clean());
-        Ok(())
-    }
-
-    #[tokio::test]
     async fn prover_status_counts_missing_queue_task_as_orphaned() -> Result<()> {
         let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
             "prover-status-orphaned",
@@ -4216,14 +4143,14 @@ mod tests {
             "orphaned-root",
             RuntimeRunnerStatus::Running,
             &metadata,
-            PipelineKey::ShastaRisc0Network,
+            PipelineKey::ShastaSp1,
         )
         .await?;
 
         let state = test_state_with_engines(
             runtime,
             [(
-                PipelineKey::ShastaRisc0Network,
+                PipelineKey::ShastaSp1,
                 Arc::new(NoopEngine) as Arc<dyn EngineHandle>,
             )],
         );
@@ -4247,7 +4174,7 @@ mod tests {
         let mut metadata = zk_any_metadata(Some("prove"));
         metadata.proposals[0].request = request.clone();
         let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
-            pipeline: PipelineKey::ShastaRisc0Network,
+            pipeline: PipelineKey::ShastaSp1,
             request,
         });
         upsert_test_record(
@@ -4255,7 +4182,7 @@ mod tests {
             "root",
             RuntimeRunnerStatus::Running,
             &metadata,
-            PipelineKey::ShastaRisc0Network,
+            PipelineKey::ShastaSp1,
         )
         .await?;
 
@@ -4266,7 +4193,7 @@ mod tests {
         let state = test_state_with_engines(
             runtime,
             [(
-                PipelineKey::ShastaRisc0Network,
+                PipelineKey::ShastaSp1,
                 Arc::clone(&engine) as Arc<dyn EngineHandle>,
             )],
         );
@@ -4293,7 +4220,7 @@ mod tests {
         let mut metadata = zk_any_metadata(Some("prove"));
         metadata.proposals[0].request = request.clone();
         let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
-            pipeline: PipelineKey::ShastaRisc0Network,
+            pipeline: PipelineKey::ShastaSp1,
             request,
         });
         upsert_test_record(
@@ -4301,7 +4228,7 @@ mod tests {
             "root-a",
             RuntimeRunnerStatus::Running,
             &metadata,
-            PipelineKey::ShastaRisc0Network,
+            PipelineKey::ShastaSp1,
         )
         .await?;
         upsert_test_record(
@@ -4309,7 +4236,7 @@ mod tests {
             "root-b",
             RuntimeRunnerStatus::Running,
             &metadata,
-            PipelineKey::ShastaRisc0Network,
+            PipelineKey::ShastaSp1,
         )
         .await?;
 
@@ -4326,7 +4253,7 @@ mod tests {
         let state = test_state_with_engines(
             runtime,
             [(
-                PipelineKey::ShastaRisc0Network,
+                PipelineKey::ShastaSp1,
                 Arc::clone(&engine) as Arc<dyn EngineHandle>,
             )],
         );
@@ -4357,7 +4284,7 @@ mod tests {
             "missing-pipeline",
             RuntimeRunnerStatus::Running,
             &missing_pipeline_metadata,
-            PipelineKey::ShastaRisc0Network,
+            PipelineKey::ShastaSp1,
         )
         .await?;
         upsert_test_record(
@@ -4365,33 +4292,28 @@ mod tests {
             "clearable",
             RuntimeRunnerStatus::Running,
             &metadata,
-            PipelineKey::ShastaRisc0Network,
+            PipelineKey::ShastaSp1,
         )
         .await?;
         let mut remote_metadata = metadata.clone();
         let now = unix_now_secs();
         set_test_proposal_runtime(
             &mut remote_metadata,
-            test_boundless_runtime(
-                "0xremote",
-                now,
-                now.saturating_add(300),
-                now.saturating_add(600),
-            ),
+            test_sp1_runtime_with_deadline("0xremote", now, now.saturating_add(600)),
         );
         upsert_test_record(
             &runtime,
             "remote-progress",
             RuntimeRunnerStatus::Running,
             &remote_metadata,
-            PipelineKey::ShastaRisc0Network,
+            PipelineKey::ShastaSp1,
         )
         .await?;
 
         let state = test_state_with_acl(
             Arc::clone(&runtime),
             [(
-                PipelineKey::ShastaRisc0Network,
+                PipelineKey::ShastaSp1,
                 Arc::new(NoopEngine) as Arc<dyn EngineHandle>,
             )],
         );
@@ -4444,14 +4366,14 @@ mod tests {
             "clearable",
             RuntimeRunnerStatus::Running,
             &metadata,
-            PipelineKey::ShastaRisc0Network,
+            PipelineKey::ShastaSp1,
         )
         .await?;
 
         let state = test_state_with_acl(
             Arc::clone(&runtime),
             [(
-                PipelineKey::ShastaRisc0Network,
+                PipelineKey::ShastaSp1,
                 Arc::new(CancelFailEngine) as Arc<dyn EngineHandle>,
             )],
         );
@@ -4503,7 +4425,6 @@ mod tests {
             PipelineKey::ShastaNative,
             PipelineKey::ShastaRisc0,
             PipelineKey::ShastaSp1,
-            PipelineKey::ShastaRisc0Network,
         ] {
             let mut record = runtime_record(RuntimeRunnerStatus::Failed, &metadata);
             record.pipeline_key = pipeline_key;
@@ -4527,38 +4448,6 @@ mod tests {
         );
         let record = runtime_record(RuntimeRunnerStatus::Failed, &metadata);
 
-        assert!(!should_reenqueue_existing_submission_without_engine(
-            &record, &metadata
-        ));
-    }
-
-    #[test]
-    fn failed_submission_with_boundless_resume_metadata_is_reenqueueable_for_failed_prove_stage() {
-        let mut metadata = task_metadata_with_stage(Some("prove"));
-        set_test_proposal_runtime(
-            &mut metadata,
-            test_boundless_runtime("0x1234", 123_000, 123_400, 123_456),
-        );
-        let record = runtime_record(RuntimeRunnerStatus::Failed, &metadata);
-        let metadata = TaskMetadata::decode_for_record(&record).expect("canonical Boundless root");
-
-        assert!(should_reenqueue_existing_submission_without_engine(
-            &record, &metadata
-        ));
-    }
-
-    #[test]
-    fn failed_submission_with_incomplete_boundless_metadata_is_not_reenqueueable() {
-        let mut metadata = task_metadata_with_stage(Some("prove"));
-        set_test_proposal_runtime(
-            &mut metadata,
-            TaskRuntimeMetadata {
-                provider_request_id: Some("0x1234".to_string()),
-                expires_at: Some(123_456),
-                ..TaskRuntimeMetadata::default()
-            },
-        );
-        let record = runtime_record(RuntimeRunnerStatus::Failed, &metadata);
         assert!(!should_reenqueue_existing_submission_without_engine(
             &record, &metadata
         ));
@@ -4690,8 +4579,9 @@ mod tests {
 
     #[tokio::test]
     async fn remote_progress_recovery_failure_preserves_checkpointed_root() -> Result<()> {
-        let pipeline = PipelineKey::ShastaRisc0Network;
-        let route = CanonicalProofRoute::new(pipeline.route(), pipeline);
+        let pipeline = PipelineKey::ShastaSp1;
+        let network_route = "sp1/network".parse().expect("SP1 network route");
+        let route = CanonicalProofRoute::new(network_route, pipeline);
         let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
             "remote-progress-recovery-failure",
         ))?);
@@ -4699,11 +4589,11 @@ mod tests {
         let mut metadata = task_metadata_with_stage(Some("prove"));
         set_test_proposal_runtime(
             &mut metadata,
-            test_boundless_runtime("0xpending", 123_000, 123_400, 123_456),
+            test_sp1_runtime_with_deadline("0xpending", 123_000, 123_456),
         );
         let mut record = runtime_record(RuntimeRunnerStatus::Running, &metadata);
         record.task_id.clone_from(&submission.public_task_id);
-        align_runtime_record_identity(&mut record, &mut metadata, pipeline, pipeline.route());
+        align_runtime_record_identity(&mut record, &mut metadata, pipeline, network_route);
         record.request_fingerprint = batch_request_fingerprint_for_test(&submission)?;
         runtime.upsert_task(&record).await?;
         submission.public_task_id.clone_from(&record.task_id);
@@ -4738,7 +4628,7 @@ mod tests {
         metadata.requested_proof_type = Some("zk_any".to_string());
         set_test_proposal_runtime(
             &mut metadata,
-            test_boundless_runtime("0x1234", 123_000, 123_400, 123_456),
+            test_sp1_runtime_with_deadline("0x1234", 123_000, 123_456),
         );
         let record = runtime_record(RuntimeRunnerStatus::Cancelled, &metadata);
         runtime.upsert_task(&record).await?;
@@ -4751,7 +4641,6 @@ mod tests {
         assert!(tasks.is_clean());
         assert!(network.is_clean());
         assert!(skipped.is_clean());
-        assert_eq!(network.risc0.inflight_orders, 0);
         assert_eq!(network.sp1.inflight_orders, 0);
 
         Ok(())
@@ -6033,7 +5922,7 @@ mod tests {
         set_test_proposal_runtime(
             &mut metadata,
             TaskRuntimeMetadata {
-                remote_tx_hash: Some("0xremote".to_string()),
+                provider_request_id: Some("remote-request".to_string()),
                 ..TaskRuntimeMetadata::default()
             },
         );
@@ -6061,7 +5950,7 @@ mod tests {
         configure_test_aggregate(&mut metadata);
         set_test_proposal_runtime(
             &mut metadata,
-            test_boundless_runtime("0xproposal", 123_000, 123_400, 123_456),
+            test_sp1_runtime_with_deadline("0xproposal", 123_000, 123_456),
         );
         let record = runtime_record(RuntimeRunnerStatus::Failed, &metadata);
         let metadata = TaskMetadata::decode_for_record(&record).expect("canonical aggregate root");
@@ -6077,12 +5966,11 @@ mod tests {
         configure_test_aggregate(&mut metadata);
         set_test_proposal_runtime(
             &mut metadata,
-            test_boundless_runtime("0xproposal", 123_000, 123_400, 123_456),
+            test_sp1_runtime_with_deadline("0xproposal", 123_000, 123_456),
         );
-        metadata.runtime.aggregate = Some(test_boundless_runtime(
+        metadata.runtime.aggregate = Some(test_sp1_runtime_with_deadline(
             "0xaggregate",
             456_000,
-            456_700,
             456_789,
         ));
         let record = runtime_record(RuntimeRunnerStatus::Failed, &metadata);
@@ -6227,7 +6115,7 @@ mod tests {
         let mut metadata = task_metadata_with_stage(Some("prove"));
         set_test_proposal_runtime(
             &mut metadata,
-            test_boundless_runtime("0xpending", 123_000, 123_400, 123_456),
+            test_sp1_runtime_with_deadline("0xpending", 123_000, 123_456),
         );
         let record = runtime_record(RuntimeRunnerStatus::Running, &metadata);
         let task_id = record.task_id.clone();
@@ -6237,7 +6125,7 @@ mod tests {
         let state = test_state_with_engines(
             Arc::clone(&runtime),
             [(
-                PipelineKey::ShastaRisc0Network,
+                PipelineKey::ShastaSp1,
                 recorder.clone() as Arc<dyn EngineHandle>,
             )],
         );
@@ -6308,7 +6196,7 @@ mod tests {
         let mut metadata = task_metadata_with_stage(Some("prove"));
         set_test_proposal_runtime(
             &mut metadata,
-            test_boundless_runtime("0xpending", 123_000, 123_400, 123_456),
+            test_sp1_runtime_with_deadline("0xpending", 123_000, 123_456),
         );
         let record = runtime_record(RuntimeRunnerStatus::Running, &metadata);
 
@@ -7253,6 +7141,485 @@ mod tests {
         Ok(())
     }
 
+    // Wire shape emitted by taiko-client's restored RISC0 composer at PR #22346.
+    // Keep this as JSON: serializing Rust wire types would add hash prefixes and
+    // could hide a mismatch with Go's numeric IDs and unprefixed checkpoint hashes.
+    fn risc0_client_v4_payload(aggregate: bool, checkpoint: bool) -> serde_json::Value {
+        let proposals = (0..=u64::from(aggregate))
+            .map(|offset| {
+                let mut proposal = serde_json::json!({
+                    "proposal_id": 42 + offset,
+                    "l1_inclusion_block_number": 1000 + offset,
+                    "l2_block_number_start": if offset == 0 { 2000 } else { 2011 },
+                    "l2_block_number_end": 2010 + offset * 10,
+                    "last_anchor_block_number": if offset == 0 { 1999 } else { 2010 }
+                });
+                if checkpoint {
+                    proposal["checkpoint"] = serde_json::json!({
+                        "block_number": 2010 + offset * 10,
+                        "block_hash": if offset == 0 { "11" } else { "44" }.repeat(32),
+                        "state_root": if offset == 0 { "22" } else { "55" }.repeat(32)
+                    });
+                }
+                proposal
+            })
+            .collect::<Vec<_>>();
+        serde_json::json!({
+            "proof_type": "risc0",
+            "aggregate": aggregate,
+            "proposals": proposals,
+            "prover": "0x3333333333333333333333333333333333333333"
+        })
+    }
+
+    async fn client_v4_http(
+        app: &axum::Router,
+        method: &str,
+        uri: &str,
+        payload: Option<serde_json::Value>,
+        api_key: Option<&str>,
+    ) -> Result<(StatusCode, serde_json::Value)> {
+        use tower::ServiceExt;
+
+        let mut request = Request::builder().method(method).uri(uri);
+        if let Some(api_key) = api_key {
+            request = request.header("x-api-key", api_key);
+        }
+        let body = if let Some(payload) = payload {
+            request = request.header("content-type", "application/json");
+            Body::from(serde_json::to_vec(&payload)?)
+        } else {
+            Body::empty()
+        };
+        let response = app.clone().oneshot(request.body(body)?).await?;
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024).await?;
+        Ok((status, serde_json::from_slice(&bytes)?))
+    }
+
+    fn client_v4_app(
+        runtime: Arc<RuntimeManager>,
+        engine: Arc<RecordingEngine>,
+        enabled: bool,
+    ) -> axum::Router {
+        let mut config = Config::default();
+        config.prover.risc0.enabled = enabled;
+        let mut factory = StaticPipelineFactory::default();
+        let pair = config
+            .rpc
+            .resolved_pairs()
+            .expect("configured network pair")[0]
+            .key
+            .clone();
+        factory.insert(pair, PipelineKey::ShastaRisc0, engine);
+        crate::server::app::build_router(AppState::from_parts(
+            Arc::new(config),
+            Arc::new(factory),
+            runtime,
+        ))
+    }
+
+    fn assert_client_v4_proof_response(
+        status: StatusCode,
+        response: &serde_json::Value,
+        aggregate: bool,
+        expected_status: &str,
+    ) -> String {
+        assert_eq!(status, StatusCode::OK, "{response}");
+        assert_eq!(response["proof_type"], "risc0", "{response}");
+        assert_eq!(response["proposal_id_start"], 42);
+        assert_eq!(response["proposal_id_end"], if aggregate { 43 } else { 42 });
+        assert_eq!(response["data"]["status"], expected_status, "{response}");
+        assert!(response.get("error").is_none(), "{response}");
+        assert!(response.get("message").is_none(), "{response}");
+        response["data"]["task_id"]
+            .as_str()
+            .expect("client task id")
+            .to_string()
+    }
+
+    async fn post_risc0_client_v4(
+        app: &axum::Router,
+        payload: &serde_json::Value,
+        aggregate: bool,
+        expected_status: &str,
+    ) -> Result<serde_json::Value> {
+        let (status, response) = client_v4_http(
+            app,
+            "POST",
+            "/v4/proof/proposal",
+            Some(payload.clone()),
+            None,
+        )
+        .await?;
+        assert_client_v4_proof_response(status, &response, aggregate, expected_status);
+        Ok(response)
+    }
+
+    async fn client_v4_backlog_status(
+        app: &axum::Router,
+        proof_type: &str,
+    ) -> Result<serde_json::Value> {
+        let (status, response) = client_v4_http(
+            app,
+            "GET",
+            &format!("/v4/prover/status?proof_type={proof_type}"),
+            None,
+            None,
+        )
+        .await?;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        assert_eq!(response["proof_type"], proof_type, "{response}");
+        Ok(response["data"].clone())
+    }
+
+    fn assert_client_v4_admitted_inputs(
+        engine: &RecordingEngine,
+        metadata: &TaskMetadata,
+        aggregate: bool,
+        checkpoint: bool,
+    ) {
+        let proposals = engine.proposals.lock().expect("recorded proposals");
+        assert_eq!(proposals.len(), if aggregate { 2 } else { 1 });
+        assert_eq!(metadata.requested_proof_type.as_deref(), Some("risc0"));
+        assert_eq!(metadata.aggregate_requested, aggregate);
+        for (offset, (request, _)) in proposals.iter().enumerate() {
+            let offset = u64::try_from(offset).expect("small proposal offset");
+            assert_eq!(request.proposal_id, 42 + offset);
+            assert_eq!(request.l1_inclusion_block_number, 1000 + offset);
+            assert_eq!(
+                request.last_anchor_block_number,
+                if offset == 0 { 1999 } else { 2010 }
+            );
+            assert_eq!(
+                request.l2_block_range,
+                Some(L2BlockRange {
+                    start: if offset == 0 { 2000 } else { 2011 },
+                    end: 2010 + offset * 10,
+                })
+            );
+            assert_eq!(
+                request.prover.as_deref(),
+                Some("0x3333333333333333333333333333333333333333")
+            );
+            assert_eq!(
+                request.checkpoint,
+                checkpoint.then_some(raiko2_primitives::ShastaCheckpoint {
+                    block_number: 2010 + offset * 10,
+                    block_hash: alloy_primitives::B256::repeat_byte(if offset == 0 {
+                        0x11
+                    } else {
+                        0x44
+                    }),
+                    state_root: alloy_primitives::B256::repeat_byte(if offset == 0 {
+                        0x22
+                    } else {
+                        0x55
+                    }),
+                })
+            );
+        }
+        let inputs = engine.aggregate_inputs.lock().expect("aggregate inputs");
+        assert_eq!(inputs.len(), if aggregate { 2 } else { 0 });
+        if aggregate {
+            assert_eq!(
+                metadata
+                    .aggregate_request
+                    .as_ref()
+                    .expect("aggregate request")
+                    .proposal_ids,
+                vec![42, 43]
+            );
+            for (input, (request, _)) in inputs.iter().zip(proposals.iter()) {
+                let AggregateProofInput::PendingProofArtifact {
+                    artifact,
+                    dependency,
+                } = input
+                else {
+                    panic!("client supplies proposal metadata, not ready-made proofs");
+                };
+                assert_eq!(artifact.pipeline_key, PipelineKey::ShastaRisc0);
+                assert_eq!(artifact.route, PipelineKey::ShastaRisc0.route());
+                assert_eq!(
+                    artifact.proof_ref,
+                    proposal_task_ref(PipelineKey::ShastaRisc0, request)
+                );
+                assert_eq!(
+                    dependency.as_ref(),
+                    &proposal_task_id(PipelineKey::ShastaRisc0, request.clone())
+                );
+            }
+        } else {
+            assert!(metadata.aggregate_request.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn risc0_client_v4_disabled_rejects_before_admission_and_status_is_backlog_only()
+    -> Result<()> {
+        assert!(!Config::default().prover.risc0.enabled);
+        let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
+            "client-v4-disabled",
+        ))?);
+        let engine = Arc::new(RecordingEngine::new());
+        let app = client_v4_app(Arc::clone(&runtime), Arc::clone(&engine), false);
+        for (aggregate, checkpoint) in [(false, true), (false, false), (true, true)] {
+            let (status, response) = client_v4_http(
+                &app,
+                "POST",
+                "/v4/proof/proposal",
+                Some(risc0_client_v4_payload(aggregate, checkpoint)),
+                None,
+            )
+            .await?;
+            assert_eq!(status, StatusCode::OK, "{response}");
+            assert_eq!(response["error"], "unsupported_proof_type", "{response}");
+        }
+        assert!(runtime.list_tasks().await?.is_empty());
+        assert!(engine.attached.lock().expect("attached roots").is_empty());
+        assert!(
+            engine
+                .proposals
+                .lock()
+                .expect("recorded proposals")
+                .is_empty()
+        );
+        let (status, response) = client_v4_http(
+            &app,
+            "GET",
+            "/v4/prover/status?proof_type=risc0",
+            None,
+            None,
+        )
+        .await?;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        assert_eq!(response["data"]["clean"], true);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn risc0_client_v4_proposal_and_aggregation_poll_to_root_proof() -> Result<()> {
+        for (aggregate, checkpoint) in [(false, true), (false, false), (true, true)] {
+            let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
+                "client-v4-poll",
+            ))?);
+            let engine = Arc::new(RecordingEngine::new());
+            let app = client_v4_app(Arc::clone(&runtime), Arc::clone(&engine), true);
+            let payload = risc0_client_v4_payload(aggregate, checkpoint);
+            let registered = post_risc0_client_v4(&app, &payload, aggregate, "registered").await?;
+            let task_id = registered["data"]["task_id"]
+                .as_str()
+                .expect("root task id")
+                .to_string();
+            assert!(registered["data"]["proof"].is_null());
+            let mut record = runtime.get_task(&task_id).await?.expect("admitted root");
+            assert_eq!(record.pipeline_key, PipelineKey::ShastaRisc0);
+            let mut metadata =
+                parse_task_metadata(&record).map_err(|error| anyhow!(error.message))?;
+            assert_client_v4_admitted_inputs(&engine, &metadata, aggregate, checkpoint);
+
+            let repeated = post_risc0_client_v4(&app, &payload, aggregate, "registered").await?;
+            assert_eq!(repeated["data"]["task_id"], task_id);
+            assert_eq!(runtime.list_tasks().await?.len(), 1);
+            assert_eq!(engine.attached.lock().expect("attached roots").len(), 1);
+
+            metadata.runtime.active_stage =
+                Some(if aggregate { "aggregate" } else { "prove" }.to_string());
+            metadata.runtime.last_event = Some("started:client-contract".to_string());
+            record.runner_status = RuntimeRunnerStatus::Running;
+            record.metadata = serde_json::to_value(&metadata)?;
+            runtime.upsert_task(&record).await?;
+            let running =
+                post_risc0_client_v4(&app, &payload, aggregate, "work_in_progress").await?;
+            assert_eq!(running["data"]["task_id"], task_id);
+            assert!(running["data"]["proof"].is_null());
+
+            // Synthetic stored payloads test HTTP projection, not proof validity or GPU execution.
+            for proposal in &metadata.proposals {
+                write_test_proof_artifact_for_route(
+                    &runtime,
+                    &record.network_pair,
+                    record.pipeline_key,
+                    record.route,
+                    &proposal.task_id,
+                    &Proof {
+                        proof: Some("0xaabb".to_string()),
+                        ..Proof::default()
+                    },
+                )
+                .await?;
+            }
+            if let Some(aggregate_ref) = metadata.aggregate_task_id.as_ref() {
+                let waiting =
+                    post_risc0_client_v4(&app, &payload, aggregate, "work_in_progress").await?;
+                assert_eq!(waiting["data"]["task_id"], task_id);
+                assert!(
+                    waiting["data"]["proof"].is_null(),
+                    "completed children cannot replace the aggregate proof"
+                );
+                write_test_proof_artifact_for_route(
+                    &runtime,
+                    &record.network_pair,
+                    record.pipeline_key,
+                    record.route,
+                    aggregate_ref,
+                    &Proof {
+                        proof: Some("0xccdd".to_string()),
+                        ..Proof::default()
+                    },
+                )
+                .await?;
+            }
+            for _ in 0..2 {
+                let completed =
+                    post_risc0_client_v4(&app, &payload, aggregate, "completed").await?;
+                assert_eq!(completed["data"]["task_id"], task_id);
+                let proof = completed["data"]["proof"]
+                    .as_str()
+                    .expect("RISC0 requires proof bytes");
+                assert_eq!(proof, if aggregate { "0xccdd" } else { "0xaabb" });
+                assert!(
+                    !hex::decode(proof.strip_prefix("0x").expect("client proof prefix"))?
+                        .is_empty()
+                );
+            }
+            assert_eq!(engine.attached.lock().expect("attached roots").len(), 1);
+        }
+        Ok(())
+    }
+
+    type ClientV4BacklogSpies = HashMap<PipelineKey, (Arc<ListingEngine>, RootOwner)>;
+
+    async fn client_v4_backlog_fixture(
+        runtime: Arc<RuntimeManager>,
+    ) -> Result<(axum::Router, ClientV4BacklogSpies)> {
+        let mut engines = Vec::new();
+        let mut spies = HashMap::new();
+        for (pipeline, proof_type, task_id) in [
+            (PipelineKey::ShastaRisc0, "risc0", "client-risc0-root"),
+            (PipelineKey::ShastaSp1, "sp1", "client-sp1-root"),
+        ] {
+            let mut metadata = task_metadata_with_stage(Some("prove"));
+            metadata.requested_proof_type = Some(proof_type.to_string());
+            upsert_test_record(
+                &runtime,
+                task_id,
+                RuntimeRunnerStatus::Running,
+                &metadata,
+                pipeline,
+            )
+            .await?;
+            let record = runtime.get_task(task_id).await?.expect("backlog root");
+            let metadata = parse_task_metadata(&record).map_err(|error| anyhow!(error.message))?;
+            let owner = RootOwner::new(task_id.to_string(), record.incarnation_id);
+            let engine = Arc::new(ListingEngine::with_active_owners(
+                vec![(
+                    metadata.proposals[0].engine_task_id(pipeline),
+                    EngineQueueTaskState::Running,
+                )],
+                HashSet::from([owner.clone()]),
+            ));
+            engines.push((pipeline, Arc::clone(&engine) as Arc<dyn EngineHandle>));
+            spies.insert(pipeline, (engine, owner));
+        }
+        let app = crate::server::app::build_router(test_state_with_acl(runtime, engines));
+        Ok((app, spies))
+    }
+
+    #[tokio::test]
+    async fn risc0_client_v4_backlog_clear_requires_acl_and_preserves_sp1() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
+            "client-v4-clear",
+        ))?);
+        let (app, spies) = client_v4_backlog_fixture(Arc::clone(&runtime)).await?;
+        let (risc0_engine, risc0_owner) = spies.get(&PipelineKey::ShastaRisc0).expect("RISC0 spy");
+        let (sp1_engine, _) = spies.get(&PipelineKey::ShastaSp1).expect("SP1 spy");
+        let backlog = client_v4_backlog_status(&app, "risc0").await?;
+        assert_eq!(backlog["clean"], false);
+        assert_eq!(backlog["tasks"]["running"], 1);
+
+        let clear = serde_json::json!({ "proof_type": "risc0" });
+        let (status, denied) =
+            client_v4_http(&app, "POST", "/v4/prover/clear", Some(clear.clone()), None).await?;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{denied}");
+        for task_id in ["client-risc0-root", "client-sp1-root"] {
+            assert_eq!(
+                runtime
+                    .get_task(task_id)
+                    .await?
+                    .expect("untouched root")
+                    .runner_status,
+                RuntimeRunnerStatus::Running
+            );
+        }
+        assert!(
+            risc0_engine
+                .detach_calls
+                .lock()
+                .expect("RISC0 detach calls")
+                .is_empty()
+        );
+        assert!(
+            sp1_engine
+                .detach_calls
+                .lock()
+                .expect("SP1 detach calls")
+                .is_empty()
+        );
+        for expected_cancelled in [1, 0] {
+            let (status, response) = client_v4_http(
+                &app,
+                "POST",
+                "/v4/prover/clear",
+                Some(clear.clone()),
+                Some("secret"),
+            )
+            .await?;
+            assert_eq!(status, StatusCode::OK, "{response}");
+            assert_eq!(response["status"], "ok");
+            assert_eq!(response["proof_type"], "risc0");
+            assert_eq!(response["data"]["cancelled"], expected_cancelled);
+            assert_eq!(response["data"]["failed"], 0);
+        }
+        assert_eq!(
+            runtime
+                .get_task("client-risc0-root")
+                .await?
+                .expect("cancelled RISC0 root")
+                .runner_status,
+            RuntimeRunnerStatus::Cancelled
+        );
+        assert_eq!(
+            runtime
+                .get_task("client-sp1-root")
+                .await?
+                .expect("live SP1 root")
+                .runner_status,
+            RuntimeRunnerStatus::Running
+        );
+        assert_eq!(
+            risc0_engine
+                .detach_calls
+                .lock()
+                .expect("RISC0 detach calls")
+                .as_slice(),
+            &[(risc0_owner.clone(), raiko2_queue::DetachMode::Cancel)]
+        );
+        assert!(
+            sp1_engine
+                .detach_calls
+                .lock()
+                .expect("SP1 detach calls")
+                .is_empty()
+        );
+        let backlog_after = client_v4_backlog_status(&app, "risc0").await?;
+        assert_eq!(backlog_after["clean"], true);
+        let sp1 = client_v4_backlog_status(&app, "sp1").await?;
+        assert_eq!(sp1["clean"], false);
+        assert_eq!(sp1["tasks"]["running"], 1);
+        Ok(())
+    }
+
     fn unique_test_runtime_root(prefix: &str) -> std::path::PathBuf {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -7311,14 +7678,13 @@ mod tests {
             ),
         );
 
-        let Err(err) = resolve_engine(&state, &pair.key, PipelineKey::ShastaRisc0Network) else {
+        let Err(err) = resolve_engine(&state, &pair.key, PipelineKey::ShastaSp1) else {
             panic!("network pipeline should be unavailable");
         };
 
         assert_eq!(err.status, StatusCode::NOT_FOUND);
         assert!(
-            err.message
-                .contains("pipeline not available: shasta-risc0-network"),
+            err.message.contains("pipeline not available: shasta-sp1"),
             "unexpected error: {}",
             err.message
         );

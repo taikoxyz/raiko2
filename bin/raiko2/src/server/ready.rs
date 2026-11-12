@@ -2,8 +2,9 @@ use crate::config::{Config, RunnerKind};
 use crate::server::state::AppState;
 use alloy::providers::{Provider as AlloyProvider, ProviderBuilder};
 use alloy_signer_local::PrivateKeySigner;
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use raiko2_primitives::ProofType;
+use raiko2_prover::gaiko2::{Gaiko2Config, Gaiko2Prover};
 use raiko2_prover::sp1_config::{
     ExecutionMode as Sp1ExecutionMode, Sp1Config, Sp1RemoteVerifyConfig, Sp1SystemConfig,
 };
@@ -59,6 +60,11 @@ pub struct ReadyResponse {
     pub runtime: ReadyCheck,
     pub queue: ReadyCheck,
     pub prover: ReadyCheck,
+    /// Responsiveness of the accelerator proving backends: the remote SGX/SGXGETH TEE runtimes and,
+    /// in `cuda` builds, the local NVIDIA GPUs used by RISC0/SP1 local proving.
+    pub accelerator: ReadyCheck,
+    /// Liveness of the proving worker pool.
+    pub workers: ReadyCheck,
 }
 
 pub async fn evaluate_readiness(state: &AppState) -> ReadyResponse {
@@ -94,7 +100,18 @@ pub async fn evaluate_readiness(state: &AppState) -> ReadyResponse {
         Err(err) => ReadyCheck::err(&err),
     };
 
-    readiness_response(reth, runtime, queue, prover)
+    let accelerator = match check_accelerator_health(&state.config).await {
+        Ok(()) => ReadyCheck::ok(),
+        Err(err) => ReadyCheck::err(&err),
+    };
+
+    let workers = if state.pipelines.workers_healthy() {
+        ReadyCheck::ok()
+    } else {
+        ReadyCheck::err(&anyhow!("proving workers are not alive"))
+    };
+
+    readiness_response(reth, runtime, queue, prover, accelerator, workers)
 }
 
 const fn readiness_response(
@@ -102,8 +119,10 @@ const fn readiness_response(
     runtime: ReadyCheck,
     queue: ReadyCheck,
     prover: ReadyCheck,
+    accelerator: ReadyCheck,
+    workers: ReadyCheck,
 ) -> ReadyResponse {
-    let status = if reth.ok && runtime.ok && queue.ok && prover.ok {
+    let status = if reth.ok && runtime.ok && queue.ok && prover.ok && accelerator.ok && workers.ok {
         "ok"
     } else {
         "error"
@@ -114,6 +133,8 @@ const fn readiness_response(
         runtime,
         queue,
         prover,
+        accelerator,
+        workers,
     }
 }
 
@@ -186,14 +207,251 @@ fn check_prover(config: &Config) -> Result<()> {
         .validate()
         .context("configured proving capabilities are invalid")?;
 
-    if config.prover.runner(ProofType::Risc0) == Some(RunnerKind::Network) {
-        check_boundless_prover(config).context("risc0 capability is invalid")?;
-    }
     if config.prover.is_enabled(ProofType::Sp1) {
         check_sp1_capability(config).context("sp1 capability is invalid")?;
     }
 
     Ok(())
+}
+
+/// Probe the responsiveness of every enabled GPU/accelerator proving backend.
+///
+/// For each enabled remote TEE prover (SGX/SGXGETH), reached over HTTP via its configured
+/// `base_url`, this performs the `/health` probe that the TEE runtime already exposes. In `cuda`
+/// builds it also checks that the NVIDIA devices used by local RISC0/SP1 proving are visible.
+/// Backends that are not enabled are skipped, so a pure CPU/local configuration reports ready.
+async fn check_accelerator_health(config: &Config) -> Result<()> {
+    for (proof_type, remote) in [
+        (ProofType::Sgx, &config.prover.sgx),
+        (ProofType::SgxGeth, &config.prover.sgxgeth),
+    ] {
+        if !remote.enabled {
+            continue;
+        }
+        let gaiko_config = Gaiko2Config {
+            base_url: remote.base_url.clone(),
+            timeout_ms: remote.timeout_ms,
+        };
+        let prover = Gaiko2Prover::new_for_proof_type(&gaiko_config, proof_type)
+            .map_err(|err| anyhow!("failed to build {proof_type} health client: {err}"))?;
+        prover
+            .health_check()
+            .await
+            .with_context(|| format!("{proof_type} accelerator backend is not responsive"))?;
+    }
+    #[cfg(feature = "cuda")]
+    check_local_cuda_devices(config)
+        .await
+        .context("local CUDA proving devices are not available")?;
+    Ok(())
+}
+
+/// NVIDIA devices the enabled local GPU provers need. Default when no local GPU proving is enabled.
+///
+/// In `cuda` builds RISC0 local proving runs in-process on the first device CUDA exposes to raiko2
+/// (after `CUDA_VISIBLE_DEVICES`). SP1 local proving runs `sp1-gpu-server` with
+/// `CUDA_VISIBLE_DEVICES=<sp1.cuda_device_id>` (default 0), which overrides the parent's setting,
+/// so that id indexes the host's devices. Any enabled SP1 local runner counts, whatever the
+/// configured `prover`/`mode`: request overrides may switch mock to local and execute to prove.
+#[derive(Debug, Default, PartialEq, Eq)]
+#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+struct GpuRequirements {
+    risc0: bool,
+    sp1_device: Option<u32>,
+}
+
+#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+fn gpu_requirements(config: &Config) -> GpuRequirements {
+    let risc0 = matches!(
+        config.prover.runner(ProofType::Risc0),
+        Some(RunnerKind::Local)
+    ) && !config.prover.risc0.mock;
+    let sp1_gpu = matches!(
+        config.prover.runner(ProofType::Sp1),
+        Some(RunnerKind::Local)
+    );
+    GpuRequirements {
+        risc0,
+        sp1_device: sp1_gpu.then(|| config.prover.sp1.cuda_device_id.unwrap_or(0)),
+    }
+}
+
+/// One `nvidia-smi --query-gpu=index,uuid --format=csv,noheader` row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+struct NvidiaGpu {
+    index: u32,
+    uuid: String,
+}
+
+#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+fn parse_nvidia_gpus(stdout: &str) -> Result<Vec<NvidiaGpu>> {
+    stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            let (index, uuid) = line
+                .split_once(',')
+                .ok_or_else(|| anyhow!("unexpected nvidia-smi row {line:?}"))?;
+            Ok(NvidiaGpu {
+                index: index
+                    .trim()
+                    .parse()
+                    .with_context(|| format!("unexpected nvidia-smi index in {line:?}"))?,
+                uuid: uuid.trim().to_string(),
+            })
+        })
+        .collect()
+}
+
+/// Host device indices CUDA exposes to this process after `CUDA_VISIBLE_DEVICES`, in CUDA order.
+/// `Dockerfile.cuda` sets `CUDA_DEVICE_ORDER=PCI_BUS_ID`, so CUDA indices equal `nvidia-smi`'s.
+///
+/// Follows CUDA's rules: unset exposes every device; entries are indices or unique prefixes of
+/// `GPU-` UUIDs; the first invalid, ambiguous, or repeated entry hides it and every later entry,
+/// so `-1` or an empty value exposes none. MIG instances are not supported: `nvidia-smi` lists
+/// only parent GPU UUIDs here, so a `MIG-` entry counts as invalid and readiness fails closed.
+#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+fn cuda_visible_devices(gpus: &[NvidiaGpu], cuda_visible_devices: Option<&str>) -> Vec<u32> {
+    let Some(visible) = cuda_visible_devices else {
+        return gpus.iter().map(|gpu| gpu.index).collect();
+    };
+    let mut selected: Vec<u32> = Vec::new();
+    for entry in visible.split(',').map(str::trim) {
+        let index = if entry.starts_with("GPU-") {
+            let mut matches = gpus.iter().filter(|gpu| gpu.uuid.starts_with(entry));
+            match (matches.next(), matches.next()) {
+                (Some(gpu), None) => Some(gpu.index),
+                _ => None,
+            }
+        } else {
+            entry
+                .parse::<u32>()
+                .ok()
+                .filter(|index| gpus.iter().any(|gpu| gpu.index == *index))
+        };
+        match index {
+            Some(index) if !selected.contains(&index) => selected.push(index),
+            _ => break,
+        }
+    }
+    selected
+}
+
+#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+fn check_gpu_requirements(
+    requirements: &GpuRequirements,
+    gpus: &[NvidiaGpu],
+    cuda_visible_devices_env: Option<&str>,
+) -> Result<()> {
+    // RISC0 runs in-process on the first device CUDA exposes to raiko2.
+    let risc0_device = if requirements.risc0 {
+        let Some(device) = cuda_visible_devices(gpus, cuda_visible_devices_env)
+            .first()
+            .copied()
+        else {
+            bail!(
+                "RISC0 local GPU proving sees no CUDA device ({} on the host, CUDA_VISIBLE_DEVICES={})",
+                gpus.len(),
+                cuda_visible_devices_env.unwrap_or("<unset>")
+            );
+        };
+        Some(device)
+    } else {
+        None
+    };
+    if let Some(device_id) = requirements.sp1_device {
+        if !gpus.iter().any(|gpu| gpu.index == device_id) {
+            bail!(
+                "SP1 local GPU proving uses CUDA device {device_id}, but nvidia-smi reports {} device(s)",
+                gpus.len()
+            );
+        }
+        // sp1-gpu-server's memory pool never returns memory, so sharing a GPU with RISC0 runs
+        // RISC0 out of memory after the first SP1 proof.
+        if risc0_device == Some(device_id) {
+            bail!(
+                "RISC0 and SP1 local GPU proving both use CUDA device {device_id}; set \
+                 prover.sp1.cuda_device_id to another device or move RISC0 with CUDA_VISIBLE_DEVICES"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// `nvidia-smi` devices, cached briefly so frequent `/ready` probes do not spawn a process each.
+#[cfg(feature = "cuda")]
+async fn nvidia_gpus() -> Result<Vec<NvidiaGpu>> {
+    use std::sync::LazyLock;
+    use std::time::{Duration, Instant};
+
+    const NVIDIA_SMI_TIMEOUT: Duration = Duration::from_secs(10);
+    const CACHE_TTL: Duration = Duration::from_secs(5);
+    type Cached = Option<(Instant, std::result::Result<Vec<NvidiaGpu>, String>)>;
+    static CACHE: LazyLock<tokio::sync::Mutex<Cached>> =
+        LazyLock::new(|| tokio::sync::Mutex::new(None));
+
+    let mut cache = CACHE.lock().await;
+    if let Some((at, result)) = cache.as_ref()
+        && at.elapsed() < CACHE_TTL
+    {
+        return result.clone().map_err(|err| anyhow!(err));
+    }
+    let result = async {
+        let output = tokio::time::timeout(
+            NVIDIA_SMI_TIMEOUT,
+            tokio::process::Command::new("nvidia-smi")
+                .args(["--query-gpu=index,uuid", "--format=csv,noheader"])
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .context("nvidia-smi timed out")?
+        .context("failed to run nvidia-smi")?;
+        if !output.status.success() {
+            bail!(
+                "nvidia-smi exited with {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        parse_nvidia_gpus(&String::from_utf8_lossy(&output.stdout))
+    }
+    .await
+    .map_err(|err| format_error_chain(&err));
+    *cache = Some((Instant::now(), result.clone()));
+    result.map_err(|err| anyhow!(err))
+}
+
+#[cfg(feature = "cuda")]
+async fn check_local_cuda_devices(config: &Config) -> Result<()> {
+    let requirements = gpu_requirements(config);
+    if requirements == GpuRequirements::default() {
+        return Ok(());
+    }
+    let gpus = nvidia_gpus().await?;
+    let cuda_visible_devices_env = std::env::var("CUDA_VISIBLE_DEVICES").ok();
+    check_gpu_requirements(&requirements, &gpus, cuda_visible_devices_env.as_deref())?;
+    // An sp1-gpu-server that failed, hung, or died stays unready until it is replaced.
+    if let Some(message) = describe_cuda_failures(&raiko2_prover::sp1::cuda_device_failures()) {
+        bail!(message);
+    }
+    Ok(())
+}
+
+/// Summarizes SP1 CUDA servers that are down, or `None` when every started server is healthy.
+#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+fn describe_cuda_failures(failures: &[(u32, String)]) -> Option<String> {
+    if failures.is_empty() {
+        return None;
+    }
+    let devices = failures
+        .iter()
+        .map(|(device_id, failure)| format!("device {device_id}: {failure}"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    Some(format!("sp1-gpu-server unavailable ({devices})"))
 }
 
 const fn sp1_network_credentials_required(config: &Config) -> bool {
@@ -205,28 +463,6 @@ const fn sp1_network_credentials_required(config: &Config) -> bool {
 
 fn check_sp1_capability(config: &Config) -> Result<()> {
     check_sp1_prover(config)
-}
-
-fn check_boundless_prover(config: &Config) -> Result<()> {
-    let boundless = &config.prover.risc0.boundless;
-    Url::parse(&boundless.rpc_url).context("boundless rpc_url is not a valid URL")?;
-    let _: PrivateKeySigner = boundless
-        .signer_key
-        .parse()
-        .context("boundless signer_key is invalid")?;
-
-    if let Some(order_stream_url) = boundless
-        .deployment
-        .as_ref()
-        .and_then(|deployment| deployment.overrides.as_ref())
-        .and_then(|overrides| overrides.get("order_stream_url"))
-        .and_then(serde_json::Value::as_str)
-    {
-        Url::parse(order_stream_url)
-            .context("boundless deployment overrides.order_stream_url is not a valid URL")?;
-    }
-
-    Ok(())
 }
 
 fn check_sp1_prover(config: &Config) -> Result<()> {
@@ -282,16 +518,72 @@ fn sp1_effective_pair_config(
 #[cfg(test)]
 mod tests {
     use super::{
-        Sp1RemoteVerifyConfig, check_prover, format_error_chain, sp1_effective_pair_config,
+        GpuRequirements, NvidiaGpu, ReadyCheck, Sp1RemoteVerifyConfig, check_gpu_requirements,
+        check_prover, cuda_visible_devices, describe_cuda_failures, format_error_chain,
+        gpu_requirements, parse_nvidia_gpus, readiness_response, sp1_effective_pair_config,
         sp1_network_credentials_required,
     };
     use crate::config::Config;
-    use raiko2_prover::sp1_config::ProverMode as Sp1ProverMode;
+    use raiko2_prover::sp1_config::{
+        ExecutionMode as Sp1ExecutionMode, ProverMode as Sp1ProverMode,
+    };
 
     fn set_routes(config: &mut Config, routes: &str) {
         config
             .prover
             .apply_routes_override(&routes.parse().expect("valid prover routes"));
+    }
+
+    fn failed_check(message: &str) -> ReadyCheck {
+        ReadyCheck {
+            ok: false,
+            error: Some(message.to_string()),
+        }
+    }
+
+    #[test]
+    fn readiness_ok_only_when_every_check_passes() {
+        let response = readiness_response(
+            ReadyCheck::ok(),
+            ReadyCheck::ok(),
+            ReadyCheck::ok(),
+            ReadyCheck::ok(),
+            ReadyCheck::ok(),
+            ReadyCheck::ok(),
+        );
+        assert_eq!(response.status, "ok");
+        assert!(response.accelerator.ok);
+        assert!(response.workers.ok);
+    }
+
+    #[test]
+    fn readiness_errors_when_accelerator_backend_is_down() {
+        let response = readiness_response(
+            ReadyCheck::ok(),
+            ReadyCheck::ok(),
+            ReadyCheck::ok(),
+            ReadyCheck::ok(),
+            failed_check("sgx accelerator backend is not responsive"),
+            ReadyCheck::ok(),
+        );
+        assert_eq!(response.status, "error");
+        assert!(!response.accelerator.ok);
+        assert!(response.workers.ok);
+    }
+
+    #[test]
+    fn readiness_errors_when_workers_are_down() {
+        let response = readiness_response(
+            ReadyCheck::ok(),
+            ReadyCheck::ok(),
+            ReadyCheck::ok(),
+            ReadyCheck::ok(),
+            ReadyCheck::ok(),
+            failed_check("proving workers are not alive"),
+        );
+        assert_eq!(response.status, "error");
+        assert!(response.accelerator.ok);
+        assert!(!response.workers.ok);
     }
 
     #[test]
@@ -345,16 +637,6 @@ mod tests {
     }
 
     #[test]
-    fn disabled_risc0_skips_boundless_readiness() {
-        let mut config = Config::default();
-        set_routes(&mut config, "native/local");
-        config.prover.risc0.boundless.rpc_url = "not a URL".to_string();
-        config.prover.risc0.boundless.signer_key = "not a signer".to_string();
-
-        check_prover(&config).expect("disabled RISC0 must skip Boundless readiness");
-    }
-
-    #[test]
     fn combined_sgx_and_sp1_still_checks_sp1() {
         let mut config = Config::default();
         set_routes(&mut config, "sp1/network,sgx/remote");
@@ -397,18 +679,173 @@ mod tests {
         assert!(sp1_network_credentials_required(&config));
     }
 
+    fn gpus(count: u32) -> Vec<NvidiaGpu> {
+        (0..count)
+            .map(|index| NvidiaGpu {
+                index,
+                uuid: format!("GPU-{index}aaaaaaa-0000-0000-0000-000000000000"),
+            })
+            .collect()
+    }
+
     #[test]
-    fn readiness_error_omits_credential_bearing_boundless_url() {
+    fn gpus_not_required_without_local_zk_proving() {
         let mut config = Config::default();
-        set_routes(&mut config, "risc0/network");
-        let sensitive_url = "https://sample_user:sample_secret@[invalid";
-        config.prover.risc0.boundless.rpc_url = sensitive_url.to_string();
-        config.prover.risc0.boundless.signer_key = "configured-by-secret-store".to_string();
+        set_routes(&mut config, "sp1/network,sgx/remote");
 
-        let err = check_prover(&config).expect_err("invalid Boundless URL must fail readiness");
-        let message = format_error_chain(&err);
+        assert_eq!(gpu_requirements(&config), GpuRequirements::default());
+    }
 
-        assert!(!message.contains(sensitive_url));
-        assert!(!message.contains("sample_secret"));
+    #[test]
+    fn gpus_not_required_for_mock_risc0_or_network_sp1() {
+        let mut config = Config::default();
+        set_routes(&mut config, "risc0/local,sp1/network");
+        config.prover.risc0.mock = true;
+
+        assert_eq!(gpu_requirements(&config), GpuRequirements::default());
+    }
+
+    #[test]
+    fn sp1_local_runner_needs_a_gpu_even_when_configured_for_execute_or_mock() {
+        // Request overrides may switch a local SP1 runner from execute to prove, or mock to local.
+        for (prover, mode) in [
+            (Sp1ProverMode::Local, Sp1ExecutionMode::Execute),
+            (Sp1ProverMode::Mock, Sp1ExecutionMode::Prove),
+        ] {
+            let mut config = Config::default();
+            set_routes(&mut config, "risc0/local,sp1/local");
+            config.prover.risc0.mock = false;
+            config.prover.sp1.prover = prover;
+            config.prover.sp1.mode = mode;
+
+            assert_eq!(
+                gpu_requirements(&config),
+                GpuRequirements {
+                    risc0: true,
+                    sp1_device: Some(0),
+                },
+                "{prover:?}/{mode:?}"
+            );
+            // Default placement puts both on device 0, which readiness rejects.
+            let requirements = gpu_requirements(&config);
+            assert!(check_gpu_requirements(&requirements, &gpus(2), None).is_err());
+        }
+    }
+
+    #[test]
+    fn gpu_requirements_cover_risc0_and_configured_sp1_device() {
+        let mut config = Config::default();
+        set_routes(&mut config, "risc0/local,sp1/local");
+        config.prover.risc0.mock = false;
+        config.prover.sp1.prover = Sp1ProverMode::Local;
+        config.prover.sp1.mode = Sp1ExecutionMode::Prove;
+        config.prover.sp1.cuda_device_id = Some(1);
+
+        assert_eq!(
+            gpu_requirements(&config),
+            GpuRequirements {
+                risc0: true,
+                sp1_device: Some(1),
+            }
+        );
+    }
+
+    #[test]
+    fn nvidia_smi_rows_parse_index_and_uuid() {
+        let parsed = parse_nvidia_gpus("0, GPU-abc\n1, GPU-def\n\n").expect("valid rows");
+
+        assert_eq!(
+            parsed,
+            vec![
+                NvidiaGpu {
+                    index: 0,
+                    uuid: "GPU-abc".to_string()
+                },
+                NvidiaGpu {
+                    index: 1,
+                    uuid: "GPU-def".to_string()
+                },
+            ]
+        );
+        assert!(parse_nvidia_gpus("garbage").is_err());
+    }
+
+    #[test]
+    fn cuda_visible_devices_follow_cuda_rules() {
+        let host = gpus(2);
+
+        assert_eq!(cuda_visible_devices(&host, None), vec![0, 1]);
+        assert_eq!(cuda_visible_devices(&host, Some("1")), vec![1]);
+        assert_eq!(cuda_visible_devices(&host, Some("1,0")), vec![1, 0]);
+        assert_eq!(cuda_visible_devices(&host, Some("GPU-1aaa")), vec![1]);
+        assert!(cuda_visible_devices(&host, Some("-1")).is_empty());
+        assert!(cuda_visible_devices(&host, Some("")).is_empty());
+        assert!(cuda_visible_devices(&host, Some("2,0")).is_empty());
+        assert_eq!(cuda_visible_devices(&host, Some("0,7,1")), vec![0]);
+        assert_eq!(cuda_visible_devices(&host, Some("0,0")), vec![0]);
+    }
+
+    #[test]
+    fn ambiguous_uuid_prefix_hides_the_entry() {
+        let host = vec![
+            NvidiaGpu {
+                index: 0,
+                uuid: "GPU-aaaa1111".to_string(),
+            },
+            NvidiaGpu {
+                index: 1,
+                uuid: "GPU-aaaa2222".to_string(),
+            },
+        ];
+
+        assert!(cuda_visible_devices(&host, Some("GPU-aaaa")).is_empty());
+        assert_eq!(cuda_visible_devices(&host, Some("GPU-aaaa2")), vec![1]);
+    }
+
+    #[test]
+    fn gpu_check_rejects_hidden_missing_or_shared_devices() {
+        let both = GpuRequirements {
+            risc0: true,
+            sp1_device: Some(1),
+        };
+
+        assert!(check_gpu_requirements(&both, &gpus(2), None).is_ok());
+        let hidden = check_gpu_requirements(&both, &gpus(2), Some("-1"))
+            .expect_err("RISC0 needs a visible device")
+            .to_string();
+        assert!(hidden.contains("RISC0"), "{hidden}");
+        let missing = check_gpu_requirements(&both, &gpus(1), None)
+            .expect_err("SP1 device 1 needs two devices")
+            .to_string();
+        assert!(missing.contains("SP1"), "{missing}");
+        // RISC0 moved onto device 1 collides with SP1.
+        let shared = check_gpu_requirements(&both, &gpus(2), Some("1"))
+            .expect_err("RISC0 and SP1 must not share a GPU")
+            .to_string();
+        assert!(shared.contains("both use CUDA device 1"), "{shared}");
+        let default_ids = GpuRequirements {
+            risc0: true,
+            sp1_device: Some(0),
+        };
+        assert!(check_gpu_requirements(&default_ids, &gpus(2), None).is_err());
+        // SP1's server ignores the parent's CUDA_VISIBLE_DEVICES, so only RISC0 is affected.
+        let sp1_only = GpuRequirements {
+            risc0: false,
+            sp1_device: Some(1),
+        };
+        assert!(check_gpu_requirements(&sp1_only, &gpus(2), Some("-1")).is_ok());
+    }
+
+    #[test]
+    fn cuda_failures_are_reported_per_device() {
+        assert_eq!(describe_cuda_failures(&[]), None);
+        assert_eq!(
+            describe_cuda_failures(&[
+                (0, "socket closed".to_string()),
+                (1, "start failed".to_string()),
+            ])
+            .as_deref(),
+            Some("sp1-gpu-server unavailable (device 0: socket closed; device 1: start failed)")
+        );
     }
 }

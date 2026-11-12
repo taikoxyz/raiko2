@@ -103,6 +103,64 @@ curl http://127.0.0.1:8087/v4/tasks/<task_id>
 The fixture engine returns deterministic task and proof data without live RPC or prover
 dependencies.
 
+## CUDA SDK Smoke
+
+Use this manual check after preparing a GPU machine or changing a zkVM SDK. The tiny fixtures
+exercise **SDK execution, local CUDA proof generation and strict local verification only**. They do
+not validate full Taiko proposals, Taiko aggregation, outer Plonk/Groth16 wrapping, production
+throughput, memory sizing, multi-GPU scheduling or remote-service recovery.
+
+The [fixture README](../tests/fixtures/cuda-sdk-smoke/README.md) records the programs, exact expected
+journals and upstream provenance. The SP1 case reuses the small opcode-lab ELF; RISC0 uses an upstream
+loop program. Neither needs L1/L2 RPC, proving-network credentials or a running raiko2 service.
+
+First validate both fixed inputs on the CPU (no CUDA feature required):
+
+```bash
+cargo run -r -p guest-launcher -- --stage sdk-smoke --proof-type sp1 --mode execute
+cargo run -r -p guest-launcher -- --stage sdk-smoke --proof-type risc0 --mode execute
+```
+
+An execute success is a CPU fixture precheck, not a generated proof or a GPU pass.
+
+On a CUDA development host with the supported NVIDIA driver, CUDA toolkit and SDK runtime
+requirements described in [GPU operations](operations.md#nvidia-gpu-proving), run:
+
+```bash
+cargo run -r -p guest-launcher --features cuda -- \
+  --stage sdk-smoke --proof-type sp1 --mode prove
+cargo run -r -p guest-launcher --features cuda -- \
+  --stage sdk-smoke --proof-type risc0 --mode prove
+```
+
+SP1 uses its pinned `sp1-gpu-server` on device 0; RISC0 uses the first visible CUDA device. Run the
+checks separately. The SP1 server binary must be installed at the location/version required by its
+SDK. A CUDA image built from a revision containing this smoke stage includes that binary, the
+launcher and the fixtures, so it can run the same checks without installing a Rust/CUDA development
+toolchain. Older images may not include the launcher:
+
+```bash
+docker run --rm --gpus all --entrypoint guest-launcher <cuda-image-digest> \
+  --stage sdk-smoke --proof-type sp1 --mode prove
+docker run --rm --gpus all --entrypoint guest-launcher <cuda-image-digest> \
+  --stage sdk-smoke --proof-type risc0 --mode prove
+```
+
+Prove mode requires the launcher `cuda` feature and verifies a real SP1 Compressed proof or RISC0
+Succinct receipt against the program identity and exact expected journal. Network, mock and CPU
+proving are not alternatives in this stage; a CPU-only build rejects `--mode prove`. RISC0 development
+receipts are rejected even when `RISC0_DEV_MODE` is set.
+
+The default inputs are embedded; optionally select their checked-in copies with
+`--input tests/fixtures/cuda-sdk-smoke/sp1-add.json` or `--input tests/fixtures/cuda-sdk-smoke/risc0-loop.json`.
+This stage accepts only these fixed tiny cases. Use the normal launcher stages for other inputs.
+Add `--json-out <report.json>` for the result and `--output <proof.json>` to retain a generated proof.
+
+A successful image build checks CUDA compilation, not GPU execution. This manual smoke check must
+finish with successful proof verification and the expected journal before recording a GPU pass.
+Keep that result separate from CPU prechecks and full-proposal regression results. It is not run as
+an automatic GPU test in the default CI suite.
+
 ## Generate A Latest Proposal Request
 
 Use the legacy `xtask` helper to discover the latest onchain proposal and emit a
@@ -704,60 +762,121 @@ The `shasta` in fixture paths, script names, and `xtask` profile names below is 
 not a fork selector. See the `Frozen identifier` entry in
 [../CONTEXT.md](../CONTEXT.md).
 
-Checked-in GuestInput fixtures live under `test/guest_inputs/shasta/<network>/`.
-Use `preflight` to capture a native fixture after live RPC preflight succeeds. The checked-in
-`taiko_hoodi/smoke` suite currently contains proposals `17460` and `17462`; proposal `17461`
-was skipped because public RPC witness fetching was unstable during capture.
+Future offline proposal regression uses fixed external fixtures from
+[`taikoxyz/raiko2-atlas`](https://github.com/taikoxyz/raiko2-atlas), starting at Unzen. The shared
+repository owns input bytes, provenance, checksums, semantic expectations, and retained measurement
+baselines. Raiko and Gaiko own their runners, adapters, case selection, assertions, backend choices,
+and execution frequency. Online regression may follow current software and chain data.
+
+Pin the fixture repository to an immutable commit chosen for the regression. Record that commit,
+the fixture ID, and the candidate Raiko/Gaiko revision separately: the software under test may be
+newer than the fixture producer. Input-format changes require a new fixture revision. Ordinary
+unit/protocol tests retain their local fixtures and require no fixture repository access.
+
+### Acquire and verify the fixture cache
+
+The shared
+[`fixtures/regressions/mainnet-unzen-proposal-41455-v1`](https://github.com/taikoxyz/raiko2-atlas/tree/main/fixtures/regressions/mainnet-unzen-proposal-41455-v1)
+case references the existing `fixture-mainnet-proposal-41455-v1` Release asset
+`guest-input.json.gz`. It contains mainnet proposal `41455`, L2 blocks `12556056..12556247`,
+with proposal and all witnesses after Unzen activation. Follow the case README at the selected
+fixture commit for its provenance and expectations.
+
+While the fixture repository is private, acquisition requires authenticated access to it. From
+the Raiko root, with that repository checked out alongside Raiko at the chosen commit:
 
 ```bash
-cargo run -r -p preflight -- \
-  --rpc-url http://<l2-rpc-host>:8545 \
-  --l1-rpc-url https://ethereum-hoodi-rpc.publicnode.com \
-  --l2-chain-id 167013 \
-  --l1-chain-id 560048 \
-  --proposal-id 17460 \
-  --l1-inclusion-block-number 2668326 \
-  --last-anchor-block-number 0 \
-  --l2-start 7165709 \
-  --l2-end 7165900 \
+set -eu
+: "${FIXTURE_REV:?Set the full immutable fixture repository commit}"
+fixture_repo=$(cd ../raiko2-atlas && pwd)
+test "$(git -C "$fixture_repo" rev-parse HEAD)" = "$FIXTURE_REV"
+fixture="$fixture_repo/fixtures/regressions/mainnet-unzen-proposal-41455-v1"
+cache="$PWD/target/offline-fixtures/mainnet-unzen-proposal-41455-v1"
+mkdir -p "$cache"
+(cd "$fixture" && sha256sum -c SHA256SUMS)
+if [ ! -f "$cache/guest-input.json.gz" ]; then
+  timeout 120s gh release download fixture-mainnet-proposal-41455-v1 \
+    --repo taikoxyz/raiko2-atlas --pattern guest-input.json.gz --dir "$cache"
+fi
+(cd "$cache" && sha256sum -c "$fixture/archive.sha256")
+gzip -dc "$cache/guest-input.json.gz" > "$cache/guest-input.json"
+(cd "$cache" && sha256sum -c "$fixture/input.sha256")
+```
+
+This verifies cached archives on reruns as well as first downloads. Prepare candidate binaries,
+dependencies, and any selected guest ELFs before entering an offline environment; build-time
+fetching is separate from replay. The following execution steps need no chain RPC, explorer,
+fixture repository connection, or preflight.
+
+### Replay the cached input offline
+
+Use the existing candidate `guest-launcher` binary directly on the verified JSON. Set
+`GUEST_LAUNCHER` to a prebuilt candidate binary path when using a different build profile or output
+directory; the default below uses `target/release/`:
+
+```bash
+"${GUEST_LAUNCHER:-target/release/guest-launcher}" \
+  --stage proposal \
+  --input "$cache/guest-input.json" \
   --proof-type native \
-  --save-guest-input \
-  --network taiko_hoodi \
-  --rpc-retry-max-attempts 8 \
-  --rpc-timeout-ms 120000 \
-  --pretty
+  --mode prove \
+  --output "$cache/native-mock.json" \
+  --json-out "$cache/native-report.json"
+test "$(jq -er '.public_values' "$cache/native-report.json")" = \
+  "$(cat "$fixture/expected/public-output.txt")"
 ```
 
-Replay one proposal, a suite, or every fixture for a network without RPC:
+Native uses `--mode prove` to run validation and produce mock output; `--mode execute` is
+unsupported for this backend. This checks replay and the expected public commitment for the
+stored proof-carry context. It is not evidence of ZK or TEE proof generation. Preserve that context
+when comparing the expected commitment; proof bytes, signatures, ELF identities, and timings are
+not fixed expectations of this case. Consumers may separately select SP1 or RISC0 execute lanes
+and their appropriate candidate guest artifacts.
+
+The existing `xtask replay-guest-input` helper is for native-captured inputs whose supplied
+proof-carry data matches reconstructed native context, or inputs with default carry data that can
+be reconstructed. It rejects this shared case because the stored context differs. Use
+`guest-launcher` above to preserve that context; do not rewrite the fixture or its expected result
+for the helper. The helper's `input_hash` describes its reconstructed protocol commitment, not the
+raw-file SHA-256. Its command requires the default `guest-tools` feature and is absent from a
+minimal `--no-default-features` build.
+
+For Gaiko, materialize the consumer request with Raiko's existing adapter before running Gaiko's
+native regression:
 
 ```bash
-cargo run -r -p xtask -- replay-guest-input --network taiko_hoodi --suite smoke
-cargo run -r -p xtask -- replay-guest-input --network taiko_hoodi --proposal 17460
-cargo run -r -p xtask -- replay-guest-input --network taiko_hoodi --all
+cargo run --locked --offline -p raiko2-prover --no-default-features \
+  --example dump_gaiko2_shasta_fixture -- \
+  "$cache/guest-input.json" \
+  "$cache/gaiko-request.json"
 ```
 
-Suites are tracked as `test/guest_inputs/shasta/<network>/suites/<name>.json`:
+The adapter expands shared witness references into the request representation. Wrapping the raw
+JSON in a request envelope does not perform this conversion. This local preparation command
+requires prepared Cargo dependencies; a prebuilt candidate adapter may be used instead. Gaiko
+owns its replay command and assertions; conversion alone does not submit a remote proof request.
 
-```json
-{
-  "network": "taiko_hoodi",
-  "name": "smoke",
-  "proposals": [17460, 17462]
-}
-```
+### Archived local replay inputs
+
+Historical inputs remain under `test/guest_inputs/shasta/<network>/` for provenance. Hoodi
+proposals `17460` and `17462` have first-witness timestamps `1776853946` and `1776854714`, before
+Hoodi Unzen activation `1781787600`. Mainnet proposal `7857` starts at `1778151287`, before mainnet
+activation `1786021200`. They are archived pre-Unzen inputs, not positive replay examples for the
+current Unzen-only path. Use the shared post-Unzen case above for positive offline regression.
 
 ## Regression Harness
 
-The file-based regression flow lives in
+The online file-based regression flow runs discovery/preflight against RPC and lives in
 [scripts/regression/README.md](../scripts/regression/README.md).
 
-Setup and run:
+Setup and run with full post-Unzen proposal metadata captured by the stress discovery helper
+(see the regression README):
 
 ```bash
 scripts/regression/prepare_regression.sh
 python scripts/regression/shasta_regression.py \
   --config scripts/regression/config/shasta_regression_devnet.json \
-  --count 3
+  --proposal-metadata /tmp/proposals.discovery.json
 
 python scripts/regression/shasta_regression.py \
   --config scripts/regression/config/shasta_regression_devnet.json \

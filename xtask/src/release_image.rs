@@ -4,14 +4,16 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Instant;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 use clap::{Args, ValueEnum};
 
 use crate::util;
 
 const DEFAULT_IMAGE_REPOSITORY: &str = "us-docker.pkg.dev/evmchain/images/raiko2";
+const DEFAULT_CUDA_IMAGE_REPOSITORY: &str = "us-docker.pkg.dev/evmchain/images/raiko2-cuda";
 const DEFAULT_BUILDX_BUILDER: &str = "raiko2-local-cache";
 const HOST_BIN_FEATURES: &str = "--no-default-features --features host";
+const CUDA_DOCKERFILE: &str = "Dockerfile.cuda";
 
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ImageBackend {
@@ -40,8 +42,13 @@ pub(crate) struct ReleaseImageArgs {
     #[arg(long)]
     pub(crate) tag: String,
 
-    #[arg(long, default_value = DEFAULT_IMAGE_REPOSITORY)]
-    pub(crate) repository: String,
+    /// Image repository. Defaults to `raiko2`, or `raiko2-cuda` with `--cuda`.
+    #[arg(long)]
+    pub(crate) repository: Option<String>,
+
+    /// Build the NVIDIA GPU image from `Dockerfile.cuda` (raiko2 built with `--features cuda`).
+    #[arg(long, default_value_t = false)]
+    pub(crate) cuda: bool,
 
     #[arg(long, default_value_t = false)]
     pub(crate) force_rebuild_guests: bool,
@@ -59,7 +66,11 @@ pub(crate) fn run(root: &std::path::Path, args: ReleaseImageArgs) -> Result<()> 
     util::ensure_docker_buildx()?;
     util::ensure_docker_buildx_builder(DEFAULT_BUILDX_BUILDER)?;
     ensure_non_empty("tag", &args.tag)?;
-    ensure_non_empty("repository", &args.repository)?;
+    let repository = resolve_repository(args.repository.as_deref(), args.cuda);
+    ensure_non_empty("repository", &repository)?;
+    if args.cuda && matches!(args.backend, ImageBackend::Host) {
+        bail!("--cuda requires a backend with local provers (risc0, sp1, or all), not host");
+    }
     let guest_refresh_backend = resolve_guest_refresh_backend(
         args.backend,
         args.force_rebuild_guests,
@@ -68,8 +79,11 @@ pub(crate) fn run(root: &std::path::Path, args: ReleaseImageArgs) -> Result<()> 
     )?;
     ensure_clean_source_tree(root, "before release-image starts")?;
 
-    let image_ref = format!("{}:{}", args.repository, args.tag);
-    let buildx_cache_root = util::target_root(root).join("buildx-cache").join("raiko2");
+    let image_ref = format!("{repository}:{}", args.tag);
+    util::ensure_remote_tag_absent(&image_ref)?;
+    let buildx_cache_root = util::target_root(root)
+        .join("buildx-cache")
+        .join(if args.cuda { "raiko2-cuda" } else { "raiko2" });
     let buildx_cache_current = buildx_cache_root.join("current");
     let buildx_cache_next = buildx_cache_root.join("next");
     fs::create_dir_all(&buildx_cache_root)
@@ -124,7 +138,12 @@ pub(crate) fn run(root: &std::path::Path, args: ReleaseImageArgs) -> Result<()> 
             "type=local,dest={},mode=max",
             buildx_cache_next.display()
         ))
-        .args(build_image_flags(args.backend, &source_revision))
+        .args(build_image_flags(
+            root,
+            args.backend,
+            args.cuda,
+            &source_revision,
+        ))
         .arg("-t")
         .arg(&image_ref)
         .arg(root);
@@ -136,12 +155,15 @@ pub(crate) fn run(root: &std::path::Path, args: ReleaseImageArgs) -> Result<()> 
     );
     promote_local_cache(&buildx_cache_current, &buildx_cache_next)?;
 
+    // Re-check after the (long) build so a tag published meanwhile is never overwritten.
+    util::ensure_remote_tag_absent(&image_ref)?;
     println!("[INFO] Pushing runtime image `{image_ref}`...");
     let mut push_cmd = Command::new("docker");
     push_cmd.arg("push").arg(&image_ref);
     util::run(push_cmd)?;
 
-    let digest_ref = resolve_repo_digest(&image_ref, &args.repository)?;
+    let digest_ref = util::resolve_repo_digest(&image_ref, &repository)?;
+    util::ensure_remote_tag_digest_matches_expected(&image_ref, &digest_ref)?;
     write_release_summary(io::stdout(), &digest_ref)?;
 
     Ok(())
@@ -249,9 +271,34 @@ fn build_metadata_flags(source_revision: &str) -> Vec<String> {
     ]
 }
 
-fn build_image_flags(image_backend: ImageBackend, source_revision: &str) -> Vec<String> {
+fn resolve_repository(repository: Option<&str>, cuda: bool) -> String {
+    repository.map_or_else(
+        || {
+            if cuda {
+                DEFAULT_CUDA_IMAGE_REPOSITORY.to_string()
+            } else {
+                DEFAULT_IMAGE_REPOSITORY.to_string()
+            }
+        },
+        str::to_string,
+    )
+}
+
+fn build_image_flags(
+    root: &Path,
+    image_backend: ImageBackend,
+    cuda: bool,
+    source_revision: &str,
+) -> Vec<String> {
     let mut flags = build_metadata_flags(source_revision);
-    if matches!(image_backend, ImageBackend::Host) {
+    if cuda {
+        // Dockerfile.cuda selects `--features cuda` by default. Docker resolves `--file` against
+        // the caller's working directory, not the build context, so anchor it to the repo root.
+        flags.extend([
+            "--file".to_string(),
+            root.join(CUDA_DOCKERFILE).display().to_string(),
+        ]);
+    } else if matches!(image_backend, ImageBackend::Host) {
         flags.extend([
             "--build-arg".to_string(),
             format!("BIN_FEATURES={HOST_BIN_FEATURES}"),
@@ -315,27 +362,6 @@ fn ensure_clean_source_tree(root: &Path, requirement: &str) -> Result<()> {
     Ok(())
 }
 
-fn resolve_repo_digest(image_ref: &str, repository: &str) -> Result<String> {
-    let output = Command::new("docker")
-        .arg("image")
-        .arg("inspect")
-        .arg("--format")
-        .arg("{{json .RepoDigests}}")
-        .arg(image_ref)
-        .output()
-        .with_context(|| format!("failed to inspect pushed image {image_ref}"))?;
-    if !output.status.success() {
-        bail!("docker image inspect failed for {image_ref}");
-    }
-
-    let repo_digests: Vec<String> = serde_json::from_slice(&output.stdout)
-        .with_context(|| format!("failed to parse RepoDigests for {image_ref}"))?;
-    repo_digests
-        .into_iter()
-        .find(|value| value.starts_with(&format!("{repository}@sha256:")))
-        .ok_or_else(|| anyhow!("missing pushed digest for repository {repository}"))
-}
-
 fn reset_dir(path: &Path) -> Result<()> {
     if path.exists() {
         fs::remove_dir_all(path).with_context(|| format!("failed to remove {path:?}"))?;
@@ -367,13 +393,13 @@ fn promote_local_cache(current: &Path, next: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
         GuestBackend, ImageBackend, build_image_flags, build_metadata_flags, release_summary_lines,
-        resolve_guest_refresh_backend, write_release_summary,
+        resolve_guest_refresh_backend, resolve_repository, write_release_summary,
     };
 
     #[test]
@@ -404,7 +430,7 @@ mod tests {
 
     #[test]
     fn host_image_flags_select_host_features() {
-        let flags = build_image_flags(ImageBackend::Host, "26eff23");
+        let flags = build_image_flags(Path::new("/repo"), ImageBackend::Host, false, "26eff23");
 
         assert_eq!(
             flags,
@@ -419,12 +445,78 @@ mod tests {
 
     #[test]
     fn non_host_image_flags_keep_default_release_profile() {
-        let flags = build_image_flags(ImageBackend::Risc0, "26eff23");
+        let flags = build_image_flags(Path::new("/repo"), ImageBackend::Risc0, false, "26eff23");
 
         assert_eq!(
             flags,
             vec!["--build-arg".to_string(), "VCS_REF=26eff23".to_string()]
         );
+    }
+
+    #[test]
+    fn cuda_image_flags_select_cuda_dockerfile() {
+        let flags = build_image_flags(Path::new("/repo"), ImageBackend::All, true, "26eff23");
+
+        assert_eq!(
+            flags,
+            vec![
+                "--build-arg".to_string(),
+                "VCS_REF=26eff23".to_string(),
+                "--file".to_string(),
+                "/repo/Dockerfile.cuda".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn repository_defaults_follow_image_flavor() {
+        assert_eq!(
+            resolve_repository(None, false),
+            "us-docker.pkg.dev/evmchain/images/raiko2"
+        );
+        assert_eq!(
+            resolve_repository(None, true),
+            "us-docker.pkg.dev/evmchain/images/raiko2-cuda"
+        );
+        assert_eq!(
+            resolve_repository(Some("example.com/custom"), true),
+            "example.com/custom"
+        );
+    }
+
+    #[test]
+    fn cuda_dockerfile_sp1_version_matches_locked_sp1_cuda() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("xtask lives in the workspace root");
+        let lock = fs::read_to_string(root.join("Cargo.lock")).expect("Cargo.lock is readable");
+        let dockerfile =
+            fs::read_to_string(root.join("Dockerfile.cuda")).expect("Dockerfile.cuda is readable");
+        let locked_version = |name: &str| {
+            let mut lines = lock.lines();
+            lines
+                .by_ref()
+                .find(|line| *line == format!("name = \"{name}\""))
+                .and_then(|_| lines.next())
+                .and_then(|line| line.strip_prefix("version = \""))
+                .and_then(|rest| rest.strip_suffix('"'))
+                .map(str::to_string)
+                .unwrap_or_else(|| panic!("Cargo.lock has no {name} package"))
+        };
+
+        let pins: Vec<&str> = dockerfile
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("ARG SP1_VERSION="))
+            .collect();
+        assert!(!pins.is_empty(), "Dockerfile.cuda must pin SP1_VERSION");
+        // sp1-cuda compares `sp1-gpu-server --version` with sp1-primitives' crate version.
+        for crate_name in ["sp1-primitives", "sp1-cuda"] {
+            let locked = locked_version(crate_name);
+            assert!(
+                pins.iter().all(|pin| *pin == locked),
+                "Dockerfile.cuda SP1_VERSION {pins:?} must match locked {crate_name} {locked}"
+            );
+        }
     }
 
     #[test]

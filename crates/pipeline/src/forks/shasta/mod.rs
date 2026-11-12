@@ -7,8 +7,7 @@ mod spec;
 use raiko2_primitives::{ChainSpec, ProofContext, RaikoError, RaikoResult, SupportedChainSpecs};
 
 pub use backends::{
-    ShastaBackends, load_risc0_boundless_shasta_backend, load_risc0_shasta_backend,
-    load_shasta_backends, load_sp1_shasta_backend, risc0_boundless_shasta_backend_from_elves,
+    ShastaBackends, load_risc0_shasta_backend, load_shasta_backends, load_sp1_shasta_backend,
     risc0_shasta_backend_from_elves, shasta_backends_from_elves, sp1_shasta_backend_from_elves,
 };
 pub use checkpoint_verify::{
@@ -68,11 +67,6 @@ mod tests {
         let risc0_agg = backends.risc0.elf(ProofStage::Aggregation)?;
         assert_eq!(risc0_proposal, expected_risc0_proposal.as_ref());
         assert_eq!(risc0_agg, expected_risc0_agg.as_ref());
-
-        let boundless_proposal = backends.risc0_boundless.elf(ProofStage::Proposal)?;
-        let boundless_agg = backends.risc0_boundless.elf(ProofStage::Aggregation)?;
-        assert_eq!(boundless_proposal, expected_risc0_proposal.as_ref());
-        assert_eq!(boundless_agg, expected_risc0_agg.as_ref());
 
         let sp1_proposal = backends.sp1.elf(ProofStage::Proposal)?;
         let sp1_agg = backends.sp1.elf(ProofStage::Aggregation)?;

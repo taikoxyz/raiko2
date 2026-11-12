@@ -9,6 +9,8 @@ name = "guest-launcher"
 path = "src/main.rs"
 
 [features]
+default = []
+cuda = ["raiko2-prover/cuda"]
 zkgas-quote = ["dep:raiko2-zkgas-trace"]
 
 [dependencies]
@@ -27,3 +29,6 @@ sp1-sdk.workspace = true
 alloy-primitives.workspace = true
 raiko2-prover.workspace = true
 tokio.workspace = true
+
+risc0-binfmt = "=3.0.4"
+risc0-zkos-v1compat = "=2.2.2"

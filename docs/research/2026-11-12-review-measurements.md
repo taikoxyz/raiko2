@@ -131,3 +131,35 @@ win: neither more features nor these local placeholder findings establish superi
 accuracy. Previously opened panels remain development regressions, not untouched holdout.
 No numerical tariff, production policy, fee, SDK, guest artifact, runtime mode or deployment
 is changed by the observations reported here.
+
+## Post-seal ORIGIN720 check
+
+After the preceding checkpoint, candidate
+`25e73b729a4b4b2cbf324c351a3b066e2423c2f9e71d90a1d32a75228cfc9622`
+passed independent generator/source review and was sealed before either reserved actual.
+Seal receipt SHA-256 is
+`c5d610cf0d3eae1f81c51997d3acc7fddd1f0eac79b6ad5ced136d16779b5c97`.
+Both attempts then completed once and passed independent input/public/program/raw-gas checks:
+
+| Reserved lane | Actual PGU | Interpretation |
+| --- | ---: | --- |
+| ORIGIN720 target | 162,272,522 | 720 completed normal ORIGIN events |
+| CALLER720 scaffold | 162,267,713 | Retained diagnostic; no subtraction credit |
+
+The target's increase from its development N0 is 1,239,591 PGU, or approximately
+1,721.654 PGU per iteration. Candidate body cost is `720*2176=1,566,720`, about 26.4%
+above that whole target increment. The reserved point does not refit the candidate.
+
+For this controlled input, independent decoding confirms the bound anchor runtime contains
+no ORIGIN instruction, immutable patches affect PUSH data only, and the third contract is
+STOP. The quote's three-code/7,681-byte inventory agrees. Thus subtracting exactly
+`720*(5000000-2176)=3,598,433,280` PGU from the predecessor normal component, retaining
+all other fixed-point terms and rounding boundaries, gives an **offline derived** node
+quote of 11,313,578 and full quote of 166,255,408 PGU. The latter is 1.024544x actual.
+This is not a run of a candidate-price executable.
+
+The independent audit SHA-256 is
+`5fc1ec82779b1f0071682ff4f7e24bc96e0fc9f02f92e087bb4ed0591272cd71`.
+All 50 retained historical quotes, including 45309, lack per-route normal ORIGIN counts;
+none can be exactly repriced from those retained fields alone. Candidate executable and
+historical/normal-input requotes remain adoption gates. Accepted801 remains unchanged.

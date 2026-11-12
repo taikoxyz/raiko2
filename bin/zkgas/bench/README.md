@@ -4843,6 +4843,12 @@ authority and its purpose. No prices or conversion are silently supplied.
 not a marginal PGU calibration or safety guarantee. Additive reserves may overlap work
 already represented by Unzen; the tool removes no operation credit.
 
+Use separate, predeclared profiles to compare alternative repairs. For example, a pair-aware
+variant can set `access_list_key_pgu=0` while retaining item/pair prices, instead of adding
+pair reserves on top of an already worst-case linear key price. Record zero as an explicit
+modeling choice, preserve the original profile, and report both variants. Do not choose the
+variant from the evaluation result and then describe that result as untouched validation.
+
 `stages` is an ordered, nonempty prefix of the following list. `tariffs` must contain exactly
 the parameter names required by the selected prefix:
 

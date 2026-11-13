@@ -10,6 +10,7 @@ mod fixture;
 mod input;
 pub mod instance;
 mod proof;
+pub mod zisk;
 
 pub use anchor::{
     AnchorSourceSpan, SourceAwareAnchorPlan, anchor_max_offset_for_chain,

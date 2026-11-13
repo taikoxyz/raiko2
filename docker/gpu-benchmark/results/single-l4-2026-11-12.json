@@ -1,0 +1,181 @@
+{
+  "schema_version": 1,
+  "benchmark_dates": [
+    "2026-11-11",
+    "2026-11-12"
+  ],
+  "purpose": "Historical single-GPU measurements; no fleet capacity or pricing policy.",
+  "workload": {
+    "network": "mainnet",
+    "fork": "shasta",
+    "proposal_id": 41455,
+    "block_count": 192,
+    "first_l2_block": 12556056,
+    "last_l2_block": 12556247,
+    "guest_input_sha256": "20c76ab78f7bde77612f28d82f734912247ee905fd682de0568d9013053cc575",
+    "aggregation_children": 1
+  },
+  "environment": {
+    "machine_type": "g2-standard-16",
+    "host_vcpu": 16,
+    "gpu_count": 1,
+    "gpu_model": "NVIDIA L4",
+    "gpu_vram_mib": 23034,
+    "gpu_power_limit_w": 72,
+    "operating_system": "Ubuntu 24.04",
+    "nvidia_driver_version": "580.178.04",
+    "container_limits": {
+      "cpus": 14,
+      "memory_gib": 56,
+      "shm_gib": 16
+    },
+    "advertised_host_memory_gb": 64
+  },
+  "cases": [
+    {
+      "id": "risc0-stock-po21",
+      "backend": "risc0",
+      "sdk_version": "3.1.0",
+      "proposal": {
+        "wall_time_ms": 7684433.7409580005,
+        "proof_verified": true,
+        "sampled_gpu_peak_mib": 20252,
+        "sampled_container_working_set_peak_gib": 1.92,
+        "proof_kind": "succinct"
+      },
+      "aggregation": {
+        "child_count": 1,
+        "wall_time_ms": 817694,
+        "proof_verified": true,
+        "sampled_gpu_peak_mib": 20236,
+        "sampled_container_working_set_peak_gib": 4.529,
+        "proof_kind": "groth16"
+      },
+      "serial_stage_sum_ms": 8502127.740958001,
+      "settings": {
+        "execution_po2": 21,
+        "keccak_po2": 17
+      },
+      "measurement_notes": [
+        "Proposal timing includes input loading, production proving and verification, Succinct compression and an additional strict final verification; backend preparation and final output writes are excluded."
+      ],
+      "public_sdk_source_commit": "22c5fb90522cb4d9427d4af6c05e747d20be2b7f"
+    },
+    {
+      "id": "risc0-experimental-po22",
+      "backend": "risc0",
+      "sdk_version": "3.1.0",
+      "proposal": {
+        "wall_time_ms": 6004740.2454780005,
+        "proof_verified": true,
+        "sampled_gpu_peak_mib": 20302.0,
+        "sampled_container_working_set_peak_gib": 12.89,
+        "proof_kind": "succinct"
+      },
+      "aggregation": null,
+      "serial_stage_sum_ms": null,
+      "settings": {
+        "execution_po2": 22,
+        "keccak_po2": 17,
+        "experimental_low_vram_port": true
+      },
+      "measurement_notes": [
+        "Proposal timing includes input loading, production proving and verification, Succinct compression and an additional strict final verification; backend preparation and final output writes are excluded.",
+        "An experimental public-SDK optimization port was used together with po22; it is not an official released configuration and is not shipped in this PR.",
+        "The experimental aggregation path was not remeasured; no combined result is inferred from the stock aggregation."
+      ],
+      "public_sdk_source_commit": "22c5fb90522cb4d9427d4af6c05e747d20be2b7f"
+    },
+    {
+      "id": "sp1-local-cuda",
+      "backend": "sp1",
+      "sdk_version": "6.8.1",
+      "proposal": {
+        "wall_time_ms": 881401,
+        "proof_verified": true,
+        "sampled_gpu_peak_mib": 20508,
+        "sampled_container_working_set_peak_gib": 18.44,
+        "proof_kind": "compressed"
+      },
+      "aggregation": {
+        "child_count": 1,
+        "wall_time_ms": 584973,
+        "proof_verified": true,
+        "sampled_gpu_peak_mib": 20510,
+        "sampled_container_working_set_peak_gib": 55.11,
+        "proof_kind": "plonk",
+        "sampled_mean_cpu_cores": 11.95693617021277,
+        "sampled_mean_gpu_utilization_percent": 1.8949152542372882
+      },
+      "serial_stage_sum_ms": 1466374,
+      "settings": {
+        "full_size_shards": false,
+        "circuit_version": "v6.1.0"
+      },
+      "measurement_notes": [
+        "Warm same-process measurements: two proposal calls followed by two aggregations of the second genuine child; reported timings are the second call of each stage.",
+        "Timers include input cloning, CPU execution, setup, proving, production native verification and serialization; helper assertions and output writes are excluded.",
+        "The first aggregation included circuit asset installation and is excluded from this warm comparison.",
+        "The aggregation resource sample covers the entire process, including final Plonk wrapping and resident caches; it is not memory attributable to one child and cannot be multiplied to estimate one multi-child aggregation."
+      ],
+      "public_sdk_source_commit": "c84ada1ed5911f28c4d3c9d0ed2f9e6cd7edb824"
+    },
+    {
+      "id": "zisk-low-memory",
+      "backend": "zisk",
+      "sdk_version": "1.4.0-alpha",
+      "proposal": {
+        "wall_time_ms": 1491984.636679,
+        "proof_verified": true,
+        "sampled_gpu_peak_mib": 21972,
+        "sampled_container_working_set_peak_gib": 21.07,
+        "proof_kind": "vadcop-final"
+      },
+      "aggregation": {
+        "child_count": 1,
+        "wall_time_ms": 108896.579149,
+        "proof_verified": true,
+        "sampled_gpu_peak_mib": 22250,
+        "sampled_container_working_set_peak_gib": 23.31,
+        "proof_kind": "taiko-aggregation-stark-then-pilfflonk"
+      },
+      "serial_stage_sum_ms": 1600881.215828,
+      "settings": {
+        "minimal_memory": true,
+        "max_witness_stored_buffers": 1
+      },
+      "measurement_notes": [
+        "Proposal wall time is the full native CLI invocation with prepared assets, including key loading, program setup, proving, proof save and verification.",
+        "Aggregation sums separate native aggregation STARK, pilfflonk wrapping and final verification calls; fixture export is excluded.",
+        "Host working-set and GPU peaks are sampled; aggregation resources use the maximum across aggregation and final wrapping."
+      ],
+      "public_sdk_source_commit": "64a1f1664184e76053686745d50c6b9aaa51b034"
+    }
+  ],
+  "limits": [
+    "One complete saved proposal and single-child aggregation; no representative workload distribution, multi-child aggregation, concurrent throughput or multi-GPU speedup was measured.",
+    "Serial sums are arithmetic sums of the measured stages, not service end-to-end latency.",
+    "Sampled working-set and GPU maxima are not exact instantaneous peaks, total-host RAM or per-child memory requirements.",
+    "SDK process/cache conditions and native proof formats differ; this is not a comparison of equivalent circuits.",
+    "The Docker recipe runs operator-provided runtime images; these records do not claim that current main or the recipe reproduces every historical driver."
+  ],
+  "excluded_tuning_results": [
+    {
+      "backend": "sp1",
+      "setting": "FULL_SIZE_SHARDS=true",
+      "warm_proposal_ms": 829650,
+      "warm_aggregation_ms": null,
+      "outcome": "container_memory_oom",
+      "container_memory_limit_gib": 56,
+      "complete_pipeline": false
+    },
+    {
+      "backend": "zisk",
+      "setting": "default witness buffering",
+      "outcome": "container_memory_oom",
+      "container_memory_limit_gib": 56,
+      "complete_pipeline": false
+    }
+  ],
+  "public_business_source_commit": "6d16f4be6941413b492532535dc2a0a7b8aff73e"
+}

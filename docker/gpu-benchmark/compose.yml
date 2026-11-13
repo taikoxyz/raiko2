@@ -1,0 +1,30 @@
+services:
+  benchmark:
+    image: "${GPU_BENCHMARK_IMAGE:?Set an immutable local CUDA image ID or repository digest}"
+    pull_policy: never
+    entrypoint: []
+    command: ["guest-launcher", "--help"]
+    network_mode: none
+    restart: "no"
+    cpus: "${GPU_BENCHMARK_CPUS:-14}"
+    mem_limit: "${GPU_BENCHMARK_MEMORY:-56g}"
+    shm_size: "${GPU_BENCHMARK_SHM_SIZE:-16g}"
+    volumes:
+      - type: bind
+        source: "${GPU_BENCHMARK_FIXTURES:?Set the existing input directory}"
+        target: /fixtures
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${GPU_BENCHMARK_RESULTS:?Set the existing output directory}"
+        target: /results
+        bind:
+          create_host_path: false
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${GPU_BENCHMARK_GPU:?Select one NVIDIA GPU index or UUID}"]
+              capabilities: [gpu]

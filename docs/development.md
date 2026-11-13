@@ -480,16 +480,231 @@ addresses, total cycle-tracker cycles, and per-label cycle medians.
 
 ## Host zkGas Proposal Quote
 
-Experimental host quoting, comparison, and reporting tools are maintained in the companion
-[`feat/zkgas-shadow-internal`](https://github.com/taikoxyz/raiko2/tree/feat/zkgas-shadow-internal)
-branch with the alethia-reth shadow-pricing APIs. Production `main` pins public alethia-reth `main`
-and does not include those APIs or tools. Use the companion branch's documentation for its workflow.
-The [draft zkGas evaluation standard](zkgas-evaluation-standard.md) remains the reference for evidence
-lanes, unit-safe comparisons, scorecard metrics, and promotion criteria.
+The pricing implementation below is evaluated separately under the
+[draft zkGas evaluation standard](zkgas-evaluation-standard.md), which defines evidence lanes,
+unit-safe comparisons, scorecard metrics, and promotion criteria without duplicating the pricing
+formula.
+
+Replay one current-format Shasta `GuestInput` through the canonical native validation path and
+complete the sealed Alethia zkGas model with exact resource, MPT, payload, and blob selectors:
+
+```bash
+cargo run -r -p guest-launcher --features zkgas-quote -- \
+  --stage proposal-workload-quote \
+  --input ./path/to/current-guest-input.json \
+  --json-out ./proposal-workload-quote.json
+```
+
+For an already serialized current-format input, replace `--input` with the mutually exclusive
+`--input-bincode ./path/to/current-guest-input.bin`. The bincode form must round-trip to the exact
+same canonical bytes; trailing or otherwise non-canonical bytes are rejected.
+
+The stage is feature-gated so ordinary launcher builds do not enable stateless MPT instrumentation
+through Cargo feature unification. It does not produce or verify a proof and accepts only native
+execute mode. It validates the supplied input without backfilling proof-carry data, fails if the
+exact resource observations do not cover the EVM-local report, and records both the sum of
+per-block-local quotes and the proposal-once total.
+The initial report schema separates fields by where the current implementation obtains them:
+
+- `node` contains the incomplete block-local information available to Alethia during mining. The
+  existing block `difficulty` remains the Unzen value and is recorded as `unzen_zkgas`; the new
+  pricing subtotal is Shadow output and is not written to `difficulty`.
+- `prove` contains information obtained only by the raiko2 host's full proposal replay: exact
+  block-end resources, stateless MPT work, proposal payload/blob/parent-MPT selectors, and the
+  completed model quote. This replay is native host computation; actual SP1 PGU still comes from
+  `ExecutionReport::gas()` and is joined by the external collection pipeline.
+
+All `*_scaled` values use a fixed-point scale of `10^18`. For each block `b`, the currently
+implemented node-side Shadow subtotal is:
+
+```text
+N_b = fixed_b + operations_b + evm_local_resources_b + committed_payload_b
+```
+
+These terms are reported under `blocks[b].node.pricing`. `feature_error_scaled` is attribution
+inside `operations_scaled`, not an additional term. The raw five-selector EVM-local resource set is
+reported as `evm_local_resources`. The node's `transaction_payload` records canonical signed
+EIP-2718 encoded bytes and transactions with nonempty calldata; `transaction_payload_scaled`
+prices them with the shared model. This includes Anchor and included REVERT/HALT transactions.
+Payload observations commit atomically with inclusion, so discarded candidates do not change the
+node subtotal. In PGU before the final ceiling, the sealed formula is:
+
+```text
+fixed = 1,280,652.929819390011787524
+      +   172,429.766934792317965893 * started_non_anchor_tx
+      +     5,017                         * native_transfer
+
+operations = sum_route(compose(accepted, incremental, structural) + feature_error)
+
+resources(A, Sa, Sw, Ch, Cb)
+  = 12,162*A + 9,152*Sa + 20,296*Sw + 2,971*Ch + 2*Cb
+```
+
+Here `A`, `Sa`, `Sw`, `Ch`, and `Cb` are unique accounts, storage accesses, storage writes, code
+hashes, and code bytes. Route composition is either the accepted value or the maximum of the three
+normal candidates, as sealed by the generated route table. The current node report exposes the
+priced `fixed` and `operations` aggregates, `feature_error` attribution, and raw resource selectors;
+it does not expose raw fixed selectors or per-route operation rows.
+
+For each block, `input_transaction_count` is the number of serialized candidates,
+`consumed_candidate_count` is the number visited by the canonical executor iterator, and
+`attempted_transaction_count` is the number whose EVM pricing scope began. The quote requires
+`attempted <= consumed <= input`; `true_unattempted_transactions` is `input - consumed`.
+Pre-execution rejections can therefore be consumed without being attempted, while a candidate
+discarded after execution contributes to attempted fixed/operation work without becoming committed.
+
+The complete replay-side block quote uses attempted fixed/operation work, the exact committed
+block-end resource term, and actual stateless MPT work:
+
+```text
+B_b = attempted_fixed_b + attempted_operations_b + committed_exact_resources_b + mpt_b
+    + committed_payload_b
+
+committed_payload_b = 256*committed_canonical_tx_bytes_b
+                    + 16,384*committed_nonempty_payload_tx_b
+
+mpt(P, M, Hh, De, Dh, Sc, Dn)
+  = 256*P + 5,000*M + 3,000*Hh + 8,000*De + 3,000*Dh
+    + 400,000*Sc + 400,000*Dn
+```
+
+The raw exact resource and seven MPT selectors are under `blocks[b].prove`; their priced terms are
+`prove.pricing.resources_scaled` and `prove.pricing.mpt_scaled`. `prove.committed_payload` independently
+records payload from the canonical committed block's actual signed transactions. Its byte and
+nonempty selectors must exactly match the sealed node selectors. Proposal-once work is:
+
+```text
+Q = 154,263,870.735480402119958866
+  + 256*additional_canonical_tx_bytes
+  + 16,384*additional_nonempty_payload_tx
+  + 131,072*true_unattempted_tx
+  + 19,922,944*extra_blobs
+  + 1,048,576*extra_sources
+  + mpt(parent selectors)
+
+P = ceil((sum_b B_b + Q) / 10^18)
+```
+
+`prove.selectors.payload` preserves all manifest payload, including Anchor and extra candidates.
+The additional byte and nonempty selectors in `Q` are this manifest total minus summed committed
+payload. Count, byte, and nonempty domains are checked before and after subtraction; inconsistent
+observations fail instead of clamping. Attempted discarded candidates retain fixed/operation work
+in `B_b` and their additional payload in `Q`, so payload is charged once. The node payload selectors,
+price, and replay committed payload are required fields of the initial schema version 1.
+
+The other raw inputs to `Q` are under `prove.selectors`, its priced breakdown is
+`prove.proposal_once`, and `prove.total_pgu` is `P`. `node.block_local_known_pgu` and
+`prove.block_local_pgu` apply one ceiling after summing their respective block fixed-point values;
+the corresponding `sum_of_block_*_pgu` fields preserve the sum of per-block ceilings for direct
+comparison with independently rounded block-local quotes.
+
+The reported `model_id` authenticates the pricing specification, not the SP1 ELF used by an external
+proving run. A complete model quote is therefore shadow-comparison output; it becomes admission or
+capacity evidence only after the compared PGU is verified against the proposal ELF/VK identity
+sealed by that model.
+Historical input decoding, raw replay corpora, and daily comparison reports live outside the raiko2
+runtime repository.
 
 The optional `raiko2-stateless/mpt-metrics` feature remains available for companion
 [PR #284](https://github.com/taikoxyz/raiko2/pull/284)'s calibration tooling. The normal production
 path does not enable this instrumentation.
+
+The embedded calibration/Unzen-normalization profile retains its original model and program
+identities. It is historical provenance, not a runtime pricing selector or certification for
+a newer model. A new runtime content address requires an explicitly matching comparison
+profile; do not retag the old calibration or treat raw Unzen scores as PGU. Archived quotes
+retain their producer revision. The initial report structure now requires committed payload
+selectors; use that pinned producer for old serialized reports, or re-quote their unchanged
+GuestInput with the current tools. Missing selectors are rejected rather than defaulted to zero.
+
+### Block-local payload pricing checkpoint
+
+Model `0a3a9663ca0b2c399bce514ae06ee009b43781f957898dfec5cf1ea27f80a885` is an
+ownership-only successor of `e529`; it retains the preceding MULMOD tariff correction and
+uses the existing 256 PGU per canonical signed EIP-2718 byte and 16,384 PGU per
+nonempty calldata transaction. It adds the committed term to node pricing and charges
+only additional input payload during proposal completion. Startup, blob/source and MPT
+terms keep their existing ownership. Default Unzen admission is unchanged.
+
+| Frozen input | Previous node PGU | New node PGU | Complete PGU, unchanged | Archived actual SP1 PGU |
+| --- | ---: | ---: | ---: | ---: |
+| Empty STOP, 30 blocks | 97,830,164 | 100,763,924 | 274,913,627 | 242,584,415 |
+| 1MiB calldata + STOP, 30 blocks | 97,830,164 | 8,154,359,316 | 8,328,509,019 | 4,751,019,705 |
+| Mainnet proposal 41455 | 3,442,739,352 | 3,458,293,400 | 4,804,098,423 | See its original observation |
+
+Re-quoting all 257 native-valid inputs from the immutable
+[Atlas boundary fixture](https://github.com/taikoxyz/raiko2-atlas/releases/tag/fixture-unzen-underpricing-boundaries-v1)
+preserved complete fixed-point totals, public outputs and Unzen scores. The node increase
+equaled the committed payload price for every input. The archive contains 256 accepted
+SP1 observations plus one native-valid input rejected by the estimator's JSON size cap;
+the latter has no measured PGU. No guest or SP1 rerun is part of this ownership check.
+
+For the large paired case, feed
+`samples/fee-replay/payload-zero-n1048576-b30/guest-input.json` from the verified archive
+to `zkgas-quote --input-json <input> --corpus-id <corpus> --sample-id <sample> --output <new-quote.jsonl>`.
+The empty control is `samples/fee-replay/payload-zero-n0-b30/guest-input.json`.
+Use the archive's asset manifest and internal SHA256SUMS before executing input; keep the
+original reports fixed and save new model results separately. These values are a model-specific
+checkpoint, not an exhaustive bound or production-program accuracy certification. The following
+block-cost refinement supersedes its arithmetic and MCOPY prices.
+
+### Block-aware arithmetic and copy refinement checkpoint
+
+The arithmetic/copy checkpoint `80459b4dd85741f04703e2ab6b4760f2a6a5736c6c77fd69a5dd98b61e2d325d`
+adds normally executed event floors of 800 PGU for DIV/MOD/SMOD, 900 for SDIV and
+1,100 for ADDMOD. MCOPY charges 48 PGU per copied 32-byte word, retaining its
+additive dispatch, constant and memory-expansion terms. The preceding MULMOD floor,
+committed payload ownership and other tariffs remain intact. Node and prover operation
+terms use the same model. Default Unzen/admission behavior remains unchanged.
+
+The [upstream pricing document](https://github.com/taikoxyz/alethia-reth/blob/5ac54f8c13e2e6c4c0755cfb3216503f21fd2e40/docs/zk-gas-pricing-model.md)
+contains the exact-fraction derivation from 123 fit rows and four zero-word controls,
+with 25% headroom and upward rounding. Reserved holdouts are excluded. Controlled
+primary counts describe the user program; repriced Anchor operations may conservatively
+increase a full native replay beyond the primary-only fit projection.
+
+| Fixed mainnet cohort | Proposals / blocks | Parent P50 quote/actual | Current P50 | Weighted price uplift | Maximum proposal uplift | Complete underquotes, before/after |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| October 19–22, 2026 | 90 / 17,280 | 2.005949 | 2.031725 | 0.951806% | 1.450460% | 0 / 0 |
+| October 23–26, 2026 | 90 / 17,280 | 2.102697 | 2.128474 | 0.916790% | 1.447198% | 0 / 0 |
+
+P50 uses the existing nearest-rank convention. These paired re-quotes preserve input,
+public output, Unzen scores, selectors and non-operation prices. Actual PGU remains
+bound to each archived SP1 task/program identity; historical calibration/program compatibility
+limits remain in force. This is pricing-regression evidence, not current-program certification.
+
+All 298 retained native-valid boundary rows were re-quoted (297 have measured PGU).
+Complete underquotes fall from 56 to three rows, representing two distinct dense EXP
+inputs at four/five exponent bytes; the following EXP refinement addresses those cases. All six refined
+routes' retained cases are covered. Seven fresh prospective arithmetic/copy inputs, sealed
+after choosing prices and excluded from fitting, also pass native/SP1 identity checks and
+complete-price coverage. These local actuals use frozen ELF416f/local SDK6.3; neither
+new guest artifacts nor production-SDK parity are claimed.
+
+### EXP per-event refinement checkpoint
+
+Current model `67d0b01fee7f5ba208dfd2311e5be469ec96421156ecf5f0c14962c27e7b4df9`
+preserves the arithmetic/copy checkpoint and charges each normal EXP the maximum of
+its original accepted price and `24 * (10 + 50 * L)` PGU, where `L` is its typed
+exponent byte length in `0..=32`. The maximum occurs before event accumulation;
+different lengths cannot dilute each other's winning candidate. No new execution
+selector, public model version, default activation or Unzen change is introduced.
+
+The deterministic upstream successor authenticates 29 local observations: 21 complete
+parent-price deficits constrain the coefficient, while eight covered rows validate the
+preserved original curve. Exact fractions, 25% headroom and upward integer rounding
+yield 24. Independent native replay checked those 29, six fresh shape/mixed-length
+holdouts excluded from fitting, and 13 retained EXP observations. All 48 complete quotes
+cover their saved actuals; the fresh six have quote/actual ratios 1.1597–1.2361. Actual
+SP1 PGU divided by node subtotal remains the workload-search metric, distinct from
+complete-proposal diagnostics and raw Unzen scores.
+
+Both fixed mainnet cohorts above were replayed again against model80459: all 180
+proposals and 34,560 blocks have identical node and complete prices, selectors, gas and
+outputs. Thus this refinement does not change the historical roughly 2x overquote
+conclusion. Local measurements retain frozen ELF416f/SDK6.3; production-program parity
+and a universal workload upper bound remain unestablished. Subsequent complex cases
+extend coverage to substantive child work before successful return or caught revert.
 
 ## Opcode Workload-Metric Experiments
 

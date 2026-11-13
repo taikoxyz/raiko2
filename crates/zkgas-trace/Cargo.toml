@@ -1,0 +1,38 @@
+[package]
+name = "raiko2-zkgas-trace"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+alethia-reth-block.workspace = true
+alethia-reth-evm.workspace = true
+alloy-consensus.workspace = true
+alloy-evm.workspace = true
+alloy-eips.workspace = true
+alloy-primitives.workspace = true
+alloy-rlp.workspace = true
+anyhow.workspace = true
+bincode.workspace = true
+raiko2-guest-common.workspace = true
+raiko2-primitives-shasta.workspace = true
+raiko2-stateless = { workspace = true, features = ["mpt-metrics"] }
+reth-ethereum-primitives.workspace = true
+reth-evm.workspace = true
+reth-execution-types.workspace = true
+reth-primitives-traits.workspace = true
+reth-revm.workspace = true
+reth-trie-common.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+raiko2-protocol-shasta.workspace = true
+serde_json.workspace = true
+tracing-subscriber.workspace = true

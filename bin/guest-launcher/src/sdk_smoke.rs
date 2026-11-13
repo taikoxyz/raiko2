@@ -36,6 +36,11 @@ struct SmokeReport {
 }
 
 pub(super) fn validate(args: &Args, matches: &ArgMatches) -> Result<()> {
+    #[cfg(feature = "zkgas-quote")]
+    ensure!(
+        args.input_bincode.is_none(),
+        "--input-bincode is only valid with --stage proposal-workload-quote"
+    );
     ensure!(
         args.proof_type != ProofType::Native,
         "sdk-smoke requires --proof-type sp1 or risc0"
@@ -337,6 +342,13 @@ mod tests {
         }
         let (mut args, matches) = args(&[]);
         args.proof_type = ProofType::Native;
+        assert!(validate(&args, &matches).is_err());
+    }
+
+    #[cfg(feature = "zkgas-quote")]
+    #[test]
+    fn quote_bincode_option_is_rejected_before_sdk_execution() {
+        let (args, matches) = args(&["--input-bincode", "fixture-data/missing.bin"]);
         assert!(validate(&args, &matches).is_err());
     }
 

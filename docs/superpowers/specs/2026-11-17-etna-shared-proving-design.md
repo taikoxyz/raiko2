@@ -25,12 +25,12 @@ activation are separate work.
 
 Initial pinned inputs:
 
-| Source | Commit |
-| --- | --- |
-| Raiko2 main | `3f4ec3879b9f4b002e2a5e14b6ab6552da2ac2d1` |
+| Source                  | Commit                                     |
+| ----------------------- | ------------------------------------------ |
+| Raiko2 main             | `3f4ec3879b9f4b002e2a5e14b6ab6552da2ac2d1` |
 | Etna Rust client #22280 | `df307bf411ef59b93fc7bdbee318df4f9d99e71d` |
-| Etna protocol #22286 | `1ef5aa82c86538d9681b08dd63cb86a867543869` |
-| Anchorless EVM #248 | `efc3c162ad54760a84c561da03f44af9c2adffdd` |
+| Etna protocol #22286    | `1ef5aa82c86538d9681b08dd63cb86a867543869` |
+| Anchorless EVM #248     | `efc3c162ad54760a84c561da03f44af9c2adffdd` |
 
 The client currently generates protocol artifacts from
 `35e2f8f191132e87d9a223554d0b699f4203f2e3`. Before adopting the newer protocol pin,

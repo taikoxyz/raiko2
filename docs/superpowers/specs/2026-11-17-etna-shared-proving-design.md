@@ -13,6 +13,34 @@ This replaces the L1-authenticated committee-authority proposal in Raiko2 #295
 for this implementation. It does not require an additional L1 authority contract.
 No implementation, deployment or merge readiness follows from this document.
 
+## Existing execution backend decision
+
+The user confirmed that Etna work must preserve Raiko2's working low-level
+trie/witness implementation. Keep the current `risc0_ethereum_trie::CachedTrie`
+backend, witness-node pooling, retained storage tries and post-state-root path.
+Do not replace them with the read-only verifier from taiko-mono #22390 or
+reimplement the execution database as a prerequisite for Etna.
+
+The upstream shared library focuses on native BFT/QC verification, committee
+selection, scheduling, ValState and the associated Etna rules. Generic account
+and storage authentication uses adapters over the existing backends. These
+adapters must authenticate values against the expected root; unverified host
+values or a success boolean are never sufficient. Sharing protocol rules does
+not require replacing the underlying trie implementation.
+
+The MPT prototype at taiko-mono #22390 is independent of Raiko2 integration.
+Diagnostic guests established that it can link and execute on both backends,
+but a controlled SP1 6.8.1 comparison of 15 synthetic cases found material cycle
+differences: cold three-/four-slot requests used +9.9%/+18.8% total diagnostic
+cycles relative to the pooled CachedTrie path. Shared-path and overlapping
+requests also favored the existing path; repeated single-slot reads favored
+VerifiedStorage reuse. These are MPT microbenchmarks, not proposal measurements.
+No backend replacement follows from that prototype or its guest compatibility.
+
+Review the shared consensus API upstream before starting substantial Raiko2
+integration. Prefer an exact dependency commit after that API is reviewed and
+merged into the Etna development mainline. #22390 is not this review gate.
+
 ## Intent and constraints
 
 Implement complete Etna PoS range proving using the existing RISC0 and SP1
@@ -42,16 +70,16 @@ hand. A newer source or pin is accepted only after its delta is recorded/reviewe
 
 The upstream protocol layer owns deterministic consensus interpretation and the
 complete proof statement. The execution layer owns deterministic EVM execution
-and candidate-admission behavior. The common verifier combines them through an
-explicit execution interface; a host-provided success/empty boolean is never an
-execution proof.
+and candidate-admission behavior. The common verifier combines them through
+narrow adapters over the existing execution and witness infrastructure. A
+host-provided success/empty boolean is never an execution proof.
 
 ```text
 node RPC/store adapters ----> upstream Etna protocol/verification crates
                                       |
                                execution interface
                                       |
-                           upstream stateless EVM adapter
+                           existing stateless EVM adapter
                                       ^
                                       |
 Raiko2 collection -> witnesses -> RISC0/SP1 thin guest -> proof backend

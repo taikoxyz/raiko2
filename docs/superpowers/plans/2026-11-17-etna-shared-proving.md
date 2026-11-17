@@ -27,9 +27,11 @@ The closed prototype [taiko-mono #22390](https://github.com/taikoxyz/taiko-mono/
 at `8ed9c271da7fff80e6698754e9da21a7466cf6ea` remains separate from Raiko2's
 integration base. Do not repeat/expand it or adopt its MPT backend for this plan.
 
-The next upstream review concerns the shared consensus API. Wait for that review
-to converge before substantial Raiko2 integration. Prefer an exact commit from
-the merged Etna development mainline; a reviewed branch commit is a temporary
+The next upstream review concerns the shared consensus API: Task 2 plus the native
+Comet/QC/body checkpoint of Task 3. Envelope, FI and transition extraction remain
+separate unfinished work; QC/body alone is not a complete Etna block verifier.
+Wait for that review to converge before substantial Raiko2 integration. Prefer
+an exact commit from the merged Etna development mainline; a reviewed branch commit is a temporary
 option. Keep Raiko2 in its own branch and record code revisions for later
 implementation-conformance work. The separate TLA+/Lean work is untouched.
 
@@ -82,12 +84,26 @@ required by this plan. Resume planning at the shared consensus boundary below.
 
 **Interfaces:** Core owns canonical `ChainParams`, `ConsensusKey`, `Schedule`, `CommitteeState`, `ValState`, `validator_updates`, registry root/record/config hashes and native validator commitment helpers. Expose a documented `RegistryProof` authenticated-storage trait; core owns the entire snapshot/cutoff/entries/selection/record-check algorithm, while adapters authenticate exact requested slots under the requested L1 root. Preserve the node's `CommitteeWitness` wire type and private `VerifiedWitness` fixed-configuration cache as thin facades calling core. Keep the node MPT engine/error payload intact, using a backend-generic committee error. Pure data/config validation is canonical; builtin selection/TOML and state-store adapters stay outside. No mirrored parameter/state structs or duplicate committee algorithm.
 
-- [ ] Add cross-consumer vector tests proving node imports and core return identical canonical committee records/roots/config hashes and Go-derived ValState transitions/preimages.
-- [ ] Move the consensus dependency closure, including validator wire/hash helpers; access authenticated L1 state through an existing-backend adapter instead of importing a replacement MPT engine; do not create core→abci→core cycles. Resolve foreign-type inherent configuration methods using host free functions or explicit optional configuration API.
-- [ ] Cover cutoff versus proving-anchor root, S(t)/H+2 boundaries, power caps/ties, exclusions, recovery initial committee and old pending-update discard. Authenticate origin ValState and advance every height, including non-switches.
-- [ ] Run core and affected node/lander tests, portable target checks and independent review/behavior verification; commit the coherent extraction.
+- [x] Add cross-consumer vector tests proving node imports and core return identical canonical committee records/roots/config hashes and Go-derived ValState transitions/preimages.
+- [x] Move the consensus dependency closure, including validator wire/hash helpers; access authenticated L1 state through an existing-backend adapter instead of importing a replacement MPT engine; do not create core→abci→core cycles. Resolve foreign-type inherent configuration methods using host free functions or explicit optional configuration API.
+- [x] Cover cutoff versus proving-anchor root, S(t)/H+2 boundaries, power caps/ties, exclusions, recovery initial committee and old pending-update discard. Authenticate origin ValState and advance every height, including non-switches.
+- [x] Run core and affected node/lander tests, portable target checks and independent review/behavior verification; commit the coherent extraction.
+
+Checkpoint: `4fb1de48c5870bf36c8bd6c7c756df0bf5435550` on the shared upstream
+branch. Independent review and 80 focused native test executions passed. A
+pointer-width count defect found during review was fixed and reproduced with
+actual RISC0 RED/GREEN execution. The affected lander library passed 325 tests,
+with one resource acceptance test intentionally ignored. Full `just verify`,
+Docker, complete Raiko2 guest integration and generated proofs remain unrun.
 
 ## Task 3: Shared block rules, canonical Comet verification and transition replay
+
+Execution checkpoints (the task is complete only after both):
+
+- [ ] Task 3a: native Comet codecs, checked validators, QC/body/ancestry and host
+  compatibility facades; include this in the early upstream API review.
+- [ ] Task 3b: pure envelope/rules/FI and shared pending-to-committed transition
+  closure; retain this obligation before downstream range proving.
 
 **Files:** etna-core envelope/rules/forced/validation/native-consensus modules; existing abci app validation/finalize and lander validate/native/history adapters.
 

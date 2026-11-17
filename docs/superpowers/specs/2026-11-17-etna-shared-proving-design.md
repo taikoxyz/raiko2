@@ -70,6 +70,14 @@ Unzen handoff, adds switching configuration, preserves generation-zero committee
 0 above S, and makes checkpoint grid offsets relative to S. Keep these semantics
 when extracting shared types and schedule logic. No #22390 commit is included.
 
+The shared committee/parameter/schedule/ValState extraction checkpoint is
+`4fb1de48c5870bf36c8bd6c7c756df0bf5435550`. It passed independent source review,
+focused native behavior checks and actual RISC0 count-regression execution. The
+next checkpoint adds native Comet/QC/body verification for early upstream API
+review. This is an implementation checkpoint, not a Raiko2 dependency adoption,
+full Etna verifier, merge or deployment. Envelope/FI/transition and range proving
+remain later work, and full repository verification remains outstanding.
+
 The client currently generates protocol artifacts from
 `35e2f8f191132e87d9a223554d0b699f4203f2e3`. Before adopting the newer protocol pin,
 compare ABI, statement encoding, storage layout and shared vectors. Generated

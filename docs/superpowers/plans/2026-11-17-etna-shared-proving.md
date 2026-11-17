@@ -10,6 +10,17 @@
 
 **Spec:** `docs/superpowers/specs/2026-11-17-etna-shared-proving-design.md`. The user selected the shared-library/guest-committee direction on 2026-11-17; builder check found no remaining user decisions. This replaces #295's L1 committee-authority proposal for this implementation.
 
+## Foundation review gate
+
+The user requested an upstream foundation PR for external review before substantial
+Raiko2 integration proceeds. Finish Task 1 as a separate change against the pinned
+Etna client branch; keep Tasks 2–7 planned until the foundation has been reviewed.
+Prefer an exact dependency commit after the foundation merges into the Etna development
+mainline. A foundation-branch commit is only a temporary integration option; choose
+the final pin after upstream review converges. Raiko2 remains in its own branch. This extraction
+does not change the consensus rules or modify the separate TLA+/Lean work. Any later
+implementation-conformance check must record the new code commit.
+
 ## Global constraints
 
 - Common deterministic Etna logic belongs upstream and has one production implementation, consumed by the node and guest. Raiko2 owns no alternative committee, QC, FI, range or statement rules.

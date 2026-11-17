@@ -2,13 +2,34 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement task-by-task. Steps use checkbox syntax. Root coordinates the repositories and shared build target; one implementer owns a coherent task at a time.
 
-**Goal:** Support Etna PoS proving through common upstream rule/verification crates, with Raiko2 restricted to collection, witness and backend adapters.
+**Goal:** Verify already known Etna blocks using shared checks where useful and Raiko2's existing EVM, witness and proving infrastructure, with minimal fork-specific changes.
 
-**Architecture:** Extract `etna-core` from the actual Etna client and make the node consume it immediately. Add `etna-proof-core` for authenticated range replay and the canonical landing statement; it calls narrow strict-execution/singleton adapters over the existing stateless execution and witness path. Raiko2 and RISC0/SP1 guests call those libraries without reimplementing Etna rules.
+**Architecture:** Keep the reviewed `etna-core` checkpoint for shared consensus computations and verification. Check supplied blocks through existing Raiko2 execution paths, adding only narrow missing Etna checks/adapters. Reuse affordable mining computations; verify their outputs when reuse is unsuitable or zk-expensive. Proof orchestration may remain in existing Raiko2 modules; an upstream `etna-proof-core` crate is optional, justified by actual reusable checks.
 
 **Tech Stack:** Rust, alloc-capable protocol core, existing alloy/prost/Comet codecs, alethia-reth stateless execution, RISC0 3.0.5, SP1 6.8.1, Solidity ABI/shared vectors.
 
 **Spec:** `docs/superpowers/specs/2026-11-17-etna-shared-proving-design.md`. The user selected the shared-library/guest-committee direction on 2026-11-17; builder check found no remaining user decisions. This replaces #295's L1 committee-authority proposal for this implementation.
+
+## Mining/proving boundary (user clarification)
+
+The user confirmed a hybrid on 2026-11-17. The guest knows the committed blocks;
+its obligation is protocol validity, not reproducing a proposer's choices. For
+each proposed extraction, record whether it is unnecessary build policy, a useful
+low-cost computation to reuse, or a relation to verify using supplied witnesses.
+Choose using relevant RISC0/SP1 cycles, witness size, memory and dependency cost;
+no optimization benefit is established by source shape or host timings alone.
+
+- Pool selection, candidate ordering/retry policy, Engine payload IDs, compression
+  generation, blob packing and submission scheduling stay outside the guest.
+- Share protocol constants, canonical encodings and verifiers. Equivalent producer
+  and verifier algorithms are allowed; validate them against the same rules and
+  vectors rather than imposing one code path everywhere.
+- Reuse the existing EVM replay, CachedTrie/witness/database, crypto and post-state
+  root pipeline. No large EVM architecture change, backend relocation or mandatory
+  new execution framework is part of this plan.
+- Keep #22398 at its reviewed scope while waiting for external review. Its existing
+  committee/ValState computations are reusable; no alternate algorithm is required
+  merely to rename them verification.
 
 ## Shared consensus review gate
 
@@ -38,7 +59,7 @@ implementation-conformance work. The separate TLA+/Lean work is untouched.
 ## Global constraints
 
 - Keep the existing Raiko2 trie, witness and execution database implementation. Only fork-specific behavior required by Etna may change through narrow adapters; no generic backend replacement or broad extraction is part of this plan.
-- Common deterministic Etna logic belongs upstream and has one production implementation, consumed by the node and guest. Raiko2 owns no alternative committee, QC, FI, range or statement rules.
+- The node and guest implement the same Etna validity rules. Share useful primitives/verifiers; allow equivalent specialized verification algorithms. Mining logic does not automatically become an upstream API, and proving orchestration may stay in Raiko2.
 - Begin at the exact four source pins in the spec. Exact development-branch commit pins are authorized; no moving branch dependency in published manifests/locks.
 - Preserve existing nine-field LandInput and 23-word statement unless a concrete omission requires a separately reviewed protocol change. Prover input/transport is a distinct interface.
 - Every final backend proves the complete same statement. Initial pair: RISC0 + SP1. No SGX implementation, new zkVM, IVC, zkGas repricing, production activation or deployment is implied.
@@ -51,18 +72,18 @@ implementation-conformance work. The separate TLA+/Lean work is untouched.
 ## Review focus
 
 1. A hash-consistent host value is not authority: authenticate every origin, committee, anchor and total power; test substituted roots/generation/cutoff/ValState.
-2. Never turn execution errors or missing witnesses into an empty singleton: test omitted discarded-path code/storage/BLOCKHASH and ordinary reverting first transactions.
+2. Never turn execution errors or missing witnesses into a verified FI skip: test omitted necessary trial reads and ordinary reverting first transactions; lightweight skip predicates require singleton-equivalence coverage.
 3. Preserve exact native Comet/protobuf semantics, signature slots, full BlockID and strict power threshold: shared stock vectors plus mutations.
 4. Host feature unification or unwinding must not hide guest failures: check isolated portable dependency closure and execute both aborting guest targets.
 5. Mutable landing frontier and public metadata cannot rewrite immutable proof origin or body: test overlaps, internal cuts, wrong blobs, images and reference/generation changes.
 
 ## File ownership and dependency direction
 
-- mono `packages/taiko-client-rs/crates/etna-core`: canonical witnesses/types, parameters, key/domain, schedule, committee and authenticated-state interfaces, validator hashes/state, pure block/FI rules and canonical Comet validation.
-- mono `packages/taiko-client-rs/crates/etna-proof-core`: proof input/context, checked replay/transition, origin/ancestry/DA, exact statement/cuts and composition. Depends on etna-core, never abci/lander/raiko2.
-- mono abci/lander: adapters and compatibility exports that consume the core; transport, store, local trust and runtime policy stay here.
-- existing stateless execution/witness backend plus narrow adapters: strict block execution, deterministic singleton completion and authenticated state reads. Preserve generic trie/DB implementations; only demonstrated missing Etna execution behavior belongs upstream. No FI queue/committee policy.
-- raiko2 provider/pipeline/guest IO/prover/xtask: mechanical integration, fetching/witness construction, versioned request identity, backend composition and generated artifacts.
+- mono `packages/taiko-client-rs/crates/etna-core`: existing canonical consensus types, useful pure computations and native verifiers; add only narrowly justified shared checks.
+- mono abci/lander: retain mining/build policy, RPC/store/signing/runtime behavior and payload publication; reuse shared checks where appropriate without adopting prover-specific orchestration.
+- raiko2 existing `crates/protocol*`, `crates/pipeline`, stateless/witness and guest modules: fork-specific proof inputs/context, known-block/range verification, witness collection and proof/backend composition. Preserve existing execution and DB ownership.
+- alethia-reth: add only a demonstrated missing fork behavior or small reusable execution/admission primitive; retain strict execution and necessary transaction-rejection semantics.
+- A portable upstream range/statement library may be introduced if concrete consumers justify it. It must not depend on host services, and neither Raiko2 nor the node is restructured merely to accommodate it.
 
 ## Task 1: MPT feasibility prototype (historical; not an integration prerequisite)
 
@@ -120,35 +141,37 @@ Rust/Docker CI checks were skipped and link checking failed on unchanged vendore
 MIT license links returning HTTP 403. Wait for external API review before substantial
 Raiko2 integration.
 
-**Files:** etna-core envelope/rules/forced/validation/native-consensus modules; existing abci app validation/finalize and lander validate/native/history adapters.
+**Files:** Existing abci validation/rules/forced and lander checks, shared etna-core verifier additions where useful, and Raiko2 fork-verification modules. Extract the necessary check closure, not whole mining modules or payload builders.
 
 **Interfaces:** Preserve canonical envelope version6 and existing eligibility/header rules. Expose pure context/check/transition results, `verify_commit` and body/BlockID validation, with a deterministic crypto interface. Shared low-s/key/order/domain checks precede backend crypto recovery. A pending transition becomes committed only after complete execution/FI verification.
 
 - [ ] Migrate existing stock Comet vectors and negative tests for nil votes, absent slots, duplicate/substituted signers, altered sign bytes, exact2/3, wrong generation/domain/full BlockID and envelope/EL byte mismatch.
-- [ ] Extract pure `ChainContext`/committee lookup and rejection errors from Engine/L1/runtime errors. Centralize update-schedule selection currently repeated in FinalizeBlock and lander replay.
+- [ ] Define the authenticated verification context separately from node-local build settings. Reuse existing validation predicates and cheap header/schedule math; keep payload_attributes/Engine orchestration outside the guest. Accept arbitrary protocol-permitted beneficiary and alternative valid transaction selections. Share a transition/update checker or computation as justified, without requiring a common mining orchestration path.
 - [ ] Reuse existing FI `NeedsSkip` as a pending request, never a completed authorization. Preserve ineligible/fee/revert/OOG/zk-discard distinctions.
 - [ ] Run node/lander differential fixtures and core target/crypto vectors; independent review and verification, then commit.
 
-## Task 4: Narrow Etna execution and FI singleton adapters
+## Task 4: Etna execution and FI omission verification over existing paths
 
 **Files:** existing Raiko2 stateless/witness interfaces and thin fork adapters; alethia-reth changes only for a verified missing Etna behavior, based on #248 in a dedicated isolated branch. Preserve CachedTrie, node pooling, the execution database and post-state-root support. Etna policy remains in the shared protocol library.
 
-**Interfaces:** `ExecutionBackend` has distinct `verify_committed_block` and `build_singleton_on_parent` requests/results, plus authenticated state read capability. Strict execution checks the entire committed list. Singleton returns Included or a completed deterministic Empty; missing witness/config/infrastructure remains Err. Neither operation decides FI queue policy.
+**Interfaces:** Start with the existing strict witness-backed block validator and add narrow Etna fork/context support. If a shared caller needs an adapter, keep committed-block verification and `verify_fi_omission` as distinct contracts; a new executor framework is not mandatory. A verified FI omission establishes the same completed decision as the pinned singleton rules, without requiring a fully assembled empty block. Included revert/OOG cannot justify omission; missing witness/config/infrastructure remains an error.
 
-- [ ] Add RED fixtures for strict `[valid,zk-overflow,valid]` rejection, included ordinary revert/OOG at index0, empty Etna blocks and singleton rollback without trial effects leaking into actual execution.
-- [ ] Reuse the existing witness-backed database/state-root support without replacing or broadly moving it. Add only the necessary Etna execution adapter and authenticate parent/ancestors/grandparent and signer recovery. Execute system calls on both actual and separate trial branches; an empty trial's state root need not equal its parent.
-- [ ] Capture/read witness footprint from the complete aborted trial, including EIP7702/code/storage/BLOCKHASH; removing a required item must fail, not yield Empty. Test actual/trial execution ordering gives identical outputs.
-- [ ] Align all exposed reth Git identities and preserve backend crypto package instances. Run native/differential and guest checks, independently review/verify, commit and record the exact development pin.
+- [ ] Identify the smallest existing API delta and add RED fixtures for strict `[valid,zk-overflow,valid]` rejection, included ordinary revert/OOG at index0 and empty Etna blocks. Proving a committed list must never filter a shorter prefix.
+- [ ] Reuse existing witness-backed DB, signer recovery, ancestor checks and post-root calculation. Add only necessary Etna fork checks; preserve system calls and Unzen behavior. No generic backend replacement or relocation.
+- [ ] For each FI omission path, establish equivalence with the completed singleton decision on the same authenticated parent, checked attributes and full budgets. A lightweight rejection predicate is allowed only with that evidence; zk/state-dependent cases retain necessary trial execution. Keep trial effects separate from actual execution and check required system-call context.
+- [ ] Preserve all reads needed by the chosen verification path, including code/storage/BLOCKHASH/EIP7702 before a zk discard. Missing a necessary read must fail; never convert a prover-local resource failure into a skip. Test actual/trial ordering and rollback isolation.
+- [ ] Compare reuse versus specialized verification using representative, identity-pinned guest measurements where a cost-based decision is needed. Reuse valid existing measurements; no duplicate target trees or unsolicited broad benchmark campaign.
+- [ ] Align exposed dependency identities/crypto hooks, run focused native/guest/differential checks, independently review/verify and commit the narrow change.
 
 ## Task 5: Complete common range verifier and canonical output
 
-**Files:** mono etna-proof-core input/context/replay/ancestry/DA/statement/cuts/composition modules, generated portable ABI definitions, node/lander provider input adapter and shared fixtures.
+**Files:** Existing Raiko2 fork protocol/pipeline/guest-common modules for input/context/range orchestration; shared canonical ABI/codec/statement checks and small upstream verifiers where justified. No mandatory client-owned proof framework or wholesale module migration.
 
-**Interfaces:** `verify_range(input, execution_backend, consensus_crypto) -> VerifiedRange` authenticates its complete context and returns the canonical statement/preimage/hash plus typed boundaries/cuts. `RangeInput<W>` carries raw Comet/envelopes, origin/ValState/registry/L1 witnesses, exact block and FI trial witnesses, DA and reference data. `PreparedBatch::verify_restored` remains host journal validation, not this verifier.
+**Interfaces:** A fork range verifier authenticates the supplied blocks/context and returns the canonical statement/preimage/hash plus boundaries/cuts. Compose existing execution with the required shared checks; use local proof-input types rather than forcing client request types into the guest. Inputs include raw consensus/EL data, authenticated origin/ValState/registry/L1 witnesses, execution and necessary FI evidence, DA and reference data. PreparedBatch::verify_restored remains host journal validation, not the verifier.
 
 - [ ] Compare current protocol ABI/statement/layout/vectors with the client's generated pin; reuse existing generation entrypoint to refresh only when necessary. No independent L1 authority interface is added.
 - [ ] Authenticate fixed origin, parent hash/state, registry/committee/ValState, full range, own/inherited anchors and every required L1 root; include switching-origin Anchor implementation witness. Implement the currently specified ancestry policy first; historical Merkle optimization is separate.
-- [ ] Enforce all per-block common checks and strict execution; resolve FI pending decisions only by authenticated singleton replay. Compute every required grid cut and the complete flat blob/KZG/statement binding.
+- [ ] Verify each supplied block and execute its complete committed body strictly. Resolve FI only with authenticated evidence for the completed singleton decision. Decode/bind the supplied blobs and ordered blocks, then derive required cuts/statement; do not rerun compression generation, batch selection or blob packing.
 - [ ] Test wrong origin/cutoff/header/committee/ValState/blob/cut/reference and generation changes, handovers/recovery, complete overlap `(p,h]` with live frontierc and terminal values. Failed transitions leave replay state unchanged.
 - [ ] Run Rust/Solidity/client vector comparisons and portable/native replay, independently review and verify, then commit. No native fixture is described as a real proof.
 
@@ -156,11 +179,11 @@ Raiko2 integration.
 
 **Files:** raiko2 provider/pipeline fork wiring, shared-type re-exports, protocol request/backend mapping, guest entrypoints, prover aggregation, xtask/provenance/API docs and generated ELF artifacts.
 
-**Interfaces:** Raiko2 uses immutable upstream revs and the shared RangeInput/output. Provider fetches source consensus history and execution/trial witnesses. Guest entrypoints initialize existing crypto, deserialize, invoke common verify_range, and commit its exact output. No locally duplicated Etna rule engine.
+**Interfaces:** Preserve existing Raiko2 execution/guest/prover architecture and pin reviewed dependencies exactly. Providers collect needed consensus/execution/FI evidence; existing guest entrypoints initialize current crypto, deserialize the fork input, compose verification with existing execution and commit the complete output. Share validity predicates without requiring identical mining algorithms or a new cross-repo request framework.
 
 - [ ] Add versioned Etna range request and immutable task/cache/artifact identities without reinterpreting existing Unzen v4 proposal IDs. Test missing history/witness versus contradictory inputs, persisted retry/restart and stale generation/image/reference handling.
 - [ ] Align the full upstream dependency graph, fix removed devnet construction APIs and update host/both guest locks together. Record actual resolved hashes and preserve existing crypto patches.
-- [ ] Implement the two thin range guests and fixed-range aggregation/wrapper with exact child continuity, image/rule/generation and ordered content/cut commitments. Each final backend covers execution+consensus+DA+complete statement.
+- [ ] Extend existing RISC0/SP1 guest and aggregation paths for Etna with exact child continuity, image/rule/generation and ordered content/cut commitments. Avoid new parallel execution/provider/queue architectures. Each final backend covers execution+consensus+DA+the complete statement.
 - [ ] Build each backend once after source freeze using inspected xtask/cache configuration. Run a real valid proof and mutated invalid cases, verify each output/proof and their combined L1 verifier result in an isolated test environment. Preserve Unzen fixtures and API/queue regressions.
 - [ ] Independently review and behavior-test both backend and failure-path results; commit source/locks separately from tool-generated artifact refreshes as appropriate.
 

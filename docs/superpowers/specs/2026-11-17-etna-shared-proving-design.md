@@ -28,6 +28,48 @@ adapters must authenticate values against the expected root; unverified host
 values or a success boolean are never sufficient. Sharing protocol rules does
 not require replacing the underlying trie implementation.
 
+## Verification-first reuse decision
+
+The user clarified the mining/proving boundary on 2026-11-17: Raiko2 already has
+the committed blocks. Reuse client computations when they are useful and have
+acceptable zk cost; otherwise verify the claimed result against the same protocol
+rules. Shared rules do not require identical producer and verifier algorithms,
+and client logic does not automatically become a public upstream API.
+
+Apply three choices to each operation:
+
+1. Proposer policy outside consensus validity (pool selection, candidate ordering,
+   retry budgets and payload publication) stays outside the guest; it needs no
+   replacement proving implementation.
+2. Small deterministic computations may reuse existing pure code, including
+   hashes/codecs, schedules, committee derivation and ValState arithmetic. Keep
+   the current #22398 scope while its API review proceeds.
+3. When reuse is unsuitable or zk-expensive, expose a narrow verification
+   relation over the supplied block/output and authenticated context. Share only
+   the primitives needed to keep that relation equivalent to protocol rules.
+
+Assess cycles, witness size, memory and dependency/setup cost on the relevant
+RISC0/SP1 paths before claiming an improvement. A supplied result or rejection
+reason is an untrusted witness until checked. Known-valid producer results must
+verify, valid alternatives permitted by the protocol must also verify, and
+invalid mutations must reject. For example, a block's beneficiary is freely
+chosen under CONS-3.2-4; the proposer's local fee_recipient must not become a guest
+constraint (the current validator preserves this distinction).
+
+Keep Raiko2's existing EVM replay, witness, trie, database, crypto and post-state
+root path. Ordinary committed-block validation executes the entire supplied body
+strictly and checks its commitments; it does not rerun mining selection or
+candidate filtering. Add only demonstrated missing Etna fork behavior. There is
+no planned wholesale EVM architecture change or mandatory migration of Raiko2's
+execution infrastructure into a client-owned crate.
+
+For FI omission, prove the protocol's completed singleton decision, without
+requiring an entire payload builder or a reconstructed empty block as the API
+result. An equivalent checked rejection predicate may establish that decision
+when justified by the pinned rules; state/zk-dependent cases retain necessary
+trial execution and read witnesses. No fast path is accepted without the same
+accept/reject semantics as the complete singleton decision.
+
 The user closed the MPT prototype at taiko-mono #22390. This revised design and
 its implementation plan are the new baseline; start upstream consensus work
 without the prototype commits. Preserve the prototype only as a historical
@@ -90,31 +132,34 @@ hand. A newer source or pin is accepted only after its delta is recorded/reviewe
 
 ## Architecture
 
-The upstream protocol layer owns deterministic consensus interpretation and the
-complete proof statement. The execution layer owns deterministic EVM execution
-and candidate-admission behavior. The common verifier combines them through
-narrow adapters over the existing execution and witness infrastructure. A
-host-provided success/empty boolean is never an execution proof.
+The shared protocol layer exposes deterministic checks, encodings and useful
+computations. The verifier checks already supplied blocks and derives the complete
+proof statement, using narrow adapters over Raiko2's existing deterministic EVM
+execution and witness infrastructure. Proof-input, range and guest orchestration
+may remain in existing Raiko2 modules; creating an upstream proof crate is a
+choice based on concrete reusable checks, not a prerequisite. A host-provided
+success/empty boolean is never an execution proof.
 
 ```text
-node RPC/store adapters ----> upstream Etna protocol/verification crates
-                                      |
-                               execution interface
-                                      |
-                           existing stateless EVM adapter
-                                      ^
-                                      |
-Raiko2 collection -> witnesses -> RISC0/SP1 thin guest -> proof backend
+node builder/validator -----> shared primitives and verifiers
+                                          ^
+                                          |
+Raiko2 witnesses -> existing guest -> Etna verification -> statement/proof
+                                          |
+                                existing EVM / witness DB
 ```
 
-Extract existing modules with their tests and make the node consume the extracted
-code. Temporary compatibility exports may preserve node import paths, but cannot
-retain a second implementation. Keep RPC, Tokio, Engine transport, persistence,
-metrics, signing and CLI policy outside the portable dependency closure.
+Extract only useful shared computations and verifiers, with their tests. Reuse
+them in node validation where appropriate; keep the producer's construction path
+when it serves a different purpose. Equivalent verifier algorithms are permitted,
+with shared protocol constants/primitives, differential cases and negative tests.
+Keep RPC, Tokio, Engine transport, persistence, metrics, signing and CLI policy
+outside the portable dependency closure.
 
-The concrete crate/file decomposition is recorded in the implementation plan
-after the dependency analysis. Favor a pure protocol crate and a proof/orchestration
-crate over importing the complete ABCI or lander service into a guest.
+Use the existing fork protocol/pipeline/guest module boundaries first. Shared
+checks must have a portable dependency closure; no guest imports the complete
+ABCI/lander service. A separate proof/orchestration crate requires a concrete
+benefit over those existing module boundaries.
 
 ### Common deterministic responsibilities
 
@@ -134,14 +179,17 @@ prevote/locking or timeout state machine.
 
 ### Existing FI skip semantics
 
-This work adds no new skip policy. Reuse the existing Etna pure FI decision and
-EL build semantics. An ineligible entry may be skipped. An eligible entry may be
-skipped only when the complete singleton build on the authenticated parent, with
-matching attributes and full block budgets, yields an empty block. Included EVM
-revert/OOG counts as inclusion. A transaction wholly discarded on zk-limit or
-metering overflow requires a witness covering its attempted reads; timeout,
-resource exhaustion or unavailable state does not justify a skip. RPC Engine
-results are useful for preflight, but are independently reproduced in the guest.
+This work adds no new skip policy. Preserve the existing Etna pure FI decision
+and the acceptance relation of the EL singleton build. An ineligible entry may be
+skipped. An eligible entry may be skipped only when the completed singleton
+outcome on the authenticated parent, matching attributes and full block budgets
+would be empty. The guest may verify an equivalent rejection condition rather
+than reproduce irrelevant block assembly. Included EVM revert/OOG counts as
+inclusion. A transaction discarded for zk-limit or metering overflow retains
+necessary trial execution and witnesses for attempted reads; timeout, resource
+exhaustion or unavailable state does not justify a skip. RPC Engine results are
+preflight hints; the guest independently establishes the decision. New shortcuts
+require explicit equivalence coverage against the pinned singleton semantics.
 
 ### Contract and prover interfaces
 
@@ -151,8 +199,9 @@ The statement includes EL/Comet hashes, validator state, generation, FI cursors,
 reference, blob hashes and cuts. Every final backend proof covers the full same
 statement; an execution-only proof plus a QC-only proof is insufficient.
 
-Define missing prover-side request/witness/journal interfaces in the common
-library and expose them for review. Typed requests preserve immutable proof origin
+Define missing prover-side request/witness/journal interfaces in the existing
+Raiko2 modules or a narrowly justified shared verifier library, and expose them
+for review. Typed requests preserve immutable proof origin
 and complete range even if the settled frontier advances. Bind all cache/artifact
 identities to protocol/generation/rules/image/content. Transport collection never
 substitutes for guest authentication.

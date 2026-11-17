@@ -63,6 +63,13 @@ Initial pinned inputs:
 | Etna protocol #22286    | `1ef5aa82c86538d9681b08dd63cb86a867543869` |
 | Anchorless EVM #248     | `efc3c162ad54760a84c561da03f44af9c2adffdd` |
 
+Consensus extraction source refresh: use client commit
+`ea74662169262dc8ab6ada7028d2ef54137088d2`, one commit after the initial client
+pin, for the new implementation branch. The inspected relevant delta restores
+Unzen handoff, adds switching configuration, preserves generation-zero committee
+0 above S, and makes checkpoint grid offsets relative to S. Keep these semantics
+when extracting shared types and schedule logic. No #22390 commit is included.
+
 The client currently generates protocol artifacts from
 `35e2f8f191132e87d9a223554d0b699f4203f2e3`. Before adopting the newer protocol pin,
 compare ABI, statement encoding, storage layout and shared vectors. Generated

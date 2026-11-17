@@ -21,6 +21,11 @@ the final pin after upstream review converges. Raiko2 remains in its own branch.
 does not change the consensus rules or modify the separate TLA+/Lean work. Any later
 implementation-conformance check must record the new code commit.
 
+Foundation review checkpoint: [taiko-mono #22390](https://github.com/taikoxyz/taiko-mono/pull/22390)
+is a draft at `8ed9c271da7fff80e6698754e9da21a7466cf6ea`, stacked on #22280.
+Focused checks and independent review/behavioral verification passed; the full
+repository merge gates remain pending. Wait for upstream review before Task 2.
+
 ## Global constraints
 
 - Common deterministic Etna logic belongs upstream and has one production implementation, consumed by the node and guest. Raiko2 owns no alternative committee, QC, FI, range or statement rules.

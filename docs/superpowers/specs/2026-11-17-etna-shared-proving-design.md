@@ -73,10 +73,14 @@ when extracting shared types and schedule logic. No #22390 commit is included.
 The shared committee/parameter/schedule/ValState extraction checkpoint is
 `4fb1de48c5870bf36c8bd6c7c756df0bf5435550`. It passed independent source review,
 focused native behavior checks and actual RISC0 count-regression execution. The
-next checkpoint adds native Comet/QC/body verification for early upstream API
-review. This is an implementation checkpoint, not a Raiko2 dependency adoption,
-full Etna verifier, merge or deployment. Envelope/FI/transition and range proving
-remain later work, and full repository verification remains outstanding.
+native Comet/QC/body checkpoint is now
+`ccc9221f7d5d3c33bb3d8a62387c8f2606698bfe`, published for early upstream API review
+as draft [taiko-mono #22398](https://github.com/taikoxyz/taiko-mono/pull/22398).
+Independent source reviews and representative actual RISC0/SP1 guest challenges
+passed. Envelope/FI/transition and range proving remain later work, along with
+full repository verification. The existing lander rejects nonzero genesis
+heights, so switching-network `S > 0` integration must be completed separately.
+Raiko2 dependency adoption waits for the shared-API review gate.
 
 The client currently generates protocol artifacts from
 `35e2f8f191132e87d9a223554d0b699f4203f2e3`. Before adopting the newer protocol pin,

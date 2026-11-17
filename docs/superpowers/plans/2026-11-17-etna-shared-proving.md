@@ -100,10 +100,25 @@ Docker, complete Raiko2 guest integration and generated proofs remain unrun.
 
 Execution checkpoints (the task is complete only after both):
 
-- [ ] Task 3a: native Comet codecs, checked validators, QC/body/ancestry and host
+- [x] Task 3a: native Comet codecs, checked validators, QC/body/ancestry and host
   compatibility facades; include this in the early upstream API review.
 - [ ] Task 3b: pure envelope/rules/FI and shared pending-to-committed transition
   closure; retain this obligation before downstream range proving.
+  Include nonzero switching-origin integration: the current lander rejects
+  `genesis_height != 0` and uses a recovery-oriented epoch helper. Align origin,
+  initial committee and transition context before establishing `S > 0` proving.
+
+The early shared-API milestone is published as draft
+[taiko-mono #22398](https://github.com/taikoxyz/taiko-mono/pull/22398), head
+`ccc9221f7d5d3c33bb3d8a62387c8f2606698bfe`. Independent task and integrated
+source reviews passed; core 59 and lander 326 tests passed, with one resource
+acceptance case ignored. Seven independent native QC/body groups and identical
+representative challenges executed successfully in actual RISC0 RV32 and SP1
+RV64 guests. These diagnostic executions do not constitute complete range proofs.
+Full `just verify`/Docker/resource gates remain outstanding. At draft publication,
+Rust/Docker CI checks were skipped and link checking failed on unchanged vendored
+MIT license links returning HTTP 403. Wait for external API review before substantial
+Raiko2 integration.
 
 **Files:** etna-core envelope/rules/forced/validation/native-consensus modules; existing abci app validation/finalize and lander validate/native/history adapters.
 

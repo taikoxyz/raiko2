@@ -12,13 +12,18 @@
 
 ## Shared consensus review gate
 
+This revised plan and its linked design are the active execution baseline.
+Start new upstream consensus work from the Etna client source baseline recorded
+in the design, without the #22390 MPT prototype commits. The prototype branch
+and evidence are historical records, not code to carry into the new base.
+
 Preserve Raiko2's existing CachedTrie, witness pooling/materialization and
 post-state-root implementation. The user rejected a low-level backend switch;
 the common library should focus on BFT/QC, committee derivation, scheduling and
 ValState. Generic state authentication uses narrow existing-backend adapters.
 
 Task 1 is an archived MPT feasibility prototype, not a dependency of Tasks 2–7.
-The draft [taiko-mono #22390](https://github.com/taikoxyz/taiko-mono/pull/22390)
+The closed prototype [taiko-mono #22390](https://github.com/taikoxyz/taiko-mono/pull/22390)
 at `8ed9c271da7fff80e6698754e9da21a7466cf6ea` remains separate from Raiko2's
 integration base. Do not repeat/expand it or adopt its MPT backend for this plan.
 

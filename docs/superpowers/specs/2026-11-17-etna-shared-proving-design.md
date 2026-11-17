@@ -28,7 +28,10 @@ adapters must authenticate values against the expected root; unverified host
 values or a success boolean are never sufficient. Sharing protocol rules does
 not require replacing the underlying trie implementation.
 
-The MPT prototype at taiko-mono #22390 is independent of Raiko2 integration.
+The user closed the MPT prototype at taiko-mono #22390. This revised design and
+its implementation plan are the new baseline; start upstream consensus work
+without the prototype commits. Preserve the prototype only as a historical
+reference, independent of Raiko2 integration.
 Diagnostic guests established that it can link and execute on both backends,
 but a controlled SP1 6.8.1 comparison of 15 synthetic cases found material cycle
 differences: cold three-/four-slot requests used +9.9%/+18.8% total diagnostic

@@ -15,6 +15,7 @@ members = [
     "crates/prover",
     "crates/protocol",
     "crates/protocol-shasta",
+    "crates/protocol-etna",
     "crates/primitives-shasta",
     "crates/queue",
     "crates/sgx-runtime",
@@ -72,12 +73,14 @@ raiko2-runtime = { path = "./crates/runtime" }
 raiko2-stateless = { path = "./crates/stateless" }
 raiko2-protocol = { path = "./crates/protocol" }
 raiko2-protocol-shasta = { path = "./crates/protocol-shasta" }
+raiko2-protocol-etna = { path = "./crates/protocol-etna", default-features = false }
 raiko2-primitives-shasta = { path = "./crates/primitives-shasta" }
 raiko2-queue = { path = "./crates/queue" }
 raiko2-guests = { path = "./crates/guests" }
 raiko2-sgx-runtime = { path = "./crates/sgx-runtime" }
 
 # Taiko client protocol
+etna-core = { git = "https://github.com/taikoxyz/taiko-mono", rev = "f31e7ec55345ac7faf99756504535b0cc9929ec0", default-features = false }
 taiko-client-protocol = { git = "https://github.com/taikoxyz/taiko-mono", package = "protocol", rev = "06bd6b0ec8a6132a41253a2ba6ebe10b27ad26fd", default-features = false }
 
 # zkVM

@@ -92,14 +92,11 @@ The closed prototype [taiko-mono #22390](https://github.com/taikoxyz/taiko-mono/
 at `8ed9c271da7fff80e6698754e9da21a7466cf6ea` remains separate from Raiko2's
 integration base. Do not repeat/expand it or adopt its MPT backend for this plan.
 
-The next upstream review concerns the shared consensus API: Task 2 plus the native
-Comet/QC/body checkpoint of Task 3. Envelope, FI and full transition verification
-remain downstream obligations; extract additional helpers only for demonstrated
-Raiko2 callers. QC/body alone is not a complete Etna block verifier.
-Wait for that review to converge before substantial Raiko2 integration. Prefer
-an exact commit from the merged Etna development mainline; a reviewed branch commit is a temporary
-option. Keep Raiko2 in its own branch and record code revisions for later
-implementation-conformance work. The separate TLA+/Lean work is untouched.
+The shared consensus API review for Task 2 and the native Comet/QC/body
+checkpoint of Task 3 completed with the merge of #22398. Envelope, FI and
+full transition verification remain downstream obligations. Extract additional
+helpers only for demonstrated Raiko2 callers. Use exact revisions from the
+Etna development mainline and record the pins for implementation conformance.
 
 ## Global constraints
 
@@ -173,12 +170,16 @@ Execution checkpoints
   existing Raiko2 RISC0 3.0.5 and SP1 6.8.1 patch tables. Both actual CPU guests
   emitted the same 684-byte journal as the isolated native runner and the
   independent stock oracle. See the [validation results and entry points](../../../crates/etna-guest-compat/README.md).
-- [ ] Task 3b: map the existing Raiko2 guest's missing Etna checks to callable
-  primitives; keep envelope/FI/transition composition in existing Raiko2 modules.
+- [x] Task 3b consensus-input slice: `raiko2-protocol-etna` pins merged
+  `etna-core` at `f31e7ec55345ac7faf99756504535b0cc9929ec0`. It checks
+  canonical Comet input, the current QC and committed body, and the actual
+  embedded LastCommit against the authenticated predecessor and committee.
+  It returns the exact committed transaction with its signed Comet identity.
+- [ ] Task 3b guest composition: authenticate the inputs to this consensus gate
+  and compose it with canonical Etna envelope/EL binding and FI checks.
   Extract a helper only when that caller needs it. For `S > 0` proving authenticate
-  the switching origin and derive the correct initial committee/context. The
-  current lander's nonzero-genesis guard is a separate client limitation, not a
-  requirement to restructure or extend the lander before implementing the guest.
+  the switching origin and derive the correct initial committee/context using
+  the nonzero-origin rules in the inspected client revision recorded in the design.
 
 The early shared-API milestone was published as a draft in
 [taiko-mono #22398](https://github.com/taikoxyz/taiko-mono/pull/22398), head
@@ -189,8 +190,8 @@ representative challenges executed successfully in actual RISC0 RV32 and SP1
 RV64 guests. These diagnostic executions do not constitute complete range proofs.
 Full `just verify`/Docker/resource gates remain outstanding. At draft publication,
 Rust/Docker CI checks were skipped and link checking failed on unchanged vendored
-MIT license links returning HTTP 403. Wait for external API review before substantial
-Raiko2 integration.
+MIT license links returning HTTP 403. The upstream API review gate was satisfied
+when #22398 merged at `f31e7ec55345ac7faf99756504535b0cc9929ec0`.
 
 **Files:** Existing Raiko2 fork-verification modules and etna-core exports needed by identified callers. Use current abci/lander rules as source evidence; change client files only for necessary compatibility wiring or an extracted-surface fix.
 
@@ -221,7 +222,12 @@ Raiko2 integration.
 **Interfaces:** A fork range verifier authenticates the supplied blocks/context and returns the canonical statement/preimage/hash plus boundaries/cuts. Compose existing execution with the required shared checks; use local proof-input types rather than forcing client request types into the guest. Inputs include raw consensus/EL data, authenticated origin/ValState/registry/L1 witnesses, execution and necessary FI evidence, DA and reference data. PreparedBatch::verify_restored remains host journal validation, not the verifier.
 
 - [ ] Compare current protocol ABI/statement/layout/vectors with the client's generated pin; reuse existing generation entrypoint to refresh only when necessary. No independent L1 authority interface is added.
-- [ ] Authenticate fixed origin, parent hash/state, registry/committee/ValState, full range, own/inherited anchors and every required L1 root; include switching-origin Anchor implementation witness. Implement the currently specified ancestry policy first; historical Merkle optimization is separate.
+- [ ] Authenticate fixed origin, parent hash/state, registry/committee/ValState,
+  full range, own/inherited anchors and every required L1 root. At switching
+  origin S, verify the SignalService proxy account and EIP-1967 implementation
+  slot against the settled state root. Bind the pinned implementation's
+  immutable `beaconRootsFrom` to the configured fork time. Implement the
+  specified ancestry policy before considering historical Merkle optimization.
 - [ ] Verify each supplied block and execute its complete committed body strictly. Resolve FI only with authenticated evidence for the completed singleton decision. Decode/bind the supplied blobs and ordered blocks, then derive required cuts/statement; do not rerun compression generation, batch selection or blob packing.
 - [ ] Test wrong origin/cutoff/header/committee/ValState/blob/cut/reference and generation changes, handovers/recovery, complete overlap `(p,h]` with live frontierc and terminal values. Failed transitions leave replay state unchanged.
 - [ ] Run Rust/Solidity/client vector comparisons and portable/native replay, independently review and verify, then commit. No native fixture is described as a real proof.

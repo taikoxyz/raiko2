@@ -169,9 +169,11 @@ native Comet/QC/body checkpoint is now
 as draft [taiko-mono #22398](https://github.com/taikoxyz/taiko-mono/pull/22398).
 Independent source reviews and representative actual RISC0/SP1 guest challenges
 passed. Envelope/FI/transition and range proving remain later work, along with
-full repository verification. The existing lander rejects nonzero genesis
-heights, so switching-network `S > 0` integration must be completed separately.
-Raiko2 dependency adoption waits for the shared-API review gate.
+full repository verification. At that historical checkpoint, the lander
+rejected nonzero genesis heights. The later inspected client implements
+switching-origin handling. Raiko2 must still authenticate that origin in the
+guest. The draft checkpoint preceded the shared-API review gate for dependency
+adoption.
 
 The pre-merge compatibility diagnostic at
 `e6e186fe6a2e3912739db9b9cae1740e31064824` passed in the actual Raiko2 RISC0
@@ -180,14 +182,23 @@ Both guests executed the QC, committee, ValState and recorded cut-preimage
 fixture and emitted the same 684-byte journal as native and the stock oracle.
 The updated guest locks affect production ELF provenance. The [diagnostic
 results](../../../crates/etna-guest-compat/README.md) cover CPU compatibility.
-Production guest composition, proof generation and L1 verification remain
-downstream work subject to the shared-API review gate.
+The shared API subsequently merged at `f31e7ec55345ac7faf99756504535b0cc9929ec0`.
+Raiko2 pins that revision in `crates/protocol-etna` for a lower-level Comet
+consensus gate. The caller authenticates the deployment, generation origin,
+expected height and parent EL hash, the active committees and the predecessor's
+header and full BlockID. The gate verifies the current certificate and body and
+independently checks the embedded LastCommit when present. Its output is the
+borrowed committed transaction and signed Comet identity. Guest context
+authentication, envelope/EL binding, execution, FI, DA, range verification,
+proof generation and L1 verification remain open.
 
-The client currently generates protocol artifacts from
-`35e2f8f191132e87d9a223554d0b699f4203f2e3`. Before adopting the newer protocol pin,
-compare ABI, statement encoding, storage layout and shared vectors. Generated
-artifacts must be regenerated through their existing entrypoint, never edited by
-hand. A newer source or pin is accepted only after its delta is recorded/reviewed.
+The extraction baseline generated protocol artifacts from
+`35e2f8f191132e87d9a223554d0b699f4203f2e3`. The later inspected client
+`48db1326d52495ba5f97dfca3ed8ccacbe92e85f` uses
+`4c6424bc97b226d100cc9ce9dc828c9567acef4e` and implements the SignalService
+switch. These are source references for the next integration step. Before
+adopting a newer protocol pin, compare ABI, statement encoding, storage layout
+and shared vectors, then regenerate artifacts through their existing entrypoint.
 
 ## Architecture
 
@@ -264,8 +275,11 @@ and complete range even if the settled frontier advances. Bind all cache/artifac
 identities to protocol/generation/rules/image/content. Transport collection never
 substitutes for guest authentication.
 
-When proving starts at Etna start S on a switching network, include the Anchor
-proxy account and EIP-1967 implementation witness required by PROOF-6.2-46a.
+For a switching-network proof whose parent is Etna start S, include the L2
+SignalService proxy account and EIP-1967 implementation slot witness under the
+settled S header's state root. Bind the slot to the configured implementation,
+whose immutable `beaconRootsFrom` gives the configured fork time, and check
+the S header timestamp is earlier than that time (PROOF-6.2-46a).
 Current PreparedBatch is not a complete GuestInput and its restore checks do not
 replace witness rederivation. Blobs do not contain all original consensus history.
 

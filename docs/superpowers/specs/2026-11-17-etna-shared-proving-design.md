@@ -2,16 +2,43 @@
 
 ## Direction and authorization
 
-On 2026-11-17 the user selected an upstream common implementation consumed by
-both the Etna node and Raiko2 guests. Committee derivation belongs in that common
-implementation. Raiko2 remains the collection, witness, scheduling and backend
-adapter. Development branches may be consumed at explicit commit pins; landing
-upstream on main is not a prerequisite for development. Commit coherent stages
-and retain enough provenance to resume after resource-related interruptions.
+The deliverable is an upstream dependency crate that Raiko2 can call for useful
+Etna computations and verification. Committee derivation belongs in that shared
+implementation. Raiko2 retains proof composition as well as collection, witness,
+scheduling and backend integration. Development dependencies use explicit commit
+pins; prefer a reviewed merged Etna development commit for eventual integration.
+Commit coherent stages and retain provenance across resource interruptions.
 
 This replaces the L1-authenticated committee-authority proposal in Raiko2 #295
 for this implementation. It does not require an additional L1 authority contract.
 No implementation, deployment or merge readiness follows from this document.
+
+## Scope correction: Raiko2-facing dependency crate
+
+On 2026-11-18 the user explicitly narrowed the upstream work to a callable crate
+for Raiko2, not an architectural adjustment of taiko-client-rs. An export, helper
+or adapter needs an identified Raiko2 call site or a necessary dependency of that
+call site. Existing extraction/re-export changes may supply shared primitives;
+keep further client changes to necessary compatibility wiring and fixes in the
+extracted surface. Do not reorganize ABCI/lander services, mining, runtime state,
+Engine integration or transition orchestration to make the client resemble a
+prover framework.
+
+Raiko2 can compose QC, ancestry, applicable validator hashes and ValState checks
+inside its existing guest modules. A monolithic shared authenticated-transition
+API, or adoption of that orchestration by the client, is not a prerequisite.
+If a checkpoint-start call needs a smaller parent-hash/BlockID input, add only
+that verification input; preserve the full proving obligations at composition.
+
+The pooled-trie/RPC proof-count comment is conditional integration feedback, not
+a mandatory redesign: change RegistryProof only if Raiko2 actually consumes that
+interface and an adapter is insufficient. If another authenticated read path is
+used, keep snapshot length/cutoff/entries/selection checks complete. The inherited
+generation-start helper guard still needs correction for an exported verifier;
+it predates this extraction, and the lander's None predecessor already rejects
+that malformed structure. Remove extraction-induced redundant decoding locally.
+Actual Raiko2 handover/cut fixtures belong to downstream integration validation;
+they do not require a client architecture change or immediate downstream work.
 
 ## Existing execution backend decision
 
@@ -161,7 +188,7 @@ checks must have a portable dependency closure; no guest imports the complete
 ABCI/lander service. A separate proof/orchestration crate requires a concrete
 benefit over those existing module boundaries.
 
-### Common deterministic responsibilities
+### Full-prover obligations, not mandatory upstream crate contents
 
 - Canonical envelopes, execution headers, domain/generation and chain identity.
 - L1 header/account/storage witness authentication and anchor progression.
@@ -237,8 +264,9 @@ Only isolated credential-free execution may run repository tests/builds.
 
 ## Completion evidence
 
-Completion requires common-library consumers in both node and prover, matching
-native/guest decisions, full valid/reject coverage of committee/QC/FI/origin/cut
+Completion requires the intended Raiko2 callers to use the reviewed crate,
+preservation of existing client behavior, matching native/guest decisions and
+full valid/reject coverage of committee/QC/FI/origin/cut
 boundaries, actual proofs from both supported ZK backends, compatible aggregation
 and L1 verification against the pinned contracts, and Unzen regression evidence.
 No dummy/native execution is counted as a real proof. Report missing checks,

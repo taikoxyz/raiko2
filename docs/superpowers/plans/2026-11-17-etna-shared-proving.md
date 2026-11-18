@@ -1,4 +1,4 @@
-# Upstream shared Etna proving implementation plan
+# Raiko2-facing Etna library and integration plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement task-by-task. Steps use checkbox syntax. Root coordinates the repositories and shared build target; one implementer owns a coherent task at a time.
 
@@ -9,6 +9,29 @@
 **Tech Stack:** Rust, alloc-capable protocol core, existing alloy/prost/Comet codecs, alethia-reth stateless execution, RISC0 3.0.5, SP1 6.8.1, Solidity ABI/shared vectors.
 
 **Spec:** `docs/superpowers/specs/2026-11-17-etna-shared-proving-design.md`. The user selected the shared-library/guest-committee direction on 2026-11-17; builder check found no remaining user decisions. This replaces #295's L1 committee-authority proposal for this implementation.
+
+## Scope correction: callable crate, minimal client wiring
+
+The upstream milestone delivers the library Raiko2 needs to reference. Further
+taiko-client-rs changes require a concrete Raiko2 consumer, necessary extraction
+wiring, or a correctness/regression fix in the extracted surface. Re-exports and
+small adapters may preserve the existing client interfaces; restructuring
+ABCI/lander/mining/Engine/state or unifying their orchestration is out of scope.
+
+Keep consensus-check composition in existing Raiko2 guest modules unless an
+identified caller needs a small shared helper. A complete shared transition
+framework is not an upstream prerequisite. Checkpoint-start inputs may be narrowed
+without moving the lander's replay workflow. RegistryProof transport adaptation is
+conditional on actually using it; the RPC proof-count comment is non-blocking
+until that consumer requirement is demonstrated. Snapshot authentication and all
+protocol checks remain mandatory whichever read path Raiko2 uses.
+
+For #22398, retain the exported generation-start guard correction and the local
+redundant-decoding regression as concrete fixes. The ancestry condition is inherited
+from the base; the existing lander caller rejects nonempty first-block ancestry.
+Actual-lockfile guest handover/cut fixtures are a downstream integration gate,
+not permission to start integration while upstream API review is open. The later
+full-prover tasks below do not enlarge this upstream milestone.
 
 ## Mining/proving boundary (user clarification)
 
@@ -49,8 +72,9 @@ at `8ed9c271da7fff80e6698754e9da21a7466cf6ea` remains separate from Raiko2's
 integration base. Do not repeat/expand it or adopt its MPT backend for this plan.
 
 The next upstream review concerns the shared consensus API: Task 2 plus the native
-Comet/QC/body checkpoint of Task 3. Envelope, FI and transition extraction remain
-separate unfinished work; QC/body alone is not a complete Etna block verifier.
+Comet/QC/body checkpoint of Task 3. Envelope, FI and full transition verification
+remain downstream obligations; extract additional helpers only for demonstrated
+Raiko2 callers. QC/body alone is not a complete Etna block verifier.
 Wait for that review to converge before substantial Raiko2 integration. Prefer
 an exact commit from the merged Etna development mainline; a reviewed branch commit is a temporary
 option. Keep Raiko2 in its own branch and record code revisions for later
@@ -117,17 +141,18 @@ actual RISC0 RED/GREEN execution. The affected lander library passed 325 tests,
 with one resource acceptance test intentionally ignored. Full `just verify`,
 Docker, complete Raiko2 guest integration and generated proofs remain unrun.
 
-## Task 3: Shared block rules, canonical Comet verification and transition replay
+## Task 3: Callable consensus checks and Raiko2 validity composition
 
 Execution checkpoints (the task is complete only after both):
 
 - [x] Task 3a: native Comet codecs, checked validators, QC/body/ancestry and host
   compatibility facades; include this in the early upstream API review.
-- [ ] Task 3b: pure envelope/rules/FI and shared pending-to-committed transition
-  closure; retain this obligation before downstream range proving.
-  Include nonzero switching-origin integration: the current lander rejects
-  `genesis_height != 0` and uses a recovery-oriented epoch helper. Align origin,
-  initial committee and transition context before establishing `S > 0` proving.
+- [ ] Task 3b: map the existing Raiko2 guest's missing Etna checks to callable
+  primitives; keep envelope/FI/transition composition in existing Raiko2 modules.
+  Extract a helper only when that caller needs it. For `S > 0` proving authenticate
+  the switching origin and derive the correct initial committee/context. The
+  current lander's nonzero-genesis guard is a separate client limitation, not a
+  requirement to restructure or extend the lander before implementing the guest.
 
 The early shared-API milestone is published as draft
 [taiko-mono #22398](https://github.com/taikoxyz/taiko-mono/pull/22398), head
@@ -141,18 +166,18 @@ Rust/Docker CI checks were skipped and link checking failed on unchanged vendore
 MIT license links returning HTTP 403. Wait for external API review before substantial
 Raiko2 integration.
 
-**Files:** Existing abci validation/rules/forced and lander checks, shared etna-core verifier additions where useful, and Raiko2 fork-verification modules. Extract the necessary check closure, not whole mining modules or payload builders.
+**Files:** Existing Raiko2 fork-verification modules and etna-core exports needed by identified callers. Use current abci/lander rules as source evidence; change client files only for necessary compatibility wiring or an extracted-surface fix.
 
-**Interfaces:** Preserve canonical envelope version6 and existing eligibility/header rules. Expose pure context/check/transition results, `verify_commit` and body/BlockID validation, with a deterministic crypto interface. Shared low-s/key/order/domain checks precede backend crypto recovery. A pending transition becomes committed only after complete execution/FI verification.
+**Interfaces:** Preserve canonical envelope version6 and existing eligibility/header rules. Reuse `verify_commit`, body/BlockID checks and other demonstrated pure APIs; no mandatory common transition result or client adoption of guest orchestration. The Raiko2 caller authenticates and consistently binds context and accepts a transition only after all consensus, execution and FI checks complete.
 
 - [ ] Migrate existing stock Comet vectors and negative tests for nil votes, absent slots, duplicate/substituted signers, altered sign bytes, exact2/3, wrong generation/domain/full BlockID and envelope/EL byte mismatch.
-- [ ] Define the authenticated verification context separately from node-local build settings. Reuse existing validation predicates and cheap header/schedule math; keep payload_attributes/Engine orchestration outside the guest. Accept arbitrary protocol-permitted beneficiary and alternative valid transaction selections. Share a transition/update checker or computation as justified, without requiring a common mining orchestration path.
+- [ ] Define the authenticated verification context separately from node-local build settings. Reuse existing validation predicates and cheap header/schedule math; keep payload_attributes/Engine orchestration outside the guest. Accept arbitrary protocol-permitted beneficiary and alternative valid transaction selections. Compose transition/update checks in the existing Raiko2 guest; introduce a shared checker only for a demonstrated missing call boundary, without changing client orchestration.
 - [ ] Reuse existing FI `NeedsSkip` as a pending request, never a completed authorization. Preserve ineligible/fee/revert/OOG/zk-discard distinctions.
 - [ ] Run node/lander differential fixtures and core target/crypto vectors; independent review and verification, then commit.
 
 ## Task 4: Etna execution and FI omission verification over existing paths
 
-**Files:** existing Raiko2 stateless/witness interfaces and thin fork adapters; alethia-reth changes only for a verified missing Etna behavior, based on #248 in a dedicated isolated branch. Preserve CachedTrie, node pooling, the execution database and post-state-root support. Etna policy remains in the shared protocol library.
+**Files:** existing Raiko2 stateless/witness interfaces and thin fork adapters; alethia-reth changes only for a verified missing Etna behavior, based on #248 in a dedicated isolated branch. Preserve CachedTrie, node pooling, the execution database and post-state-root support. Etna validity uses existing guest composition and shared primitives where useful.
 
 **Interfaces:** Start with the existing strict witness-backed block validator and add narrow Etna fork/context support. If a shared caller needs an adapter, keep committed-block verification and `verify_fi_omission` as distinct contracts; a new executor framework is not mandatory. A verified FI omission establishes the same completed decision as the pinned singleton rules, without requiring a fully assembled empty block. Included revert/OOG cannot justify omission; missing witness/config/infrastructure remains an error.
 

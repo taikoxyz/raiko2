@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-11-17-etna-shared-proving-design.md`. The user selected the shared-library/guest-committee direction on 2026-11-17; builder check found no remaining user decisions. This replaces #295's L1 committee-authority proposal for this implementation.
 
-## Scope correction: callable crate, minimal client wiring
+## Historical partial scope correction (superseded below)
 
 The upstream milestone delivers the library Raiko2 needs to reference. Further
 taiko-client-rs changes require a concrete Raiko2 consumer, necessary extraction
@@ -37,6 +37,22 @@ The draft was updated and external review re-requested; it is not merge-ready.
 Actual-lockfile guest handover/cut fixtures are a downstream integration gate,
 not permission to start integration while upstream API review is open. The later
 full-prover tasks below do not enlarge this upstream milestone.
+
+## Entire-PR boundary at the current review head
+
+Review head `1d6d1666afec8795cf5203668317a534b339367f` replaces the earlier
+72-file extraction with 31 new etna-core files plus only workspace Cargo.toml and
+Cargo.lock changes. All existing client/CLI/config/native tests/fixtures/generators
+match base `ea74662169262dc8ab6ada7028d2ef54137088d2`; no host adoption,
+re-export, type/config migration, adapter or constructor change remains. Every
+future upstream addition in this milestone must preserve that entire-PR boundary.
+
+This is a temporary independently callable port with pinned provenance and copied
+stock data, not a library already consumed by the node. Client adoption is separate.
+Do not reintroduce the reverted migrations to satisfy historical task text below.
+Final independent checks: core61, extra witness-shape controls, unchanged native
+metadata/lock/fixture identities, strict core lint/rustdoc and both zkVM library
+targets pass. Whole workspace/Docker/proof integration remain outside this evidence.
 
 ## Mining/proving boundary (user clarification)
 
@@ -109,7 +125,7 @@ implementation-conformance work. The separate TLA+/Lean work is untouched.
 ## File ownership and dependency direction
 
 - mono `packages/taiko-client-rs/crates/etna-core`: existing canonical consensus types, useful pure computations and native verifiers; add only narrowly justified shared checks.
-- mono abci/lander: retain mining/build policy, RPC/store/signing/runtime behavior and payload publication; reuse shared checks where appropriate without adopting prover-specific orchestration.
+- mono abci/lander/CLI/config/tests: unchanged from the pinned base in this milestone; use them as source and vector oracles, with client adoption separately scoped.
 - raiko2 existing `crates/protocol*`, `crates/pipeline`, stateless/witness and guest modules: fork-specific proof inputs/context, known-block/range verification, witness collection and proof/backend composition. Preserve existing execution and DB ownership.
 - alethia-reth: add only a demonstrated missing fork behavior or small reusable execution/admission primitive; retain strict execution and necessary transaction-rejection semantics.
 - A portable upstream range/statement library may be introduced if concrete consumers justify it. It must not depend on host services, and neither Raiko2 nor the node is restructured merely to accommodate it.
@@ -130,16 +146,16 @@ required by this plan. Resume planning at the shared consensus boundary below.
 
 ## Task 2: Shared committee, parameter, schedule and validator-state implementation
 
-**Files:** etna-core modules `params`, `types`, `key`, `domain`, `schedule`, `committee`, `validator`, `valstate`; move corresponding abci tests/stock vectors and modify abci imports/re-exports, `config`, `store`, `wire`, `envelope` and callers.
+**Files:** etna-core modules `params`, `types`, `key`, `domain`, `schedule`, `committee`, `validator`, `valstate` and required standalone test/data copies. Existing abci/lander/CLI/config and original fixture paths stay unchanged; the former migration is historical and reverted.
 
-**Interfaces:** Core owns canonical `ChainParams`, `ConsensusKey`, `Schedule`, `CommitteeState`, `ValState`, `validator_updates`, registry root/record/config hashes and native validator commitment helpers. Expose a documented `RegistryProof` authenticated-storage trait; core owns the entire snapshot/cutoff/entries/selection/record-check algorithm, while adapters authenticate exact requested slots under the requested L1 root. Preserve the node's `CommitteeWitness` wire type and private `VerifiedWitness` fixed-configuration cache as thin facades calling core. Keep the node MPT engine/error payload intact, using a backend-generic committee error. Pure data/config validation is canonical; builtin selection/TOML and state-store adapters stay outside. No mirrored parameter/state structs or duplicate committee algorithm.
+**Interfaces:** The independent core exposes its portable `ChainParams`, `ConsensusKey`, `Schedule`, `CommitteeState`, `ValState`, `validator_updates` and committee/validator commitments. Its optional `RegistryProof` contract authenticates exact root/account/ordered slots; supplied proof count, returned-word count, snapshot/cutoff/entries/selection and record checks remain complete. Existing native types, caches, MPT errors and configuration methods are preserved as-is. Document temporary source coexistence and pin parity to original fixture/source identities; no native facade is introduced in this PR.
 
-- [x] Add cross-consumer vector tests proving node imports and core return identical canonical committee records/roots/config hashes and Go-derived ValState transitions/preimages.
-- [x] Move the consensus dependency closure, including validator wire/hash helpers; access authenticated L1 state through an existing-backend adapter instead of importing a replacement MPT engine; do not create core→abci→core cycles. Resolve foreign-type inherent configuration methods using host free functions or explicit optional configuration API.
+- [x] Check core outputs against unchanged native/Go committee, wire and ValState vectors, with pinned source provenance and standalone copies; do not claim node imports the crate.
+- [x] Port the pure dependency closure without a host service dependency. Keep native config methods and all existing client APIs unchanged; no new native adapter, free-function migration or MPT engine is part of the final diff.
 - [x] Cover cutoff versus proving-anchor root, S(t)/H+2 boundaries, power caps/ties, exclusions, recovery initial committee and old pending-update discard. Authenticate origin ValState and advance every height, including non-switches.
 - [x] Run core and affected node/lander tests, portable target checks and independent review/behavior verification; commit the coherent extraction.
 
-Checkpoint: `4fb1de48c5870bf36c8bd6c7c756df0bf5435550` on the shared upstream
+Historical extraction checkpoint: `4fb1de48c5870bf36c8bd6c7c756df0bf5435550` on the shared upstream
 branch. Independent review and 80 focused native test executions passed. A
 pointer-width count defect found during review was fixed and reproduced with
 actual RISC0 RED/GREEN execution. The affected lander library passed 325 tests,
@@ -150,8 +166,8 @@ Docker, complete Raiko2 guest integration and generated proofs remain unrun.
 
 Execution checkpoints (the task is complete only after both):
 
-- [x] Task 3a: native Comet codecs, checked validators, QC/body/ancestry and host
-  compatibility facades; include this in the early upstream API review.
+- [x] Task 3a: native Comet codecs, checked validators and QC/body/ancestry with
+  standalone test/data copies; native compatibility migration was reverted.
 - [ ] Task 3b: map the existing Raiko2 guest's missing Etna checks to callable
   primitives; keep envelope/FI/transition composition in existing Raiko2 modules.
   Extract a helper only when that caller needs it. For `S > 0` proving authenticate

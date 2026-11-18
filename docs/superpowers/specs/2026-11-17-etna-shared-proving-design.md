@@ -13,7 +13,7 @@ This replaces the L1-authenticated committee-authority proposal in Raiko2 #295
 for this implementation. It does not require an additional L1 authority contract.
 No implementation, deployment or merge readiness follows from this document.
 
-## Scope correction: Raiko2-facing dependency crate
+## Historical partial scope correction (superseded below)
 
 On 2026-11-18 the user explicitly narrowed the upstream work to a callable crate
 for Raiko2, not an architectural adjustment of taiko-client-rs. An export, helper
@@ -40,6 +40,27 @@ predates the extraction; the correction also preserves native commitment-error
 priority and the host's authenticated Safety classification.
 Actual Raiko2 handover/cut fixtures belong to downstream integration validation;
 they do not require a client architecture change or immediate downstream work.
+
+## Entire-PR scope correction
+
+The 2026-11-18 correction applies to every commit in #22398, not only recent
+fixes. At review head `1d6d1666afec8795cf5203668317a534b339367f`, the complete
+diff against `ea74662169262dc8ab6ada7028d2ef54137088d2` adds 31 etna-core files
+and changes only the workspace manifest/member and lock package record. All 47
+previously migrated native paths, including configuration APIs, CLI callers,
+ABCI/lander code, original tests and generators, are restored to their base Git
+blobs and modes. There is no existing native consumer of etna-core in this PR.
+This supersedes earlier completed-step descriptions of client reexports/adoption.
+
+Deliver the separately callable portable port first. Client adoption is a separate
+migration, so temporary source coexistence is explicit and pinned to the native
+baseline, with unchanged Go/native fixture copies and conformance checks rather
+than a claim of shared runtime implementation. Keep the original generators as
+the source for data refresh; do not duplicate their implementation. All 790 old
+lock package blocks and the existing native dependency/feature graph are intact.
+Independent source and behavior checks cover the entire boundary, core61, strict
+Clippy/rustdoc, both zkVM library targets and witness-shape controls. Full workspace,
+Docker and production Raiko2 guest/proof integration remain unverified.
 
 ## Existing execution backend decision
 
@@ -169,17 +190,16 @@ choice based on concrete reusable checks, not a prerequisite. A host-provided
 success/empty boolean is never an execution proof.
 
 ```text
-node builder/validator -----> shared primitives and verifiers
-                                          ^
-                                          |
-Raiko2 witnesses -> existing guest -> Etna verification -> statement/proof
+existing node -> unchanged native implementation (pinned source/vector oracle)
+
+Raiko2 witnesses -> existing guest -> etna-core primitives -> statement/proof
                                           |
                                 existing EVM / witness DB
 ```
 
-Extract only useful shared computations and verifiers, with their tests. Reuse
-them in node validation where appropriate; keep the producer's construction path
-when it serves a different purpose. Equivalent verifier algorithms are permitted,
+Port only useful computations and verifiers with their tests. Keep node validation
+and construction unchanged for this upstream milestone; client adoption is a
+separate migration. Equivalent verifier algorithms are permitted,
 with shared protocol constants/primitives, differential cases and negative tests.
 Keep RPC, Tokio, Engine transport, persistence, metrics, signing and CLI policy
 outside the portable dependency closure.

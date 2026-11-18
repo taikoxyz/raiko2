@@ -34,9 +34,10 @@ The pooled-trie/RPC proof-count comment is conditional integration feedback, not
 a mandatory redesign: change RegistryProof only if Raiko2 actually consumes that
 interface and an adapter is insufficient. If another authenticated read path is
 used, keep snapshot length/cutoff/entries/selection checks complete. The inherited
-generation-start helper guard still needs correction for an exported verifier;
-it predates this extraction, and the lander's None predecessor already rejects
-that malformed structure. Remove extraction-induced redundant decoding locally.
+generation-start helper guard and redundant typed-block decoding were corrected
+in upstream review head `61d27093f8970a24eca8d0dc3d711a034c9cea95`. The guard
+predates the extraction; the correction also preserves native commitment-error
+priority and the host's authenticated Safety classification.
 Actual Raiko2 handover/cut fixtures belong to downstream integration validation;
 they do not require a client architecture change or immediate downstream work.
 

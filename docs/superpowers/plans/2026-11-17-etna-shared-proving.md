@@ -26,9 +26,14 @@ conditional on actually using it; the RPC proof-count comment is non-blocking
 until that consumer requirement is demonstrated. Snapshot authentication and all
 protocol checks remain mandatory whichever read path Raiko2 uses.
 
-For #22398, retain the exported generation-start guard correction and the local
-redundant-decoding regression as concrete fixes. The ancestry condition is inherited
-from the base; the existing lander caller rejects nonempty first-block ancestry.
+The #22398 review revision is `61d27093f8970a24eca8d0dc3d711a034c9cea95`.
+It changes four existing files for the exported generation-start guard, preserved
+host fault classification, removal of redundant decoding, tests and API docs.
+Independent source and behavior checks passed: core 60, lander 327 (one resource
+case ignored), four independent groups, strict core lint/docs and both actual
+zkVM target compiles. Full `just verify` stopped at unavailable Go in the isolated
+environment; broader host consumer/lint and Docker gates remain outstanding.
+The draft was updated and external review re-requested; it is not merge-ready.
 Actual-lockfile guest handover/cut fixtures are a downstream integration gate,
 not permission to start integration while upstream API review is open. The later
 full-prover tasks below do not enlarge this upstream milestone.

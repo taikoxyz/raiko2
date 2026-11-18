@@ -164,10 +164,15 @@ Docker, complete Raiko2 guest integration and generated proofs remain unrun.
 
 ## Task 3: Callable consensus checks and Raiko2 validity composition
 
-Execution checkpoints (the task is complete only after both):
+Execution checkpoints
 
 - [x] Task 3a: native Comet codecs, checked validators and QC/body/ancestry with
   standalone test/data copies; native compatibility migration was reverted.
+- [x] Task 3b preflight: run the stock Etna vectors before merging #22398 at
+  `e6e186fe6a2e3912739db9b9cae1740e31064824`. Locked diagnostic builds used the
+  existing Raiko2 RISC0 3.0.5 and SP1 6.8.1 patch tables. Both actual CPU guests
+  emitted the same 684-byte journal as the isolated native runner and the
+  independent stock oracle. See the [validation results and entry points](../../../crates/etna-guest-compat/README.md).
 - [ ] Task 3b: map the existing Raiko2 guest's missing Etna checks to callable
   primitives; keep envelope/FI/transition composition in existing Raiko2 modules.
   Extract a helper only when that caller needs it. For `S > 0` proving authenticate
@@ -175,7 +180,7 @@ Execution checkpoints (the task is complete only after both):
   current lander's nonzero-genesis guard is a separate client limitation, not a
   requirement to restructure or extend the lander before implementing the guest.
 
-The early shared-API milestone is published as draft
+The early shared-API milestone was published as a draft in
 [taiko-mono #22398](https://github.com/taikoxyz/taiko-mono/pull/22398), head
 `ccc9221f7d5d3c33bb3d8a62387c8f2606698bfe`. Independent task and integrated
 source reviews passed; core 59 and lander 326 tests passed, with one resource

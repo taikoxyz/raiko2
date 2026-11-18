@@ -1,0 +1,23 @@
+[package]
+name = "etna-guest-compat"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[features]
+risc0 = ["dep:risc0-binfmt", "dep:risc0-zkos-v1compat", "dep:risc0-zkvm"]
+sp1 = ["dep:sp1-core-executor"]
+
+[dependencies]
+etna-guest-compat-fixture = { path = "../../crates/etna-guest-compat" }
+hex = "0.4"
+risc0-binfmt = { version = "=3.0.4", optional = true }
+risc0-zkos-v1compat = { version = "=2.2.2", optional = true }
+risc0-zkvm = { version = "=3.0.5", default-features = false, features = ["client", "disable-dev-mode"], optional = true }
+sp1-core-executor = { version = "=6.8.1", optional = true }
+
+[profile.release]
+opt-level = 2
+debug = 0

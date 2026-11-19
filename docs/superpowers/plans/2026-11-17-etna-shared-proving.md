@@ -22,7 +22,7 @@ including its current planning-baseline amendment.
 Updated 2026-11-19. This plan is the authoritative progress tracker for
 [Raiko2 #305](https://github.com/taikoxyz/raiko2/pull/305).
 The user resumed implementation on 2026-11-19. Work now includes source
-alignment and the bounded statement/cut codec slice. Review requests for other
+alignment, the bounded statement/cut codec and the proof-specific execution projection. Review requests for other
 PRs are handled separately; only verified dependency or proof-rule changes
 alter this plan. Keep shared build caches and resource limits in place.
 
@@ -32,7 +32,7 @@ alter this plan. Keep shared build caches and resource limits in place.
 | Shared dependency | `f31e7ec55345ac7faf99756504535b0cc9929ec0` | Merged taiko-mono #22398; used by that slice |
 | Patched SDK diagnostic | `a29b53c462b69035ef2acfb5785d78ba20067605` | Actual CPU guest feasibility with the then-current patch tables |
 | Merged design target | `93b59fe629dc8987ecb03c7d59d1f66004de068f` | taiko-mono #22412; reviewed head merged as `2e6763e2`, implementation adoption still separate |
-| Shared body API candidate | `d7c6c3e30599463177152346d21dee6610f9f7f0` | [taiko-mono #22415](https://github.com/taikoxyz/taiko-mono/pull/22415), draft with external review requested; not the current Raiko2 dependency |
+| Shared body API candidate | `d7c6c3e30599463177152346d21dee6610f9f7f0` | [taiko-mono #22415](https://github.com/taikoxyz/taiko-mono/pull/22415), optional full-original-body helper; draft review requested; not the current Raiko2 dependency |
 | Inspected client / protocol | `af1b952adb2d14263da60c5090e15e65b5d8d48c` / `4c6424bc97b226d100cc9ce9dc828c9567acef4e` | Still the earlier 9-field input, 23-word statement and 4-word checkpoint implementation |
 | Inspected execution candidate | `53f33b708d869cfb3f8cccd597381fa2e92a5be5` | Anchorless execution exists; adoption also requires the OP-reth 2.7 / traits 0.8 / Alloy consensus 2.5 interoperability update |
 
@@ -57,7 +57,7 @@ from checkbox counts.
 | --- | --- | --- | --- | --- |
 | P00 | Portable shared core and patched SDK feasibility | DONE (earlier baseline) | — | Merged #22398; diagnostic README and checkpoint `a29b53c4` |
 | P01 | Freeze revised spec, implementation pins and ABI vectors | PARTIAL | Compatible upstream implementations | Design approval, source matrix and codec vectors recorded; native ABI/backend framing agreement pending |
-| P02 | Canonical supplied-block input and EL/Comet binding | PARTIAL | P01 for revised behavior | Existing `845ecbcb`; upstream body candidate #22415 verified; adoption and canonical envelope/EL binding remain open |
+| P02 | Canonical supplied-block input and EL/Comet binding | PARTIAL | P01 for revised behavior | Earlier gate plus independently checked F31 header/envelope/EL projection; strict nested witnesses and range composition remain open; #22415 is optional |
 | P03 | Authenticated origin, L1 context and committee schedule | TODO | P01, P02 | Witness-backed context; substituted-root/epoch/generation controls reject |
 | P04 | Strict Etna execution and FI omission verification | TODO | P01, P02 | Existing execution path passes full-body and singleton-equivalence cases |
 | P05 | Range consensus coverage, DA, cuts and statement | PARTIAL: codec only | P02–P04 for full range | Native encoding and digest vectors pass; context, execution, DA, QC coverage and proof composition pending |
@@ -130,7 +130,7 @@ root/guest manifests and generated binding entrypoints only when adopting code.
 - [x] Implement pure typed ABI encoders for the proposed 8-field input, 21-word / 672-byte statement preimage and 32-byte Keccak digest, four-word cut leaf and five-word cutHash. Cross-check representative and full-width codec-only vectors against independent manual packing and offline Cast.
 - [ ] Compare generated native contract/client layouts, selectors and vectors, including the three-word record and semantic uint48/range boundaries. Record the exact public-input/journal framing required by each pinned backend verifier.
 - [x] Specify and independently verify the structural-only shared body API candidate in [taiko-mono #22415](https://github.com/taikoxyz/taiko-mono/pull/22415), without AppHash or certificate policy and without native caller changes.
-- [ ] Adopt a reviewed compatible shared revision and complete the Raiko2 body/header/certificate composition. The current dependency stays at `f31e7ec5` pending upstream review and merge.
+- [ ] Adopt additional shared APIs only when a concrete caller benefits. #22415 is optional, not a global gate; the direct proof-specific path uses existing F31 header/DataHash primitives. Keep the current pin while its review proceeds.
 
 Evidence for the encoding subtask: [source](../../../crates/protocol-etna/src/statement.rs),
 [golden tests](../../../crates/protocol-etna/tests/land_statement.rs) and
@@ -163,9 +163,53 @@ crate; `crates/protocol-etna/tests/certified_envelope.rs` and new envelope tests
 
 - [x] Build the earlier canonical-wire/current-QC/body/embedded-QC gate in `845ecbcb`; keep its evidence scoped to that relation.
 - [x] Implement and independently verify the narrow upstream body API candidate in #22415: 67 core tests and three independent checks, including 26 Go vectors and 2,112 differential inputs. It recomputes full BlockID and returns exact transaction bytes; it authenticates no identity, domain, version, committee or execution by itself. External review and Raiko2 adoption remain open.
-- [ ] Add the reviewed portable canonical envelope decoder/binding helper when the caller needs it. Preserve byte identity; do not import the ABCI/lander service graph or independently reinterpret its RLP format.
+- [x] Bind the exact v6 envelope shell and supplied EL projection with existing canonical RLP and Ethereum codecs. Preserve byte identity and the normative/native wire schema; no ABCI/lander service import. Full strict nested-witness decoding/authentication remains required in P03/P04.
 - [ ] Bind every supplied EL header/body to its committed envelope, height, parent and generation; treat Comet app-hash bytes as opaque to the proof, as the revised spec requires.
-- [ ] Split structural/body/part-set checks from required-certificate checks. All block identities remain authenticated even when their own QC is not a required target.
+- [ ] Compose header-hash ancestry, DataHash binding and required endpoint certificates. Recompute full original part sets only for callers that require that stronger body relation; do not add it to every guest block by default. All header identities still require authentication.
+
+### Immediate P02 projection slice
+
+Use the current F31 `header_hash`, `data_hash`, domain and app-version primitives.
+`projection.rs` binds a caller-authenticated expected Comet header hash and the
+single exact envelope to the actual supplied Ethereum Header and typed
+transactions. It checks domain/version/height, fixed-origin header ancestry,
+EL parent and 13-byte generation/anchor extraData; no AppHash-content check or
+per-height detached QC is introduced.
+
+The v6 parser checks only the strict outer shell and optional slot arity, retaining
+borrowed execution/witness RLP spans. Compare the Ethereum Header's canonical
+encode/decode fixed point, ordered EIP-2718 byte strings and transaction root;
+limit the complete original execution item to 124,000 bytes. Native wire vectors
+and real public signed transaction fixtures guard compatibility. The returned
+projection is not complete envelope or proof validation: nested witness grammar,
+authenticated provenance/schedules, all-height validator hashes, strict execution,
+FI, DA and endpoint QCs stay mandatory in their composing milestones.
+
+- [x] Add behavioral RED and implement the bounded projection in the existing fork crate.
+- [x] Preserve all external dependency records; inspect normal no_std features.
+- [x] Run focused/independent native wire and mutation tests, strict scoped Clippy and formatting; obtain independent adversarial review.
+
+Projection evidence: [implementation](../../../crates/protocol-etna/src/projection.rs)
+and [12 regression tests](../../../crates/protocol-etna/tests/execution_projection.rs).
+The semantic RED failed at the unimplemented verifier, then the final native
+`cargo test --locked --offline -p raiko2-protocol-etna --all-targets -- --test-threads=2`
+run passed 33 tests: 12 projection, seven earlier-gate, six statement and eight
+independent scratch-only native-oracle groups. The latter used the exact
+`envelope.rs` and raw-L1-header codec from client `af1b952a`, compiled separately
+against its locked Alloy consensus 2.5.0, then consumed those bytes with Raiko2's
+unchanged 2.4.2. Public signed legacy/EIP-1559 inputs, optional witnesses,
+124000/124001-byte execution items and a larger witness-only envelope were covered.
+The native encoder source SHA256 was
+`4171e5e1cd72fe46853047fcc21676277c73946318d37cee49c255a3da0cc26e`.
+These are wire fixtures, not valid complete Etna blocks or state-transition proofs.
+
+Strict scoped Clippy and workspace formatting passed. A separate locked
+`#![no_std]` consumer compiled, and its normal dependency tree activated no `std`,
+`use_std` or `use-std` feature. All 1207 other root lock package records remain
+unchanged; only three direct existing-version Alloy edges were added to the fork
+crate. Independent adversarial review and independent behavioral verification
+passed. Validation used host Rust 1.95; no production guest build, ELF refresh,
+real proof, cycle/performance measurement or end-to-end integration is claimed.
 
 A scratch-only patch of #22415 into the current Raiko2 Rust 1.95 graph passed
 14 native tests: the new API consumer plus all seven earlier gate and six
@@ -177,7 +221,8 @@ keeps the merged `f31e7ec5` pin.
 
 **Accept:** valid new app hashes and alternate permitted beneficiaries pass;
 substituted envelope/EL bytes, raw/projection mismatch, height/domain/parent errors,
-malformed canonical input and part-set changes reject. No full-transition claim
+malformed framing and changed authenticated header commitments reject. Full-BlockID
+callers separately reject changed original part sets. No full-transition claim
 is attached to an unauthenticated input or a structural-only result.
 
 ## P03 — Authenticated context and committees

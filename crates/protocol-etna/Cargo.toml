@@ -10,7 +10,10 @@ description = "Etna consensus input verification for Raiko V2"
 workspace = true
 
 [dependencies]
+alloy-consensus.workspace = true
+alloy-eips.workspace = true
 alloy-primitives.workspace = true
+alloy-rlp.workspace = true
 alloy-sol-types.workspace = true
 etna-core.workspace = true
 tendermint = { version = "0.40", default-features = false }

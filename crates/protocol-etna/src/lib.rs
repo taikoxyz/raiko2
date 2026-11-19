@@ -5,6 +5,11 @@
 //! verifies the embedded predecessor commit after the first block. The caller
 //! authenticates the gate's consensus context and predecessor.
 //!
+//! The [`projection`] module follows the revised header/envelope/execution
+//! binding. It checks equality against caller-authenticated context and returns
+//! exact original RLP spans. Nested witness authentication and the remaining
+//! execution, consensus and range checks belong to the composing verifier.
+//!
 //! The [`statement`] module follows the revised landing design. The full
 //! proof must authenticate the deployment, origin, L1 state, committee
 //! schedule and `CometBFT` header chain. It must check the current and next
@@ -14,6 +19,9 @@
 
 #![no_std]
 
+extern crate alloc;
+
+pub mod projection;
 pub mod statement;
 
 use alloy_primitives::B256;

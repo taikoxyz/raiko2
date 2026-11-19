@@ -8640,7 +8640,10 @@ dependencies = [
 name = "raiko2-protocol-etna"
 version = "0.1.0"
 dependencies = [
+ "alloy-consensus 2.4.2",
+ "alloy-eips 2.5.0",
  "alloy-primitives",
+ "alloy-rlp",
  "alloy-sol-types",
  "etna-core",
  "k256",

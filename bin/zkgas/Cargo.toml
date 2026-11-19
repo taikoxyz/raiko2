@@ -26,5 +26,61 @@ num-rational = "0.4.2"
 num-traits = "0.2"
 rustix = { version = "1.1", features = ["fs"] }
 
+alethia-reth-block = { workspace = true, optional = true }
+alethia-reth-consensus = { workspace = true, optional = true }
+alloy-consensus = { workspace = true, optional = true }
+alloy-eips = { workspace = true, optional = true }
+alloy-primitives = { workspace = true, optional = true }
+alloy-evm = { workspace = true, optional = true }
+alloy-rlp = { workspace = true, optional = true }
+alloy-sol-types = { workspace = true, optional = true }
+alloy-trie = { workspace = true, optional = true }
+raiko2-protocol = { workspace = true, optional = true }
+raiko2-protocol-shasta = { workspace = true, optional = true }
+raiko2-stateless = { workspace = true, optional = true }
+reth-ethereum-primitives = { workspace = true, optional = true }
+reth-evm = { workspace = true, optional = true }
+reth-primitives-traits = { workspace = true, optional = true }
+reth-revm = { workspace = true, optional = true }
+reth-trie-common = { workspace = true, optional = true }
+risc0-ethereum-trie = { workspace = true, optional = true }
+taiko-client-protocol = { workspace = true, optional = true }
+alloy-signer = { version = "2.0", default-features = false, optional = true }
+alloy-signer-local-fixture = { package = "alloy-signer-local", version = "2.0", default-features = false, optional = true }
+
 [dev-dependencies]
 raiko2-protocol-shasta.workspace = true
+tempfile = "3"
+
+[features]
+default = []
+fixture = [
+    "dep:alethia-reth-block",
+    "dep:alethia-reth-consensus",
+    "dep:alloy-consensus",
+    "dep:alloy-eips",
+    "dep:alloy-primitives",
+    "dep:alloy-evm",
+    "dep:alloy-rlp",
+    "dep:alloy-sol-types",
+    "dep:alloy-trie",
+    "dep:alloy-signer",
+    "dep:alloy-signer-local-fixture",
+    "raiko2-primitives/kzg-host",
+    "raiko2-primitives/chain-spec-json",
+    "dep:raiko2-protocol",
+    "dep:raiko2-protocol-shasta",
+    "dep:raiko2-stateless",
+    "dep:reth-ethereum-primitives",
+    "dep:reth-evm",
+    "dep:reth-primitives-traits",
+    "dep:reth-revm",
+    "dep:reth-trie-common",
+    "dep:risc0-ethereum-trie",
+    "dep:taiko-client-protocol",
+]
+
+[[bin]]
+name = "zkgas-fixture"
+path = "src/bin/zkgas-fixture.rs"
+required-features = ["fixture"]

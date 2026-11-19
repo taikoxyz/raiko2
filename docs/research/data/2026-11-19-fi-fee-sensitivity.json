@@ -1,0 +1,1049 @@
+{
+  "assumptions": {
+    "arithmetic": "full precision intermediates; each fee must fit uint256; exact unbounded revenue sums",
+    "batch": "sequential enqueue at initial_pending+i; no landing or head advancement",
+    "batch_cost": "same hypothetical incremental PGU for every entry; sum of per-entry ceiling fees",
+    "coverage": "protocol revenue versus assumed reserve-adjusted incremental SP1 cost only",
+    "doubling_interpolated_fee_wei": "q,r=divmod(p,T); floor(F0*2^q*(T+r)/T)",
+    "limits": "not measured Etna FI costs, full cost coverage, proof feasibility, or capacity acceptance",
+    "linear_fee_wei": "floor(F0*(T+p)/T)",
+    "pending": "tail - head, including consumed but unlanded entries",
+    "prices": "explicit sensitivity inputs; existing zkGas prices are unchanged",
+    "required_fee_wei": "ceil(FI_extra_PGU/1e9*SP1_USD_per_billion_PGU*reserve/ETH_USD*1e18)"
+  },
+  "batches": [
+    {
+      "covers_reserve_adjusted_sp1_cost": {
+        "hypothetical 0.2B PGU": true,
+        "hypothetical 15B PGU": true,
+        "hypothetical 1B PGU": true,
+        "hypothetical 3.6B PGU": true
+      },
+      "final_pending": 900,
+      "first_unavailable_pending": null,
+      "initial_pending": 0,
+      "model": "linear",
+      "priced_count": 900,
+      "priced_prefix_fee_eth": "89.91",
+      "priced_prefix_fee_wei": "89910000000000000000",
+      "requested_count": 900,
+      "required_batch_fee_wei": {
+        "hypothetical 0.2B PGU": "67500000000000000",
+        "hypothetical 15B PGU": "5062500000000000000",
+        "hypothetical 1B PGU": "337500000000000000",
+        "hypothetical 3.6B PGU": "1215000000000000000"
+      },
+      "status": "complete",
+      "threshold": 50,
+      "total_fee_eth": "89.91",
+      "total_fee_wei": "89910000000000000000"
+    },
+    {
+      "covers_reserve_adjusted_sp1_cost": {
+        "hypothetical 0.2B PGU": true,
+        "hypothetical 15B PGU": true,
+        "hypothetical 1B PGU": true,
+        "hypothetical 3.6B PGU": true
+      },
+      "final_pending": 900,
+      "first_unavailable_pending": null,
+      "initial_pending": 0,
+      "model": "doubling_interpolated",
+      "priced_count": 900,
+      "priced_prefix_fee_eth": "195296.535",
+      "priced_prefix_fee_wei": "195296535000000000000000",
+      "requested_count": 900,
+      "required_batch_fee_wei": {
+        "hypothetical 0.2B PGU": "67500000000000000",
+        "hypothetical 15B PGU": "5062500000000000000",
+        "hypothetical 1B PGU": "337500000000000000",
+        "hypothetical 3.6B PGU": "1215000000000000000"
+      },
+      "status": "complete",
+      "threshold": 50,
+      "total_fee_eth": "195296.535",
+      "total_fee_wei": "195296535000000000000000"
+    },
+    {
+      "covers_reserve_adjusted_sp1_cost": {
+        "hypothetical 0.2B PGU": true,
+        "hypothetical 15B PGU": true,
+        "hypothetical 1B PGU": true,
+        "hypothetical 3.6B PGU": true
+      },
+      "final_pending": 900,
+      "first_unavailable_pending": null,
+      "initial_pending": 0,
+      "model": "linear",
+      "priced_count": 900,
+      "priced_prefix_fee_eth": "29.2275",
+      "priced_prefix_fee_wei": "29227500000000000000",
+      "requested_count": 900,
+      "required_batch_fee_wei": {
+        "hypothetical 0.2B PGU": "67500000000000000",
+        "hypothetical 15B PGU": "5062500000000000000",
+        "hypothetical 1B PGU": "337500000000000000",
+        "hypothetical 3.6B PGU": "1215000000000000000"
+      },
+      "status": "complete",
+      "threshold": 200,
+      "total_fee_eth": "29.2275",
+      "total_fee_wei": "29227500000000000000"
+    },
+    {
+      "covers_reserve_adjusted_sp1_cost": {
+        "hypothetical 0.2B PGU": true,
+        "hypothetical 15B PGU": true,
+        "hypothetical 1B PGU": true,
+        "hypothetical 3.6B PGU": true
+      },
+      "final_pending": 900,
+      "first_unavailable_pending": null,
+      "initial_pending": 0,
+      "model": "doubling_interpolated",
+      "priced_count": 900,
+      "priced_prefix_fee_eth": "64.885",
+      "priced_prefix_fee_wei": "64885000000000000000",
+      "requested_count": 900,
+      "required_batch_fee_wei": {
+        "hypothetical 0.2B PGU": "67500000000000000",
+        "hypothetical 15B PGU": "5062500000000000000",
+        "hypothetical 1B PGU": "337500000000000000",
+        "hypothetical 3.6B PGU": "1215000000000000000"
+      },
+      "status": "complete",
+      "threshold": 200,
+      "total_fee_eth": "64.885",
+      "total_fee_wei": "64885000000000000000"
+    },
+    {
+      "covers_reserve_adjusted_sp1_cost": {
+        "hypothetical 0.2B PGU": true,
+        "hypothetical 15B PGU": true,
+        "hypothetical 1B PGU": true,
+        "hypothetical 3.6B PGU": true
+      },
+      "final_pending": 900,
+      "first_unavailable_pending": null,
+      "initial_pending": 0,
+      "model": "linear",
+      "priced_count": 900,
+      "priced_prefix_fee_eth": "13.0455",
+      "priced_prefix_fee_wei": "13045500000000000000",
+      "requested_count": 900,
+      "required_batch_fee_wei": {
+        "hypothetical 0.2B PGU": "67500000000000000",
+        "hypothetical 15B PGU": "5062500000000000000",
+        "hypothetical 1B PGU": "337500000000000000",
+        "hypothetical 3.6B PGU": "1215000000000000000"
+      },
+      "status": "complete",
+      "threshold": 1000,
+      "total_fee_eth": "13.0455",
+      "total_fee_wei": "13045500000000000000"
+    },
+    {
+      "covers_reserve_adjusted_sp1_cost": {
+        "hypothetical 0.2B PGU": true,
+        "hypothetical 15B PGU": true,
+        "hypothetical 1B PGU": true,
+        "hypothetical 3.6B PGU": true
+      },
+      "final_pending": 900,
+      "first_unavailable_pending": null,
+      "initial_pending": 0,
+      "model": "doubling_interpolated",
+      "priced_count": 900,
+      "priced_prefix_fee_eth": "13.0455",
+      "priced_prefix_fee_wei": "13045500000000000000",
+      "requested_count": 900,
+      "required_batch_fee_wei": {
+        "hypothetical 0.2B PGU": "67500000000000000",
+        "hypothetical 15B PGU": "5062500000000000000",
+        "hypothetical 1B PGU": "337500000000000000",
+        "hypothetical 3.6B PGU": "1215000000000000000"
+      },
+      "status": "complete",
+      "threshold": 1000,
+      "total_fee_eth": "13.0455",
+      "total_fee_wei": "13045500000000000000"
+    }
+  ],
+  "calculator_sha256": "d1612b6253d5261c557c1f6c80ca996f68725d25532a00c3b9f63c964c9678e5",
+  "config": {
+    "base_fee_wei": "10000000000000000",
+    "doubling_thresholds": [
+      50,
+      200,
+      1000
+    ],
+    "enqueue_count": 900,
+    "eth_usd": "2000",
+    "evidence_kind": "sensitivity",
+    "fi_extra_pgu_scenarios": [
+      {
+        "name": "hypothetical 0.2B PGU",
+        "pgu": "200000000"
+      },
+      {
+        "name": "hypothetical 1B PGU",
+        "pgu": "1000000000"
+      },
+      {
+        "name": "hypothetical 3.6B PGU",
+        "pgu": "3600000000"
+      },
+      {
+        "name": "hypothetical 15B PGU",
+        "pgu": "15000000000"
+      }
+    ],
+    "initial_pending": 0,
+    "pending_samples": [
+      0,
+      25,
+      49,
+      50,
+      100,
+      200,
+      300,
+      400,
+      900
+    ],
+    "reserve_multiplier": "1.5",
+    "schema_version": 1,
+    "sp1_usd_per_billion_pgu": "0.5"
+  },
+  "config_sha256": "3d7aa0ebe7f97e5ed6213869ea6045e77ea1201c1011c30d938d31c0304382f9",
+  "cost_scenarios": [
+    {
+      "evidence_kind": "hypothetical_sensitivity",
+      "incremental_sp1_usd": {
+        "denominator": "10",
+        "numerator": "1"
+      },
+      "name": "hypothetical 0.2B PGU",
+      "pgu": "200000000",
+      "required_fee_eth": "0.000075",
+      "required_fee_wei": "75000000000000",
+      "reserve_adjusted_sp1_usd": {
+        "denominator": "20",
+        "numerator": "3"
+      }
+    },
+    {
+      "evidence_kind": "hypothetical_sensitivity",
+      "incremental_sp1_usd": {
+        "denominator": "2",
+        "numerator": "1"
+      },
+      "name": "hypothetical 1B PGU",
+      "pgu": "1000000000",
+      "required_fee_eth": "0.000375",
+      "required_fee_wei": "375000000000000",
+      "reserve_adjusted_sp1_usd": {
+        "denominator": "4",
+        "numerator": "3"
+      }
+    },
+    {
+      "evidence_kind": "hypothetical_sensitivity",
+      "incremental_sp1_usd": {
+        "denominator": "5",
+        "numerator": "9"
+      },
+      "name": "hypothetical 3.6B PGU",
+      "pgu": "3600000000",
+      "required_fee_eth": "0.00135",
+      "required_fee_wei": "1350000000000000",
+      "reserve_adjusted_sp1_usd": {
+        "denominator": "10",
+        "numerator": "27"
+      }
+    },
+    {
+      "evidence_kind": "hypothetical_sensitivity",
+      "incremental_sp1_usd": {
+        "denominator": "2",
+        "numerator": "15"
+      },
+      "name": "hypothetical 15B PGU",
+      "pgu": "15000000000",
+      "required_fee_eth": "0.005625",
+      "required_fee_wei": "5625000000000000",
+      "reserve_adjusted_sp1_usd": {
+        "denominator": "4",
+        "numerator": "45"
+      }
+    }
+  ],
+  "evidence_kind": "sensitivity",
+  "excluded_costs": [
+    "unmeasured second proof",
+    "landing",
+    "DA",
+    "validator and operator operations",
+    "sender L1 submission gas (not protocol revenue)"
+  ],
+  "samples": [
+    {
+      "covers_reserve_adjusted_sp1_cost": {
+        "hypothetical 0.2B PGU": true,
+        "hypothetical 15B PGU": true,
+        "hypothetical 1B PGU": true,
+        "hypothetical 3.6B PGU": true
+      },
+      "fee_eth": "0.01",
+      "fee_wei": "10000000000000000",
+      "model": "linear",
+      "pending": 0,
+      "status": "available",
+      "threshold": 50
+    },
+    {
+      "covers_reserve_adjusted_sp1_cost": {
+        "hypothetical 0.2B PGU": true,
+        "hypothetical 15B PGU": true,
+        "hypothetical 1B PGU": true,
+        "hypothetical 3.6B PGU": true
+      },
+      "fee_eth": "0.015",
+      "fee_wei": "15000000000000000",
+      "model": "linear",
+      "pending": 25,
+      "status": "available",
+      "threshold": 50
+    },
+    {
+      "covers_reserve_adjusted_sp1_cost": {
+        "hypothetical 0.2B PGU": true,
+        "hypothetical 15B PGU": true,
+        "hypothetical 1B PGU": true,
+        "hypothetical 3.6B PGU": true
+      },
+      "fee_eth": "0.0198",
+      "fee_wei": "19800000000000000",
+      "model": "linear",
+      "pending": 49,
+      "status": "available",
+      "threshold": 50
+    },
+    {
+      "covers_reserve_adjusted_sp1_cost": {
+        "hypothetical 0.2B PGU": true,
+        "hypothetical 15B PGU": true,
+        "hypothetical 1B PGU": true,
+        "hypothetical 3.6B PGU": true
+      },
+      "fee_eth": "0.02",
+      "fee_wei": "20000000000000000",
+      "model": "linear",
+      "pending": 50,
+      "status": "available",
+      "threshold": 50
+    },
+    {
+      "covers_reserve_adjusted_sp1_cost": {
+        "hypothetical 0.2B PGU": true,
+        "hypothetical 15B PGU": true,
+        "hypothetical 1B PGU": true,
+        "hypothetical 3.6B PGU": true
+      },
+      "fee_eth": "0.03",
+      "fee_wei": "30000000000000000",
+      "model": "linear",
+      "pending": 100,
+      "status": "available",
+      "threshold": 50
+    },
+    {
+      "covers_reserve_adjusted_sp1_cost": {
+        "hypothetical 0.2B PGU": true,
+        "hypothetical 15B PGU": true,
+        "hypothetical 1B PGU": true,
+        "hypothetical 3.6B PGU": true
+      },
+      "fee_eth": "0.05",
+      "fee_wei": "50000000000000000",
+      "model": "linear",
+      "pending": 200,
+      "status": "available",
+      "threshold": 50
+    },
+    {
+      "covers_reserve_adjusted_sp1_cost": {
+        "hypothetical 0.2B PGU": true,
+        "hypothetical 15B PGU": true,
+        "hypothetical 1B PGU": true,
+        "hypothetical 3.6B PGU": true
+      },
+      "fee_eth": "0.07",
+      "fee_wei": "70000000000000000",
+      "model": "linear",
+      "pending": 300,
+      "status": "available",
+      "threshold": 50
+    },
+    {
+      "covers_reserve_adjusted_sp1_cost": {
+        "hypothetical 0.2B PGU": true,
+        "hypothetical 15B PGU": true,
+        "hypothetical 1B PGU": true,
+        "hypothetical 3.6B PGU": true
+      },
+      "fee_eth": "0.09",
+      "fee_wei": "90000000000000000",
+      "model": "linear",
+      "pending": 400,
+      "status": "available",
+      "threshold": 50
+    },
+    {
+      "covers_reserve_adjusted_sp1_cost": {
+        "hypothetical 0.2B PGU": true,
+        "hypothetical 15B PGU": true,
+        "hypothetical 1B PGU": true,
+        "hypothetical 3.6B PGU": true
+      },
+      "fee_eth": "0.19",
+      "fee_wei": "190000000000000000",
+      "model": "linear",
+      "pending": 900,
+      "status": "available",
+      "threshold": 50
+    },
+    {
+      "covers_reserve_adjusted_sp1_cost": {
+        "hypothetical 0.2B PGU": true,
+        "hypothetical 15B PGU": true,
+        "hypothetical 1B PGU": true,
+        "hypothetical 3.6B PGU": true
+      },
+      "fee_eth": "0.01",
+      "fee_wei": "10000000000000000",
+      "model": "doubling_interpolated",
+      "pending": 0,
+      "status": "available",
+      "threshold": 50
+    },
+    {
+      "covers_reserve_adjusted_sp1_cost": {
+        "hypothetical 0.2B PGU": true,
+        "hypothetical 15B PGU": true,
+        "hypothetical 1B PGU": true,
+        "hypothetical 3.6B PGU": true
+      },
+      "fee_eth": "0.015",
+      "fee_wei": "15000000000000000",
+      "model": "doubling_interpolated",
+      "pending": 25,
+      "status": "available",
+      "threshold": 50
+    },
+    {
+      "covers_reserve_adjusted_sp1_cost": {
+        "hypothetical 0.2B PGU": true,
+        "hypothetical 15B PGU": true,
+        "hypothetical 1B PGU": true,
+        "hypothetical 3.6B PGU": true
+      },
+      "fee_eth": "0.0198",
+      "fee_wei": "19800000000000000",
+      "model": "doubling_interpolated",
+      "pending": 49,
+      "status": "available",
+      "threshold": 50
+    },
+    {
+      "covers_reserve_adjusted_sp1_cost": {
+        "hypothetical 0.2B PGU": true,
+        "hypothetical 15B PGU": true,
+        "hypothetical 1B PGU": true,
+        "hypothetical 3.6B PGU": true
+      },
+      "fee_eth": "0.02",
+      "fee_wei": "20000000000000000",
+      "model": "doubling_interpolated",
+      "pending": 50,
+      "status": "available",
+      "threshold": 50
+    },
+    {
+      "covers_reserve_adjusted_sp1_cost": {
+        "hypothetical 0.2B PGU": true,
+        "hypothetical 15B PGU": true,
+        "hypothetical 1B PGU": true,
+        "hypothetical 3.6B PGU": true
+      },
+      "fee_eth": "0.04",
+      "fee_wei": "40000000000000000",
+      "model": "doubling_interpolated",
+      "pending": 100,
+      "status": "available",
+      "threshold": 50
+    },
+    {
+      "covers_reserve_adjusted_sp1_cost": {
+        "hypothetical 0.2B PGU": true,
+        "hypothetical 15B PGU": true,
+        "hypothetical 1B PGU": true,
+        "hypothetical 3.6B PGU": true
+      },
+      "fee_eth": "0.16",
+      "fee_wei": "160000000000000000",
+      "model": "doubling_interpolated",
+      "pending": 200,
+      "status": "available",
+      "threshold": 50
+    },
+    {
+      "covers_reserve_adjusted_sp1_cost": {
+        "hypothetical 0.2B PGU": true,
+        "hypothetical 15B PGU": true,
+        "hypothetical 1B PGU": true,
+        "hypothetical 3.6B PGU": true
+      },
+      "fee_eth": "0.64",
+      "fee_wei": "640000000000000000",
+      "model": "doubling_interpolated",
+      "pending": 300,
+      "status": "available",
+      "threshold": 50
+    },
+    {
+      "covers_reserve_adjusted_sp1_cost": {
+        "hypothetical 0.2B PGU": true,
+        "hypothetical 15B PGU": true,
+        "hypothetical 1B PGU": true,
+        "hypothetical 3.6B PGU": true
+      },
+      "fee_eth": "2.56",
+      "fee_wei": "2560000000000000000",
+      "model": "doubling_interpolated",
+      "pending": 400,
+      "status": "available",
+      "threshold": 50
+    },
+    {
+      "covers_reserve_adjusted_sp1_cost": {
+        "hypothetical 0.2B PGU": true,
+        "hypothetical 15B PGU": true,
+        "hypothetical 1B PGU": true,
+        "hypothetical 3.6B PGU": true
+      },
+      "fee_eth": "2621.44",
+      "fee_wei": "2621440000000000000000",
+      "model": "doubling_interpolated",
+      "pending": 900,
+      "status": "available",
+      "threshold": 50
+    },
+    {
+      "covers_reserve_adjusted_sp1_cost": {
+        "hypothetical 0.2B PGU": true,
+        "hypothetical 15B PGU": true,
+        "hypothetical 1B PGU": true,
+        "hypothetical 3.6B PGU": true
+      },
+      "fee_eth": "0.01",
+      "fee_wei": "10000000000000000",
+      "model": "linear",
+      "pending": 0,
+      "status": "available",
+      "threshold": 200
+    },
+    {
+      "covers_reserve_adjusted_sp1_cost": {
+        "hypothetical 0.2B PGU": true,
+        "hypothetical 15B PGU": true,
+        "hypothetical 1B PGU": true,
+        "hypothetical 3.6B PGU": true
+      },
+      "fee_eth": "0.01125",
+      "fee_wei": "11250000000000000",
+      "model": "linear",
+      "pending": 25,
+      "status": "available",
+      "threshold": 200
+    },
+    {
+      "covers_reserve_adjusted_sp1_cost": {
+        "hypothetical 0.2B PGU": true,
+        "hypothetical 15B PGU": true,
+        "hypothetical 1B PGU": true,
+        "hypothetical 3.6B PGU": true
+      },
+      "fee_eth": "0.01245",
+      "fee_wei": "12450000000000000",
+      "model": "linear",
+      "pending": 49,
+      "status": "available",
+      "threshold": 200
+    },
+    {
+      "covers_reserve_adjusted_sp1_cost": {
+        "hypothetical 0.2B PGU": true,
+        "hypothetical 15B PGU": true,
+        "hypothetical 1B PGU": true,
+        "hypothetical 3.6B PGU": true
+      },
+      "fee_eth": "0.0125",
+      "fee_wei": "12500000000000000",
+      "model": "linear",
+      "pending": 50,
+      "status": "available",
+      "threshold": 200
+    },
+    {
+      "covers_reserve_adjusted_sp1_cost": {
+        "hypothetical 0.2B PGU": true,
+        "hypothetical 15B PGU": true,
+        "hypothetical 1B PGU": true,
+        "hypothetical 3.6B PGU": true
+      },
+      "fee_eth": "0.015",
+      "fee_wei": "15000000000000000",
+      "model": "linear",
+      "pending": 100,
+      "status": "available",
+      "threshold": 200
+    },
+    {
+      "covers_reserve_adjusted_sp1_cost": {
+        "hypothetical 0.2B PGU": true,
+        "hypothetical 15B PGU": true,
+        "hypothetical 1B PGU": true,
+        "hypothetical 3.6B PGU": true
+      },
+      "fee_eth": "0.02",
+      "fee_wei": "20000000000000000",
+      "model": "linear",
+      "pending": 200,
+      "status": "available",
+      "threshold": 200
+    },
+    {
+      "covers_reserve_adjusted_sp1_cost": {
+        "hypothetical 0.2B PGU": true,
+        "hypothetical 15B PGU": true,
+        "hypothetical 1B PGU": true,
+        "hypothetical 3.6B PGU": true
+      },
+      "fee_eth": "0.025",
+      "fee_wei": "25000000000000000",
+      "model": "linear",
+      "pending": 300,
+      "status": "available",
+      "threshold": 200
+    },
+    {
+      "covers_reserve_adjusted_sp1_cost": {
+        "hypothetical 0.2B PGU": true,
+        "hypothetical 15B PGU": true,
+        "hypothetical 1B PGU": true,
+        "hypothetical 3.6B PGU": true
+      },
+      "fee_eth": "0.03",
+      "fee_wei": "30000000000000000",
+      "model": "linear",
+      "pending": 400,
+      "status": "available",
+      "threshold": 200
+    },
+    {
+      "covers_reserve_adjusted_sp1_cost": {
+        "hypothetical 0.2B PGU": true,
+        "hypothetical 15B PGU": true,
+        "hypothetical 1B PGU": true,
+        "hypothetical 3.6B PGU": true
+      },
+      "fee_eth": "0.055",
+      "fee_wei": "55000000000000000",
+      "model": "linear",
+      "pending": 900,
+      "status": "available",
+      "threshold": 200
+    },
+    {
+      "covers_reserve_adjusted_sp1_cost": {
+        "hypothetical 0.2B PGU": true,
+        "hypothetical 15B PGU": true,
+        "hypothetical 1B PGU": true,
+        "hypothetical 3.6B PGU": true
+      },
+      "fee_eth": "0.01",
+      "fee_wei": "10000000000000000",
+      "model": "doubling_interpolated",
+      "pending": 0,
+      "status": "available",
+      "threshold": 200
+    },
+    {
+      "covers_reserve_adjusted_sp1_cost": {
+        "hypothetical 0.2B PGU": true,
+        "hypothetical 15B PGU": true,
+        "hypothetical 1B PGU": true,
+        "hypothetical 3.6B PGU": true
+      },
+      "fee_eth": "0.01125",
+      "fee_wei": "11250000000000000",
+      "model": "doubling_interpolated",
+      "pending": 25,
+      "status": "available",
+      "threshold": 200
+    },
+    {
+      "covers_reserve_adjusted_sp1_cost": {
+        "hypothetical 0.2B PGU": true,
+        "hypothetical 15B PGU": true,
+        "hypothetical 1B PGU": true,
+        "hypothetical 3.6B PGU": true
+      },
+      "fee_eth": "0.01245",
+      "fee_wei": "12450000000000000",
+      "model": "doubling_interpolated",
+      "pending": 49,
+      "status": "available",
+      "threshold": 200
+    },
+    {
+      "covers_reserve_adjusted_sp1_cost": {
+        "hypothetical 0.2B PGU": true,
+        "hypothetical 15B PGU": true,
+        "hypothetical 1B PGU": true,
+        "hypothetical 3.6B PGU": true
+      },
+      "fee_eth": "0.0125",
+      "fee_wei": "12500000000000000",
+      "model": "doubling_interpolated",
+      "pending": 50,
+      "status": "available",
+      "threshold": 200
+    },
+    {
+      "covers_reserve_adjusted_sp1_cost": {
+        "hypothetical 0.2B PGU": true,
+        "hypothetical 15B PGU": true,
+        "hypothetical 1B PGU": true,
+        "hypothetical 3.6B PGU": true
+      },
+      "fee_eth": "0.015",
+      "fee_wei": "15000000000000000",
+      "model": "doubling_interpolated",
+      "pending": 100,
+      "status": "available",
+      "threshold": 200
+    },
+    {
+      "covers_reserve_adjusted_sp1_cost": {
+        "hypothetical 0.2B PGU": true,
+        "hypothetical 15B PGU": true,
+        "hypothetical 1B PGU": true,
+        "hypothetical 3.6B PGU": true
+      },
+      "fee_eth": "0.02",
+      "fee_wei": "20000000000000000",
+      "model": "doubling_interpolated",
+      "pending": 200,
+      "status": "available",
+      "threshold": 200
+    },
+    {
+      "covers_reserve_adjusted_sp1_cost": {
+        "hypothetical 0.2B PGU": true,
+        "hypothetical 15B PGU": true,
+        "hypothetical 1B PGU": true,
+        "hypothetical 3.6B PGU": true
+      },
+      "fee_eth": "0.03",
+      "fee_wei": "30000000000000000",
+      "model": "doubling_interpolated",
+      "pending": 300,
+      "status": "available",
+      "threshold": 200
+    },
+    {
+      "covers_reserve_adjusted_sp1_cost": {
+        "hypothetical 0.2B PGU": true,
+        "hypothetical 15B PGU": true,
+        "hypothetical 1B PGU": true,
+        "hypothetical 3.6B PGU": true
+      },
+      "fee_eth": "0.04",
+      "fee_wei": "40000000000000000",
+      "model": "doubling_interpolated",
+      "pending": 400,
+      "status": "available",
+      "threshold": 200
+    },
+    {
+      "covers_reserve_adjusted_sp1_cost": {
+        "hypothetical 0.2B PGU": true,
+        "hypothetical 15B PGU": true,
+        "hypothetical 1B PGU": true,
+        "hypothetical 3.6B PGU": true
+      },
+      "fee_eth": "0.24",
+      "fee_wei": "240000000000000000",
+      "model": "doubling_interpolated",
+      "pending": 900,
+      "status": "available",
+      "threshold": 200
+    },
+    {
+      "covers_reserve_adjusted_sp1_cost": {
+        "hypothetical 0.2B PGU": true,
+        "hypothetical 15B PGU": true,
+        "hypothetical 1B PGU": true,
+        "hypothetical 3.6B PGU": true
+      },
+      "fee_eth": "0.01",
+      "fee_wei": "10000000000000000",
+      "model": "linear",
+      "pending": 0,
+      "status": "available",
+      "threshold": 1000
+    },
+    {
+      "covers_reserve_adjusted_sp1_cost": {
+        "hypothetical 0.2B PGU": true,
+        "hypothetical 15B PGU": true,
+        "hypothetical 1B PGU": true,
+        "hypothetical 3.6B PGU": true
+      },
+      "fee_eth": "0.01025",
+      "fee_wei": "10250000000000000",
+      "model": "linear",
+      "pending": 25,
+      "status": "available",
+      "threshold": 1000
+    },
+    {
+      "covers_reserve_adjusted_sp1_cost": {
+        "hypothetical 0.2B PGU": true,
+        "hypothetical 15B PGU": true,
+        "hypothetical 1B PGU": true,
+        "hypothetical 3.6B PGU": true
+      },
+      "fee_eth": "0.01049",
+      "fee_wei": "10490000000000000",
+      "model": "linear",
+      "pending": 49,
+      "status": "available",
+      "threshold": 1000
+    },
+    {
+      "covers_reserve_adjusted_sp1_cost": {
+        "hypothetical 0.2B PGU": true,
+        "hypothetical 15B PGU": true,
+        "hypothetical 1B PGU": true,
+        "hypothetical 3.6B PGU": true
+      },
+      "fee_eth": "0.0105",
+      "fee_wei": "10500000000000000",
+      "model": "linear",
+      "pending": 50,
+      "status": "available",
+      "threshold": 1000
+    },
+    {
+      "covers_reserve_adjusted_sp1_cost": {
+        "hypothetical 0.2B PGU": true,
+        "hypothetical 15B PGU": true,
+        "hypothetical 1B PGU": true,
+        "hypothetical 3.6B PGU": true
+      },
+      "fee_eth": "0.011",
+      "fee_wei": "11000000000000000",
+      "model": "linear",
+      "pending": 100,
+      "status": "available",
+      "threshold": 1000
+    },
+    {
+      "covers_reserve_adjusted_sp1_cost": {
+        "hypothetical 0.2B PGU": true,
+        "hypothetical 15B PGU": true,
+        "hypothetical 1B PGU": true,
+        "hypothetical 3.6B PGU": true
+      },
+      "fee_eth": "0.012",
+      "fee_wei": "12000000000000000",
+      "model": "linear",
+      "pending": 200,
+      "status": "available",
+      "threshold": 1000
+    },
+    {
+      "covers_reserve_adjusted_sp1_cost": {
+        "hypothetical 0.2B PGU": true,
+        "hypothetical 15B PGU": true,
+        "hypothetical 1B PGU": true,
+        "hypothetical 3.6B PGU": true
+      },
+      "fee_eth": "0.013",
+      "fee_wei": "13000000000000000",
+      "model": "linear",
+      "pending": 300,
+      "status": "available",
+      "threshold": 1000
+    },
+    {
+      "covers_reserve_adjusted_sp1_cost": {
+        "hypothetical 0.2B PGU": true,
+        "hypothetical 15B PGU": true,
+        "hypothetical 1B PGU": true,
+        "hypothetical 3.6B PGU": true
+      },
+      "fee_eth": "0.014",
+      "fee_wei": "14000000000000000",
+      "model": "linear",
+      "pending": 400,
+      "status": "available",
+      "threshold": 1000
+    },
+    {
+      "covers_reserve_adjusted_sp1_cost": {
+        "hypothetical 0.2B PGU": true,
+        "hypothetical 15B PGU": true,
+        "hypothetical 1B PGU": true,
+        "hypothetical 3.6B PGU": true
+      },
+      "fee_eth": "0.019",
+      "fee_wei": "19000000000000000",
+      "model": "linear",
+      "pending": 900,
+      "status": "available",
+      "threshold": 1000
+    },
+    {
+      "covers_reserve_adjusted_sp1_cost": {
+        "hypothetical 0.2B PGU": true,
+        "hypothetical 15B PGU": true,
+        "hypothetical 1B PGU": true,
+        "hypothetical 3.6B PGU": true
+      },
+      "fee_eth": "0.01",
+      "fee_wei": "10000000000000000",
+      "model": "doubling_interpolated",
+      "pending": 0,
+      "status": "available",
+      "threshold": 1000
+    },
+    {
+      "covers_reserve_adjusted_sp1_cost": {
+        "hypothetical 0.2B PGU": true,
+        "hypothetical 15B PGU": true,
+        "hypothetical 1B PGU": true,
+        "hypothetical 3.6B PGU": true
+      },
+      "fee_eth": "0.01025",
+      "fee_wei": "10250000000000000",
+      "model": "doubling_interpolated",
+      "pending": 25,
+      "status": "available",
+      "threshold": 1000
+    },
+    {
+      "covers_reserve_adjusted_sp1_cost": {
+        "hypothetical 0.2B PGU": true,
+        "hypothetical 15B PGU": true,
+        "hypothetical 1B PGU": true,
+        "hypothetical 3.6B PGU": true
+      },
+      "fee_eth": "0.01049",
+      "fee_wei": "10490000000000000",
+      "model": "doubling_interpolated",
+      "pending": 49,
+      "status": "available",
+      "threshold": 1000
+    },
+    {
+      "covers_reserve_adjusted_sp1_cost": {
+        "hypothetical 0.2B PGU": true,
+        "hypothetical 15B PGU": true,
+        "hypothetical 1B PGU": true,
+        "hypothetical 3.6B PGU": true
+      },
+      "fee_eth": "0.0105",
+      "fee_wei": "10500000000000000",
+      "model": "doubling_interpolated",
+      "pending": 50,
+      "status": "available",
+      "threshold": 1000
+    },
+    {
+      "covers_reserve_adjusted_sp1_cost": {
+        "hypothetical 0.2B PGU": true,
+        "hypothetical 15B PGU": true,
+        "hypothetical 1B PGU": true,
+        "hypothetical 3.6B PGU": true
+      },
+      "fee_eth": "0.011",
+      "fee_wei": "11000000000000000",
+      "model": "doubling_interpolated",
+      "pending": 100,
+      "status": "available",
+      "threshold": 1000
+    },
+    {
+      "covers_reserve_adjusted_sp1_cost": {
+        "hypothetical 0.2B PGU": true,
+        "hypothetical 15B PGU": true,
+        "hypothetical 1B PGU": true,
+        "hypothetical 3.6B PGU": true
+      },
+      "fee_eth": "0.012",
+      "fee_wei": "12000000000000000",
+      "model": "doubling_interpolated",
+      "pending": 200,
+      "status": "available",
+      "threshold": 1000
+    },
+    {
+      "covers_reserve_adjusted_sp1_cost": {
+        "hypothetical 0.2B PGU": true,
+        "hypothetical 15B PGU": true,
+        "hypothetical 1B PGU": true,
+        "hypothetical 3.6B PGU": true
+      },
+      "fee_eth": "0.013",
+      "fee_wei": "13000000000000000",
+      "model": "doubling_interpolated",
+      "pending": 300,
+      "status": "available",
+      "threshold": 1000
+    },
+    {
+      "covers_reserve_adjusted_sp1_cost": {
+        "hypothetical 0.2B PGU": true,
+        "hypothetical 15B PGU": true,
+        "hypothetical 1B PGU": true,
+        "hypothetical 3.6B PGU": true
+      },
+      "fee_eth": "0.014",
+      "fee_wei": "14000000000000000",
+      "model": "doubling_interpolated",
+      "pending": 400,
+      "status": "available",
+      "threshold": 1000
+    },
+    {
+      "covers_reserve_adjusted_sp1_cost": {
+        "hypothetical 0.2B PGU": true,
+        "hypothetical 15B PGU": true,
+        "hypothetical 1B PGU": true,
+        "hypothetical 3.6B PGU": true
+      },
+      "fee_eth": "0.019",
+      "fee_wei": "19000000000000000",
+      "model": "doubling_interpolated",
+      "pending": 900,
+      "status": "available",
+      "threshold": 1000
+    }
+  ],
+  "schema_version": 1,
+  "sensitivity_only": true,
+  "status": "complete"
+}

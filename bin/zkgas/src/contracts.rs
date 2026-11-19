@@ -1,7 +1,7 @@
 //! Independently versioned, strict composition contracts. Pricing remains in zkgas-trace.
 use std::collections::BTreeMap;
 
-use raiko2_zkgas_trace::ProposalWorkloadQuote;
+use raiko2_zkgas_trace::{ExecutionProfile, ProposalWorkloadQuote};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 use serde_json::Value;
 
@@ -10,6 +10,11 @@ pub const MAX_OPAQUE_DEPTH: usize = 16;
 pub const MAX_OPAQUE_ENTRIES: usize = 1_024;
 pub const MAX_INPUT_ROWS: usize = 10_000;
 pub const MAX_OBSERVATION_ROWS: usize = 10_000;
+
+#[allow(clippy::trivially_copy_pass_by_ref)] // Serde's skip predicate receives a reference.
+pub(crate) fn execution_profile_is_legacy(profile: &ExecutionProfile) -> bool {
+    *profile == ExecutionProfile::LegacyUnzen
+}
 
 fn version_one<'de, D: Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
     let version = u32::deserialize(d)?;
@@ -260,6 +265,7 @@ wire! { pub struct ProposalIdentityV1 {
 } }
 wire! { pub struct CompleteQuoteV1 {
     #[serde(deserialize_with = "version_one")] pub schema_version: u32,
+    #[serde(default, skip_serializing_if = "execution_profile_is_legacy")] pub execution_profile: ExecutionProfile,
     pub key: QuoteKey,
     pub executable: ExecutableIdentity,
     pub input_source: InputSourceV1,
@@ -273,6 +279,7 @@ wire! { pub struct CompleteQuoteV1 {
 } }
 wire! { pub struct FailedQuoteV1 {
     #[serde(deserialize_with = "version_one")] pub schema_version: u32,
+    #[serde(default, skip_serializing_if = "execution_profile_is_legacy")] pub execution_profile: ExecutionProfile,
     pub corpus_id: String,
     pub sample_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")] pub verified_key: Option<QuoteKey>,

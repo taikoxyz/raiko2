@@ -55,6 +55,28 @@ Natural-corpus rates and correlations include a declared confidence or resamplin
 sample supports one. Controlled and adversarial maxima are exact observed bounds, not confidence
 claims.
 
+### Controlled-workload semantic evidence
+
+Numerical replay and source hashes do not establish that a controlled program executes its
+declared workload. For operand-, branch-, size- or terminal-sensitive families, the proposed
+evidence contract also records:
+
+- the intended operands, branch and expected result or terminal condition;
+- independently decoded actual operands, including order, width and signedness;
+- focused native confirmation of the relevant result, success/failure and completed counts;
+- fitting and validation partitions bound to the qualified program/input identities; and
+- explicit limits for zero-only, symmetric, early-return and intentional failure controls.
+
+A successful receipt, a zero result, matching opcode totals or small fit residuals can all coexist
+with the wrong operands. Fit and holdout rows produced by the same defective generator do not
+independently validate its semantics. Use an independent operand/result oracle appropriate to the
+claimed family; this need not require a full proof or a full execution trace for every row.
+Preserve rejected or mislabeled evidence and identify which claims it cannot support. Deliberate
+conservative tariffs remain distinguishable from measured normal-path costs.
+
+The [BLOCKHASH calibration erratum](research/2026-10-31-calibration-semantics.md) supplies a concrete
+case. This addition remains part of the draft standard, not an adopted production gate.
+
 ### Observation surfaces
 
 Every score, metric, predicate, and limit binds the exact observation surface and execution stage
@@ -62,6 +84,28 @@ that produces it. In the current architecture, relevant surfaces include the nod
 block-local score and the prover host's full-replay score enriched with proposal input, exact
 block-end resource, MPT, payload, and blob observations. These are distinct measurements even when
 they share a model identity.
+
+For the current SP1 workload campaign, retain three quantities for each identical proposal input:
+the complete proposal estimate `Q_proposal`, the node-observable mining estimate for each block
+`Q_node,b` and its proposal aggregate `Q_node`, and actual proposal SP1 PGU `A` under the
+named frozen program. When both estimates have the declared PGU semantics, report `A / Q_proposal`
+and `A / Q_node`, their independent underpricing flags (`A > Q`), and absolute shortfalls. Keep
+small-input and zero-repetition controls in both comparisons. A full proposal quote covering `A`
+does not mean the mining estimate covers it. Comparing a node sum with proposal actual is an
+aggregate observability diagnostic; it does not assign actual PGU to any individual block.
+
+Preserve the producer's aggregation and rounding. The current quote API exposes
+`block_local_known_pgu = ceil(sum(block_known_scaled) / scale)` alongside
+`sum_of_block_known_pgu = sum(ceil(block_known_scaled / scale))`. Retain the individual block
+estimates and both totals for multi-block proposals; name the denominator actually used. The
+current controlled single-block cases have equal totals. Rounding does not allocate actual
+proposal PGU to blocks.
+
+The current priority is finding gaps in the block-mining-aware model. Matched increments help
+distinguish fixed costs from repeatable scaling deficits, but do not replace either full ratio or
+erase controls with large actual/node ratios. Adding a proposal-aware estimate and allocating its
+cost back to mining remains an unresolved design option, not an assumed bridge or a correction
+applied to these observations.
 
 Prove-only offline completion cannot establish the safety of node admission. A node admission claim
 must use the candidate-prefix score computable from node-observable inputs, or a separately
@@ -165,6 +209,55 @@ the declared domain has `A <= C`. A zero denominator is not applicable, not a pa
 
 Finite zero counts cover only the declared domain. Complete routing, bounded dimensions, monotonic
 pricing, and fail-closed behavior establish the structural boundary.
+
+#### Gas-bounded priority and pricing complexity
+
+For the current SP1 research worklist, apply the same severity dimension to every pricing family:
+opcodes, precompiles, memory, witness/MPT, payload and transaction/block/proposal-level terms.
+Use a30,000,000 charged-EVM-gas block budget and the positive absolute underpricing in matched
+SP1 PGU units:
+
+```text
+node_shortfall(x)     = max(0, actual_SP1_PGU(x) - node_estimate_PGU(x))
+proposal_shortfall(x) = max(0, actual_SP1_PGU(x) - full_proposal_estimate_PGU(x))
+worst_observed_node_shortfall_30m = max(node_shortfall(x) over tested valid blocks with gas_used <= 30,000,000)
+```
+
+Keep the campaign's honest minimal-input/witness eligibility rule. If no eligible block was tested,
+this maximum is not applicable rather than zero. A block already exceeding the shortfall threshold
+below30M remains relevant; exact saturation is not an eligibility requirement.
+
+For block-aware work, the node shortfall controls the priority; report the full-proposal shortfall
+separately. More than2,000,000,000PGU of shortfall within this budget is high priority;
+at or below2,000,000,000 is low priority in the tested domain and may remain a documented TODO.
+The threshold concerns the missing workload, not total actual PGU or a ratio. High ratios remain
+useful search diagnostics, including controls, without automatically requiring a complex fix.
+Record the exact model, program, input/assembly, gas usage and any node admission limit/filter.
+A gas-only experiment does not establish that a candidate also passes a separately selected filter.
+
+Use receipt charged gas, including intrinsic, floor, refund and system/Anchor effects. Keep those
+effects and any gross-execution-gas diagnostic explicit. Controlled single-block proposals provide
+matched whole-proposal actuals for this block-budget diagnostic. Multi-block context studies retain
+their actual whole-proposal results and block counts separately; do not divide proposal PGU into
+invented block truth. Count proposal-once startup once. State whether a reported30M result is a
+saturation measurement, an extrapolation or a structural bound. A short-sample extrapolation can
+support provisional prioritization, but cannot certify the30M maximum or become a measured result.
+
+Evaluate freely composed transactions and mixed workload families under the same total gas budget.
+Independent low-priority findings do not establish a low-priority combined block. Keep baseline
+shortfalls, growth shortfalls, maximum actual workload and original literal ratios visible alongside
+this severity dimension. This worklist threshold changes neither admission limits nor the separate
+proposal-capacity/deadline policy.
+
+Pricing precision is traded against implementation, runtime and maintenance cost. This applies to
+new fixes and to simplifying existing rules: an opcode special case, witness selector or
+level-aware tariff can be replaced by a simpler candidate when gas-bounded composition tests and
+normal-workload compatibility support accepting the remaining low-priority discrepancy. Record
+the removed branches/selectors, price changes and observed residuals; retain old data and model
+identities. Prefer an explicit small residual/TODO to complexity whose measured benefit does not
+justify its cost. The present engineering focus remains block-mining-aware workload pricing;
+proposal-aware allocation remains undecided. See the
+[initial application and numerical evidence](research/2026-11-02-gas-bounded-pricing-priority.md).
 
 ### 4. Normal-workload availability
 

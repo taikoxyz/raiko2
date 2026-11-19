@@ -518,7 +518,8 @@ All `*_scaled` values use a fixed-point scale of `10^18`. For each block `b`, th
 implemented node-side Shadow subtotal is:
 
 ```text
-N_b = fixed_b + operations_b + evm_local_resources_b + committed_payload_b
+N_b = fixed_b + authorization_b + access_list_b + code_preparation_b
+    + operations_b + storage_journal_b + evm_local_resources_b + committed_payload_b
 ```
 
 These terms are reported under `blocks[b].node.pricing`. `feature_error_scaled` is attribution
@@ -534,10 +535,15 @@ fixed = 1,280,652.929819390011787524
       +   172,429.766934792317965893 * started_non_anchor_tx
       +     5,017                         * native_transfer
 
+authorization = 200,000 * raw_authorization_entries
+access_list = 8,192 * raw_access_list_address_items
+code_preparation = 8,192 * nonempty_events + 32 * prepared_bytes
 operations = sum_route(compose(accepted, incremental, structural) + feature_error)
+           + 64 * normal_dispatch_count
+storage_journal = 384 * storage_journal_work_units
 
 resources(A, Sa, Sw, Ch, Cb)
-  = 12,162*A + 9,152*Sa + 20,296*Sw + 2,971*Ch + 2*Cb
+  = 12,162*A + 9,152*Sa + 20,296*Sw + 2,971*Ch + 64*Cb
 ```
 
 Here `A`, `Sa`, `Sw`, `Ch`, and `Cb` are unique accounts, storage accesses, storage writes, code
@@ -553,12 +559,13 @@ For each block, `input_transaction_count` is the number of serialized candidates
 Pre-execution rejections can therefore be consumed without being attempted, while a candidate
 discarded after execution contributes to attempted fixed/operation work without becoming committed.
 
-The complete replay-side block quote uses attempted fixed/operation work, the exact committed
+The complete replay-side block quote uses attempted execution contributions, the exact committed
 block-end resource term, and actual stateless MPT work:
 
 ```text
-B_b = attempted_fixed_b + attempted_operations_b + committed_exact_resources_b + mpt_b
-    + committed_payload_b
+B_b = attempted_fixed_b + attempted_authorization_b + attempted_access_list_b
+    + attempted_code_preparation_b + attempted_operations_b + attempted_storage_journal_b
+    + committed_exact_resources_b + mpt_b + committed_payload_b
 
 committed_payload_b = 256*committed_canonical_tx_bytes_b
                     + 16,384*committed_nonempty_payload_tx_b
@@ -567,6 +574,15 @@ mpt(P, M, Hh, De, Dh, Sc, Dn)
   = 256*P + 5,000*M + 3,000*Hh + 8,000*De + 3,000*Dh
     + 400,000*Sc + 400,000*Dn
 ```
+
+`storage_journal_work_units` observes physical journal materialization opportunities and potential
+lookups per transaction and storage owner; it is independent of block-wide unique MPT selectors.
+The observer groups the numeric raw slot low32, verified against the current sampled guest's
+little-endian comparator. Its conservative work formula and calibration limits are documented in
+[the storage-journal record](research/2026-11-05-storage-journal-prefix.md). The journal term is
+separate from operations and resources and is absent from proposal-once pricing. The ordinary
+opcode dispatch reserve is already in operations. All numeric coefficients shown above are
+normalized PGU; the serialized contributions multiply them by the fixed-point scale.
 
 The raw exact resource and seven MPT selectors are under `blocks[b].prove`; their priced terms are
 `prove.pricing.resources_scaled` and `prove.pricing.mpt_scaled`. `prove.committed_payload` independently
@@ -609,10 +625,14 @@ The optional `raiko2-stateless/mpt-metrics` feature remains available for compan
 [PR #284](https://github.com/taikoxyz/raiko2/pull/284)'s calibration tooling. The normal production
 path does not enable this instrumentation.
 
-The embedded calibration/Unzen-normalization profile retains its original model and program
-identities. It is historical provenance, not a runtime pricing selector or certification for
-a newer model. A new runtime content address requires an explicitly matching comparison
-profile; do not retag the old calibration or treat raw Unzen scores as PGU. Archived quotes
+The embedded default comparison profile is `bin/zkgas/profiles/sp1-research-current.toml`:
+numerical model `80160649…`, research ELF `b76baf2e…`, SP1 SDK `6.3.0`, execute and SP1 PGU. It requires every named
+identity to match and includes no old Unzen normalization. This is a research compatibility
+profile, not certification for the production program or another SDK. The original `93d04edd…` / `ba5ab702…`
+profile and normalization remain an explicit historical `--profiles` option at
+`bin/zkgas/profiles/sp1-pricing-calibration-v1.toml`. A new runtime content address requires
+an explicitly matching comparison profile; do not retag the old calibration or treat raw
+Unzen scores as PGU. Archived quotes
 retain their producer revision. The initial report structure now requires committed payload
 selectors; use that pinned producer for old serialized reports, or re-quote their unchanged
 GuestInput with the current tools. Missing selectors are rejected rather than defaulted to zero.

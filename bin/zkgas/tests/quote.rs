@@ -615,6 +615,41 @@ fn manifest_preserves_order_raw_hash_and_metadata() {
 }
 
 #[test]
+fn explicit_execution_profile_labels_each_manifest_row_and_failure() {
+    use raiko2_zkgas_trace::ExecutionProfile;
+
+    let dir = TestDir::new();
+    let bytes = bincode::serialize(&fixture()).unwrap();
+    fs::write(dir.path().join("input.bin"), &bytes).unwrap();
+    let mut args = batch_args(
+        &dir,
+        vec![
+            sample("first", "input.bin", &bytes),
+            sample("missing", "missing.bin", &bytes),
+            sample("last", "input.bin", &bytes),
+        ],
+    );
+    args.execution_profile = ExecutionProfile::EvmGasOnly;
+    assert_eq!(run_quote(&args, &executable()).unwrap().exit_code(), 2);
+    let values = rows(&args.output);
+    assert_eq!(values.len(), 3);
+    for (index, row) in values.iter().enumerate() {
+        match row {
+            QuoteRowV1::Complete(row) => {
+                assert_ne!(index, 1);
+                assert_eq!(row.execution_profile, ExecutionProfile::EvmGasOnly);
+                assert_eq!(row.quote.execution_profile, ExecutionProfile::EvmGasOnly);
+            }
+            QuoteRowV1::Failed(row) => {
+                assert_eq!(index, 1);
+                assert_eq!(row.execution_profile, ExecutionProfile::EvmGasOnly);
+                assert_eq!(row.failure.code, "input_open");
+            }
+        }
+    }
+}
+
+#[test]
 fn invalid_manifest_and_configuration_do_not_publish() {
     for case in [
         "duplicate",

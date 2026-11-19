@@ -1,12 +1,20 @@
-//! Consensus checks for the `CometBFT` transaction that carries an Etna envelope.
+//! Etna consensus input checks and landing statement encoding.
 //!
-//! The outer verifier authenticates the deployment, generation origin, active
-//! committees and parent identities from its settled checkpoint and L1 witnesses.
-//! It uses the returned transaction for canonical Etna envelope decoding, EL
-//! binding and replay, and separately verifies the committee schedule, `ValState`,
-//! forced inclusion, data availability, range continuity and L1 settlement inputs.
+//! The per-block certified-envelope gate implements the earlier relation.
+//! It checks the bare execution parent hash as the `CometBFT` app hash and
+//! verifies the embedded predecessor commit after the first block. The caller
+//! authenticates the gate's consensus context and predecessor.
+//!
+//! The [`statement`] module follows the revised landing design. The full
+//! proof must authenticate the deployment, origin, L1 state, committee
+//! schedule and `CometBFT` header chain. It must check the current and next
+//! validator hashes at every height and verify execution, forced inclusion,
+//! data availability and complete range continuity. `ValState` belongs to node
+//! validation.
 
 #![no_std]
+
+pub mod statement;
 
 use alloy_primitives::B256;
 use etna_core::{

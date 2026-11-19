@@ -3,13 +3,16 @@
 ## Current planning baseline (2026-11-19)
 
 The forward implementation target is the proposed design in
-[taiko-mono #22412 at `e035cce6`](https://github.com/taikoxyz/taiko-mono/tree/e035cce6e6af52b95473eb443c7aec627ed553a6/packages/protocol/docs/etna).
-It is not yet a merged implementation baseline. The review requests an
-unconditional landing-level recovery audit when local nodes already hold the
-settled checkpoint; [that review](https://github.com/taikoxyz/taiko-mono/pull/22412#pullrequestreview-5968253514)
-and later source changes must be resolved/inspected before P01 is closed.
-Contract/client/reth code and generated artifacts must be aligned to the final
-accepted relation before adoption. No dependency pin changes in this revision.
+[taiko-mono #22412 at `93b59fe6`](https://github.com/taikoxyz/taiko-mono/tree/93b59fe629dc8987ecb03c7d59d1f66004de068f/packages/protocol/docs/etna).
+The exact updated design was [approved](https://github.com/taikoxyz/taiko-mono/pull/22412#pullrequestreview-5968429349)
+after the unconditional landing-level recovery audit was added. That fix changes
+no proving/ABI rule. Approval is not implementation compatibility: the inspected
+client `af1b952a` and protocol `4c6424bc` still implement the earlier settlement
+and app-hash interfaces, while execution candidate `53f33b70` also changes the
+Reth/Alloy dependency graph. P01 keeps those adoption gates open. The byte codec
+in `crates/protocol-etna/src/statement.rs` implements the specified layout with
+independent ABI vectors; it is not a complete verifier or generated-runtime ABI
+conformance. No runtime/SDK dependency pin changes are made by that slice.
 
 For planned guest work, this amendment supersedes earlier priority, app-hash,
 grid and settlement-interface assumptions:
@@ -39,8 +42,9 @@ or trie backend. The old seven tests, six independent groups and patched-SDK
 CPU diagnostic remain historical feasibility evidence, not new-design proofs.
 
 Use the [P00–P08 progress tracker](../plans/2026-11-17-etna-shared-proving.md#milestone-progress)
-for current deliverables and completion gates. Implementation/build work remains
-paused for the user's image builds until the user resumes it; this is planning only.
+for current deliverables and completion gates. The user resumed implementation
+on 2026-11-19; retain the existing shared-cache and resource policy. Separate PR
+reviews change this plan only when their dependency or proof-rule impact is verified.
 
 ## Direction and authorization
 

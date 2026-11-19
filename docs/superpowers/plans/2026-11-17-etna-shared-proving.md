@@ -21,24 +21,28 @@ including its current planning-baseline amendment.
 
 Updated 2026-11-19. This plan is the authoritative progress tracker for
 [Raiko2 #305](https://github.com/taikoxyz/raiko2/pull/305).
-Implementation and compilation remain paused for the user's image builds;
-this revision changes planning documents only. Publishing the plan or resolving
-an upstream review does not itself resume that work.
+The user resumed implementation on 2026-11-19. Work now includes source
+alignment and the bounded statement/cut codec slice. Review requests for other
+PRs are handled separately; only verified dependency or proof-rule changes
+alter this plan. Keep shared build caches and resource limits in place.
 
 | Source | Exact revision | Meaning |
 | --- | --- | --- |
 | Existing Raiko2 checkpoint | `845ecbcbe9c5cb81e1c09d0ca37464e58c2dbc18` | Implemented and tested consensus-input slice under the earlier design |
 | Shared dependency | `f31e7ec55345ac7faf99756504535b0cc9929ec0` | Merged taiko-mono #22398; used by that slice |
 | Patched SDK diagnostic | `a29b53c462b69035ef2acfb5785d78ba20067605` | Actual CPU guest feasibility with the then-current patch tables |
-| Proposed design target | `e035cce6e6af52b95473eb443c7aec627ed553a6` | taiko-mono #22412, open and changes requested at planning time |
-| Earlier inspected client / protocol | `48db1326d52495ba5f97dfca3ed8ccacbe92e85f` / `4c6424bc97b226d100cc9ce9dc828c9567acef4e` | SignalService switch implementation references; not evidence of #22412 implementation |
+| Reviewed design target | `93b59fe629dc8987ecb03c7d59d1f66004de068f` | taiko-mono #22412; recovery-audit correction approved, implementation adoption still separate |
+| Inspected client / protocol | `af1b952adb2d14263da60c5090e15e65b5d8d48c` / `4c6424bc97b226d100cc9ce9dc828c9567acef4e` | Still the earlier 9-field input, 23-word statement and 4-word checkpoint implementation |
+| Inspected execution candidate | `53f33b708d869cfb3f8cccd597381fa2e92a5be5` | Anchorless execution exists; adoption also requires the OP-reth 2.7 / traits 0.8 / Alloy consensus 2.5 interoperability update |
 
-The #22412 review requests a landing-level recovery audit even when honest nodes
-already hold the settled checkpoint. Track its resolution at
-[the review](https://github.com/taikoxyz/taiko-mono/pull/22412#pullrequestreview-5968253514).
-The affected contract/client implementations must be checked against the final
-accepted spec. No moving dependency or unreviewed implementation is adopted here.
-If the design head changes, inspect its delta and update this table before coding.
+The recovery-audit issue was fixed and the exact revised head was
+[approved](https://github.com/taikoxyz/taiko-mono/pull/22412#pullrequestreview-5968429349).
+That delta changes no proving rule or ABI. The contract/client snapshots still
+implement the earlier relation, so generated runtime ABI agreement remains open.
+The new codec follows the normative proposed layout and independent ABI vectors;
+it does not establish compatibility with those old implementations. No runtime,
+SDK or execution dependency pin changes in this slice. Inspect later source deltas
+before adoption rather than silently following development branches.
 
 ## Milestone progress
 
@@ -51,11 +55,11 @@ from checkbox counts.
 | ID | Deliverable | Status | Depends on | Completion gate / evidence |
 | --- | --- | --- | --- | --- |
 | P00 | Portable shared core and patched SDK feasibility | DONE (earlier baseline) | — | Merged #22398; diagnostic README and checkpoint `a29b53c4` |
-| P01 | Freeze revised spec, implementation pins and ABI vectors | TODO; upstream alignment gate open | #22412 disposition | Reviewed source matrix and generated ABI/encoding agreement |
+| P01 | Freeze revised spec, implementation pins and ABI vectors | PARTIAL | Compatible upstream implementations | Design approval, source matrix and codec vectors recorded; native ABI/backend framing agreement pending |
 | P02 | Canonical supplied-block input and EL/Comet binding | PARTIAL | P01 for revised behavior | Existing `845ecbcb`; new app-hash/body contract and envelope binding still required |
 | P03 | Authenticated origin, L1 context and committee schedule | TODO | P01, P02 | Witness-backed context; substituted-root/epoch/generation controls reject |
 | P04 | Strict Etna execution and FI omission verification | TODO | P01, P02 | Existing execution path passes full-body and singleton-equivalence cases |
-| P05 | Range consensus coverage, DA, cuts and statement | TODO | P02–P04 | Derived QC endpoints, every interior cut, 672-byte preimage and 32-byte statement digest verified |
+| P05 | Range consensus coverage, DA, cuts and statement | PARTIAL: codec only | P02–P04 for full range | Native encoding and digest vectors pass; context, execution, DA, QC coverage and proof composition pending |
 | P06 | Provider, pipeline and backend wiring | TODO | P02–P05 | Existing task lifecycle produces and consumes the complete Etna input |
 | P07 | Both real guests, aggregation and proof acceptance | TODO | P05, P06 | Real proofs, child continuity, permitted L1 verifier combination and resource bounds |
 | P08 | Regression, independent final review and ready handoff | TODO | P01–P07 | Required checks, Unzen regressions and exact-head review; no unresolved material findings |
@@ -119,13 +123,23 @@ Evidence: [diagnostic results](../../../crates/etna-guest-compat/README.md),
 **Owns:** dependency/source matrix, protocol codecs and shared-vector provenance;
 root/guest manifests and generated binding entrypoints only when adopting code.
 
-- [ ] Record the final reviewed design SHA and disposition of #22412; inspect any later delta.
-- [ ] Compare the actual protocol/client/reth implementations with that design. Pin a compatible reviewed set, including the execution fork and rules/SDK identities; list any upstream helper needed by a concrete Raiko2 caller.
-- [ ] Generate matching ABI/layout/vector evidence: 8-field input, 21 static words / 672-byte statement preimage and its 32-byte Keccak digest, four-word cut leaf, three-word record, all-interior cutHash, domain/generation and checked uint48 boundaries. Record the exact public-input/journal framing required by each pinned backend verifier.
+- [x] Record reviewed design `93b59fe6` and its exact-head approval; its recovery-only delta leaves the proving/ABI target unchanged. Later deltas still require inspection.
+- [x] Compare actual client `af1b952a`, protocol `4c6424bc` and execution candidate `53f33b70` with the design: old 9/23/4 settlement and bare-EL app hash remain; execution adoption changes the Reth/Alloy graph.
+- [ ] Pin a compatible reviewed implementation set, including execution fork and rules/SDK identities. Do not treat the preceding source audit as completed integration.
+- [x] Implement pure typed ABI encoders for the proposed 8-field input, 21-word / 672-byte statement preimage and 32-byte Keccak digest, four-word cut leaf and five-word cutHash. Cross-check representative and full-width codec-only vectors against independent manual packing and offline Cast.
+- [ ] Compare generated native contract/client layouts, selectors and vectors, including the three-word record and semantic uint48/range boundaries. Record the exact public-input/journal framing required by each pinned backend verifier.
 - [ ] Separate signature/body/header primitives from old app-hash and all-height-QC policy. Specify the narrow shared call contract before changing its caller.
 
+Evidence for the encoding subtask: [source](../../../crates/protocol-etna/src/statement.rs),
+[golden tests](../../../crates/protocol-etna/tests/land_statement.rs) and
+[fixture provenance](../../../crates/protocol-etna/tests/fixtures/README.md).
+Thirteen crate tests (seven earlier-gate plus six codec) and two independent
+oracle cases passed; scoped strict Clippy and workspace formatting passed.
+The codec deliberately does not enforce authentication, range/count/budget
+constraints or semantic uint48 bounds. Full-width vectors test encoding only.
+
 **Accept:** cross-language preimage and digest golden vectors agree with the
-pinned contract/client encoders and backend framing; old 23-word,
+matching native contract/client encoders and backend framing; old 23-word,
 missing-field, reordered-cut and wrong-generation inputs reject. The matrix
 identifies implemented versus specified behavior. Historical pins alone do not close P01.
 
@@ -179,10 +193,11 @@ A host Engine result alone never authorizes omission.
 **Files:** range/statement modules in `crates/protocol-etna`, existing guest
 composition, and new `consensus_range.rs` / `land_statement.rs` integration tests.
 
-- [ ] Derive the required QC heights: terminal h plus the final height of each signing-committee interval inside `(p,h]`, with the exact origin/recovery schedule. Check each required strict quorum under its derived keys/powers.
+- [ ] Derive the required QC heights: terminal h plus the final height of each signing-committee interval inside `(p,h]`, with the exact origin/recovery schedule. Check each required strict quorum under its derived keys/powers. Confirm the source/vector interpretation when distinct epoch records have identical signing keys and powers; do not add certificate requirements merely because metadata changed.
 - [ ] Verify all intervening header/full-BlockID links, native body commitments and envelope/EL continuity, plus P03's current/next-validator hash checks at every height. A later committee cannot replace the outgoing committee's endpoint certificate; do not require a QC for authenticated origin p merely because it is an input boundary.
 - [ ] Authenticate and decode ordered blobs and references against the complete supplied range; preserve all per-block anchor, ruleset, stop, FI and execution checks.
-- [ ] Derive p through h cuts and commit every interior height in order. Encode the 21-word / 672-byte preimage and compute `statementHash = keccak256(preimage)` (ENC-A-35); the Inbox verifies this bytes32 digest. Bind the final proof public input/journal to it using the exact pinned backend framing. Derive terminal values, active snapshot and FI cursors; add no ValState field.
+- [x] Provide the pure 21-word preimage/digest and ordered cut-hash encoders (ENC-A-29/30/35). The statement recomputes nested commitments from the same generation, p/h, blobs and supplied cut leaves.
+- [ ] Derive and authenticate p through h cuts and terminal values from the actual verified range, with every interior height in order. Bind the computed bytes32 statement digest to the final proof using the pinned backend framing; add no ValState field.
 - [ ] Preserve overlapping settlement and historical origins without reproving a suffix. Reject wrong leaves, blobs, references, generations and cross-fork boundaries.
 
 **Accept:** singleton, no-handover and multi-handover ranges; range ends immediately

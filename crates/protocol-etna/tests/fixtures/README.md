@@ -17,3 +17,12 @@ with powers 10 and 30. The Rust tests extend the stock bytes with a linked
 two-height case using the same test keys. Those synthetic blocks exercise the
 Raiko2 caller checks with a nonzero origin and different signer powers at each
 height. They are separate from the stock Go oracle.
+
+## Etna landing ABI vectors
+
+`land-input.hex` and `land-statement.hex` contain one ABI word per line from the
+[proposed Etna design at `93b59fe6`](https://github.com/taikoxyz/taiko-mono/blob/93b59fe629dc8987ecb03c7d59d1f66004de068f/packages/protocol/docs/etna/SPEC.md),
+section 6.1 and rules ENC-A-29–ENC-A-35. The word layout was assembled from the
+specification and checked against Foundry `cast abi-encode`. Foundry
+`cast keccak` produced the expected digest literals in `land_statement.rs`.
+All inputs are synthetic and the wide integers exercise full ABI widths.

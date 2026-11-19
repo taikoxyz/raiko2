@@ -8641,6 +8641,7 @@ name = "raiko2-protocol-etna"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",
+ "alloy-sol-types",
  "etna-core",
  "k256",
  "prost 0.13.5",

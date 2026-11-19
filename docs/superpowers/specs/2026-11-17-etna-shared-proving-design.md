@@ -1,5 +1,47 @@
 # Shared upstream Etna proving implementation
 
+## Current planning baseline (2026-11-19)
+
+The forward implementation target is the proposed design in
+[taiko-mono #22412 at `e035cce6`](https://github.com/taikoxyz/taiko-mono/tree/e035cce6e6af52b95473eb443c7aec627ed553a6/packages/protocol/docs/etna).
+It is not yet a merged implementation baseline. The review requests an
+unconditional landing-level recovery audit when local nodes already hold the
+settled checkpoint; [that review](https://github.com/taikoxyz/taiko-mono/pull/22412#pullrequestreview-5968253514)
+and later source changes must be resolved/inspected before P01 is closed.
+Contract/client/reth code and generated artifacts must be aligned to the final
+accepted relation before adoption. No dependency pin changes in this revision.
+
+For planned guest work, this amendment supersedes earlier priority, app-hash,
+grid and settlement-interface assumptions:
+
+- The guest does not replay proposer priorities or prove a ValState preimage,
+  and does not check Comet `app_hash`. The node commits EL hash plus ValState in
+  `app_hash`; that does not remove guest envelope/EL parent-chain checks.
+- Keys, powers, committee provenance, schedule and strict weighted quorum remain
+  proved. Both current and next validator hashes must match the authenticated
+  schedule at every height, including non-QC endpoints (PROOF-6.2-18).
+  Required QCs are h and each signing committee's final height in the
+  range; all other block identities are bound by the authenticated ancestry.
+- A range can end at any height. Commit every interior cut; use the specified
+  21-word statement preimage and its 32-byte Keccak digest, eight-field
+  LandInput, four-word cut leaf and three-word
+  slot 285 record, with no ValState settlement fields.
+- Every valid block must be provable alone, including any required FI singleton
+  trial. A fixed aggregation boundary must not reintroduce K or mandatory
+  intermediate certificates absent from the protocol relation.
+- Registry selection follows the final no-displacement implementation; shortened
+  evidence retention and app-import priority handling remain node responsibilities.
+
+Existing `845ecbcb` verifies the earlier per-block relation. Its body helper
+compares `app_hash` to the bare EL parent and it verifies the actual embedded
+predecessor QC. Those policies need adaptation for this target, not a new EVM
+or trie backend. The old seven tests, six independent groups and patched-SDK
+CPU diagnostic remain historical feasibility evidence, not new-design proofs.
+
+Use the [P00–P08 progress tracker](../plans/2026-11-17-etna-shared-proving.md#milestone-progress)
+for current deliverables and completion gates. Implementation/build work remains
+paused for the user's image builds until the user resumes it; this is planning only.
+
 ## Direction and authorization
 
 The deliverable is an upstream dependency crate that Raiko2 can call for useful
@@ -24,9 +66,10 @@ extracted surface. Do not reorganize ABCI/lander services, mining, runtime state
 Engine integration or transition orchestration to make the client resemble a
 prover framework.
 
-Raiko2 can compose QC, ancestry, applicable validator hashes and ValState checks
-inside its existing guest modules. A monolithic shared authenticated-transition
-API, or adoption of that orchestration by the client, is not a prerequisite.
+Raiko2 composes required QCs, ancestry and applicable committee/validator hashes
+inside its existing guest modules. Under the current planning target, proposer
+priorities and ValState replay stay outside those guest obligations. A monolithic
+shared authenticated-transition API, or adoption of that orchestration by the client, is not a prerequisite.
 If a checkpoint-start call needs a smaller parent-hash/BlockID input, add only
 that verification input; preserve the full proving obligations at composition.
 
@@ -70,8 +113,10 @@ backend, witness-node pooling, retained storage tries and post-state-root path.
 Do not replace them with the read-only verifier from taiko-mono #22390 or
 reimplement the execution database as a prerequisite for Etna.
 
-The upstream shared library focuses on native BFT/QC verification, committee
-selection, scheduling, ValState and the associated Etna rules. Generic account
+The upstream shared library provides native BFT/QC verification, committee
+selection, scheduling and legacy ValState utilities. The revised guest uses only
+the computations its proof relation requires; retaining a node utility does not
+make priority arithmetic a guest obligation. Generic account
 and storage authentication uses adapters over the existing backends. These
 adapters must authenticate values against the expected root; unverified host
 values or a success boolean are never sufficient. Sharing protocol rules does
@@ -91,8 +136,8 @@ Apply three choices to each operation:
    retry budgets and payload publication) stays outside the guest; it needs no
    replacement proving implementation.
 2. Small deterministic computations may reuse existing pure code, including
-   hashes/codecs, schedules, committee derivation and ValState arithmetic. Keep
-   the current #22398 scope while its API review proceeds.
+   hashes/codecs, schedules and committee derivation. Keep additional upstream
+   extraction scoped to a demonstrated Raiko2 call site.
 3. When reuse is unsuitable or zk-expensive, expose a narrow verification
    relation over the supplied block/output and authenticated context. Share only
    the primitives needed to keep that relation equivalent to protocol rules.
@@ -139,8 +184,9 @@ merged into the Etna development mainline. #22390 is not this review gate.
 
 Implement complete Etna PoS range proving using the existing RISC0 and SP1
 backends and the existing stateless EVM infrastructure. Reuse the node's actual
-consensus rules, committee derivation, canonical codecs and validator-state
-arithmetic through upstream crates rather than maintaining a Raiko2 translation.
+consensus rules, committee derivation and canonical codecs through upstream
+crates rather than maintaining a Raiko2 translation. Do not add proposer-priority
+arithmetic to the revised guest.
 Keep Unzen inputs, APIs and proof outputs compatible. Start with fixed-range
 aggregation; incremental extension, new proof systems, new zkGas pricing and live
 activation are separate work.
@@ -158,8 +204,9 @@ Consensus extraction source refresh: use client commit
 `ea74662169262dc8ab6ada7028d2ef54137088d2`, one commit after the initial client
 pin, for the new implementation branch. The inspected relevant delta restores
 Unzen handoff, adds switching configuration, preserves generation-zero committee
-0 above S, and makes checkpoint grid offsets relative to S. Keep these semantics
-when extracting shared types and schedule logic. No #22390 commit is included.
+0 above S, and made the then-current checkpoint grid relative to S. This records
+the extraction baseline. The current target removes the grid while preserving
+authenticated origin and committee timing; no #22390 commit is included.
 
 The shared committee/parameter/schedule/ValState extraction checkpoint is
 `4fb1de48c5870bf36c8bd6c7c756df0bf5435550`. It passed independent source review,
@@ -183,8 +230,8 @@ fixture and emitted the same 684-byte journal as native and the stock oracle.
 The updated guest locks affect production ELF provenance. The [diagnostic
 results](../../../crates/etna-guest-compat/README.md) cover CPU compatibility.
 The shared API subsequently merged at `f31e7ec55345ac7faf99756504535b0cc9929ec0`.
-Raiko2 pins that revision in `crates/protocol-etna` for a lower-level Comet
-consensus gate. The caller authenticates the deployment, generation origin,
+Checkpoint `845ecbcb` pins that revision in `crates/protocol-etna` for the earlier
+lower-level Comet consensus gate. Its caller authenticates deployment, origin,
 expected height and parent EL hash, the active committees and the predecessor's
 header and full BlockID. The gate verifies the current certificate and body and
 independently checks the embedded LastCommit when present. Its output is the
@@ -235,9 +282,11 @@ benefit over those existing module boundaries.
 - Canonical envelopes, execution headers, domain/generation and chain identity.
 - L1 header/account/storage witness authentication and anchor progression.
 - Registry snapshots, committee selection, voting powers, records and H+2 changes.
-- Comet header/BlockID/body bindings and canonical secp256k1eth commit verification,
-  unique signer accounting and strict `3*signedPower > 2*totalPower`.
-- Per-block validator-state updates, priorities and grid-cut state commitments.
+- Comet header/BlockID/body bindings, the range-derived required certificates,
+  canonical secp256k1eth verification, unique signer accounting and strict
+  `3*signedPower > 2*totalPower`.
+- Complete ancestry and cuts at every interior height, without priority arithmetic
+  or a validator-state settlement commitment.
 - FI entry authentication, canonical eligibility, ordered cursor movement and
   deterministic singleton execution when a skip requires it.
 - Rules schedules, origin/recovery boundaries and complete range continuity.
@@ -262,11 +311,18 @@ require explicit equivalence coverage against the pinned singleton semantics.
 
 ### Contract and prover interfaces
 
-Use upstream `IEtnaInbox.LandInput`, its grid leaves and the existing 23-word
-`LandStatement` as the starting L1 ABI. Do not invent a parallel settlement ABI.
-The statement includes EL/Comet hashes, validator state, generation, FI cursors,
-reference, blob hashes and cuts. Every final backend proof covers the full same
-statement; an execution-only proof plus a QC-only proof is insufficient.
+Align with the final accepted upstream `IEtnaInbox.LandInput` and settlement
+implementation through P01. The current design target has eight input fields,
+a 21-word / 672-byte statement preimage, a four-word cut leaf and three-word
+checkpoint record. Its Keccak digest is the bytes32 statement passed to the
+Inbox verifier. Final journals/public values must authenticate that digest in
+the exact pinned backend verifier framing, including required domain wrapping.
+It carries EL/Comet identities, generation, FI cursors, reference, blob hashes
+and every interior cut, with no ValState fields or landing grid. The old 23-word
+implementation is historical source, not a compatible substitute. Generate and
+compare the exact ABI/encodings instead of inventing a parallel settlement ABI.
+Every final backend proof covers the same complete statement; an execution-only
+proof plus a QC-only proof is insufficient.
 
 Define missing prover-side request/witness/journal interfaces in the existing
 Raiko2 modules or a narrowly justified shared verifier library, and expose them
@@ -277,9 +333,11 @@ substitutes for guest authentication.
 
 For a switching-network proof whose parent is Etna start S, include the L2
 SignalService proxy account and EIP-1967 implementation slot witness under the
-settled S header's state root. Bind the slot to the configured implementation,
-whose immutable `beaconRootsFrom` gives the configured fork time, and check
-the S header timestamp is earlier than that time (PROOF-6.2-46a).
+settled S header's state root, and compare the slot with the implementation
+built into the guest for the L2 chain id (PROOF-6.2-46a). The originWriter's
+S timestamp precheck belongs to START-10-5a; reading the implementation's
+`beaconRootsFrom` and comparing it with node-local fork configuration belongs
+to the node trust path in SYNC-9-5a. Neither adds another guest witness or check.
 Current PreparedBatch is not a complete GuestInput and its restore checks do not
 replace witness rederivation. Blobs do not contain all original consensus history.
 

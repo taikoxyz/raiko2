@@ -5,6 +5,10 @@
 //! verifies the embedded predecessor commit after the first block. The caller
 //! authenticates the gate's consensus context and predecessor.
 //!
+//! The [`l1`] module binds exact raw L1 headers and their ancestry to an
+//! independently authenticated reference. It supplies covered header roots to
+//! later witness verification without establishing reference provenance itself.
+//!
 //! The [`projection`] module follows the revised header/envelope/execution
 //! binding. It checks equality against caller-authenticated context and returns
 //! exact original RLP spans. Nested witness authentication and the remaining
@@ -21,6 +25,7 @@
 
 extern crate alloc;
 
+pub mod l1;
 pub mod projection;
 pub mod statement;
 

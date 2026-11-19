@@ -19,7 +19,7 @@ including its current planning-baseline amendment.
 
 ## Current state and source authority
 
-Updated 2026-11-19. This plan is the authoritative progress tracker for
+Updated 2026-11-20. This plan is the authoritative progress tracker for
 [Raiko2 #305](https://github.com/taikoxyz/raiko2/pull/305).
 The user resumed implementation on 2026-11-19. Work now includes source
 alignment, the bounded statement/cut codec and the proof-specific execution projection. Review requests for other
@@ -32,7 +32,7 @@ alter this plan. Keep shared build caches and resource limits in place.
 | Shared dependency | `f31e7ec55345ac7faf99756504535b0cc9929ec0` | Merged taiko-mono #22398; used by that slice |
 | Patched SDK diagnostic | `a29b53c462b69035ef2acfb5785d78ba20067605` | Actual CPU guest feasibility with the then-current patch tables |
 | Merged design target | `93b59fe629dc8987ecb03c7d59d1f66004de068f` | taiko-mono #22412; reviewed head merged as `2e6763e2`, implementation adoption still separate |
-| Shared body API candidate | `d7c6c3e30599463177152346d21dee6610f9f7f0` | [taiko-mono #22415](https://github.com/taikoxyz/taiko-mono/pull/22415), optional full-original-body helper; draft review requested; not the current Raiko2 dependency |
+| Shared body API candidate | `d7c6c3e30599463177152346d21dee6610f9f7f0` | [taiko-mono #22415](https://github.com/taikoxyz/taiko-mono/pull/22415), optional full-original-body helper; ready for external review; not the current Raiko2 dependency |
 | Inspected client / protocol | `af1b952adb2d14263da60c5090e15e65b5d8d48c` / `4c6424bc97b226d100cc9ce9dc828c9567acef4e` | Still the earlier 9-field input, 23-word statement and 4-word checkpoint implementation |
 | Inspected execution candidate | `53f33b708d869cfb3f8cccd597381fa2e92a5be5` | Anchorless execution exists; adoption also requires the OP-reth 2.7 / traits 0.8 / Alloy consensus 2.5 interoperability update |
 
@@ -58,7 +58,7 @@ from checkbox counts.
 | P00 | Portable shared core and patched SDK feasibility | DONE (earlier baseline) | — | Merged #22398; diagnostic README and checkpoint `a29b53c4` |
 | P01 | Freeze revised spec, implementation pins and ABI vectors | PARTIAL | Compatible upstream implementations | Design approval, source matrix and codec vectors recorded; native ABI/backend framing agreement pending |
 | P02 | Canonical supplied-block input and EL/Comet binding | PARTIAL | P01 for revised behavior | Earlier gate plus independently checked F31 header/envelope/EL projection; strict nested witnesses and range composition remain open; #22415 is optional |
-| P03 | Authenticated origin, L1 context and committee schedule | TODO | P01, P02 | Witness-backed context; substituted-root/epoch/generation controls reject |
+| P03 | Authenticated origin, L1 context and committee schedule | PARTIAL: L1 reference ancestry | P01, P02 | Raw-header/ancestor binding implemented; origin/storage/committee authentication and reference composition remain open |
 | P04 | Strict Etna execution and FI omission verification | TODO | P01, P02 | Existing execution path passes full-body and singleton-equivalence cases |
 | P05 | Range consensus coverage, DA, cuts and statement | PARTIAL: codec only | P02–P04 for full range | Native encoding and digest vectors pass; context, execution, DA, QC coverage and proof composition pending |
 | P06 | Provider, pipeline and backend wiring | TODO | P02–P05 | Existing task lifecycle produces and consumes the complete Etna input |
@@ -240,6 +240,48 @@ origin reject; initial deployment, nonzero S, ordinary handover and recovery-ori
 cases pass. Mutate current and next validator hashes at a non-QC endpoint while
 resealing the authentic ancestry and endpoint QCs; both mutations must reject.
 Reuse shared algorithms; do not accept host success flags.
+
+
+### Immediate P03 L1 reference ancestry slice
+
+Before account/storage and committee witness composition, add a bounded borrowed
+raw-header reader and contiguous newest-first L1 ancestry check in the existing
+fork crate. Follow CONS-3.3-6/7: at most 4096 original bytes, one complete RLP list
+with at least 12 items, reading only parentHash/stateRoot/number/timestamp at
+positions 0/3/8/11. Unknown fields retain native-compatible opaque framing. Hash
+the exact original bytes, including future fields, without re-encoding.
+
+The chain starts at the expected reference hash and number and verifies every
+parent hash and consecutive height. The caller must bind that reference to the
+statement and L1 contract check; a supplied root/context is not provenance. The
+result permits lookups only for covered headers. Configured count/total-byte
+budgets remain separate from the per-header protocol cap and the L+2 historical
+EL budget. No local clock, fixed Ethereum fork field count or new timestamp rule
+is introduced. Keep existing CachedTrie and all execution infrastructure.
+
+- [x] Add compiled behavioral RED and implement raw/header-chain binding.
+- [x] Verify future-field and malformed/limit cases against the exact native decoder.
+- [x] Pass scoped tests, Clippy, formatting, standalone no_std and independent review/verification.
+
+
+Evidence: [source](../../../crates/protocol-etna/src/l1.rs),
+[12 focused tests](../../../crates/protocol-etna/tests/l1_ancestry.rs), and
+[four independent native-vector groups](../../../crates/protocol-etna/tests/l1_native_vectors.rs).
+The compiled semantic RED failed at `Unimplemented`. Final locked/offline host
+Rust 1.95 validation passed all 41 crate tests, strict all-target Clippy and
+workspace formatting. The 159 native accept/reject vectors, original parser
+revision and public real-header provenance are recorded in the
+[fixture notes](../../../crates/protocol-etna/tests/fixtures/README.md).
+A separate locked no-default-features consumer compiled, and its normal feature
+tree enabled no `std`, `use_std` or `use-std`. No dependency or lock record changed.
+Independent adversarial source review and independent behavioral verification
+passed. These checks do not establish either real guest execution or proofs.
+
+This closes only an L1-reference component. It does not authenticate contract
+inputs or prove L1 finality, anchor selection/age/EL root equality, account/storage
+paths, origin records, committee derivation or complete range/proof composition.
+Native/client packed storage and schedule decoders still need checking against
+the revised spec before adoption; do not import their earlier layout wholesale.
 
 ## P04 — Existing execution and FI verification
 

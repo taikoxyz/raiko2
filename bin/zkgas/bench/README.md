@@ -22,6 +22,49 @@ pages across failed attempts. Objects outside the receipt are never deleted. Ter
 constructor/receipt publication can leave small initial headers or semaphore objects; a missing
 or corrupt receipt records incomplete cleanup and requires investigation before retrying.
 
+## Offline FI fee sensitivity
+
+`fi_fee_report.py` independently compares linear and interpolated-doubling FI enqueue fees
+with explicitly hypothetical incremental SP1 PGU costs. It uses only the standard library,
+with no RPC, market lookup, execution, prover or build. Existing zkGas prices stay unchanged.
+The [research contract](../../../docs/research/2026-11-19-fi-workload-fee.md) records the
+pending Etna FI execution/measurement dependency; these outputs supply no actual FI cost,
+proof-feasibility or capacity evidence.
+
+```sh
+~/.venv/bin/python bin/zkgas/bench/fi_fee_report.py \
+  --config bin/zkgas/bench/examples/fi-fee-sensitivity.json \
+  --output fi-fee-report.json
+~/.venv/bin/python -m unittest discover \
+  -s bin/zkgas/bench/tests -p test_fi_fee_report.py -v
+```
+
+All config fields in the example are required. Configs are regular JSON files of at most
+64KiB; unknown/duplicate keys, booleans as integers and nonfinite numbers are rejected.
+Base fee and PGU use canonical decimal integer strings bounded to uint256 and uint128;
+base fee must be positive, while PGU zero is an explicit control. Positive thresholds and
+pending values fit uint64; thresholds are unique (1..16), samples unique (0..32), scenarios
+uniquely named (1..32; printable names of 1..64 characters). `enqueue_count` is 0..10000 and
+`initial_pending + enqueue_count` must fit uint64. Rates are positive canonical decimal
+strings, with at most 38 digits and 18 fractional digits, no exponent or trailing fractional
+zero; reserve must be at least one. Scenario names cannot have leading/trailing whitespace.
+
+The deterministic report embeds the config, raw-config and calculator SHA256 hashes,
+exact rational USD costs, ceiling-rounded required wei, and separate sample and batch rows.
+Batch entry `i` observes `initial_pending+i`, with no landing or head advancement; consumed
+but unlanded entries remain pending. Batch cost repeats the same scenario for each entry
+and sums the per-entry ceiling requirements. Coverage concerns protocol revenue against the
+assumed reserve-adjusted incremental SP1 cost. Second proof, landing, DA, validator/operator
+costs and sender L1 submission gas are excluded; missing costs are not measured zeros.
+
+Each modeled fee must fit uint256; batch revenue sums use exact unbounded accounting
+integers and do not simulate contract balances or intermediate arithmetic. On overflow,
+the sample fee or full batch total stays null; a batch retains only its priced prefix.
+`final_pending` denotes the configured batch span even when its fee calculation is partial.
+Publication is atomic and exclusive, preserving existing output. Exit 0 means all requested
+fees are available, exit 2 means a partial report was published, and exit 1 means invalid
+config or I/O failure with no new published report. Use a fresh output path for every run.
+
 ## Build and check
 
 Run from the repository root. Use an existing bounded Cargo target directory when local disk is

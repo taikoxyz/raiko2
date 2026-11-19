@@ -146,6 +146,7 @@ jobs:
           -p raiko2-primitives-shasta
           -p raiko2-protocol
           -p raiko2-protocol-shasta
+          -p raiko2-protocol-etna
           -p raiko2-guest-common
           -p raiko2-guests
           -p raiko2-provider
@@ -195,6 +196,7 @@ jobs:
           -p raiko2-primitives-shasta
           -p raiko2-protocol
           -p raiko2-protocol-shasta
+          -p raiko2-protocol-etna
           -p raiko2-guest-common
           -p raiko2-stateless
 

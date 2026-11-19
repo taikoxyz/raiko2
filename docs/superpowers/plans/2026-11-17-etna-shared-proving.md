@@ -31,12 +31,13 @@ alter this plan. Keep shared build caches and resource limits in place.
 | Existing Raiko2 checkpoint | `845ecbcbe9c5cb81e1c09d0ca37464e58c2dbc18` | Implemented and tested consensus-input slice under the earlier design |
 | Shared dependency | `f31e7ec55345ac7faf99756504535b0cc9929ec0` | Merged taiko-mono #22398; used by that slice |
 | Patched SDK diagnostic | `a29b53c462b69035ef2acfb5785d78ba20067605` | Actual CPU guest feasibility with the then-current patch tables |
-| Reviewed design target | `93b59fe629dc8987ecb03c7d59d1f66004de068f` | taiko-mono #22412; recovery-audit correction approved, implementation adoption still separate |
+| Merged design target | `93b59fe629dc8987ecb03c7d59d1f66004de068f` | taiko-mono #22412; reviewed head merged as `2e6763e2`, implementation adoption still separate |
+| Shared body API candidate | `d7c6c3e30599463177152346d21dee6610f9f7f0` | [taiko-mono #22415](https://github.com/taikoxyz/taiko-mono/pull/22415), draft with external review requested; not the current Raiko2 dependency |
 | Inspected client / protocol | `af1b952adb2d14263da60c5090e15e65b5d8d48c` / `4c6424bc97b226d100cc9ce9dc828c9567acef4e` | Still the earlier 9-field input, 23-word statement and 4-word checkpoint implementation |
 | Inspected execution candidate | `53f33b708d869cfb3f8cccd597381fa2e92a5be5` | Anchorless execution exists; adoption also requires the OP-reth 2.7 / traits 0.8 / Alloy consensus 2.5 interoperability update |
 
 The recovery-audit issue was fixed and the exact revised head was
-[approved](https://github.com/taikoxyz/taiko-mono/pull/22412#pullrequestreview-5968429349).
+[approved](https://github.com/taikoxyz/taiko-mono/pull/22412#pullrequestreview-5968429349), then merged at that same head.
 That delta changes no proving rule or ABI. The contract/client snapshots still
 implement the earlier relation, so generated runtime ABI agreement remains open.
 The new codec follows the normative proposed layout and independent ABI vectors;
@@ -56,7 +57,7 @@ from checkbox counts.
 | --- | --- | --- | --- | --- |
 | P00 | Portable shared core and patched SDK feasibility | DONE (earlier baseline) | — | Merged #22398; diagnostic README and checkpoint `a29b53c4` |
 | P01 | Freeze revised spec, implementation pins and ABI vectors | PARTIAL | Compatible upstream implementations | Design approval, source matrix and codec vectors recorded; native ABI/backend framing agreement pending |
-| P02 | Canonical supplied-block input and EL/Comet binding | PARTIAL | P01 for revised behavior | Existing `845ecbcb`; new app-hash/body contract and envelope binding still required |
+| P02 | Canonical supplied-block input and EL/Comet binding | PARTIAL | P01 for revised behavior | Existing `845ecbcb`; upstream body candidate #22415 verified; adoption and canonical envelope/EL binding remain open |
 | P03 | Authenticated origin, L1 context and committee schedule | TODO | P01, P02 | Witness-backed context; substituted-root/epoch/generation controls reject |
 | P04 | Strict Etna execution and FI omission verification | TODO | P01, P02 | Existing execution path passes full-body and singleton-equivalence cases |
 | P05 | Range consensus coverage, DA, cuts and statement | PARTIAL: codec only | P02–P04 for full range | Native encoding and digest vectors pass; context, execution, DA, QC coverage and proof composition pending |
@@ -128,7 +129,8 @@ root/guest manifests and generated binding entrypoints only when adopting code.
 - [ ] Pin a compatible reviewed implementation set, including execution fork and rules/SDK identities. Do not treat the preceding source audit as completed integration.
 - [x] Implement pure typed ABI encoders for the proposed 8-field input, 21-word / 672-byte statement preimage and 32-byte Keccak digest, four-word cut leaf and five-word cutHash. Cross-check representative and full-width codec-only vectors against independent manual packing and offline Cast.
 - [ ] Compare generated native contract/client layouts, selectors and vectors, including the three-word record and semantic uint48/range boundaries. Record the exact public-input/journal framing required by each pinned backend verifier.
-- [ ] Separate signature/body/header primitives from old app-hash and all-height-QC policy. Specify the narrow shared call contract before changing its caller.
+- [x] Specify and independently verify the structural-only shared body API candidate in [taiko-mono #22415](https://github.com/taikoxyz/taiko-mono/pull/22415), without AppHash or certificate policy and without native caller changes.
+- [ ] Adopt a reviewed compatible shared revision and complete the Raiko2 body/header/certificate composition. The current dependency stays at `f31e7ec5` pending upstream review and merge.
 
 Evidence for the encoding subtask: [source](../../../crates/protocol-etna/src/statement.rs),
 [golden tests](../../../crates/protocol-etna/tests/land_statement.rs) and
@@ -143,12 +145,21 @@ matching native contract/client encoders and backend framing; old 23-word,
 missing-field, reordered-cut and wrong-generation inputs reject. The matrix
 identifies implemented versus specified behavior. Historical pins alone do not close P01.
 
+Build consistency was repaired without changing runtime pins or guest locks. The test
+now distinguishes independent packages in the same repository and follows the actual
+`guest-common` dependency edges to the precise locked commits. The full xtask suite
+with `digests` passed 42 tests; two independent controls, strict Clippy and formatting
+passed. The existing CI lanes now include `protocol-etna`; the Python CI environment
+also declares its missing Keccak backend. Production guest provenance remains an
+open draft gate, rather than being rewritten to match stale artifacts.
+
 ## P02 — Supplied blocks and canonical envelope binding
 
 **Files:** `crates/protocol-etna/src/lib.rs`, narrow envelope/input modules in that
 crate; `crates/protocol-etna/tests/certified_envelope.rs` and new envelope tests.
 
 - [x] Build the earlier canonical-wire/current-QC/body/embedded-QC gate in `845ecbcb`; keep its evidence scoped to that relation.
+- [x] Implement and independently verify the narrow upstream body API candidate in #22415: 67 core tests and three independent checks, including 26 Go vectors and 2,112 differential inputs. It recomputes full BlockID and returns exact transaction bytes; it authenticates no identity, domain, version, committee or execution by itself. External review and Raiko2 adoption remain open.
 - [ ] Add the reviewed portable canonical envelope decoder/binding helper when the caller needs it. Preserve byte identity; do not import the ABCI/lander service graph or independently reinterpret its RLP format.
 - [ ] Bind every supplied EL header/body to its committed envelope, height, parent and generation; treat Comet app-hash bytes as opaque to the proof, as the revised spec requires.
 - [ ] Split structural/body/part-set checks from required-certificate checks. All block identities remain authenticated even when their own QC is not a required target.

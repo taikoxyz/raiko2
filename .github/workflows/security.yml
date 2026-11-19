@@ -31,5 +31,6 @@ jobs:
           uv run
           --with cryptography
           --with eth-utils
+          --with "eth-hash[pycryptodome]"
           python scripts/security/check_evm_private_keys.py
           --deny-address 0x382bba7d7bc9ae86c5de3e16c4ca96bcc0a3478e

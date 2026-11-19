@@ -2,10 +2,11 @@
 
 ## Current planning baseline (2026-11-19)
 
-The forward implementation target is the proposed design in
+The forward implementation target is the merged design in
 [taiko-mono #22412 at `93b59fe6`](https://github.com/taikoxyz/taiko-mono/tree/93b59fe629dc8987ecb03c7d59d1f66004de068f/packages/protocol/docs/etna).
 The exact updated design was [approved](https://github.com/taikoxyz/taiko-mono/pull/22412#pullrequestreview-5968429349)
-after the unconditional landing-level recovery audit was added. That fix changes
+after the unconditional landing-level recovery audit was added, then merged as
+`2e6763e21bc236cfcda6011d164b32040f9e0c8d` at that same reviewed head. That fix changes
 no proving/ABI rule. Approval is not implementation compatibility: the inspected
 client `af1b952a` and protocol `4c6424bc` still implement the earlier settlement
 and app-hash interfaces, while execution candidate `53f33b70` also changes the

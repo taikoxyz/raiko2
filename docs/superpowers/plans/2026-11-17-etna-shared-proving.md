@@ -151,7 +151,10 @@ now distinguishes independent packages in the same repository and follows the ac
 with `digests` passed 42 tests; two independent controls, strict Clippy and formatting
 passed. The existing CI lanes now include `protocol-etna`; the Python CI environment
 also declares its missing Keccak backend. Production guest provenance remains an
-open draft gate, rather than being rewritten to match stale artifacts.
+open draft gate, rather than being rewritten to match stale artifacts. Unused
+private signing fields were removed from the diagnostic generator inputs; all
+public values and the pinned 684-byte journal are unchanged. Native re-execution
+passed; historical guest ELF/cycle measurements were not repeated.
 
 ## P02 — Supplied blocks and canonical envelope binding
 
@@ -163,6 +166,14 @@ crate; `crates/protocol-etna/tests/certified_envelope.rs` and new envelope tests
 - [ ] Add the reviewed portable canonical envelope decoder/binding helper when the caller needs it. Preserve byte identity; do not import the ABCI/lander service graph or independently reinterpret its RLP format.
 - [ ] Bind every supplied EL header/body to its committed envelope, height, parent and generation; treat Comet app-hash bytes as opaque to the proof, as the revised spec requires.
 - [ ] Split structural/body/part-set checks from required-certificate checks. All block identities remain authenticated even when their own QC is not a required target.
+
+A scratch-only patch of #22415 into the current Raiko2 Rust 1.95 graph passed
+14 native tests: the new API consumer plus all seven earlier gate and six
+statement cases. The consumer matches the Go header/part hashes and current
+Tendermint type, including opaque AppHash bytes. The other 1,207 lock records
+are unchanged. This verifies native crate compatibility, not canonical envelope
+binding, guest/proof acceptance or dependency adoption. The real checkout
+keeps the merged `f31e7ec5` pin.
 
 **Accept:** valid new app hashes and alternate permitted beneficiaries pass;
 substituted envelope/EL bytes, raw/projection mismatch, height/domain/parent errors,

@@ -34,7 +34,9 @@ The following inputs are read from the pinned taiko-mono revision.
   the committee config, the five registry entries and their entries root,
   `committee_sets[3]`, `val_state_chains.chains[0]` (gen0, heights 0–8,
   first switch and its keys), the two cut leaves at heights 6 and 12, and
-  the `g0_p0_h18` cut. The recorded values are preserved.
+  the `g0_p0_h18` cut. All recorded verification values are preserved; unused
+  private signing fields from the generator inputs are omitted. The diagnostic
+  reads the public keys only.
 
 `fixtures/journal.bin` is assembled from those recorded values. Its 684 bytes
 contain the ASCII marker `raiko2-etna-guest-compat-v1` followed by NUL, the
@@ -59,9 +61,12 @@ fail. The original inputs passed after the test recompiled.
 | RISC Zero 3.0.5, RV32 | 1.91.1-dev | 15,774,476 cycles, 17 segments | `6906d4eabfb02189ad8545f1e7fbfc72f3aea9c7fc53cf5c3bd79ddf39af5753` |
 | SP1 6.8.1, RV64 | 1.93.0-dev | 4,247,290 cycles | `0b97b20613439477d5a9db9bee50b2d52a20435cdad5593311a74ad471d99e2b` |
 
-The RISC Zero runner used `r0vm` 3.0.4. The cycle counts describe this fixed
-fixture. Production ELF validation, complete Etna range verification, proof
-generation and L1 verification remain outside this checkpoint.
+The RISC Zero runner used `r0vm` 3.0.4. These ELF hashes and cycle counts
+record the 2026-11-18 inputs, before the unused signing fields were removed.
+Native re-execution after the cleanup still matches the pinned 684-byte journal.
+The cleanup has not been remeasured in either guest. Production ELF validation,
+complete Etna range verification, proof generation and L1 verification remain
+outside this checkpoint.
 
 ## Entry points
 

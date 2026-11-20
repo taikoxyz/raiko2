@@ -47,6 +47,86 @@ for current deliverables and completion gates. The user resumed implementation
 on 2026-11-19; retain the existing shared-cache and resource policy. Separate PR
 reviews change this plan only when their dependency or proof-rule impact is verified.
 
+
+## Reuse audit and L1 reference strategy (2026-11-20)
+
+The user reaffirmed that new implementation should principally cover Etna
+BFT/PoS and its proof bindings. Account/storage MPT verification, ordinary EL
+header/body/transaction-root validation, execution, witness pooling and generic
+L1 header linkage already exist in Raiko2. Reuse those authoritative paths and
+add only a demonstrated Etna adapter; do not create parallel validators.
+
+The audit removed the unused `protocol-etna::l1` implementation and its dedicated
+test/vector scaffold from checkpoint `1bc5bea6`, and removed the projection's
+duplicate transaction-root computation. The existing stateless consensus and
+pre-execution path remains responsible for that predicate on the exact matched
+block. Its existing `rejects_mismatched_transaction_root` regression remains the
+behavioral authority. The projection still binds original envelope bytes, Comet
+identity, EL number to Comet height, generation, and the independently expected
+EL parent. The latter is not equivalent to checking a host-supplied parent;
+remove it only when the composed execution path binds that same authenticated
+range parent itself. A projection result is never execution or proof validity.
+
+| Responsibility | Reuse / remaining Etna-specific work |
+| --- | --- |
+| EL header/body/STF | Existing `raiko2-stateless` strict validator and execution path; adapt the fork rules and exact committed-body input, without reproducing their ordinary checks in projection |
+| Account/storage | Existing `SparseState` / `CachedTrie` with the expected authenticated root; thin root/context adapter and Etna address/slot/witness-format checks only |
+| Generic L1 linkage | Reuse/factor the existing `guest-common` L1-header linkage when its actual Etna caller is wired; keep Shasta source/checkpoint policy separate |
+| Raw L1 representation | Existing Raiko2 typed headers cannot preserve unknown future fields; retain the raw-hash/4096-byte/four-field decoding requirement as an integration gap, not a new unused verifier library |
+| BFT/PoS and settlement | Shared core signatures, quorum, committee derivation/schedule plus Etna-specific Comet/EL/DA bindings and revised landing codec |
+
+### Recovered long-distance-anchor decision
+
+This direction was already selected in the
+[earlier design, sections 5.1.1–5.1.2](https://github.com/taikoxyz/raiko2/blob/6aed2ef9b33c0ef8bef0d627752c90c3b9188261/docs/superpowers/specs/2026-10-29-etna-pos-proving-design.md#511-l1-ancestry-link-nearby-references-use-a-historical-proof-for-long-delays).
+Let N..L be the range's distinct L1 anchor span, Q the execution reference bound
+by L1, and P the actual landing height. Distinguish the required anchor span L−N
+from the waiting tail Q−L.
+
+| Situation | Reference and guest witness |
+| --- | --- |
+| Q=L covers every required root and remains queryable through expected landing | Preserve N..L linkage; L1 reads Q's execution hash with BLOCKHASH at age 1..256 or EIP-2935 at 257..8191 execution blocks; no guest proof of the L1 history contract is needed |
+| Q=L has insufficient proving/queue/retry/inclusion headroom, or a newer required L1 root exists | Choose a newer queryable Q; retain N..L and bridge L to Q with a short header tail or Ethereum beacon SSZ membership proof |
+| Recent beacon history / completed historical period | Use `block_roots` in its strict slot window / `historical_summaries` with the authenticated period, list length and index respectively |
+
+Prefer a Q reported finalized by the local L1 node when the query window permits,
+as BATCH-6.3-4 specifies; selecting an unnecessarily unfinalized head creates
+reorg/reproving risk. Pin Q's number and hash in the proving job/final wrapper; an
+expired reference is not repaired by editing an already proven public input.
+
+The intended cost is the anchor span plus one bridge for L, not a proof for every
+anchor or every header in the waiting tail. Other L1 roots needed for committee,
+origin or rules witnesses still require authentication under Q; the bridge does
+not authorize unrelated roots. Q=L is a policy for Etna's selectable reference,
+not a change to Shasta's proposal-metadata-bound origin.
+
+8191 execution blocks is lookup headroom, not a measured proving-cost crossover,
+and it differs from 8192 beacon slots when slots are missed. A short tail remains
+valid beyond the direct-reference window; do not make SSZ exclusive at a numeric
+age threshold. Bind Q's original execution header to the public reference hash;
+the bridge uses Ethereum L1 Q's `parentBeaconBlockRoot`, not Taiko L2's field of
+the same name, which carries an anchor execution state root. Bind chain/fork,
+slot, SSZ path, index and list length, and compare the authenticated execution
+hash with the exact raw header L. Missing archive data is an error, not validity.
+
+The existing [historical-proof research and public fixtures](https://github.com/taikoxyz/raiko2/blob/170e0fd7d965b0ee20ac8f9d33295f8fb5d217c6/docs/research/2026-10-29-ethereum-historical-header-proof.md)
+are witness-verification feasibility evidence, not an integrated production
+guest or a throughput claim. The source branch/commits remain the historical
+reference; this amendment restores only its ancestry strategy, not its old
+committee authority or superseded settlement ABI.
+
+**Upstream reconciliation gate:** the current normative target at `93b59fe6`
+still requires raw parentHash links in PROOF-6.2-33/34 and describes a linear
+ancestry resource/recovery limit in BATCH-6.3-5..7. Reconcile that specification
+with the retained bridge strategy before implementing or enabling the far path.
+The far path also needs fork-aware extraction of Q's `parentBeaconBlockRoot` from
+that same authenticated raw execution header: the current four-field rule at
+CONS-3.3-6/7 reads only positions 0/3/8/11 and does not supply this field. Include
+that extraction in reconciliation rather than trusting a separate host root.
+Removing unused scaffolding does not relax those obligations or establish this
+gate as complete. Do not silently force all references through Q..N or claim
+that the historical bridge is already integrated.
+
 ## Direction and authorization
 
 The deliverable is an upstream dependency crate that Raiko2 can call for useful

@@ -206,15 +206,21 @@ fn later_height_binds_ordered_legacy_and_typed_transactions() {
 }
 
 #[test]
-fn transaction_root_must_match_even_with_committed_header_and_transactions() {
+fn projection_binds_committed_bytes_with_an_invalid_transaction_root() {
     let transactions = signed_transactions();
     let mut fixture = Fixture::new(&transactions);
     fixture.execution_header.transactions_root = B256::ZERO;
     fixture.seal_execution(&transactions);
-    assert!(matches!(
-        fixture.verify(&transactions),
-        Err(ProjectionError::TransactionRoot)
-    ));
+
+    // Projection establishes no execution validity. The composing verifier
+    // must run strict EL validation on this same header and transaction list.
+    let projection = fixture
+        .verify(&transactions)
+        .expect("the precisely committed execution item must bind");
+    assert_eq!(
+        projection.execution_item_bytes(),
+        execution_item(&fixture.execution_header, &transactions)
+    );
 }
 
 #[test]

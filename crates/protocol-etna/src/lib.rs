@@ -5,14 +5,11 @@
 //! verifies the embedded predecessor commit after the first block. The caller
 //! authenticates the gate's consensus context and predecessor.
 //!
-//! The [`l1`] module binds exact raw L1 headers and their ancestry to an
-//! independently authenticated reference. It supplies covered header roots to
-//! later witness verification without establishing reference provenance itself.
-//!
 //! The [`projection`] module follows the revised header/envelope/execution
 //! binding. It checks equality against caller-authenticated context and returns
-//! exact original RLP spans. Nested witness authentication and the remaining
-//! execution, consensus and range checks belong to the composing verifier.
+//! exact original RLP spans. The composing verifier must apply the existing
+//! strict EL verifier to the same matched header and transactions, authenticate
+//! the nested witnesses, and check consensus and range continuity.
 //!
 //! The [`statement`] module follows the revised landing design. The full
 //! proof must authenticate the deployment, origin, L1 state, committee
@@ -25,7 +22,6 @@
 
 extern crate alloc;
 
-pub mod l1;
 pub mod projection;
 pub mod statement;
 

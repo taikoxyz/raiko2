@@ -26,31 +26,3 @@ section 6.1 and rules ENC-A-29–ENC-A-35. The word layout was assembled from th
 specification and checked against Foundry `cast abi-encode`. Foundry
 `cast keccak` produced the expected digest literals in `land_statement.rs`.
 All inputs are synthetic and the wide integers exercise full ABI widths.
-
-
-## L1 raw-header native vectors
-
-`l1-native-cases.tsv` contains 159 independent native-decoder cases (41 accepted,
-118 rejected). Each row has a neutral case label, exact raw header hex and either
-`ok` followed by raw hash, parent hash, state root, number and timestamp, or `err`
-followed by the native diagnostic. Tests compare acceptance and all accepted
-fields; diagnostic text is retained as provenance, not a stable error ABI.
-
-The oracle compiled the unmodified
-[native raw-header decoder](https://github.com/taikoxyz/taiko-mono/blob/af1b952adb2d14263da60c5090e15e65b5d8d48c/packages/taiko-client-rs/crates/abci/src/l1/header.rs)
-against that client's locked Alloy consensus 2.5.0 and RLP 0.3.16. Raiko2 consumes
-the vectors using its existing consensus 2.4.2 and the same RLP 0.3.16. The parser
-source SHA256 is `e848a79c09958309b3fecd2434676626a849d2999faad749fd70bdae643ba3a9`.
-The corpus SHA256 is `480fb9c22e137e0be70a2401b09b7117d461bf732d4e0aa9c5c62e160a644732`.
-
-Only `mainnet_26155639` is a real Ethereum header, copied with its expected fields
-from the same revision's
-[public mainnet fixture](https://github.com/taikoxyz/taiko-mono/blob/af1b952adb2d14263da60c5090e15e65b5d8d48c/packages/taiko-client-rs/crates/abci/src/l1/testdata/mainnet_header_26155639.json).
-Other cases exercise the positional wire parser, mutations and synthetic linked
-headers; they are not full valid Ethereum blocks or evidence of L1 finality.
-Coverage includes future opaque fields, 4096/4097 byte boundaries, canonical
-integer/hash widths, truncated/nonminimal framing, raw-hash substitutions,
-contiguous ancestors, height gaps and block-zero underflow. Unused nested list
-payloads remain opaque exactly as in the native parser; only their top-level item
-framing is checked. All 41 accepted hashes were independently recomputed from
-the original bytes with a separate Keccak implementation.

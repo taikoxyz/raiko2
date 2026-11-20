@@ -1,11 +1,12 @@
 //! Binding of a Comet header and its original envelope to the supplied execution projection.
 //!
-//! The caller independently authenticates the context. This module checks context
-//! equality, header/envelope/execution projection and transaction-root binding.
-//! Nested witness items require strict decoding and verification by the caller.
+//! The caller independently authenticates the context. This module binds the
+//! header and ordered transactions to the exact committed bytes and expected
+//! context. The composing verifier must apply the existing strict EL verifier
+//! to that same input and strictly decode and authenticate the witness items.
 
 use alloc::vec::Vec;
-use alloy_consensus::{Header as ExecutionHeader, proofs::calculate_transaction_root};
+use alloy_consensus::Header as ExecutionHeader;
 use alloy_eips::eip2718::Encodable2718;
 use alloy_primitives::B256;
 use alloy_rlp::Header as RlpHeader;
@@ -41,12 +42,12 @@ pub struct ProjectionContext {
     pub max_envelope_bytes: usize,
 }
 
-/// Execution projection matched to the envelope and expected caller context.
+/// Exact execution byte and context binding for the committed envelope.
 ///
-/// Signature and committee verification, witness authentication, execution and
-/// forced inclusion, data availability, and final proof verification remain with
-/// the caller. The result does not establish a complete Comet body or any
-/// remaining execution and fork rules, including ommers and withdrawals.
+/// The composing verifier must establish the required Comet header, range and
+/// certificate relations, authenticate the witnesses, verify forced inclusion
+/// and data availability, and apply strict EL verification to the same matched
+/// header and transactions.
 #[derive(Debug)]
 pub struct ExecutionProjection<'a> {
     execution_item_bytes: &'a [u8],
@@ -95,7 +96,7 @@ impl<'a> ExecutionProjection<'a> {
     }
 }
 
-/// The supplied data failed execution projection verification.
+/// The supplied data failed execution byte or context binding.
 #[derive(Debug, thiserror::Error)]
 pub enum ProjectionError {
     /// The Comet transaction list must contain a single envelope.
@@ -152,28 +153,29 @@ pub enum ProjectionError {
     /// Typed execution transactions differ from the committed ordered list.
     #[error("execution transactions do not match the envelope")]
     ExecutionTransactions,
-    /// The transaction trie root disagrees with the execution header.
-    #[error("execution transaction trie root differs from the header")]
-    TransactionRoot,
 }
 
-/// Checks the execution projection against independently authenticated caller context.
+/// Binds the supplied header and ordered transactions to the committed bytes
+/// and independently authenticated caller context.
 ///
 /// At the start of a generation, the Comet header must have no parent ID. At later
-/// heights, only the parent header hash is checked. The caller authenticates the
-/// range and verifies any required complete `BlockID` relation. The Comet app hash
-/// is included in the header hash as opaque data.
+/// heights, this binding checks the parent header hash. The composing verifier
+/// establishes the header, range and certificate relations required by the proof
+/// specification, including complete `BlockID` relations where required. This
+/// binding does not check evidence, part sets, or the embedded predecessor
+/// commit. The Comet app hash is included in the header hash as opaque data.
 ///
-/// The caller must strictly decode and authenticate each returned witness, verify
-/// committee state and signatures, execute the matched block with the remaining
-/// body and fork rules (including ommers and withdrawals), verify forced
-/// inclusion and bind data availability before drawing a final proof conclusion.
-/// This checks neither evidence, part sets, nor the embedded predecessor commit.
+/// The result establishes byte and context binding. The composing verifier
+/// must run the existing strict EL verifier on the same matched header and
+/// ordered transactions. That verifier checks the transaction root, ommers,
+/// withdrawals, fork rules and state transition. The composing verifier must
+/// also strictly decode and authenticate the returned witnesses, verify forced
+/// inclusion, and bind data availability.
 ///
 /// # Errors
 ///
 /// Returns an error on a context mismatch, invalid boundary framing, a byte
-/// limit violation, or a failed execution projection or transaction-root check.
+/// limit violation, or a mismatch with the committed execution bytes.
 pub fn verify_execution_projection<'a, T: Encodable2718>(
     comet_header: &tendermint::block::Header,
     comet_transactions: &'a [Vec<u8>],
@@ -311,9 +313,6 @@ fn verify_execution_block<T: Encodable2718>(
     }
     if !tx_items.is_empty() {
         return Err(ProjectionError::ExecutionTransactions);
-    }
-    if calculate_transaction_root(transactions) != header.transactions_root {
-        return Err(ProjectionError::TransactionRoot);
     }
     Ok(())
 }

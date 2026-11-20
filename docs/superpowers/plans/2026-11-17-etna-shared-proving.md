@@ -58,12 +58,28 @@ from checkbox counts.
 | P00 | Portable shared core and patched SDK feasibility | DONE (earlier baseline) | — | Merged #22398; diagnostic README and checkpoint `a29b53c4` |
 | P01 | Freeze revised spec, implementation pins and ABI vectors | PARTIAL | Compatible upstream implementations | Design approval, source matrix and codec vectors recorded; native ABI/backend framing agreement pending |
 | P02 | Canonical supplied-block input and EL/Comet binding | PARTIAL | P01 for revised behavior | Earlier gate plus independently checked F31 header/envelope/EL projection; strict nested witnesses and range composition remain open; #22415 is optional |
-| P03 | Authenticated origin, L1 context and committee schedule | PARTIAL: L1 reference ancestry | P01, P02 | Raw-header/ancestor binding implemented; origin/storage/committee authentication and reference composition remain open |
+| P03 | Authenticated origin, L1 context and committee schedule | TODO: reuse and compose | P01, P02 | Reuse existing L1/MPT readers; Etna reference, origin, storage/committee binding and far-path specification alignment remain open |
 | P04 | Strict Etna execution and FI omission verification | TODO | P01, P02 | Existing execution path passes full-body and singleton-equivalence cases |
 | P05 | Range consensus coverage, DA, cuts and statement | PARTIAL: codec only | P02–P04 for full range | Native encoding and digest vectors pass; context, execution, DA, QC coverage and proof composition pending |
 | P06 | Provider, pipeline and backend wiring | TODO | P02–P05 | Existing task lifecycle produces and consumes the complete Etna input |
 | P07 | Both real guests, aggregation and proof acceptance | TODO | P05, P06 | Real proofs, child continuity, permitted L1 verifier combination and resource bounds |
 | P08 | Regression, independent final review and ready handoff | TODO | P01–P07 | Required checks, Unzen regressions and exact-head review; no unresolved material findings |
+
+
+## Reuse audit and scope correction (2026-11-20)
+
+- Removed the unused independent Etna L1 verifier and its 159-vector scaffold; reuse existing L1 linkage at its actual caller and retain the raw/future-header adapter requirement as an open integration gap.
+- Removed ordinary transaction-root recomputation from the Comet/EL byte projection. Existing `stateless::validate_block` consensus/pre-execution remains authoritative for the same matched block; its existing `rejects_mismatched_transaction_root` test is the regression check.
+- Retained BFT/domain/committee duties, original envelope/EL byte equality, cross-layer Comet/EL height, generation and independently authenticated expected-parent binding. Generic EL validation against an arbitrary supplied parent is not a substitute for that last relation.
+- No account/MPT implementation was added. Reuse existing `SparseState` / `CachedTrie`; future work is Etna-specific root/address/slot/context composition.
+- Restored the earlier near/far L1-reference decision in the paired design; its historical SSZ bridge and current normative linear-chain rules still need explicit reconciliation.
+
+Current acceptance is the existing 25-test fork crate plus the common EL rejection
+regression, scoped Clippy/format/no_std checks and independent review/verification.
+The common regression exercises the existing Shasta/Unzen validator; Etna fork
+wiring is still open and is not established by that check.
+Earlier standalone L1 evidence is withdrawn from the completion gates. No source
+or SDK pin, EVM/trie/provider/pipeline or production guest/ELF change is included.
 
 ## What #22412 changes in the proving plan
 
@@ -178,7 +194,7 @@ per-height detached QC is introduced.
 
 The v6 parser checks only the strict outer shell and optional slot arity, retaining
 borrowed execution/witness RLP spans. Compare the Ethereum Header's canonical
-encode/decode fixed point, ordered EIP-2718 byte strings and transaction root;
+encode/decode fixed point and ordered EIP-2718 byte strings;
 limit the complete original execution item to 124,000 bytes. Native wire vectors
 and real public signed transaction fixtures guard compatibility. The returned
 projection is not complete envelope or proof validation: nested witness grammar,
@@ -189,8 +205,8 @@ FI, DA and endpoint QCs stay mandatory in their composing milestones.
 - [x] Preserve all external dependency records; inspect normal no_std features.
 - [x] Run focused/independent native wire and mutation tests, strict scoped Clippy and formatting; obtain independent adversarial review.
 
-Projection evidence: [implementation](../../../crates/protocol-etna/src/projection.rs)
-and [12 regression tests](../../../crates/protocol-etna/tests/execution_projection.rs).
+Historical projection evidence at `39f803b5`: [implementation](https://github.com/taikoxyz/raiko2/blob/39f803b532df88f688a350ef95bcf8adce0021f5/crates/protocol-etna/src/projection.rs)
+and [12 regression tests](https://github.com/taikoxyz/raiko2/blob/39f803b532df88f688a350ef95bcf8adce0021f5/crates/protocol-etna/tests/execution_projection.rs).
 The semantic RED failed at the unimplemented verifier, then the final native
 `cargo test --locked --offline -p raiko2-protocol-etna --all-targets -- --test-threads=2`
 run passed 33 tests: 12 projection, seven earlier-gate, six statement and eight
@@ -242,46 +258,36 @@ resealing the authentic ancestry and endpoint QCs; both mutations must reject.
 Reuse shared algorithms; do not accept host success flags.
 
 
-### Immediate P03 L1 reference ancestry slice
+### P03 reuse and near/far reference integration
 
-Before account/storage and committee witness composition, add a bounded borrowed
-raw-header reader and contiguous newest-first L1 ancestry check in the existing
-fork crate. Follow CONS-3.3-6/7: at most 4096 original bytes, one complete RLP list
-with at least 12 items, reading only parentHash/stateRoot/number/timestamp at
-positions 0/3/8/11. Unknown fields retain native-compatible opaque framing. Hash
-the exact original bytes, including future fields, without re-encoding.
+The unused independent L1 module and its tests/vectors from `1bc5bea6` were
+withdrawn after the reuse audit. Its earlier native checks remain historical
+evidence in that commit, not completed integration. Generic hash linkage already
+exists in `guest-common`; account/storage authentication already exists in
+`stateless` over `SparseState` / `CachedTrie`. Do not add another generic verifier.
+Existing public helpers are parent-state-oriented; add only a thin expected-L1-root
+adapter when a real Etna call site needs it. Preserve exact witness address/slot
+and format obligations. Typed L1 headers cannot preserve unknown future fields:
+track the raw-header adapter gap when reusing linkage rather than treating it as
+already solved or restoring a parallel library in advance of its consumer.
 
-The chain starts at the expected reference hash and number and verifies every
-parent hash and consecutive height. The caller must bind that reference to the
-statement and L1 contract check; a supplied root/context is not provenance. The
-result permits lookups only for covered headers. Configured count/total-byte
-budgets remain separate from the per-header protocol cap and the L+2 historical
-EL budget. No local clock, fixed Ethereum fork field count or new timestamp rule
-is introduced. Keep existing CachedTrie and all execution infrastructure.
+The [paired design's recovered near/far strategy](../specs/2026-11-17-etna-shared-proving-design.md#recovered-long-distance-anchor-decision)
+restores the prior N..L / Q policy and links the original design and research.
+Reuse generic linkage; keep Etna reference selection separate from Shasta origin
+metadata. Normal Q=L needs no submission-delay tail when its expected landing
+fits the BLOCKHASH/EIP-2935 query window. Otherwise choose newer Q and use a short
+tail or beacon `block_roots` / `historical_summaries` bridge for L, retaining N..L.
+All other required L1 roots must still be independently covered. Account for
+proving/inclusion headroom, raw future fields, fork/slot/path bindings and archive
+availability. Execution-block lookup age is distinct from beacon-slot windows.
 
-- [x] Add compiled behavioral RED and implement raw/header-chain binding.
-- [x] Verify future-field and malformed/limit cases against the exact native decoder.
-- [x] Pass scoped tests, Clippy, formatting, standalone no_std and independent review/verification.
+- [ ] Reconcile the retained historical bridge policy with normative PROOF-6.2-33/34 and BATCH-6.3-5..7 before enabling it; current spec still describes a linear resource/recovery limit.
+- [ ] Wire the existing common L1 verification at the actual Etna consumer, adding only the necessary raw-header representation adapter and byte/count bounds. Do not require a new generic L1 framework.
+- [ ] Bind selected Q to the same statement/contract reference, cross-check requested L against actual block anchors, and authenticate all origin/committee/rules roots.
+- [ ] Reuse existing trie reads with the correct authenticated root and enforce Etna-specific witness/address/slot semantics; do not reimplement MPT or the execution database.
 
-
-Evidence: [source](../../../crates/protocol-etna/src/l1.rs),
-[12 focused tests](../../../crates/protocol-etna/tests/l1_ancestry.rs), and
-[four independent native-vector groups](../../../crates/protocol-etna/tests/l1_native_vectors.rs).
-The compiled semantic RED failed at `Unimplemented`. Final locked/offline host
-Rust 1.95 validation passed all 41 crate tests, strict all-target Clippy and
-workspace formatting. The 159 native accept/reject vectors, original parser
-revision and public real-header provenance are recorded in the
-[fixture notes](../../../crates/protocol-etna/tests/fixtures/README.md).
-A separate locked no-default-features consumer compiled, and its normal feature
-tree enabled no `std`, `use_std` or `use-std`. No dependency or lock record changed.
-Independent adversarial source review and independent behavioral verification
-passed. These checks do not establish either real guest execution or proofs.
-
-This closes only an L1-reference component. It does not authenticate contract
-inputs or prove L1 finality, anchor selection/age/EL root equality, account/storage
-paths, origin records, committee derivation or complete range/proof composition.
-Native/client packed storage and schedule decoders still need checking against
-the revised spec before adoption; do not import their earlier layout wholesale.
+No historical SSZ guest, archive provider, reference-selection host API or full
+origin/committee proof is claimed implemented by this audit.
 
 ## P04 — Existing execution and FI verification
 
@@ -289,7 +295,7 @@ the revised spec before adoption; do not import their earlier layout wholesale.
 when introduced, and focused tests in their existing crates.
 
 - [ ] Align the Etna EVM dependency and select fork-specific header/system-call behavior, including the source-defined extraData/generation/anchor fields, required fee-share value and nonzero anchor-root context. Remove legacy anchor/first-receipt-success assumptions only on the Etna path; preserve Unzen checks.
-- [ ] Execute the entire committed body through existing witness/trie/post-root code. Reject `[valid, zk-overflow, valid]` rather than filtering it into a shorter block; accept valid empty bodies and ordinary first-tx revert/OOG.
+- [ ] Wire the entire exact committed Etna body through existing strict consensus/execution/witness/trie/post-root code; ordinary transaction-root, header/body and STF checks stay there. Reject `[valid, zk-overflow, valid]` rather than filtering it into a shorter block; accept valid empty bodies and ordinary first-tx revert/OOG.
 - [ ] Authenticate the FI queue entry and bytes, due-time/eligibility rules and cursor progression. Complete any required singleton trial, or verify an equivalent rejection predicate against the same parent, attributes and full budgets.
 - [ ] Retain reads required before a discard, including storage/code/BLOCKHASH/EIP-7702; isolate trial effects from actual execution. Missing data and infrastructure errors remain errors.
 

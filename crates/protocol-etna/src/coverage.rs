@@ -2,13 +2,20 @@
 //!
 //! The caller must independently derive and authenticate the range endpoints
 //! and the validator schedule, including the successor set at the terminal
-//! height. This module checks the resulting validator commitments. The
-//! composing verifier authenticates header identity and ancestry and verifies
-//! the commit at each required height against its authorized active set and
-//! deployment domain.
+//! height. This module checks the resulting validator commitments and can
+//! verify the required standalone native certificates. The composing verifier
+//! separately authenticates the header chain and deployment domain.
 
 use alloc::vec::Vec;
-use etna_core::{comet::validators::Validators, schedule::UINT48_MAX};
+use etna_core::{
+    comet::{
+        native::Commit,
+        validators::Validators,
+        verify::{BftError, verify_native_commit},
+    },
+    domain::{DeploymentDomain, DomainError, chain_id},
+    schedule::UINT48_MAX,
+};
 use tendermint::block::Header;
 
 /// Caller-authenticated endpoints and resource limit for a complete landing range.
@@ -179,4 +186,108 @@ pub fn bind_committee_schedule(
     }
     heights.push(last_height);
     Ok(CommitRequirements { heights })
+}
+
+/// Required standalone native certificates failed coverage or authentication.
+#[derive(Debug, thiserror::Error)]
+pub enum CommitVerificationError {
+    /// The range or expected validator schedule failed its coverage checks.
+    #[error("invalid landing range or validator schedule: {0}")]
+    Schedule(#[source] CoverageError),
+    /// The deployment cannot form the canonical Etna chain ID.
+    #[error("invalid Etna deployment domain: {0}")]
+    Domain(#[source] DomainError),
+    /// The witness must contain one certificate at each required height.
+    #[error("landing range requires {expected} commits, got {actual}")]
+    CommitCount {
+        /// Number of required certificates.
+        expected: usize,
+        /// Number of supplied certificates.
+        actual: usize,
+    },
+    /// A certificate was supplied for a different height than required.
+    #[error("expected Comet commit at height {expected}, got {actual}")]
+    CommitHeight {
+        /// Height required at this witness position.
+        expected: u64,
+        /// Height of the supplied certificate.
+        actual: u64,
+    },
+    /// A derived height could not be mapped to its checked header and schedule entry.
+    #[error("required Comet commit height {height} has no checked landing range entry")]
+    TargetOutsideRange {
+        /// Required height outside the checked entries.
+        height: u64,
+    },
+    /// The certificate disagreed with the target header, domain or active set.
+    #[error("invalid native Comet commit at height {height}: {source}")]
+    Certificate {
+        /// Target height of the failing certificate.
+        height: u64,
+        /// Failure reported by the shared native certificate checker.
+        #[source]
+        source: BftError,
+    },
+}
+
+/// Verifies the required native certificates after binding the landing range.
+///
+/// Supply one bounded, canonically decoded commit per required height in
+/// ascending order. The complete schedule and all commit target heights are
+/// checked before native signature verification.
+///
+/// The caller authenticates the endpoints, the complete validator schedule, the
+/// deployment domain and header ancestry. This helper returns the required
+/// heights after checking their native certificates. Origin, H+2 schedule
+/// derivation, body and embedded `LastCommit` checks belong to their composing
+/// relations.
+///
+/// The pinned native checker requires `APP_VERSION = 1` at each target. The
+/// revised guest field table omits a separate application-version check, so
+/// adoption for that relation remains gated on P01.
+///
+/// # Errors
+///
+/// Returns an error for invalid coverage, an invalid signing domain, incorrect
+/// commit count or target heights, or a failing native certificate.
+pub fn verify_required_native_commits(
+    headers: &[Header],
+    expected: &[ExpectedValidatorSets<'_>],
+    context: &CoverageContext,
+    commits: &[Commit],
+    domain: &DeploymentDomain,
+) -> Result<CommitRequirements, CommitVerificationError> {
+    let requirements = bind_committee_schedule(headers, expected, context)
+        .map_err(CommitVerificationError::Schedule)?;
+    let heights = requirements.required_commit_heights();
+    if commits.len() != heights.len() {
+        return Err(CommitVerificationError::CommitCount {
+            expected: heights.len(),
+            actual: commits.len(),
+        });
+    }
+
+    let chain_id = chain_id(domain).map_err(CommitVerificationError::Domain)?;
+    for (&height, commit) in heights.iter().zip(commits) {
+        let actual = commit.height.value();
+        if actual != height {
+            return Err(CommitVerificationError::CommitHeight {
+                expected: height,
+                actual,
+            });
+        }
+    }
+
+    for commit in commits {
+        let height = commit.height.value();
+        let (header, sets) = height
+            .checked_sub(context.parent_height)
+            .and_then(|distance| distance.checked_sub(1))
+            .and_then(|offset| usize::try_from(offset).ok())
+            .and_then(|offset| headers.get(offset).zip(expected.get(offset)))
+            .ok_or(CommitVerificationError::TargetOutsideRange { height })?;
+        verify_native_commit(commit, header, sets.active, &chain_id)
+            .map_err(|source| CommitVerificationError::Certificate { height, source })?;
+    }
+    Ok(requirements)
 }

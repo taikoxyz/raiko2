@@ -23,8 +23,8 @@ Updated 2026-11-20. This plan is the authoritative progress tracker for
 [Raiko2 #305](https://github.com/taikoxyz/raiko2/pull/305).
 The user resumed implementation on 2026-11-19. Work now includes source
 alignment, the bounded statement/cut codec, proof-specific execution projection
-and per-height validator binding / required-QC derivation. Review requests for other
-PRs are handled separately; only verified dependency or proof-rule changes
+and per-height validator binding / required-QC verification through the shared
+native checker. Review requests for other PRs are handled separately; only verified dependency or proof-rule changes
 alter this plan. Keep shared build caches and resource limits in place.
 
 | Source | Exact revision | Meaning |
@@ -74,7 +74,7 @@ from checkbox counts.
 | P02 | Canonical supplied-block input and EL/Comet binding | PARTIAL | P01 for revised behavior | Earlier gate plus independently checked F31 header/envelope/EL projection; strict nested witnesses and range composition remain open; #22415 is optional |
 | P03 | Authenticated origin, L1 context and committee schedule | PARTIAL: field binding | P01, P02 | Every current/next validator hash and neighboring schedule edge checked; authenticated origin/L1/storage/committee derivation and far-path alignment remain open |
 | P04 | Strict Etna execution and FI omission verification | TODO | P01, P02 | Existing execution path passes full-body and singleton-equivalence cases |
-| P05 | Range consensus coverage, DA, cuts and statement | PARTIAL: codec and QC requirements | P02–P04 for full range | Native codec vectors and required-QC height derivation pass; authenticated schedule/context, ancestry, actual QC signatures, execution, DA and full composition pending |
+| P05 | Range consensus coverage, DA, cuts and statement | PARTIAL: codec and native QC checks | P02–P04 for full range | Codec, required heights and pinned native QC checks pass; authenticated schedule/context, ancestry, version-policy alignment, execution, DA and full composition pending |
 | P06 | Provider, pipeline and backend wiring | TODO | P02–P05 | Existing task lifecycle produces and consumes the complete Etna input |
 | P07 | Both real guests, aggregation and proof acceptance | TODO | P05, P06 | Real proofs, child continuity, permitted L1 verifier combination and resource bounds |
 | P08 | Regression, independent final review and ready handoff | TODO | P01–P07 | Required checks, Unzen regressions and exact-head review; no unresolved material findings |
@@ -90,7 +90,7 @@ from checkbox counts.
 
 The reuse correction passed the then-current 25-test fork crate plus the common
 EL rejection regression, scoped Clippy/format/no_std checks and independent
-review/verification. The later BFT slice below expands the fork crate to 41 tests.
+review/verification. The BFT slices below expand the fork crate to 57 tests.
 The common regression exercises the existing Shasta/Unzen validator; Etna fork
 wiring is still open and is not established by that check.
 Earlier standalone L1 evidence is withdrawn from the completion gates. No source
@@ -327,7 +327,8 @@ no target and aggregation child boundaries do not create protocol QCs.
 
 - [x] Add compiled semantic RED, the minimal field-binding/target derivation and meaningful full-range/mutation boundaries.
 - [x] Run focused and independent exhaustive-model tests, strict scoped Clippy, formatting and standalone no_std checks; obtain independent source review.
-- [ ] Compose the resulting requirements with independently derived schedules, authenticated ancestry and actual strict native QC verification. The requirement list alone establishes no signature, schedule provenance or proof validity.
+- [x] Verify an exact ordered commit list at all derived targets through the shared native QC checker, using the corresponding checked header/active set and the canonical deployment domain.
+- [ ] Compose these helpers with independently derived schedules, authenticated ancestry and the final adopted QC policy. Matching supplied schedules and native certificates alone do not establish schedule authority or full proof validity.
 
 Implemented in `crates/protocol-etna/src/coverage.rs`. For independently
 supplied active/next sets and authenticated full-landing endpoints, the helper
@@ -339,15 +340,35 @@ Acceptance evidence on host Rust 1.95:
 
 - The valid A,A,B,B,A range compiled and failed against the stub before GREEN;
   the implemented relation returns the outgoing endpoints plus h.
-- `cargo test --locked --offline -p raiko2-protocol-etna --all-targets -- --test-threads=2`: 41 passed, including 11 focused coverage cases, 5 independent model cases and all 25 preceding regressions.
+- `cargo test --locked --offline -p raiko2-protocol-etna --all-targets -- --test-threads=2`: 57 passed: the prior 41 regressions, 13 signed native-QC cases and 3 independently authored adversarial cases.
 - The independent model checks 1,360 short schedules using explicit sorted keys/powers, 10,016 current/next hash substitutions and 3,648 disconnected adjacent schedule mutations. It is finite regression coverage, not an unbounded theorem or composer test.
 - `cargo clippy --locked --offline -p raiko2-protocol-etna --all-targets -- -D warnings` and `cargo fmt --all -- --check` passed. A separate locked no-default-features `#![no_std]` consumer compiled; its 221-record normal-feature closure enabled no `std`, `use_std` or `use-std` feature.
 - Independent adversarial source review and independent behavioral verification passed. Immutable offline source, the existing shared target/lock, two jobs and a 15 GiB reserve were used. No dependency/lock, EL/MPT, provider/pipeline or production guest/ELF change.
 
 These checks do not authenticate the supplied schedule, derive origin/H+2 or
-verify commit signatures, header ancestry, DA, execution, FI or a final proof.
+verify header ancestry, DA, execution, FI or a final proof. Native commit
+signatures are checked only by the explicitly pinned native helper below.
 Aggregation must pass the whole landing endpoints; a shorter child cut cannot
 stand in for them. P03/P05 remain partial until the real composition is tested.
+
+`verify_required_native_commits` first reuses the complete schedule binding,
+requires exactly one commit at each derived height in ascending order and checks
+all target heights before any native signature verification. It derives the
+chain ID from the full `DeploymentDomain` and uses checked offsets to select the
+same height's header and active set for `verify_native_commit`. It does not add
+origin, embedded-LastCommit, aggregation-child or non-target certificates.
+Callers must bound and canonically decode raw commit witnesses before this API.
+
+The signed tests cover A-to-B-to-A, a missing outgoing commit, extra/duplicate/
+reordered targets, a later malformed target before an invalid first QC, wrong
+signed header or outgoing keys, full-width chain IDs/Inbox/generation, exact
+2/3 rejection, nil/absent votes and malformed present slots. The independently
+signed vote-domain mutation preserves the header/BlockID to isolate signature
+domain binding. A re-signed APP_VERSION mutation proves the inherited restriction
+is the rejecting predicate. The native positive RED first passed the shared QC
+checker, then failed at the new stub before implementation. Two test-only lint
+issues were fixed; the final frozen source passed all checks and independent
+source/behavioral review.
 
 P01 must also reconcile F31 `verify_native_commit`'s APP_VERSION restriction with
 the candidate's explicit guest field table before using it as the complete new
@@ -373,7 +394,8 @@ A host Engine result alone never authorizes omission.
 **Files:** range/statement modules in `crates/protocol-etna`, existing guest
 composition, and new `consensus_range.rs` / `land_statement.rs` integration tests.
 
-- [ ] Derive the required QC heights: terminal h plus the final height of each signing-committee interval inside `(p,h]`, with the exact origin/recovery schedule. Check each required strict quorum under its derived keys/powers. Confirm the source/vector interpretation when distinct epoch records have identical signing keys and powers; do not add certificate requirements merely because metadata changed.
+- [x] Derive terminal h plus each interior signing-set endpoint from supplied sets and verify each required native quorum under its corresponding keys/powers and full deployment domain. Identical keys/powers across metadata changes add no target.
+- [ ] Authenticate the actual origin/recovery schedule and adopted QC field policy before composing those native checks into the final range proof; supplied sets alone are not committee authority.
 - [ ] Verify all intervening header/full-BlockID links, native body commitments and envelope/EL continuity, plus P03's current/next-validator hash checks at every height. A later committee cannot replace the outgoing committee's endpoint certificate; do not require a QC for authenticated origin p merely because it is an input boundary.
 - [ ] Authenticate and decode ordered blobs and references against the complete supplied range; preserve all per-block anchor, ruleset, stop, FI and execution checks.
 - [x] Provide the pure 21-word preimage/digest and ordered cut-hash encoders (ENC-A-29/30/35). The statement recomputes nested commitments from the same generation, p/h, blobs and supplied cut leaves.
@@ -416,6 +438,27 @@ xtask guest builder and tool-generated ELF/VK/provenance outputs.
 **Accept:** actual valid proofs and invalid-case rejection, matching statements,
 child ordering/image/generation failures, single-block completeness and supported
 batch limits. No IVC, new zkVM, new pricing or broad performance campaign is part of this milestone.
+
+### Production ELF source provenance gate
+
+CI's RISC0 source fingerprint mismatch is separate from native test results.
+The fingerprint covers the production guest's local source closure plus the
+whole root manifest, backend guest manifest/lock, toolchain inputs and all build-tool source,
+including its tests. At `aeda3262`, against comparison base `3f4ec387`, four hashed
+inputs changed:
+`Cargo.toml`, `guests/risc0/Cargo.toml`, `guests/risc0/Cargo.lock` and
+`xtask/build-guest/src/lib.rs`. Replacing just those bytes with base versions
+reproduced the recorded fingerprint. Both checked-in RISC0 ELFs still match their
+provenance digests and are unchanged; no current-source rebuilt bytes or image ID
+are established. The Etna crate is not yet in that production guest's closure.
+
+P07 must run the canonical backend build (`just build-guest risc0`, and refresh
+SP1 if stale), review generated artifact/provenance changes and pass
+`just build-guest all --check`. Do not hand-edit the recorded source fingerprint
+or weaken the check. A legitimate rebuild may leave ELF bytes identical while
+refreshing provenance. The stale source check runs before artifact verification
+and RISC0 precedes SP1, so its first failure does not establish that SP1 artifacts
+are current.
 
 ## P08 — Final review and ready gate
 

@@ -59,6 +59,44 @@ changes clarify signing-set identity (keys and assigned powers) and permit one
 narrowly scoped settled-switch root reuse; the latest fix changes no proving
 rule. Candidate interface/storage changes and all anchor tasks remain gated.
 
+## Devnet delivery phases (2026-11-20)
+
+The user explicitly authorized FI to be disabled for the first devnet phase.
+Phase one targets the complete Etna execution/Comet/committee/DA/statement path
+in that configured environment. Phase two adds FI consumption, eligibility and
+singleton-trial verification. This is a delivery split, not a claim that the
+unrestricted normative proof relation is already implemented.
+
+- Keep the same envelope witness positions, origin/cut/statement FI cursor
+  fields and existing execution/prover ownership in both phases. Carry the
+  authenticated cursor unchanged in phase one; do not remove it from the ABI.
+- The phase-one deployment must actually disable FI with no unprocessed entries;
+  the eventual guest composition must be restricted to that deployment/profile
+  and reject FI witnesses or consumption. A host-controlled skip flag is not
+  part of the proof interface. The exact profile binding is still P01/P06 work,
+  not an implemented flag or a claim about existing devnet configuration.
+- Phase two fills the existing FI verification seam with authenticated queue
+  entries, due checks, consumed-cursor updates and the necessary trial. It must
+  retain the phase-one range/statement/input architecture and existing EVM/MPT.
+- P04's FI items and FI-specific P07 worst-case trials move to phase two. P03,
+  non-FI execution, DA/range/output binding, both real guests and the applicable
+  proof/ABI/provenance gates remain mandatory for phase one.
+- The fewer-QC design challenge is open in [#305](https://github.com/taikoxyz/raiko2/pull/305#issuecomment-7030686273).
+  Do not silently alter QC policy or claim protocol consensus while proceeding
+  with independent byte/identity composition.
+
+### Immediate range projection slice
+
+Reuse the existing per-block projection to derive every intermediate Comet/EL
+parent from the preceding matched input over a complete bounded `(p,h]`, then
+bind both terminal hashes to the expected statement endpoints. This supplies
+the missing Etna Comet/envelope binding around existing EL range replay; it does
+not reimplement the EL validator, aggregation framework or BFT signing process.
+Comet links compare the predecessor header hash under the current target; no
+stock full-BlockID or embedded-LastCommit rule is added. Origin/schedule
+authentication, nested witnesses, execution, anchor/time rules, DA and final
+statement composition remain separate gates.
+
 ## Parallel review findings and merge gates
 
 The first external review at 0c218cbd/aeda3262 is tracked alongside implementation.
@@ -102,10 +140,10 @@ from checkbox counts.
 | --- | --- | --- | --- | --- |
 | P00 | Portable shared core and patched SDK feasibility | DONE (earlier baseline) | — | Merged #22398; diagnostic README and checkpoint `a29b53c4` |
 | P01 | Freeze revised spec, implementation pins and ABI vectors | PARTIAL | Compatible upstream implementations | Design approval, source matrix and codec vectors recorded; native ABI/backend framing agreement pending |
-| P02 | Canonical supplied-block input and EL/Comet binding | PARTIAL | P01 for revised behavior | Earlier gate plus independently checked F31 header/envelope/EL projection; strict nested witnesses and range composition remain open; #22415 is optional |
+| P02 | Canonical supplied-block input and EL/Comet binding | PARTIAL: complete range projection | P01 for revised behavior | Bounded original-byte projection and Comet/EL chains bind the expected endpoints; strict nested witnesses and authenticated execution composition remain open; #22415 is optional |
 | P03 | Authenticated origin, L1 context and committee schedule | PARTIAL: field binding | P01, P02 | Every current/next validator hash and neighboring schedule edge checked; authenticated origin/L1/storage/committee derivation and far-path alignment remain open |
-| P04 | Strict Etna execution and FI omission verification | TODO | P01, P02 | Existing execution path passes full-body and singleton-equivalence cases |
-| P05 | Range consensus coverage, DA, cuts and statement | PARTIAL: codec and native QC checks | P02–P04 for full range | Codec, required heights and pinned native QC checks pass; authenticated schedule/context, ancestry, version-policy alignment, execution, DA and full composition pending |
+| P04 | Strict Etna execution; FI in phase two | TODO | P01, P02 | Phase one: existing strict execution on the matched full body; phase two: authenticated FI include/skip and singleton-equivalence cases |
+| P05 | Range consensus coverage, DA, cuts and statement | PARTIAL: codec, QCs and range projection | P02–P04 for full range | Expected-endpoint Comet/EL byte ancestry, codec and native QC checks pass separately; authenticated origin/schedule, version policy, strict execution, DA and final composition pending |
 | P06 | Provider, pipeline and backend wiring | TODO | P02–P05 | Existing task lifecycle produces and consumes the complete Etna input |
 | P07 | Both real guests, aggregation and proof acceptance | TODO | P05, P06 | Real proofs, child continuity, permitted L1 verifier combination and resource bounds |
 | P08 | Regression, independent final review and ready handoff | TODO | P01–P07 | Required checks, Unzen regressions and exact-head review; no unresolved material findings |
@@ -293,6 +331,38 @@ malformed framing and changed authenticated header commitments reject. Full-Bloc
 callers separately reject changed original part sets. No full-transition claim
 is attached to an unauthenticated input or a structural-only result.
 
+### Complete range projection checkpoint (2026-11-20)
+
+`range::verify_range_projection` is a thin caller of the existing per-block
+projection. It checks `origin <= p < h < 2^48`, representable/budgeted exact
+input count before processing, derives each Comet/EL parent from the preceding
+matched block and binds both terminal hashes to the expected endpoints. A
+generation's first Comet header has no parent ID; later ranges bind the first
+header to p. The result retains original execution/transaction/anchor/committee/
+FI spans and inherits the current APP_VERSION policy. It is byte/identity
+projection, not a certified range or state-transition proof.
+
+The valid three-block case compiled and failed at the RED stub. Frozen GREEN
+passed all **86 protocol tests** (68 prior, including 7 historical controls,
+plus 18 range cases), strict package all-target Clippy and workspace formatting.
+Five separately authored scratch tests compiled and passed against the same
+production source. Forged first/interior Comet and EL parents remain rejected
+after resealing descendants and terminal identities; singleton/later-origin,
+uint48, count/byte bounds, generation, original spans and each endpoint have
+direct controls. The isolated no_std consumer compiles and its 221 normal
+feature rows enable no std/use_std/use-std. Independent adversarial source
+review and behavioral verification passed.
+
+One nonblocking cost observation remains: the current public-helper composition
+hashes each Comet header twice. It does not change acceptance; account for it
+when measuring/wiring the real guest rather than widening this slice into an
+upstream API refactor. No guest cycle measurement or proof build was run.
+Source/runtime pins, manifests/locks, EL/trie, provider/pipeline, production
+guests and ELF/provenance are unchanged. Origin/storage/committee provenance,
+strict nested witnesses, execution/time/anchor checks, DA/cuts and final backend
+composition still gate P02/P03/P05–P08. Phase-one FI restrictions are not yet a
+guest implementation. No QC policy conclusion is implied by these tests.
+
 ## P03 — Authenticated context and committees
 
 **Files:** narrow context modules in `crates/protocol-etna`, the existing
@@ -427,7 +497,8 @@ composition, and new `consensus_range.rs` / `land_statement.rs` integration test
 
 - [x] Derive terminal h plus each interior signing-set endpoint from supplied sets and verify each required native quorum under its corresponding keys/powers and full deployment domain. Identical keys/powers across metadata changes add no target.
 - [ ] Authenticate the actual origin/recovery schedule and adopted QC field policy before composing those native checks into the final range proof; supplied sets alone are not committee authority.
-- [ ] Verify all intervening header/full-BlockID links, native body commitments and envelope/EL continuity, plus P03's current/next-validator hash checks at every height. A later committee cannot replace the outgoing committee's endpoint certificate; do not require a QC for authenticated origin p merely because it is an input boundary.
+- [x] Compose the bounded complete Comet/EL header-hash chains and original envelope/EL bytes against the caller-authenticated origin/terminal expectations; preserve the generation-origin exception.
+- [ ] Join that byte projection with P03's authenticated context and schedule, current/next-validator hashes and the required native QCs over the same headers. Do not add stock full-part-set/embedded-LastCommit checks to the revised hash-link relation. A later committee cannot replace the outgoing committee's endpoint certificate; origin p does not require a QC merely because it is an input boundary.
 - [ ] Authenticate and decode ordered blobs and references against the complete supplied range; preserve all per-block anchor, ruleset, stop, FI and execution checks.
 - [x] Provide the pure 21-word preimage/digest and ordered cut-hash encoders (ENC-A-29/30/35). The statement recomputes nested commitments from the same generation, p/h, blobs and supplied cut leaves.
 - [ ] Derive and authenticate p through h cuts and terminal values from the actual verified range, with every interior height in order. Bind the computed bytes32 statement digest to the final proof using the pinned backend framing; add no ValState field.

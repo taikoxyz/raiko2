@@ -25,6 +25,7 @@ extern crate alloc;
 
 pub mod coverage;
 pub mod projection;
+pub mod range;
 pub mod statement;
 
 use alloy_primitives::B256;

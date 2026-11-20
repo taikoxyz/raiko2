@@ -47,6 +47,40 @@ for current deliverables and completion gates. The user resumed implementation
 on 2026-11-19; retain the existing shared-cache and resource policy. Separate PR
 reviews change this plan only when their dependency or proof-rule impact is verified.
 
+## Devnet phase-one scope (2026-11-20)
+
+The user selected a first devnet phase with FI disabled, followed by FI support
+without a separate proving architecture. Preserve the v6 witness slots, FI
+cursor fields in origins/cuts/statements and the final input/output shape.
+The phase-one composer must bind the restricted deployment/profile, carry the
+authenticated cursor unchanged and reject FI consumption/witnesses; no host
+skip flag may turn off a required proof check. Actual deployment/profile
+binding remains an implementation gate. The later phase adds authenticated
+queue/eligibility/trial checks to that same path, reusing existing execution.
+The unrestricted normative FI relation and its worst-case trial acceptance
+are phase-two completion gates, not phase-one claims. All non-FI execution,
+Comet/committee, anchors, DA and output/proof checks remain required.
+
+The fewer-QC proof-goal discussion in #305 remains open. Continue byte/identity
+composition independently without changing the current certificate policy.
+
+## Range projection checkpoint (2026-11-20)
+
+The narrow `range::verify_range_projection` caller now derives intermediate
+Comet/EL identities from the same matched blocks and checks both expected
+endpoints over a complete bounded `(p,h]`. It reuses the existing per-block
+projection, keeps original witness/transaction spans and the generation-origin
+exception, and adds no EVM, trie, recursive proof or certificate policy.
+Its context remains caller-authenticated; the eventual composer must establish
+origin/committee authority, execution, anchor/time rules, DA and final cuts/output
+on those same inputs. Structural success, including preservation of an opaque
+FI witness, does not imply phase-one FI admissibility or full proof validity.
+Current native evidence is 86 protocol tests, five independent scratch cases,
+strict all-target Clippy, formatting and a separate no_std consumer. The current
+helper boundary computes each Comet header hash twice; optimize or measure that
+at real guest composition without changing the proof relation. No cycle or
+production guest/proof acceptance claim is made.
+
 ## Per-height committee binding checkpoint (2026-11-20)
 
 `protocol-etna::coverage::bind_committee_schedule` binds every supplied header's

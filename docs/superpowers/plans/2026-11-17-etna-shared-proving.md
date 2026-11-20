@@ -80,15 +80,17 @@ alter this plan. Keep shared build caches and resource limits in place.
 | Merged design target | `93b59fe629dc8987ecb03c7d59d1f66004de068f` | taiko-mono #22412; reviewed head merged as `2e6763e2`, implementation adoption still separate |
 | Shared body API candidate | `d7c6c3e30599463177152346d21dee6610f9f7f0` | [taiko-mono #22415](https://github.com/taikoxyz/taiko-mono/pull/22415), optional full-original-body helper; ready for external review; not the current Raiko2 dependency |
 | Reviewed design candidate | `3fe7350119f2efe38cf588c145a9913bf9b3b398` | [taiko-mono #22419](https://github.com/taikoxyz/taiko-mono/pull/22419); approved after the import/gossip specification fix; proving clarifications recorded separately, no blanket source/layout adoption |
-| Inspected client / protocol | `af1b952adb2d14263da60c5090e15e65b5d8d48c` / `4c6424bc97b226d100cc9ce9dc828c9567acef4e` | Still the earlier 9-field input, 23-word statement and 4-word checkpoint implementation |
+| Earlier client / protocol audit | `af1b952adb2d14263da60c5090e15e65b5d8d48c` / `4c6424bc97b226d100cc9ce9dc828c9567acef4e` | Historical 9-field input, 23-word statement and 4-word checkpoint snapshots |
+| Later protocol / client witness audit | `7cd9606af6a8c9290874bd1525d58008e24ebadc` / `69090335f64df4ac509859a465f55f93d2f4c5d9` | Protocol source has 8-field input, 21-word statement and 3-word checkpoint; client account-witness schema inspected, generated settlement/backend agreement still pending |
 | Inspected execution candidate | `53f33b708d869cfb3f8cccd597381fa2e92a5be5` | Anchorless execution exists; adoption also requires the OP-reth 2.7 / traits 0.8 / Alloy consensus 2.5 interoperability update |
 
 The recovery-audit issue was fixed and the exact revised head was
 [approved](https://github.com/taikoxyz/taiko-mono/pull/22412#pullrequestreview-5968429349), then merged at that same head.
-That delta changes no proving rule or ABI. The contract/client snapshots still
-implement the earlier relation, so generated runtime ABI agreement remains open.
-The new codec follows the normative proposed layout and independent ABI vectors;
-it does not establish compatibility with those old implementations. No runtime,
+That delta changes no proving rule or ABI. The earlier contract/client audit
+used the superseded relation; the later protocol source above now has the
+8/21/3 layout. Generated native-client and backend-journal agreement remains
+open. The codec follows the normative proposed layout and independent ABI
+vectors; this alone does not establish end-to-end implementation compatibility. No runtime,
 SDK or execution dependency pin changes in this slice. Inspect later source deltas
 before adoption rather than silently following development branches.
 
@@ -188,7 +190,7 @@ from checkbox counts.
 | P02 | Canonical supplied-block input and EL/Comet binding | PARTIAL: complete range projection | P01 for revised behavior | Bounded original-byte projection and Comet/EL chains bind the expected endpoints; strict nested witnesses and authenticated execution composition remain open; #22415 is optional |
 | P03 | Authenticated origin, L1 context and committee schedule | PARTIAL: field binding | P01, P02 | Every current/next validator hash and neighboring schedule edge checked; authenticated origin/L1/storage/committee derivation and far-path alignment remain open |
 | P04 | Strict Etna execution; FI in phase two | TODO | P01, P02 | Phase one: existing strict execution on the matched full body; phase two: authenticated FI include/skip and singleton-equivalence cases |
-| P05 | Range consensus coverage, DA, cuts and statement | PARTIAL: codec, QCs and range projection | P02–P04 for full range | Expected-endpoint Comet/EL byte ancestry, codec and native QC checks pass separately; authenticated origin/schedule, version policy, strict execution, DA and final composition pending |
+| P05 | Range consensus coverage, DA, cuts and statement | PARTIAL: codec, QCs, range and cut/statement projection | P02–P04 for full range | Matched Comet/EL identities and supplied cursor shape bind every interior cut and statement endpoint; actual FI/context authority, execution, DA and final composition remain pending |
 | P06 | Provider, pipeline and backend wiring | TODO | P02–P05 | Existing task lifecycle produces and consumes the complete Etna input |
 | P07 | Both real guests, aggregation and proof acceptance | TODO | P05, P06 | Real proofs, child continuity, permitted L1 verifier combination and resource bounds |
 | P08 | Regression, independent final review and ready handoff | TODO | P01–P07 | Required checks, Unzen regressions and exact-head review; no unresolved material findings |
@@ -535,6 +537,30 @@ when introduced, and focused tests in their existing crates.
 missing-read mutations and execution-root mutations have the pinned decisions.
 A host Engine result alone never authorizes omission.
 
+
+### Reuse inventory (2026-11-20)
+
+This is integration work, not a new EVM or blob-verification implementation.
+The existing stateless path already checks ancestors, header/body/receipts and
+post-state root using the witness DB and native executor. The current Alethia
+pin `59e06d0` has no Etna fork, so a later timestamp alone cannot select it.
+An inspected upstream candidate `efc3c162` supplies timestamp-gated strict
+committed-list/anchorless execution and a devnet override; it is not an adopted
+runtime pin. Raiko2 still needs the matching trusted fork profile and narrow
+scoping of legacy zero-root, first-successful-receipt and anchor assumptions.
+The inspected candidate's 2 s fee target also needs reconciliation if #22422's
+proposed Etna 4 s rule is adopted. Network timestamps are configuration, not a
+reason to duplicate the upstream executor or trust a host fork override.
+
+The provider's Beacon fetch/order path and both guests' shared KZG/versioned-
+hash checks are reusable. Etna's remaining DA seam is strict version-6 payload
+framing/decompression and exact ordered item equality with the matched range,
+using the same verified hash list in the landing statement. Reuse the blob
+unpacker, with Etna padding/full-chunk checks; do not route Etna through the
+Unzen manifest's offset/default-on-error semantics. Pending #22422 makes the
+first field header's high-bit check explicit; adoption and client/guest parity
+remain P01/P05 tasks, not verified production support.
+
 ## P05 — Complete range relation and settlement output
 
 **Files:** range/statement modules in `crates/protocol-etna`, existing guest
@@ -546,6 +572,7 @@ composition, and new `consensus_range.rs` / `land_statement.rs` integration test
 - [ ] Join that byte projection with P03's authenticated context and schedule, current/next-validator hashes and the required native QCs over the same headers. Do not add stock full-part-set/embedded-LastCommit checks to the revised hash-link relation. A later committee cannot replace the outgoing committee's endpoint certificate; origin p does not require a QC merely because it is an input boundary.
 - [ ] Authenticate and decode ordered blobs and references against the complete supplied range; preserve all per-block anchor, ruleset, stop, FI and execution checks.
 - [x] Provide the pure 21-word preimage/digest and ordered cut-hash encoders (ENC-A-29/30/35). The statement recomputes nested commitments from the same generation, p/h, blobs and supplied cut leaves.
+- [x] **P05-C01 — Range/statement projection:** bind all shared full-width domain/origin/terminal fields, the matched terminal header state root and each interior cut to the existing range projection and supplied uint48 cursor sequence; return the existing statement digest. This checks cursor shape, not actual FI consumption or L1 authority.
 - [ ] Derive and authenticate p through h cuts and terminal values from the actual verified range, with every interior height in order. Bind the computed bytes32 statement digest to the final proof using the pinned backend framing; add no ValState field.
 - [ ] Preserve overlapping settlement and historical origins without reproving a suffix. Reject wrong leaves, blobs, references, generations and cross-fork boundaries.
 
@@ -554,6 +581,32 @@ before/at/after a handover; missing outgoing/terminal QC; same-set recurrence;
 interior heights without detached QCs; omitted/duplicate/swapped leaves; `p=c` and
 `p<c<h`; `c>=h` cancellation; and reference expiry. Validity is established for
 all `(p,h]`, not merely the newly settled suffix.
+
+### Range/statement projection evidence (2026-11-20)
+
+`range::verify_range_statement_projection` composes existing range projection,
+`cut_leaf` and `LandStatement::try_digest`. The existing per-block verifier now
+retains its already-checked Comet hash for that actual cut caller. It introduces
+no hash pass, EVM/trie/KZG implementation, dependency pin, manifest/lock or
+production guest/ELF change. Shape validation remains shared with the original
+encoder, and errors preserve their source chain.
+
+Compiled semantic RED preserved all 18 original range tests while the nine
+new tests failed at the explicit composition seam. Final native evidence is
+95 protocol tests (nine new), five independently authored signed-fixture
+checks, strict all-target Clippy, workspace fmt and a locked standalone no_std
+consumer. Its 221 normal runtime dependency rows, excluding host proc-macros,
+enable no std/use_std/use-std. Independent source review and behavioral
+verification passed. Two test-only Clippy fixes changed no production bytes.
+
+Equal-count substituted cuts that the old shape-only encoder accepts now
+reject, including changed height, EL/Comet identity, cursor and order. Full-width
+domains, historical proof origins, singleton and uint48 boundaries, wrong
+terminal state root and resealed broken ancestors have direct controls.
+Supplied cursor validity, execution, DA, L1/committee authority, phase-one FI-off
+profile and backend proof framing are still composing-verifier obligations.
+The result is not a full certified range or proof. No guest cycles, SDK build
+or real proof was run. R06/R07 and #22423 authority review remain open.
 
 ## P06 — Thin host and backend integration
 

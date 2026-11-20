@@ -66,11 +66,13 @@ pub struct LandStatement<'a> {
 }
 
 /// A landing statement has invalid range or cut-list shape.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum LandStatementError {
     /// The heights do not describe a strictly increasing uint48 range.
+    #[error("invalid Etna landing statement height range")]
     InvalidRange,
     /// The cut-list length differs from the number of strictly interior heights.
+    #[error("Etna landing statement requires one leaf per strictly interior height")]
     CutCount,
 }
 
@@ -85,6 +87,11 @@ impl LandStatement<'_> {
     /// `parent_height < last_height <= UINT48_MAX`, or
     /// [`LandStatementError::CutCount`] if the cut list has the wrong length.
     pub fn try_digest(&self) -> Result<B256, LandStatementError> {
+        self.validate_shape()?;
+        Ok(self.digest())
+    }
+
+    pub(crate) fn validate_shape(&self) -> Result<(), LandStatementError> {
         let parent = self.input.parent_height;
         let last = self.input.last_height;
         if last > U256::from(UINT48_MAX) {
@@ -99,7 +106,7 @@ impl LandStatement<'_> {
         if self.cut_leaves.len() != expected_count {
             return Err(LandStatementError::CutCount);
         }
-        Ok(self.digest())
+        Ok(())
     }
 
     /// Encodes the raw 21-word ENC-A-35 preimage without checking range or cut count.

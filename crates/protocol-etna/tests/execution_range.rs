@@ -1,7 +1,7 @@
 //! Behavioral tests for the complete Etna execution byte projection.
 use alloy_consensus::{Header, TxEnvelope, proofs::calculate_transaction_root};
 use alloy_eips::eip2718::{Decodable2718, Encodable2718};
-use alloy_primitives::{Address, B256, U256, hex};
+use alloy_primitives::{Address, B256, U256, hex, keccak256};
 use etna_core::{
     comet::{
         APP_VERSION,
@@ -9,11 +9,14 @@ use etna_core::{
         verify::{data_hash, header_hash},
     },
     domain::{DeploymentDomain, chain_id},
+    schedule::UINT48_MAX,
 };
 use raiko2_protocol_etna::projection::{ExecutionProjection, ProjectionError};
 use raiko2_protocol_etna::range::{
-    RangeBlock, RangeProjectionContext, RangeProjectionError, verify_range_projection,
+    RangeBlock, RangeProjectionContext, RangeProjectionError, RangeStatementProjectionError,
+    verify_range_projection, verify_range_statement_projection,
 };
+use raiko2_protocol_etna::statement::{LandInput, LandStatement, LandStatementError};
 use tendermint::{
     Hash,
     block::{Header as CometHeader, Id, parts},
@@ -22,6 +25,7 @@ use tendermint::{
 const ANCHOR: &[u8] = &[0xc1, 0x11];
 const COMMITTEE: &[u8] = &[0xc1, 0x22];
 const FORCED: &[u8] = &[0xc1, 0x33];
+const BLOBS: [B256; 1] = [B256::repeat_byte(0x79)];
 
 fn list(items: &[&[u8]]) -> Vec<u8> {
     let mut encoded = Vec::new();
@@ -181,6 +185,46 @@ impl RangeFixture {
         verify_range_projection(&self.inputs(), &self.context)
     }
 
+    fn statement<'a>(&self, before: u64, after: u64, cut_leaves: &'a [B256]) -> LandStatement<'a> {
+        LandStatement {
+            l1_chain_id: self.context.domain.l1_chain_id,
+            l2_chain_id: self.context.domain.l2_chain_id,
+            inbox: self.context.domain.inbox,
+            registry: Address::repeat_byte(0x54),
+            generation: U256::from(self.context.domain.generation),
+            parent_hash: self.context.parent_el_hash,
+            parent_comet_hash: self.context.parent_comet_hash,
+            committee_config_hash: B256::repeat_byte(0x59),
+            input: LandInput {
+                parent_height: U256::from(self.context.parent_height),
+                last_height: U256::from(self.context.last_height),
+                last_block_hash: self.context.last_el_hash,
+                last_comet_hash: self.context.last_comet_hash,
+                last_state_root: self.blocks.last().unwrap().execution_header.state_root,
+                l1_reference_block_number: U256::from(2_050),
+                forced_inclusion_head: U256::from(after),
+                active_committee_snapshot: U256::from(23),
+            },
+            l1_reference_block_hash: B256::repeat_byte(0x56),
+            blob_hashes: &BLOBS,
+            forced_inclusion_head_before: U256::from(before),
+            cut_leaves,
+        }
+    }
+
+    fn verify_statement(
+        &self,
+        statement: &LandStatement<'_>,
+        post_block_cursors: &[u64],
+    ) -> Result<(Vec<ExecutionProjection<'_>>, B256), RangeStatementProjectionError> {
+        verify_range_statement_projection(
+            &self.inputs(),
+            &self.context,
+            statement,
+            post_block_cursors,
+        )
+    }
+
     fn relink_comet_after(&mut self, index: usize) {
         let mut previous_hash = comet_hash(&self.blocks[index].comet_header);
         for block in &mut self.blocks[index + 1..] {
@@ -200,6 +244,337 @@ impl RangeFixture {
         }
         self.context.last_el_hash = el_hash;
         self.relink_comet_after(index);
+    }
+}
+
+// Encode the four ABI words independently of statement::cut_leaf.
+fn cut(height: u64, el_hash: B256, comet_hash: B256, cursor: u64) -> B256 {
+    let mut words = [0; 128];
+    words[24..32].copy_from_slice(&height.to_be_bytes());
+    words[32..64].copy_from_slice(el_hash.as_slice());
+    words[64..96].copy_from_slice(comet_hash.as_slice());
+    words[120..128].copy_from_slice(&cursor.to_be_bytes());
+    keccak256(words)
+}
+
+fn cut_for(block: &BlockFixture, cursor: u64) -> B256 {
+    cut(
+        block.execution_header.number,
+        block.execution_header.hash_slow(),
+        comet_hash(&block.comet_header),
+        cursor,
+    )
+}
+
+fn expected_digest(statement: &LandStatement<'_>) -> B256 {
+    let integer = |value: U256| value.to_be_bytes::<32>();
+    let label = |bytes: &[u8]| {
+        let mut word = [0; 32];
+        word[..bytes.len()].copy_from_slice(bytes);
+        word
+    };
+    let address = |value: Address| {
+        let mut word = [0; 32];
+        word[12..].copy_from_slice(value.as_slice());
+        word
+    };
+    let packed_hash =
+        |hashes: &[B256]| keccak256(hashes.iter().flat_map(|hash| hash.0).collect::<Vec<_>>()).0;
+    let input = &statement.input;
+    let cut_hash = keccak256(
+        [
+            label(b"ETNA_LAND_CUTS_V1"),
+            integer(statement.generation),
+            integer(input.parent_height),
+            integer(input.last_height),
+            packed_hash(statement.cut_leaves),
+        ]
+        .concat(),
+    );
+
+    keccak256(
+        [
+            label(b"TAIKO_ETNA_LAND_V1"),
+            integer(statement.l1_chain_id),
+            integer(statement.l2_chain_id),
+            address(statement.inbox),
+            address(statement.registry),
+            integer(statement.generation),
+            integer(input.parent_height),
+            statement.parent_hash.0,
+            statement.parent_comet_hash.0,
+            statement.committee_config_hash.0,
+            integer(input.last_height),
+            input.last_block_hash.0,
+            input.last_comet_hash.0,
+            input.last_state_root.0,
+            integer(input.l1_reference_block_number),
+            statement.l1_reference_block_hash.0,
+            packed_hash(statement.blob_hashes),
+            integer(statement.forced_inclusion_head_before),
+            integer(input.forced_inclusion_head),
+            integer(input.active_committee_snapshot),
+            cut_hash.0,
+        ]
+        .concat(),
+    )
+}
+
+#[test]
+fn binds_singleton_statement_at_nonzero_generation_origin() {
+    let fixture = RangeFixture::new(17, 17, 1);
+    let statement = fixture.statement(UINT48_MAX - 1, UINT48_MAX, &[]);
+    let (projections, digest) = fixture.verify_statement(&statement, &[UINT48_MAX]).unwrap();
+
+    assert_eq!(digest, expected_digest(&statement));
+    assert_eq!(projections.len(), 1);
+    assert_eq!(projections[0].comet_hash(), fixture.context.last_comet_hash);
+    assert!(projections[0].transaction_bytes().is_empty());
+    assert!(core::ptr::eq(
+        projections[0].execution_item_bytes(),
+        fixture.blocks[0].original_span(&fixture.blocks[0].execution_item()),
+    ));
+}
+
+#[test]
+fn binds_historical_range_to_derived_cuts_and_preserves_original_spans() {
+    let fixture = RangeFixture::new(17, 20, 3);
+    let cursors = [31, 32, 32];
+    let leaves = [
+        cut_for(&fixture.blocks[0], 31),
+        cut_for(&fixture.blocks[1], 32),
+    ];
+    let statement = fixture.statement(31, 32, &leaves);
+    let (projections, digest) = fixture.verify_statement(&statement, &cursors).unwrap();
+
+    assert_eq!(digest, expected_digest(&statement));
+    assert_eq!(projections.len(), 3);
+    for (projection, block) in projections.iter().zip(&fixture.blocks) {
+        assert_eq!(projection.comet_hash(), comet_hash(&block.comet_header));
+        assert_eq!(
+            projection.execution_hash(),
+            block.execution_header.hash_slow()
+        );
+        assert!(core::ptr::eq(
+            projection.execution_item_bytes(),
+            block.original_span(&block.execution_item()),
+        ));
+        assert_eq!(
+            projection.transaction_bytes().len(),
+            block.transactions.len()
+        );
+        for (actual, tx) in projection
+            .transaction_bytes()
+            .iter()
+            .zip(&block.transactions)
+        {
+            assert!(core::ptr::eq(
+                *actual,
+                block.original_span(&tx.encoded_2718())
+            ));
+        }
+        for (actual, bytes) in [
+            (projection.anchor_witness(), ANCHOR),
+            (projection.committee_witness(), COMMITTEE),
+            (projection.forced_witness(), FORCED),
+        ] {
+            assert!(core::ptr::eq(actual.unwrap(), block.original_span(bytes)));
+        }
+    }
+}
+
+#[test]
+fn rejects_equal_count_cut_leaves_with_substituted_fields_or_order() {
+    let fixture = RangeFixture::new(17, 20, 3);
+    let first = &fixture.blocks[0];
+    let height = first.execution_header.number;
+    let el = first.execution_header.hash_slow();
+    let comet = comet_hash(&first.comet_header);
+    let second_leaf = cut_for(&fixture.blocks[1], 32);
+    for leaves in [
+        [cut(height, el, B256::ZERO, 31), second_leaf],
+        [cut(height, B256::ZERO, comet, 31), second_leaf],
+        [cut(height + 1, el, comet, 31), second_leaf],
+        [cut(height, el, comet, 32), second_leaf],
+        [second_leaf, cut_for(first, 31)],
+    ] {
+        let statement = fixture.statement(31, 32, &leaves);
+        assert!(statement.try_digest().is_ok());
+        assert!(matches!(
+            fixture.verify_statement(&statement, &[31, 32, 32]),
+            Err(RangeStatementProjectionError::CutLeaf { height: 21 })
+        ));
+    }
+}
+
+#[test]
+fn rejects_cut_count_mismatch_before_projecting_any_block() {
+    let mut fixture = RangeFixture::new(17, 17, 1);
+    fixture.blocks[0].comet_header.version.app = APP_VERSION + 1;
+    let leaves = [cut_for(&fixture.blocks[0], 31)];
+    let statement = fixture.statement(31, 31, &leaves);
+    assert!(matches!(
+        fixture.verify_statement(&statement, &[31]),
+        Err(RangeStatementProjectionError::Statement(
+            LandStatementError::CutCount
+        ))
+    ));
+}
+
+#[test]
+fn rejects_statement_substitutions_for_each_bound_field() {
+    type StatementSubstitution = fn(&mut LandStatement<'_>);
+
+    let fixture = RangeFixture::new(17, 17, 1);
+    let cases: [(&str, StatementSubstitution); 11] = [
+        ("l1_chain_id", |s| s.l1_chain_id += U256::ONE << 255),
+        ("l2_chain_id", |s| s.l2_chain_id += U256::ONE << 192),
+        ("inbox", |s| s.inbox = Address::ZERO),
+        ("generation", |s| s.generation += U256::ONE << 128),
+        ("parent_height", |s| s.input.parent_height -= U256::ONE),
+        ("last_height", |s| s.input.last_height += U256::ONE),
+        ("parent_hash", |s| s.parent_hash = B256::ZERO),
+        ("parent_comet_hash", |s| s.parent_comet_hash = B256::ZERO),
+        ("last_block_hash", |s| s.input.last_block_hash = B256::ZERO),
+        ("last_comet_hash", |s| s.input.last_comet_hash = B256::ZERO),
+        ("last_state_root", |s| {
+            s.input.last_state_root = B256::repeat_byte(0xee);
+        }),
+    ];
+    for (name, substitute) in cases {
+        let mut statement = fixture.statement(31, 31, &[]);
+        substitute(&mut statement);
+        assert!(
+            matches!(
+                fixture.verify_statement(&statement, &[31]),
+                Err(RangeStatementProjectionError::StatementMismatch { field }) if field == name
+            ),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn rejects_missing_extra_and_out_of_bounds_cursors() {
+    let fixture = RangeFixture::new(17, 17, 1);
+    let statement = fixture.statement(31, 31, &[]);
+    for cursors in [&[][..], &[31, 31][..]] {
+        assert!(matches!(
+            fixture.verify_statement(&statement, cursors),
+            Err(RangeStatementProjectionError::CursorCount { expected: 1, actual })
+                if actual == cursors.len()
+        ));
+    }
+    assert!(matches!(
+        fixture.verify_statement(&statement, &[UINT48_MAX + 1]),
+        Err(RangeStatementProjectionError::CursorBounds { height: 18 })
+    ));
+    let mut statement = statement;
+    statement.forced_inclusion_head_before = U256::ONE << 200;
+    assert!(matches!(
+        fixture.verify_statement(&statement, &[31]),
+        Err(RangeStatementProjectionError::OriginCursor)
+    ));
+}
+
+#[test]
+fn rejects_decreasing_or_skipped_cursors_and_mismatched_endpoints() {
+    let fixture = RangeFixture::new(17, 17, 3);
+    let leaves = [
+        cut_for(&fixture.blocks[0], 31),
+        cut_for(&fixture.blocks[1], 32),
+    ];
+
+    for (before, cursors, invalid_height) in [
+        (30, [31, 30, 31], 19),
+        (30, [31, 33, 33], 19),
+        (32, [31, 32, 32], 18),
+    ] {
+        let statement = fixture.statement(before, cursors[2], &leaves);
+        assert!(matches!(
+            fixture.verify_statement(&statement, &cursors),
+            Err(RangeStatementProjectionError::CursorStep { height, .. }) if height == invalid_height
+        ));
+    }
+
+    for after in [33, UINT48_MAX + 1] {
+        let statement = fixture.statement(30, after, &leaves);
+        assert!(matches!(
+            fixture.verify_statement(&statement, &[31, 32, 32]),
+            Err(RangeStatementProjectionError::TerminalCursor)
+        ));
+    }
+}
+
+#[test]
+fn retains_range_rejection_for_resealed_comet_and_execution_links() {
+    for index in [0, 1] {
+        let mut fixture = RangeFixture::new(17, 20, 3);
+        fixture.blocks[index].comet_header.last_block_id = Some(comet_parent(B256::ZERO));
+        fixture.relink_comet_after(index);
+        let leaves = [
+            cut_for(&fixture.blocks[0], 31),
+            cut_for(&fixture.blocks[1], 31),
+        ];
+        let statement = fixture.statement(31, 31, &leaves);
+        let expected_height = fixture.blocks[index].execution_header.number;
+        assert!(matches!(
+            fixture.verify_statement(&statement, &[31, 31, 31]),
+            Err(RangeStatementProjectionError::Range(RangeProjectionError::Projection {
+                height,
+                source: ProjectionError::CometParent,
+            })) if height == expected_height
+        ));
+
+        let mut fixture = RangeFixture::new(17, 20, 3);
+        fixture.blocks[index].execution_header.parent_hash = B256::ZERO;
+        fixture.reseal_execution_from(index);
+        let leaves = [
+            cut_for(&fixture.blocks[0], 31),
+            cut_for(&fixture.blocks[1], 31),
+        ];
+        let statement = fixture.statement(31, 31, &leaves);
+        assert!(matches!(
+            fixture.verify_statement(&statement, &[31, 31, 31]),
+            Err(RangeStatementProjectionError::Range(RangeProjectionError::Projection {
+                height,
+                source: ProjectionError::ExecutionParent,
+            })) if height == expected_height
+        ));
+    }
+}
+
+#[test]
+fn includes_external_l1_fields_and_blob_order_in_statement_digest() {
+    let fixture = RangeFixture::new(17, 17, 1);
+    let blobs = [B256::repeat_byte(0x70), B256::repeat_byte(0x71)];
+    let reversed_blobs = [blobs[1], blobs[0]];
+    let baseline = || LandStatement {
+        blob_hashes: &blobs,
+        ..fixture.statement(31, 31, &[])
+    };
+    let (_, digest) = fixture.verify_statement(&baseline(), &[31]).unwrap();
+    for statement in [
+        LandStatement {
+            registry: Address::repeat_byte(0x32),
+            ..baseline()
+        },
+        LandStatement {
+            committee_config_hash: B256::repeat_byte(0x33),
+            ..baseline()
+        },
+        LandStatement {
+            l1_reference_block_hash: B256::repeat_byte(0x34),
+            ..baseline()
+        },
+        LandStatement {
+            blob_hashes: &reversed_blobs,
+            ..baseline()
+        },
+    ] {
+        let (_, changed) = fixture.verify_statement(&statement, &[31]).unwrap();
+        assert_eq!(changed, expected_digest(&statement));
+        assert_ne!(digest, changed);
     }
 }
 

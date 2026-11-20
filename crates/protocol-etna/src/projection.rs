@@ -19,6 +19,7 @@ use etna_core::{
     domain::{DeploymentDomain, DomainError, chain_id},
     schedule::UINT48_MAX,
 };
+use tendermint::Hash;
 
 const ENVELOPE_VERSION: u8 = 6;
 const MAX_EXECUTION_ITEM_BYTES: usize = 124_000;
@@ -55,6 +56,7 @@ pub struct ExecutionProjection<'a> {
     execution_item_bytes: &'a [u8],
     transaction_bytes: Vec<&'a [u8]>,
     execution_hash: B256,
+    comet_hash: B256,
     anchor_number: u64,
     anchor_witness: Option<&'a [u8]>,
     committee_witness: Option<&'a [u8]>,
@@ -83,6 +85,12 @@ impl<'a> ExecutionProjection<'a> {
     #[must_use]
     pub const fn execution_hash(&self) -> B256 {
         self.execution_hash
+    }
+
+    /// Hash derived from the matched Comet header.
+    #[must_use]
+    pub const fn comet_hash(&self) -> B256 {
+        self.comet_hash
     }
 
     /// Unsigned 48-bit anchor number in the execution header's extra data.
@@ -205,7 +213,7 @@ pub fn verify_execution_projection<'a, T: Encodable2718>(
         return Err(ProjectionError::EnvelopeSize);
     }
 
-    verify_comet_context(comet_header, context)?;
+    let comet_hash = verify_comet_context(comet_header, context)?;
     if comet_header.data_hash != Some(data_hash(comet_transactions)) {
         return Err(ProjectionError::DataHash);
     }
@@ -232,6 +240,7 @@ pub fn verify_execution_projection<'a, T: Encodable2718>(
         execution_item_bytes,
         transaction_bytes,
         execution_hash: execution_header.hash_slow(),
+        comet_hash,
         anchor_number,
         anchor_witness,
         committee_witness,
@@ -242,7 +251,7 @@ pub fn verify_execution_projection<'a, T: Encodable2718>(
 fn verify_comet_context(
     header: &tendermint::block::Header,
     context: &ProjectionContext,
-) -> Result<(), ProjectionError> {
+) -> Result<B256, ProjectionError> {
     let first_height = context
         .origin_height
         .checked_add(1)
@@ -260,16 +269,20 @@ fn verify_comet_context(
     if header.version.app != APP_VERSION {
         return Err(ProjectionError::AppVersion);
     }
-    if header_hash(header).as_bytes() != context.expected_comet_hash.as_slice() {
+    let Hash::Sha256(comet_hash) = header_hash(header) else {
+        return Err(ProjectionError::CometHash);
+    };
+    let comet_hash = B256::from(comet_hash);
+    if comet_hash != context.expected_comet_hash {
         return Err(ProjectionError::CometHash);
     }
     match header.last_block_id {
-        None if context.height == first_height => Ok(()),
+        None if context.height == first_height => Ok(comet_hash),
         Some(parent)
             if context.height > first_height
                 && parent.hash.as_bytes() == context.parent_comet_hash.as_slice() =>
         {
-            Ok(())
+            Ok(comet_hash)
         }
         _ => Err(ProjectionError::CometParent),
     }

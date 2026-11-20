@@ -113,6 +113,25 @@ helper boundary computes each Comet header hash twice; optimize or measure that
 at real guest composition without changing the proof relation. No cycle or
 production guest/proof acceptance claim is made.
 
+## Range/statement binding checkpoint (2026-11-20)
+
+The new pure composing caller binds the same projected range to its landing
+statement, checking every interior four-word cut, full-width shared context,
+terminal header state root and supplied cursor sequence. It reuses existing
+range and statement algorithms and retains the already-verified Comet hash
+for the cut caller, without another hash pass. Cursor shape is not FI validity;
+the caller must still prove actual cursor effects or the authorized FI-off
+profile. L1 context/committee authority, DA, execution and backend proof-output
+binding also remain separate gates. This component does not freeze #22423's
+proposed authority field or change the fewer-QC policy.
+
+Native validation: 95 protocol tests, five independent signed-fixture checks,
+strict all-target Clippy, fmt and a standalone no_std consumer passed. Existing
+EVM, trie, KZG, guest entrypoints, dependencies/locks and ELF are unchanged.
+P04 is upstream fork compatibility plus narrow Raiko2 legacy-assumption
+adaptation; P05 DA reuses KZG/unpacking and needs strict Etna payload-to-range
+binding. Neither task calls for a new execution or blob-proof implementation.
+
 ## Per-height committee binding checkpoint (2026-11-20)
 
 `protocol-etna::coverage::bind_committee_schedule` binds every supplied header's

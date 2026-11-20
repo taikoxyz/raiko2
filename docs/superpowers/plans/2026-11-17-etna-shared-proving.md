@@ -34,7 +34,7 @@ alter this plan. Keep shared build caches and resource limits in place.
 | Patched SDK diagnostic | `a29b53c462b69035ef2acfb5785d78ba20067605` | Actual CPU guest feasibility with the then-current patch tables |
 | Merged design target | `93b59fe629dc8987ecb03c7d59d1f66004de068f` | taiko-mono #22412; reviewed head merged as `2e6763e2`, implementation adoption still separate |
 | Shared body API candidate | `d7c6c3e30599463177152346d21dee6610f9f7f0` | [taiko-mono #22415](https://github.com/taikoxyz/taiko-mono/pull/22415), optional full-original-body helper; ready for external review; not the current Raiko2 dependency |
-| Reviewed design candidate | `d32f4568bde1b3a2824af40d8ee3985063b1c09e` | [taiko-mono #22419](https://github.com/taikoxyz/taiko-mono/pull/22419); request changes for stock evidence gossip after short-window import; proving clarifications recorded separately, no blanket source/layout adoption |
+| Reviewed design candidate | `3fe7350119f2efe38cf588c145a9913bf9b3b398` | [taiko-mono #22419](https://github.com/taikoxyz/taiko-mono/pull/22419); approved after the import/gossip specification fix; proving clarifications recorded separately, no blanket source/layout adoption |
 | Inspected client / protocol | `af1b952adb2d14263da60c5090e15e65b5d8d48c` / `4c6424bc97b226d100cc9ce9dc828c9567acef4e` | Still the earlier 9-field input, 23-word statement and 4-word checkpoint implementation |
 | Inspected execution candidate | `53f33b708d869cfb3f8cccd597381fa2e92a5be5` | Anchorless execution exists; adoption also requires the OP-reth 2.7 / traits 0.8 / Alloy consensus 2.5 interoperability update |
 
@@ -47,13 +47,17 @@ it does not establish compatibility with those old implementations. No runtime,
 SDK or execution dependency pin changes in this slice. Inspect later source deltas
 before adoption rather than silently following development branches.
 
-The #22419 review at the exact candidate head found an import/evidence-gossip
-dependency: an empty block evidence budget does not disable the stock pool's
-historical-header lookup. [Review](https://github.com/taikoxyz/taiko-mono/pull/22419#pullrequestreview-5986510365).
-This is a node/import issue, not a reason to duplicate EL/MPT logic in Raiko2.
-Its proof changes clarify signing-set identity (keys and assigned powers) and
-permit one narrowly scoped settled-switch root reuse. Candidate interface and
-storage changes remain P01 adoption gates.
+The #22419 review initially found an import/evidence-gossip dependency at
+`d32f4568`: an empty block evidence budget does not disable historical lookups.
+The revised `3fe73501` retains history while either stock age limit is met,
+authenticates the excluded boundary and requires stock header/commit/validator
+lookups, including the terminal block-commit key.
+It was [re-reviewed and approved](https://github.com/taikoxyz/taiko-mono/pull/22419#pullrequestreview-5986783866).
+Actual importer-to-peer acceptance remains an implementation gate. This is
+node/import work, not a reason to duplicate EL/MPT logic in Raiko2. Its proof
+changes clarify signing-set identity (keys and assigned powers) and permit one
+narrowly scoped settled-switch root reuse; the latest fix changes no proving
+rule. Candidate interface/storage changes and all anchor tasks remain gated.
 
 ## Milestone progress
 
@@ -110,6 +114,12 @@ range verifier. Retaining the old tests as historical controls does not make
 them the acceptance definition for the new relation.
 
 ## Global constraints and review focus
+
+- Review #305 in parallel with implementation. Before each bounded step and
+  before submitting its checkpoint, refresh the exact head, review replies,
+  inline comments and CI. Handle material interface/proof-boundary feedback before
+  building dependent changes; preserve reviewed commits and keep deltas small.
+  At the `0c218cbd` checkpoint there were no submitted reviews or comments.
 
 - Keep Raiko2's EVM, CachedTrie, witness and execution DB ownership. No client
   service migration, new generic Protocol trait, trie replacement or mining replay.

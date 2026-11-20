@@ -22,6 +22,7 @@
 
 extern crate alloc;
 
+pub mod coverage;
 pub mod projection;
 pub mod statement;
 

@@ -47,6 +47,25 @@ for current deliverables and completion gates. The user resumed implementation
 on 2026-11-19; retain the existing shared-cache and resource policy. Separate PR
 reviews change this plan only when their dependency or proof-rule impact is verified.
 
+## Per-height committee binding checkpoint (2026-11-20)
+
+`protocol-etna::coverage` binds every supplied header's current and next validator
+commitment to independently authenticated expected sets, checks their neighboring
+schedule edges and derives required commit heights for the complete `(p,h]`.
+Signing-set identity uses the existing canonical keys/powers commitment; record
+or stake metadata alone creates no new QC requirement. The terminal h is always
+required, along with every interior signing-set endpoint, including A-to-B-to-A.
+This interpretation is explicit in reviewed candidate
+[taiko-mono #22419 at `d32f4568`](https://github.com/taikoxyz/taiko-mono/blob/d32f4568bde1b3a2824af40d8ee3985063b1c09e/packages/protocol/docs/etna/SPEC.md).
+That candidate is not adopted wholesale, and its node/import review is separate.
+
+The helper returns requirements, not verified certificates. The future composer
+must derive/authenticate the schedule and landing endpoints, bind header ancestry
+and verify strict native quorums in the correct domain at each target. Child-proof
+boundaries cannot redefine the landing endpoints. The existing pinned signature
+helper's version policy still needs source alignment before it implements the
+complete revised relation. The P00–P08 tracker records these open gates and the
+explicit P03-A01–A07 anchor backlog. Existing EL/MPT paths stay authoritative.
 
 ## Reuse audit and L1 reference strategy (2026-11-20)
 

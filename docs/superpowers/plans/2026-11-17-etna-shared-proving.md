@@ -22,7 +22,8 @@ including its current planning-baseline amendment.
 Updated 2026-11-20. This plan is the authoritative progress tracker for
 [Raiko2 #305](https://github.com/taikoxyz/raiko2/pull/305).
 The user resumed implementation on 2026-11-19. Work now includes source
-alignment, the bounded statement/cut codec and the proof-specific execution projection. Review requests for other
+alignment, the bounded statement/cut codec, proof-specific execution projection
+and per-height validator binding / required-QC derivation. Review requests for other
 PRs are handled separately; only verified dependency or proof-rule changes
 alter this plan. Keep shared build caches and resource limits in place.
 
@@ -33,6 +34,7 @@ alter this plan. Keep shared build caches and resource limits in place.
 | Patched SDK diagnostic | `a29b53c462b69035ef2acfb5785d78ba20067605` | Actual CPU guest feasibility with the then-current patch tables |
 | Merged design target | `93b59fe629dc8987ecb03c7d59d1f66004de068f` | taiko-mono #22412; reviewed head merged as `2e6763e2`, implementation adoption still separate |
 | Shared body API candidate | `d7c6c3e30599463177152346d21dee6610f9f7f0` | [taiko-mono #22415](https://github.com/taikoxyz/taiko-mono/pull/22415), optional full-original-body helper; ready for external review; not the current Raiko2 dependency |
+| Reviewed design candidate | `d32f4568bde1b3a2824af40d8ee3985063b1c09e` | [taiko-mono #22419](https://github.com/taikoxyz/taiko-mono/pull/22419); request changes for stock evidence gossip after short-window import; proving clarifications recorded separately, no blanket source/layout adoption |
 | Inspected client / protocol | `af1b952adb2d14263da60c5090e15e65b5d8d48c` / `4c6424bc97b226d100cc9ce9dc828c9567acef4e` | Still the earlier 9-field input, 23-word statement and 4-word checkpoint implementation |
 | Inspected execution candidate | `53f33b708d869cfb3f8cccd597381fa2e92a5be5` | Anchorless execution exists; adoption also requires the OP-reth 2.7 / traits 0.8 / Alloy consensus 2.5 interoperability update |
 
@@ -44,6 +46,14 @@ The new codec follows the normative proposed layout and independent ABI vectors;
 it does not establish compatibility with those old implementations. No runtime,
 SDK or execution dependency pin changes in this slice. Inspect later source deltas
 before adoption rather than silently following development branches.
+
+The #22419 review at the exact candidate head found an import/evidence-gossip
+dependency: an empty block evidence budget does not disable the stock pool's
+historical-header lookup. [Review](https://github.com/taikoxyz/taiko-mono/pull/22419#pullrequestreview-5986510365).
+This is a node/import issue, not a reason to duplicate EL/MPT logic in Raiko2.
+Its proof changes clarify signing-set identity (keys and assigned powers) and
+permit one narrowly scoped settled-switch root reuse. Candidate interface and
+storage changes remain P01 adoption gates.
 
 ## Milestone progress
 
@@ -58,9 +68,9 @@ from checkbox counts.
 | P00 | Portable shared core and patched SDK feasibility | DONE (earlier baseline) | — | Merged #22398; diagnostic README and checkpoint `a29b53c4` |
 | P01 | Freeze revised spec, implementation pins and ABI vectors | PARTIAL | Compatible upstream implementations | Design approval, source matrix and codec vectors recorded; native ABI/backend framing agreement pending |
 | P02 | Canonical supplied-block input and EL/Comet binding | PARTIAL | P01 for revised behavior | Earlier gate plus independently checked F31 header/envelope/EL projection; strict nested witnesses and range composition remain open; #22415 is optional |
-| P03 | Authenticated origin, L1 context and committee schedule | TODO: reuse and compose | P01, P02 | Reuse existing L1/MPT readers; Etna reference, origin, storage/committee binding and far-path specification alignment remain open |
+| P03 | Authenticated origin, L1 context and committee schedule | PARTIAL: field binding | P01, P02 | Every current/next validator hash and neighboring schedule edge checked; authenticated origin/L1/storage/committee derivation and far-path alignment remain open |
 | P04 | Strict Etna execution and FI omission verification | TODO | P01, P02 | Existing execution path passes full-body and singleton-equivalence cases |
-| P05 | Range consensus coverage, DA, cuts and statement | PARTIAL: codec only | P02–P04 for full range | Native encoding and digest vectors pass; context, execution, DA, QC coverage and proof composition pending |
+| P05 | Range consensus coverage, DA, cuts and statement | PARTIAL: codec and QC requirements | P02–P04 for full range | Native codec vectors and required-QC height derivation pass; authenticated schedule/context, ancestry, actual QC signatures, execution, DA and full composition pending |
 | P06 | Provider, pipeline and backend wiring | TODO | P02–P05 | Existing task lifecycle produces and consumes the complete Etna input |
 | P07 | Both real guests, aggregation and proof acceptance | TODO | P05, P06 | Real proofs, child continuity, permitted L1 verifier combination and resource bounds |
 | P08 | Regression, independent final review and ready handoff | TODO | P01–P07 | Required checks, Unzen regressions and exact-head review; no unresolved material findings |
@@ -74,8 +84,9 @@ from checkbox counts.
 - No account/MPT implementation was added. Reuse existing `SparseState` / `CachedTrie`; future work is Etna-specific root/address/slot/context composition.
 - Restored the earlier near/far L1-reference decision in the paired design; its historical SSZ bridge and current normative linear-chain rules still need explicit reconciliation.
 
-Current acceptance is the existing 25-test fork crate plus the common EL rejection
-regression, scoped Clippy/format/no_std checks and independent review/verification.
+The reuse correction passed the then-current 25-test fork crate plus the common
+EL rejection regression, scoped Clippy/format/no_std checks and independent
+review/verification. The later BFT slice below expands the fork crate to 41 tests.
 The common regression exercises the existing Shasta/Unzen validator; Etna fork
 wiring is still open and is not established by that check.
 Earlier standalone L1 evidence is withdrawn from the completion gates. No source
@@ -281,13 +292,57 @@ All other required L1 roots must still be independently covered. Account for
 proving/inclusion headroom, raw future fields, fork/slot/path bindings and archive
 availability. Execution-block lookup age is distinct from beacon-slot windows.
 
-- [ ] Reconcile the retained historical bridge policy with normative PROOF-6.2-33/34 and BATCH-6.3-5..7 before enabling it; current spec still describes a linear resource/recovery limit.
-- [ ] Wire the existing common L1 verification at the actual Etna consumer, adding only the necessary raw-header representation adapter and byte/count bounds. Do not require a new generic L1 framework.
-- [ ] Bind selected Q to the same statement/contract reference, cross-check requested L against actual block anchors, and authenticate all origin/committee/rules roots.
-- [ ] Reuse existing trie reads with the correct authenticated root and enforce Etna-specific witness/address/slot semantics; do not reimplement MPT or the execution database.
+The anchor work is an explicit tracked backlog; adding these items does not
+mark their implementation or upstream specification alignment complete.
+
+- [ ] **P03-A01 — Range/root inventory:** derive N and L from the actual covered blocks, cross-check requested latest anchor L, include every required origin/committee/rules root and bind selected Q's number/hash to the same job and landing statement.
+- [ ] **P03-A02 — Near reference/headroom:** prefer Q=L when it covers the inventory and remains queryable through proving, queueing, retries and inclusion. Cover BLOCKHASH ages 1/256, EIP-2935 ages 257/8191 and expiry at 8192 execution blocks; prefer finalized Q where the query window allows.
+- [ ] **P03-A03 — Header/link reuse:** wire the existing generic L1 linkage at the real Etna caller with only the raw future-field adapter, count/byte bounds and expected-root binding it needs. Do not restore the unused independent L1 verifier or a new trie/framework.
+- [ ] **P03-A04 — Distant bridge:** retain N..L, then use a short tail or one authenticated Ethereum beacon `block_roots` / `historical_summaries` bridge from L to newer Q. Bind Q's fork-specific beacon-root field from the same raw header, fork/slot/index/list length and original hash of L. Do not confuse 8191 execution blocks with 8192 beacon slots or L1 beacon roots with L2 anchor state roots. Test missed slots, period boundaries, expired reference and missing archive data.
+- [ ] **P03-A05 — Anchor/root semantics:** reuse existing MPT reads at the authenticated L1 root, check Etna witness presence/inheritance, generation/age/progression, expected addresses/slots and EL anchor-number/parentBeaconBlockRoot equality. Every new or inherited anchor and recovery snapshot keeps its required authentication.
+- [ ] **P03-A06 — Specification gate:** reconcile the retained historical bridge policy with normative PROOF-6.2-33/34 and BATCH-6.3-5..7 before enabling it; current target still describes a linear resource/recovery limit. The candidate's settled-switch exception is not a general historical-anchor bypass.
+- [ ] **P03-A07 — Settled-switch candidate:** after source/spec adoption, authenticate an ordinary S(t) with generationStartHeight < S(t) <= p through consecutive same-generation EL hashes/heights back from p's authenticated slot-285 EL hash. Use S(t)'s root only for that rotation's registry witness, still derive D(t)/origin-floor selection and H+2 activation, and reject old-generation/discarded headers. This #22419 candidate does not exempt covered block anchors or recovery R from L1 ancestry.
 
 No historical SSZ guest, archive provider, reference-selection host API or full
 origin/committee proof is claimed implemented by this audit.
+
+### Immediate BFT schedule binding / QC requirements
+
+Implement the P03/P05 field relation using existing `Validators.hash()` and
+caller-authenticated active/next sets at each height, with complete `(p,h]`
+coverage and no host skip flags. Check both hashes even at non-QC heights and
+check next/active coherence across neighbors. Derive h plus the outgoing endpoint
+of every change in signing keys or assigned powers; metadata-only rotation adds
+no target and aggregation child boundaries do not create protocol QCs.
+
+- [x] Add compiled semantic RED, the minimal field-binding/target derivation and meaningful full-range/mutation boundaries.
+- [x] Run focused and independent exhaustive-model tests, strict scoped Clippy, formatting and standalone no_std checks; obtain independent source review.
+- [ ] Compose the resulting requirements with independently derived schedules, authenticated ancestry and actual strict native QC verification. The requirement list alone establishes no signature, schedule provenance or proof validity.
+
+Implemented in `crates/protocol-etna/src/coverage.rs`. For independently
+supplied active/next sets and authenticated full-landing endpoints, the helper
+checks exact counts, consecutive uint48 heights, both commitments at every height
+and next/active coherence. It reuses the shared canonical cached keys/powers
+hash. The result is a requirement list, not a certified range or verified QC.
+
+Acceptance evidence on host Rust 1.95:
+
+- The valid A,A,B,B,A range compiled and failed against the stub before GREEN;
+  the implemented relation returns the outgoing endpoints plus h.
+- `cargo test --locked --offline -p raiko2-protocol-etna --all-targets -- --test-threads=2`: 41 passed, including 11 focused coverage cases, 5 independent model cases and all 25 preceding regressions.
+- The independent model checks 1,360 short schedules using explicit sorted keys/powers, 10,016 current/next hash substitutions and 3,648 disconnected adjacent schedule mutations. It is finite regression coverage, not an unbounded theorem or composer test.
+- `cargo clippy --locked --offline -p raiko2-protocol-etna --all-targets -- -D warnings` and `cargo fmt --all -- --check` passed. A separate locked no-default-features `#![no_std]` consumer compiled; its 221-record normal-feature closure enabled no `std`, `use_std` or `use-std` feature.
+- Independent adversarial source review and independent behavioral verification passed. Immutable offline source, the existing shared target/lock, two jobs and a 15 GiB reserve were used. No dependency/lock, EL/MPT, provider/pipeline or production guest/ELF change.
+
+These checks do not authenticate the supplied schedule, derive origin/H+2 or
+verify commit signatures, header ancestry, DA, execution, FI or a final proof.
+Aggregation must pass the whole landing endpoints; a shorter child cut cannot
+stand in for them. P03/P05 remain partial until the real composition is tested.
+
+P01 must also reconcile F31 `verify_native_commit`'s APP_VERSION restriction with
+the candidate's explicit guest field table before using it as the complete new
+range certificate relation. This coverage component changes no version policy
+or legacy gate and does not silently solve that adoption question.
 
 ## P04 — Existing execution and FI verification
 

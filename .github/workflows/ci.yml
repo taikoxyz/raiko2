@@ -146,6 +146,7 @@ jobs:
           -p raiko2-primitives-shasta
           -p raiko2-protocol
           -p raiko2-protocol-shasta
+          -p raiko2-protocol-etna
           -p raiko2-guest-common
           -p raiko2-guests
           -p raiko2-provider
@@ -156,6 +157,9 @@ jobs:
           -p preflight
           --
           -D warnings
+
+      - name: clippy Etna integration tests
+        run: cargo clippy -p raiko2-protocol-etna --all-targets -- -D warnings
 
       - name: clippy engine core
         run: cargo clippy -p raiko2-engine --no-default-features -- -D warnings
@@ -195,6 +199,7 @@ jobs:
           -p raiko2-primitives-shasta
           -p raiko2-protocol
           -p raiko2-protocol-shasta
+          -p raiko2-protocol-etna
           -p raiko2-guest-common
           -p raiko2-stateless
 

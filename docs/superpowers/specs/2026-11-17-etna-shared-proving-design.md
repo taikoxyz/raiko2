@@ -1,5 +1,37 @@
 # Shared upstream Etna proving implementation
 
+## L1 authority boundary amendment (2026-11-20)
+
+Protocol discussion: [taiko-mono #22423](https://github.com/taikoxyz/taiko-mono/pull/22423)
+(draft; provisional representation, protocol-owner review pending).
+
+User direction: L1-verifiable state facts should be supplied through the proof
+statement by L1 itself. Raiko2 host/provider reads the values, the guest binds
+what it uses to public inputs, and the landing contract obtains or checks the
+authoritative counterpart. Preserve native signature/quorum, execution and
+data bindings in the guest. Reuse shared derivation only where it remains a
+guest obligation; do not introduce another storage/trie implementation.
+
+This supersedes the earlier blanket guest-side committee provenance direction
+where a coordinated protocol change supplies equivalent L1 authority. It does
+not mean the current protocol already does so. At protocol source `7cd9606a`,
+the 21-word statement covers L1 settlement context but not authoritative
+historical keys/powers or their schedule. `activeCommitteeSnapshot` is currently
+a proven output supplied in calldata. Adding a field requires an actual L1
+authority source and consistent rules/codecs, not merely hashing a host value.
+
+The provisional candidate is a canonical signing-authority hash covering the
+full range's current/next sets and activation context. A smaller variant binds
+L1-authenticated registry checkpoints and retains shared selection in the
+guest. Exact representation, historical cutoff binding, recovery/overlap
+semantics and L1 costs remain under protocol review. Existing original-witness
+validity rules must be reconciled before deleting their guest checks.
+
+Track this under P03-L01..L04 in the existing plan. Local registry-proof
+components are tested but unpushed/unwired candidates; their guest integration
+is paused while this authority seam is reviewed. No contract ABI, guest
+behavior, dependency pin or production artifact is changed by this amendment.
+
 ## Current planning baseline (2026-11-19)
 
 The forward implementation target is the merged design in

@@ -17,6 +17,51 @@ RISC0 3.0.5 and SP1 6.8.1 at the recorded feasibility checkpoint.
 **Spec:** [Shared proving design](../specs/2026-11-17-etna-shared-proving-design.md),
 including its current planning-baseline amendment.
 
+## L1 authority boundary amendment (2026-11-20)
+
+Protocol discussion: [taiko-mono #22423](https://github.com/taikoxyz/taiko-mono/pull/22423)
+(draft; provisional representation, protocol-owner review pending).
+
+The user directed that facts L1 can establish at proof verification belong in
+L1-constructed public inputs. The host/provider reads them; the guest binds
+the values it actually uses to the same statement L1 reconstructs. Host reads
+alone are not authority. This amendment supersedes blanket requirements below
+to re-prove L1-readable facts inside the guest, only once the equivalent L1
+predicate and statement binding are established. It changes no QC policy.
+
+At inspected protocol head `7cd9606af6a8c9290874bd1525d58008e24ebadc`, existing
+statement fields already bind L1's domain, generation, retained origin,
+configuration digest, reference hash and blob commitment. The contract does
+not independently authenticate historical signing sets: its terminal snapshot
+comes from calldata. The proposed signing-set/schedule hash, or smaller
+checkpoint-authority variant, needs coordinated protocol review before guest
+provenance checks can be removed. Checkpoint identity and activation timing
+must cover every current/next set used by the full range, including recovery
+and overlap; configuration hash is not a signing-set hash.
+
+- [ ] **P03-L01 — Authority inventory:** map each context value to its L1
+  source, guest use, public field and historical selection predicate. Do not
+  add guest storage proofs for fields already constructed authoritatively by
+  L1. Retain reference-header/hash and execution/data binding obligations.
+- [ ] **P03-L02 — Protocol review:** propose the smallest authority commitment,
+  its L1 derivation/history and exact statement schema. Review selected-set
+  authority versus registry-checkpoint authority, costs, H+2, A-to-B-to-A,
+  recovery, full-width domain and `p < c`. Representation is not frozen.
+- [ ] **P03-L03 — Coordinated acceptance:** after owner review, update the
+  normative relation, native client, L1 statement/verifier and both guest
+  journals/aggregation consistently; settle redundant embedded witness rules
+  before omitting their validation. Include mismatch/replay/cutoff vectors.
+- [ ] **P03-L04 — Narrow Raiko2 integration:** fetch in provider/host, bind in
+  guest, reuse native signature/quorum and shared selection where still
+  required. Remove the unneeded guest registry proof adapter only after its
+  authority replacement is enforced, without changing existing EL/trie code.
+
+Local registry witness work at `d535534f` and its later canonical-path
+refinement are component experiments, not an adopted production path. They
+remain unpushed and unwired. Pause further guest registry-proof integration
+while P03-L01/L02 define its replacement. Do not present their native tests
+as proof of an L1-authorized committee or complete Etna proving.
+
 ## Current state and source authority
 
 Updated 2026-11-20. This plan is the authoritative progress tracker for

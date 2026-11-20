@@ -2,7 +2,10 @@
 
 use alloy_primitives::{B256, U256, address, b256, hex};
 use alloy_sol_types::SolValue;
-use raiko2_protocol_etna::statement::{LandInput, LandStatement, cut_hash, cut_leaf};
+use etna_core::schedule::UINT48_MAX;
+use raiko2_protocol_etna::statement::{
+    LandInput, LandStatement, LandStatementError, cut_hash, cut_leaf,
+};
 
 const FIRST_LEAF: B256 = b256!("28e9b5992610c677081b2c4a3ba51d9ffea50c5e8cac87c1729b3dca5a78e89d");
 const SECOND_LEAF: B256 = b256!("3fedf08b3ce07640e06b80b4cadef13c394b341d290abd82724d16ac57159d16");
@@ -50,6 +53,84 @@ fn vector_statement() -> LandStatement<'static> {
 
 fn fixture(text: &str) -> Vec<u8> {
     hex::decode(text.lines().collect::<String>()).unwrap()
+}
+
+fn statement_for_range(parent: u64, last: u64, cut_leaves: &[B256]) -> LandStatement<'_> {
+    let mut statement = vector_statement();
+    statement.input.parent_height = U256::from(parent);
+    statement.input.last_height = U256::from(last);
+    LandStatement {
+        cut_leaves,
+        ..statement
+    }
+}
+
+#[test]
+fn checked_digest_rejects_a_missing_interior_cut_leaf() {
+    let statement = statement_for_range(1000, 1003, &LEAVES[..1]);
+
+    assert_eq!(statement.try_digest(), Err(LandStatementError::CutCount));
+}
+
+#[test]
+fn checked_digest_matches_raw_for_a_valid_range_and_cut_count() {
+    let statement = statement_for_range(1000, 1003, &LEAVES);
+
+    assert_eq!(statement.try_digest(), Ok(statement.digest()));
+}
+
+#[test]
+fn checked_digest_accepts_one_block_with_no_cuts() {
+    for parent in [0, UINT48_MAX - 1] {
+        let statement = statement_for_range(parent, parent + 1, &[]);
+
+        assert_eq!(statement.try_digest(), Ok(statement.digest()));
+    }
+}
+
+#[test]
+fn checked_digest_rejects_an_extra_endpoint_cut_leaf() {
+    let cuts = [1000, 1001, 1002, 1003].map(|height| {
+        cut_leaf(
+            U256::from(height),
+            B256::repeat_byte(0x51),
+            B256::repeat_byte(0x52),
+            U256::ZERO,
+        )
+    });
+    for leaves in [&cuts[..3], &cuts[1..]] {
+        let statement = statement_for_range(1000, 1003, leaves);
+
+        assert_eq!(statement.try_digest(), Err(LandStatementError::CutCount));
+    }
+}
+
+#[test]
+fn checked_digest_rejects_invalid_height_ranges() {
+    for (parent, last) in [
+        (1000, 1000),
+        (1001, 1000),
+        (UINT48_MAX, UINT48_MAX + 1),
+        (UINT48_MAX + 1, UINT48_MAX + 2),
+    ] {
+        let statement = statement_for_range(parent, last, &[]);
+
+        assert_eq!(
+            statement.try_digest(),
+            Err(LandStatementError::InvalidRange)
+        );
+    }
+    assert_eq!(
+        vector_statement().try_digest(),
+        Err(LandStatementError::InvalidRange)
+    );
+}
+
+#[test]
+fn checked_digest_rejects_cut_count_that_would_truncate_on_32_bit() {
+    let statement = statement_for_range(0, (1_u64 << 32) + 3, &LEAVES);
+
+    assert_eq!(statement.try_digest(), Err(LandStatementError::CutCount));
 }
 
 #[test]

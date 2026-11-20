@@ -30,8 +30,8 @@ alter this plan. Keep shared build caches and resource limits in place.
 | Source | Exact revision | Meaning |
 | --- | --- | --- |
 | Existing Raiko2 checkpoint | `845ecbcbe9c5cb81e1c09d0ca37464e58c2dbc18` | Implemented and tested consensus-input slice under the earlier design |
-| Shared dependency | `f31e7ec55345ac7faf99756504535b0cc9929ec0` | Merged taiko-mono #22398; used by that slice |
-| Patched SDK diagnostic | `a29b53c462b69035ef2acfb5785d78ba20067605` | Actual CPU guest feasibility with the then-current patch tables |
+| Shared dependency | `f31e7ec55345ac7faf99756504535b0cc9929ec0` | Squash-merged #22398 into feat/taiko-client-rs-abci; reviewed development pin, not main |
+| Patched SDK diagnostic | `a29b53c462b69035ef2acfb5785d78ba20067605` | Historical CPU guest feasibility with the then-current patch tables; diagnostics are no longer active workspace members |
 | Merged design target | `93b59fe629dc8987ecb03c7d59d1f66004de068f` | taiko-mono #22412; reviewed head merged as `2e6763e2`, implementation adoption still separate |
 | Shared body API candidate | `d7c6c3e30599463177152346d21dee6610f9f7f0` | [taiko-mono #22415](https://github.com/taikoxyz/taiko-mono/pull/22415), optional full-original-body helper; ready for external review; not the current Raiko2 dependency |
 | Reviewed design candidate | `3fe7350119f2efe38cf588c145a9913bf9b3b398` | [taiko-mono #22419](https://github.com/taikoxyz/taiko-mono/pull/22419); approved after the import/gossip specification fix; proving clarifications recorded separately, no blanket source/layout adoption |
@@ -58,6 +58,37 @@ node/import work, not a reason to duplicate EL/MPT logic in Raiko2. Its proof
 changes clarify signing-set identity (keys and assigned powers) and permit one
 narrowly scoped settled-switch root reuse; the latest fix changes no proving
 rule. Candidate interface/storage changes and all anchor tasks remain gated.
+
+## Parallel review findings and merge gates
+
+The first external review at 0c218cbd/aeda3262 is tracked alongside implementation.
+The source inspection confirmed #22398 merged into feat/taiko-client-rs-abci,
+not taiko-mono main. The immutable F31 development pin is intentional for this
+draft. Before merging into Raiko2 main, use an appropriate reviewed upstream
+main/tag revision or explicitly resolve the source-lifetime/build-reproducibility
+gate with reviewers; do not call feature-branch integration mainline adoption.
+The obsolete e6 diagnostic pin is removed with its executable diagnostic targets.
+
+- [x] R01: deprecate the superseded public certified-envelope gate; retain seven clearly historical controls.
+- [x] R02: expose original committed transaction payload spans; cover both generation-parent guards and uint48 overflow; do not trust cached hashes or recovered signers.
+- [x] R03: add checked statement range/interior-cut count validation before hashing while preserving raw ABI vectors.
+- [x] R04: cover all manifest dependency groups and every taiko-mono package in pin guards.
+- [x] R05: remove diagnostic production-workspace coupling and preserve commit-pinned historical evidence.
+- [ ] R06: settle upstream dependency provenance before main merge.
+- [ ] R07: run `just build-guest all --force` at the final source, commit generated provenance and pass the unskipped artifact/schedule-export CI gates before main merge.
+- [x] R08: lint Etna integration tests explicitly in CI with all targets.
+
+The scoped review fixes passed 68 protocol tests (7 historical controls), 44
+xtask library tests, strict all-target Clippy for both touched crates, workspace
+formatting and an isolated no_std consumer/normal-feature audit. Three projection
+guard mutations each compiled and failed its exact new regression; the unmutated
+source was compiled again and all 68 tests passed. One initial mutation run reused
+a stale artifact at the shared virtual path; that result was discarded. Subsequent
+variants forced source freshness without another target directory. Independent
+source review and independent behavioral verification passed. Workflow YAML was
+parsed with the Ruby standard library and its scoped Etna all-target lane checked.
+These checks do not replace final-head production rebuilds or upstream mainline
+source availability. R06/R07 remain unchecked and #305 remains draft.
 
 ## Milestone progress
 
@@ -90,7 +121,7 @@ from checkbox counts.
 
 The reuse correction passed the then-current 25-test fork crate plus the common
 EL rejection regression, scoped Clippy/format/no_std checks and independent
-review/verification. The BFT slices below expand the fork crate to 57 tests.
+review/verification. The BFT and review-fix slices below expand the fork crate to 68 tests.
 The common regression exercises the existing Shasta/Unzen validator; Etna fork
 wiring is still open and is not established by that check.
 Earlier standalone L1 evidence is withdrawn from the completion gates. No source
@@ -151,10 +182,10 @@ them the acceptance definition for the new relation.
 - [x] Run the stock diagnostic in actual patched RISC0 3.0.5 and SP1 6.8.1 CPU guests; compare native and independent oracle journals.
 - [x] Independently review the previous Raiko2 consensus gate: seven authored tests, six independent groups, focused strict Clippy and workspace formatting.
 
-Evidence: [diagnostic results](../../../crates/etna-guest-compat/README.md),
+Evidence: [historical diagnostic results](../../research/2026-11-18-etna-shared-core-guest-compatibility.md),
 [gate tests](../../../crates/protocol-etna/tests/certified_envelope.rs), and
 [#305](https://github.com/taikoxyz/raiko2/pull/305). These are not real proofs of
-#22412. The diagnostic lock changes leave production ELF provenance stale.
+#22412. The diagnostic workspace/lock additions were later removed. Root manifest and build-tool changes still require production provenance refresh.
 
 ## P01 — Freeze the new relation and source interfaces
 
@@ -340,10 +371,10 @@ Acceptance evidence on host Rust 1.95:
 
 - The valid A,A,B,B,A range compiled and failed against the stub before GREEN;
   the implemented relation returns the outgoing endpoints plus h.
-- `cargo test --locked --offline -p raiko2-protocol-etna --all-targets -- --test-threads=2`: 57 passed: the prior 41 regressions, 13 signed native-QC cases and 3 independently authored adversarial cases.
+- `cargo test --locked --offline -p raiko2-protocol-etna --all-targets -- --test-threads=2`: 68 passed, including 7 explicitly historical gate controls, 11 schedule cases, 5 model cases, 17 projection cases, 12 statement cases, 13 signed native-QC cases and 3 independent certificate cases.
 - The independent model checks 1,360 short schedules using explicit sorted keys/powers, 10,016 current/next hash substitutions and 3,648 disconnected adjacent schedule mutations. It is finite regression coverage, not an unbounded theorem or composer test.
 - `cargo clippy --locked --offline -p raiko2-protocol-etna --all-targets -- -D warnings` and `cargo fmt --all -- --check` passed. A separate locked no-default-features `#![no_std]` consumer compiled; its 221-record normal-feature closure enabled no `std`, `use_std` or `use-std` feature.
-- Independent adversarial source review and independent behavioral verification passed. Immutable offline source, the existing shared target/lock, two jobs and a 15 GiB reserve were used. No dependency/lock, EL/MPT, provider/pipeline or production guest/ELF change.
+- Independent adversarial source review and independent behavioral verification passed. Immutable offline source, the existing shared target/lock, two jobs and a 15 GiB reserve were used. The native-QC and review-fix slices keep the existing runtime pins, EL/MPT, provider/pipeline and production ELF bytes; the review fixes restore both guest manifest/lock pairs to base.
 
 These checks do not authenticate the supplied schedule, derive origin/H+2 or
 verify header ancestry, DA, execution, FI or a final proof. Native commit
@@ -452,9 +483,11 @@ reproduced the recorded fingerprint. Both checked-in RISC0 ELFs still match thei
 provenance digests and are unchanged; no current-source rebuilt bytes or image ID
 are established. The Etna crate is not yet in that production guest's closure.
 
-P07 must run the canonical backend build (`just build-guest risc0`, and refresh
-SP1 if stale), review generated artifact/provenance changes and pass
-`just build-guest all --check`. Do not hand-edit the recorded source fingerprint
+The later diagnostic cleanup restored both production guest manifests and locks
+to comparison base `3f4ec387` byte for byte. Root manifest and build-tool source
+still differ, so both production provenance records remain a merge gate.
+P07 must run `just build-guest all --force` on the final source, review generated
+ELF/VK/provenance changes, then pass `just build-guest all --check`. Do not hand-edit the recorded source fingerprint
 or weaken the check. A legitimate rebuild may leave ELF bytes identical while
 refreshing provenance. The stale source check runs before artifact verification
 and RISC0 precedes SP1, so its first failure does not establish that SP1 artifacts

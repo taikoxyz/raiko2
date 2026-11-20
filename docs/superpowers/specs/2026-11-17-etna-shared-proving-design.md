@@ -336,9 +336,14 @@ The pre-merge compatibility diagnostic at
 3.0.5 and SP1 6.8.1 guest workspaces with their existing crypto patch tables.
 Both guests executed the QC, committee, ValState and recorded cut-preimage
 fixture and emitted the same 684-byte journal as native and the stock oracle.
-The updated guest locks affect production ELF provenance. The [diagnostic
-results](../../../crates/etna-guest-compat/README.md) cover CPU compatibility.
-The shared API subsequently merged at `f31e7ec55345ac7faf99756504535b0cc9929ec0`.
+At that historical checkpoint, the updated guest locks affected production ELF
+provenance. They have since been restored to the base production graph. The [historical diagnostic
+results](../../research/2026-11-18-etna-shared-core-guest-compatibility.md) cover CPU compatibility.
+The shared API subsequently squash-merged into feat/taiko-client-rs-abci at
+`f31e7ec55345ac7faf99756504535b0cc9929ec0`, not taiko-mono main. That is a reviewed
+development pin, with mainline provenance still a main-merge gate. Executable
+diagnostics have since been removed from production guest workspaces; the
+linked evidence is historical and commit-pinned.
 Checkpoint `845ecbcb` pins that revision in `crates/protocol-etna` for the earlier
 lower-level Comet consensus gate. Its caller authenticates deployment, origin,
 expected height and parent EL hash, the active committees and the predecessor's

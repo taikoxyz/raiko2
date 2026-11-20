@@ -2,12 +2,14 @@
 //!
 //! Before deriving the proof statement, callers authenticate the deployment,
 //! generation, L1 reference, origin, committee, execution results and data
-//! availability. Callers also enforce the range, applicable uint48 bounds and
-//! input budgets before allocation, and derive exactly one authenticated cut
-//! leaf per interior height in ascending order.
+//! availability. Callers enforce input budgets before allocating inputs, check
+//! applicable bounds on the other fields, and derive one authenticated cut leaf
+//! per strictly interior height in ascending order. Use
+//! [`LandStatement::try_digest`] to check the range and cut count before hashing.
 
 use alloy_primitives::{Address, B256, Keccak256, U256, keccak256};
 use alloy_sol_types::{SolValue, sol};
+use etna_core::schedule::UINT48_MAX;
 
 sol! {
     /// The eight static fields of the proposed Etna Inbox landing input.
@@ -63,8 +65,46 @@ pub struct LandStatement<'a> {
     pub cut_leaves: &'a [B256],
 }
 
+/// A landing statement has invalid range or cut-list shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LandStatementError {
+    /// The heights do not describe a strictly increasing uint48 range.
+    InvalidRange,
+    /// The cut-list length differs from the number of strictly interior heights.
+    CutCount,
+}
+
 impl LandStatement<'_> {
-    /// Encodes the 21 static ABI words hashed by ENC-A-35.
+    /// Checks the uint48 height range and ENC-A-33 cut count before encoding and hashing.
+    ///
+    /// The caller enforces the input budgets and authenticates the statement
+    /// context and the contents and order of the cut leaves.
+    ///
+    /// # Errors
+    /// Returns [`LandStatementError::InvalidRange`] unless
+    /// `parent_height < last_height <= UINT48_MAX`, or
+    /// [`LandStatementError::CutCount`] if the cut list has the wrong length.
+    pub fn try_digest(&self) -> Result<B256, LandStatementError> {
+        let parent = self.input.parent_height;
+        let last = self.input.last_height;
+        if last > U256::from(UINT48_MAX) {
+            return Err(LandStatementError::InvalidRange);
+        }
+        let interior_count = last
+            .checked_sub(parent)
+            .and_then(|range_len| range_len.checked_sub(U256::ONE))
+            .ok_or(LandStatementError::InvalidRange)?;
+        let expected_count =
+            usize::try_from(interior_count).map_err(|_| LandStatementError::CutCount)?;
+        if self.cut_leaves.len() != expected_count {
+            return Err(LandStatementError::CutCount);
+        }
+        Ok(self.digest())
+    }
+
+    /// Encodes the raw 21-word ENC-A-35 preimage without checking range or cut count.
+    ///
+    /// Use [`Self::try_digest`] for runtime statement inputs.
     #[must_use]
     pub fn preimage(&self) -> [u8; 672] {
         let input = &self.input;
@@ -102,8 +142,9 @@ impl LandStatement<'_> {
         preimage
     }
 
-    /// Computes the bytes32 digest passed to the Etna Inbox verifier.
+    /// Computes the raw bytes32 digest without checking range or cut count.
     ///
+    /// Use [`Self::try_digest`] for runtime statement inputs.
     /// Backend public-input framing is applied by the backend integration.
     #[must_use]
     pub fn digest(&self) -> B256 {
@@ -117,10 +158,11 @@ pub fn cut_leaf(height: U256, block_hash: B256, comet_hash: B256, forced_head: U
     keccak256((height, block_hash, comet_hash, forced_head).abi_encode_params())
 }
 
-/// Computes the ENC-A-30 commitment to the supplied leaves in slice order.
+/// Computes the raw ENC-A-30 commitment to the supplied leaves in slice order.
 ///
-/// Callers enforce exactly one authenticated leaf per strictly interior height
-/// in increasing order. A range of one block uses an empty slice.
+/// This accepts any range and leaf count. Callers derive one authenticated leaf
+/// per strictly interior height in increasing order. A range of one block uses
+/// an empty slice. Use [`LandStatement::try_digest`] for runtime statements.
 #[must_use]
 pub fn cut_hash(generation: U256, parent_height: U256, last_height: U256, leaves: &[B256]) -> B256 {
     keccak256(

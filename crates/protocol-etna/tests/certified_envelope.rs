@@ -1,4 +1,7 @@
-//! Certified-envelope regressions using the independent stock Comet byte oracle.
+//! Historical controls for the superseded certified-envelope relation using stock Comet bytes.
+
+#![allow(deprecated)]
+
 use alloy_primitives::{Address, B256, U256, hex, keccak256};
 use etna_core::{
     comet::{

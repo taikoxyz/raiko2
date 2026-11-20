@@ -52,5 +52,3 @@ p256 = { git = "https://github.com/sp1-patches/elliptic-curves", tag = "patch-p2
 substrate-bn = { git = "https://github.com/sp1-patches/bn", package = "substrate-bn", tag = "patch-0.6.0-sp1-6.0.0-substrate-bn" }
 
 [workspace]
-members = ["diagnostics/etna-core"]
-default-members = ["."]

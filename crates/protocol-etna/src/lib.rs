@@ -1,15 +1,16 @@
 //! Etna consensus input checks and landing statement encoding.
 //!
-//! The per-block certified-envelope gate implements the earlier relation.
+//! The deprecated per-block certified-envelope gate implements the superseded baseline relation.
 //! It checks the bare execution parent hash as the `CometBFT` app hash and
 //! verifies the embedded predecessor commit after the first block. The caller
 //! authenticates the gate's consensus context and predecessor.
 //!
 //! The [`projection`] module follows the revised header/envelope/execution
 //! binding. It checks equality against caller-authenticated context and returns
-//! exact original RLP spans. The composing verifier must apply the existing
-//! strict EL verifier to the same matched header and transactions, authenticate
-//! the nested witnesses, and check consensus and range continuity.
+//! exact original RLP spans and transaction payloads. The composing verifier
+//! must apply the existing strict EL verifier to the matched header and
+//! transactions decoded from those payloads, authenticate the nested
+//! witnesses, and check consensus and range continuity.
 //!
 //! The [`statement`] module follows the revised landing design. The full
 //! proof must authenticate the deployment, origin, L1 state, committee
@@ -207,7 +208,11 @@ pub enum CertifiedEnvelopeError {
     EmbeddedCertificate(#[source] BftError),
 }
 
-/// Verifies a certified Comet body against independently authenticated caller context.
+/// Verifies a certified Comet body under the superseded per-block baseline relation.
+///
+/// For revised landing proofs, use [`projection::verify_execution_projection`]
+/// for execution binding and [`coverage`] for validator schedule binding and
+/// required native commits.
 ///
 /// The current body binds exact data, evidence, part set, height, parent EL hash
 /// and generation-start ancestry. The current QC authenticates that identity.
@@ -219,6 +224,9 @@ pub enum CertifiedEnvelopeError {
 ///
 /// Returns an error on an invalid domain, current body or QC, or missing,
 /// unexpected, mismatched or invalid predecessor ancestry.
+#[deprecated(
+    note = "Superseded per-block relation. Use projection::verify_execution_projection and coverage for the revised Etna landing relation"
+)]
 pub fn verify_certified_envelope<'a>(
     block: &'a CometBlock<'_>,
     context: &ConsensusContext<'_>,

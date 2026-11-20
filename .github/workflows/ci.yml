@@ -158,6 +158,9 @@ jobs:
           --
           -D warnings
 
+      - name: clippy Etna integration tests
+        run: cargo clippy -p raiko2-protocol-etna --all-targets -- -D warnings
+
       - name: clippy engine core
         run: cargo clippy -p raiko2-engine --no-default-features -- -D warnings
 

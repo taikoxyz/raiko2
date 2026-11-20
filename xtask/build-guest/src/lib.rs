@@ -183,7 +183,7 @@ fn verify_release_backend(
             Ok(())
         }
         provenance::GuestProvenanceStatus::Stale(reason) => bail!(
-            "Guest artifacts for `{backend_key}` are stale: {reason}. Run `just build-guest {backend_key}` or dispatch `sync-guest-elf`."
+            "Guest artifacts for `{backend_key}` are stale: {reason}. Run `just build-guest {backend_key}`."
         ),
     }
 }
@@ -1332,16 +1332,11 @@ mod tests {
     type GitRevs<'a> = BTreeMap<(&'static str, &'a str), &'a str>;
 
     #[test]
-    fn workspace_and_guest_share_alethia_and_protocol_revs() {
+    fn workspace_and_guest_share_git_revs() {
         let root = repo_root();
         let workspace = read_dependency_manifest(&root.join("Cargo.toml")).unwrap();
         let guest = read_dependency_manifest(&root.join("crates/guest-common/Cargo.toml")).unwrap();
-        let workspace_deps = workspace["workspace"]["dependencies"].as_table().unwrap();
-        let guest_deps = guest["dependencies"].as_table().unwrap();
-        let workspace_revs = parse_git_revs(workspace_deps, None).unwrap();
-        let guest_revs = parse_git_revs(guest_deps, Some(workspace_deps)).unwrap();
-
-        check_manifest_revs(&workspace_revs, &guest_revs).unwrap();
+        let guest_revs = checked_guest_manifest_revs(&workspace, &guest).unwrap();
         for backend in ["risc0", "sp1"] {
             let lock_path = root.join(format!("guests/{backend}/Cargo.lock"));
             let contents = fs::read_to_string(&lock_path).unwrap();
@@ -1356,13 +1351,57 @@ mod tests {
         toml::from_str(&contents).with_context(|| format!("parse manifest {}", path.display()))
     }
 
+    fn checked_guest_manifest_revs<'a>(
+        workspace: &'a toml::Table,
+        guest: &'a toml::Table,
+    ) -> Result<GitRevs<'a>> {
+        let workspace_deps = workspace
+            .get("workspace")
+            .and_then(|workspace| workspace.get("dependencies"))
+            .and_then(toml::Value::as_table)
+            .context("missing workspace dependencies")?;
+        let workspace_revs = parse_git_revs(
+            std::iter::once(workspace_deps).chain(dependency_tables(workspace, true)),
+            Some(workspace_deps),
+        )?;
+        let all_guest_revs = parse_git_revs(dependency_tables(guest, true), Some(workspace_deps))?;
+        check_manifest_revs(&workspace_revs, &all_guest_revs)?;
+
+        // The production guest workspaces do not lock dependency-package dev-dependencies.
+        let locked_guest_revs =
+            parse_git_revs(dependency_tables(guest, false), Some(workspace_deps))?;
+        check_manifest_revs(&workspace_revs, &locked_guest_revs)?;
+        Ok(locked_guest_revs)
+    }
+
+    fn dependency_tables(
+        manifest: &toml::Table,
+        include_dev: bool,
+    ) -> impl Iterator<Item = &toml::Table> {
+        let target_tables = manifest
+            .get("target")
+            .and_then(toml::Value::as_table)
+            .into_iter()
+            .flat_map(toml::Table::values)
+            .filter_map(toml::Value::as_table);
+
+        std::iter::once(manifest)
+            .chain(target_tables)
+            .flat_map(move |section| {
+                ["dependencies", "build-dependencies", "dev-dependencies"]
+                    .into_iter()
+                    .filter(move |kind| include_dev || *kind != "dev-dependencies")
+                    .filter_map(move |kind| section.get(kind).and_then(toml::Value::as_table))
+            })
+    }
+
     fn parse_git_revs<'a>(
-        dependencies: &'a toml::Table,
+        dependencies: impl IntoIterator<Item = &'a toml::Table>,
         workspace: Option<&'a toml::Table>,
     ) -> Result<GitRevs<'a>> {
         let mut pins = BTreeMap::new();
         let mut alethia_rev = None;
-        for (alias, value) in dependencies {
+        for (alias, value) in dependencies.into_iter().flatten() {
             let Some(mut dependency) = value.as_table() else {
                 continue;
             };
@@ -1386,7 +1425,7 @@ mod tests {
                 .map(|url| url.trim_end_matches(".git"))
             {
                 Some(ALETHIA_RETH_REPO) => ALETHIA_RETH_REPO,
-                Some(TAIKO_MONO_REPO) if package == "protocol" => TAIKO_MONO_REPO,
+                Some(TAIKO_MONO_REPO) => TAIKO_MONO_REPO,
                 _ => continue,
             };
             let rev = dependency
@@ -1395,7 +1434,7 @@ mod tests {
                 .filter(|rev| !rev.is_empty())
                 .with_context(|| format!("Git dependency {alias} from {repo} must pin a rev"))?;
 
-            // Alethia's crates share a release, while taiko-mono's protocol has its own pin.
+            // Alethia's crates share a release. Taiko-mono packages can use separate pins.
             let previous = pins.insert((repo, package), rev);
             let previous = if repo == ALETHIA_RETH_REPO {
                 alethia_rev.replace(rev)
@@ -1422,16 +1461,24 @@ mod tests {
         );
 
         let protocol = (TAIKO_MONO_REPO, "protocol");
-        let workspace_protocol = workspace
+        workspace
             .get(&protocol)
             .context("workspace must pin protocol")?;
-        let guest_protocol = guest
+        guest
             .get(&protocol)
             .context("guest-common must pin protocol")?;
-        ensure!(
-            guest_protocol == workspace_protocol,
-            "guest-common protocol rev {guest_protocol} must match workspace {workspace_protocol}"
-        );
+
+        for (&(repo, package), &guest_rev) in guest {
+            if repo == TAIKO_MONO_REPO {
+                let workspace_rev = workspace
+                    .get(&(repo, package))
+                    .with_context(|| format!("workspace must pin {package} from {repo}"))?;
+                ensure!(
+                    guest_rev == *workspace_rev,
+                    "guest-common {package} rev {guest_rev} must match workspace {workspace_rev}"
+                );
+            }
+        }
         Ok(())
     }
 
@@ -1551,6 +1598,102 @@ mod tests {
         Some((repo.trim_end_matches(".git"), rev))
     }
 
+    const TEST_WORKSPACE_PINS: &str = r#"
+[workspace.dependencies]
+alethia-reth-block = { git = "https://github.com/taikoxyz/alethia-reth", rev = "alethia-rev" }
+upstream-protocol = { git = "https://github.com/taikoxyz/taiko-mono", package = "protocol", rev = "protocol-rev" }
+upstream-etna = { git = "https://github.com/taikoxyz/taiko-mono", package = "etna-core", rev = "etna-rev" }
+"#;
+    const TEST_GUEST_PINS: &str = r#"
+[dependencies]
+alethia-reth-block.workspace = true
+upstream-protocol.workspace = true
+"#;
+
+    fn assert_alethia_pin_drift_rejected(group: &str) {
+        let workspace = toml::from_str::<toml::Table>(TEST_WORKSPACE_PINS).unwrap();
+        let guest = toml::from_str::<toml::Table>(&format!(
+            r#"{TEST_GUEST_PINS}
+
+[{group}]
+alethia-reth-evm = {{ git = "https://github.com/taikoxyz/alethia-reth", rev = "wrong-alethia-rev" }}
+"#
+        ))
+        .unwrap();
+        let err = checked_guest_manifest_revs(&workspace, &guest)
+            .expect_err("dependency group must contribute its Git pins");
+        assert!(
+            err.to_string().contains("wrong-alethia-rev"),
+            "unexpected error for {group}: {err}"
+        );
+    }
+
+    #[test]
+    fn pin_guard_rejects_drift_in_guest_target_dependencies() {
+        assert_alethia_pin_drift_rejected(r#"target.'cfg(target_os = "zkvm")'.dependencies"#);
+    }
+
+    #[test]
+    fn pin_guard_rejects_drift_in_guest_target_build_dependencies() {
+        assert_alethia_pin_drift_rejected(r#"target.'cfg(target_os = "zkvm")'.build-dependencies"#);
+    }
+
+    #[test]
+    fn pin_guard_rejects_drift_in_other_guest_dependency_groups() {
+        for group in [
+            "build-dependencies",
+            "dev-dependencies",
+            r#"target.'cfg(target_os = "zkvm")'.dev-dependencies"#,
+        ] {
+            assert_alethia_pin_drift_rejected(group);
+        }
+    }
+
+    #[test]
+    fn pin_guard_rejects_guest_etna_core_rev_mismatch() {
+        let workspace = toml::from_str::<toml::Table>(TEST_WORKSPACE_PINS).unwrap();
+        let guest = toml::from_str::<toml::Table>(&format!(
+            r#"{TEST_GUEST_PINS}
+guest-etna = {{ git = "https://github.com/taikoxyz/taiko-mono", package = "etna-core", rev = "wrong-etna-rev" }}
+"#
+        ))
+        .unwrap();
+        let err = checked_guest_manifest_revs(&workspace, &guest)
+            .expect_err("the guest Etna package must match the workspace pin");
+        assert!(err.to_string().contains("wrong-etna-rev"), "{err}");
+    }
+
+    #[test]
+    fn pin_guard_rejects_git_dependency_without_rev() {
+        let workspace = toml::from_str::<toml::Table>(TEST_WORKSPACE_PINS).unwrap();
+        let guest = toml::from_str::<toml::Table>(&format!(
+            r#"{TEST_GUEST_PINS}
+guest-etna = {{ git = "https://github.com/taikoxyz/taiko-mono", package = "etna-core" }}
+"#
+        ))
+        .unwrap();
+        let err = checked_guest_manifest_revs(&workspace, &guest)
+            .expect_err("the guest Etna package must declare its revision");
+        assert!(err.to_string().contains("must pin a rev"), "{err}");
+    }
+
+    #[test]
+    fn pin_guard_checks_inherited_target_package() {
+        let workspace = toml::from_str::<toml::Table>(TEST_WORKSPACE_PINS).unwrap();
+        let guest = toml::from_str::<toml::Table>(&format!(
+            r#"{TEST_GUEST_PINS}
+[target.'cfg(target_os = "zkvm")'.build-dependencies]
+upstream-etna.workspace = true
+"#
+        ))
+        .unwrap();
+        let guest_revs = checked_guest_manifest_revs(&workspace, &guest).unwrap();
+        assert_eq!(
+            guest_revs.get(&(TAIKO_MONO_REPO, "etna-core")),
+            Some(&"etna-rev")
+        );
+    }
+
     #[test]
     fn parse_git_revs_accepts_independent_taiko_mono_packages() {
         let workspace = toml::from_str::<toml::Table>(
@@ -1567,11 +1710,14 @@ rev = "protocol-rev"
         let guest =
             toml::from_str::<toml::Table>("taiko-client-protocol.workspace = true").unwrap();
 
-        let protocol_revs = BTreeMap::from([((TAIKO_MONO_REPO, "protocol"), "protocol-rev")]);
-        assert_eq!(parse_git_revs(&workspace, None).unwrap(), protocol_revs);
+        let protocol = ((TAIKO_MONO_REPO, "protocol"), "protocol-rev");
         assert_eq!(
-            parse_git_revs(&guest, Some(&workspace)).unwrap(),
-            protocol_revs
+            parse_git_revs([&workspace], None).unwrap(),
+            BTreeMap::from([protocol, ((TAIKO_MONO_REPO, "etna-core"), "etna-rev")])
+        );
+        assert_eq!(
+            parse_git_revs([&guest], Some(&workspace)).unwrap(),
+            BTreeMap::from([protocol])
         );
     }
 
@@ -1589,7 +1735,7 @@ rev = "other-rev"
         )
         .unwrap();
 
-        let err = parse_git_revs(&deps, None).unwrap_err();
+        let err = parse_git_revs([&deps], None).unwrap_err();
         assert!(
             err.to_string().contains("protocol-rev vs other-rev"),
             "unexpected error: {err}"
@@ -1608,7 +1754,7 @@ taiko-client-protocol = { git = "https://github.com/taikoxyz/taiko-mono", packag
             toml::from_str::<toml::Table>("taiko-client-protocol.workspace = true").unwrap();
 
         for (deps, workspace) in [(&deps, None), (&guest, Some(&deps))] {
-            let err = parse_git_revs(deps, workspace).unwrap_err();
+            let err = parse_git_revs([deps], workspace).unwrap_err();
             assert!(
                 err.to_string().contains("must pin a rev"),
                 "unexpected error: {err}"
@@ -1625,7 +1771,7 @@ alethia-reth-chainspec = { git = "https://github.com/taikoxyz/alethia-reth", rev
 "#,
         )
         .unwrap();
-        let err = parse_git_revs(&deps, None).unwrap_err();
+        let err = parse_git_revs([&deps], None).unwrap_err();
         assert!(
             err.to_string().contains("inconsistent git rev pins"),
             "unexpected error: {err}"

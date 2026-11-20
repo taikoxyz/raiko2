@@ -3,7 +3,8 @@
 //! The caller independently authenticates the context. This module binds the
 //! header and ordered transactions to the exact committed bytes and expected
 //! context. The composing verifier must apply the existing strict EL verifier
-//! to that same input and strictly decode and authenticate the witness items.
+//! to the matched header and transactions decoded from the returned payloads,
+//! and strictly decode and authenticate the witness items.
 
 use alloc::vec::Vec;
 use alloy_consensus::Header as ExecutionHeader;
@@ -34,7 +35,8 @@ pub struct ProjectionContext {
     pub height: u64,
     /// Expected hash of the current Comet header.
     pub expected_comet_hash: B256,
-    /// Expected parent Comet header hash, which may be from the previous generation.
+    /// Expected parent Comet header hash at later heights. At the generation's
+    /// first height this field is unused, and the old origin is authenticated separately.
     pub parent_comet_hash: B256,
     /// Expected execution parent hash.
     pub parent_el_hash: B256,
@@ -47,10 +49,11 @@ pub struct ProjectionContext {
 /// The composing verifier must establish the required Comet header, range and
 /// certificate relations, authenticate the witnesses, verify forced inclusion
 /// and data availability, and apply strict EL verification to the same matched
-/// header and transactions.
+/// header and transactions derived from the committed payloads.
 #[derive(Debug)]
 pub struct ExecutionProjection<'a> {
     execution_item_bytes: &'a [u8],
+    transaction_bytes: Vec<&'a [u8]>,
     execution_hash: B256,
     anchor_number: u64,
     anchor_witness: Option<&'a [u8]>,
@@ -63,6 +66,17 @@ impl<'a> ExecutionProjection<'a> {
     #[must_use]
     pub const fn execution_item_bytes(&self) -> &'a [u8] {
         self.execution_item_bytes
+    }
+
+    /// Original committed EIP-2718 payloads in execution order, without RLP string prefixes.
+    ///
+    /// Only the supplied transactions' EIP-2718 encodings are bound. Cached
+    /// hashes and pre-recovered signers remain caller-supplied. Derive hashes
+    /// for forced inclusion from these bytes and strictly decode and validate
+    /// transactions and recover signers from them for EL verification.
+    #[must_use]
+    pub const fn transaction_bytes(&self) -> &[&'a [u8]] {
+        self.transaction_bytes.as_slice()
     }
 
     /// Hash derived from the matched execution header.
@@ -166,11 +180,12 @@ pub enum ProjectionError {
 /// commit. The Comet app hash is included in the header hash as opaque data.
 ///
 /// The result establishes byte and context binding. The composing verifier
-/// must run the existing strict EL verifier on the same matched header and
-/// ordered transactions. That verifier checks the transaction root, ommers,
-/// withdrawals, fork rules and state transition. The composing verifier must
-/// also strictly decode and authenticate the returned witnesses, verify forced
-/// inclusion, and bind data availability.
+/// must run the existing strict EL verifier on the matched header and ordered
+/// transactions decoded from [`ExecutionProjection::transaction_bytes`]. That
+/// verifier checks the transaction root, ommers, withdrawals, fork rules and
+/// state transition. The composing verifier must also strictly decode and
+/// authenticate the returned witnesses, verify forced inclusion, and bind
+/// data availability.
 ///
 /// # Errors
 ///
@@ -210,10 +225,12 @@ pub fn verify_execution_projection<'a, T: Encodable2718>(
     require_empty(fields)?;
 
     let anchor_number = verify_execution_header(execution_header, context)?;
-    verify_execution_block(block_fields, execution_header, execution_transactions)?;
+    let transaction_bytes =
+        verify_execution_block(block_fields, execution_header, execution_transactions)?;
 
     Ok(ExecutionProjection {
         execution_item_bytes,
+        transaction_bytes,
         execution_hash: execution_header.hash_slow(),
         anchor_number,
         anchor_witness,
@@ -281,11 +298,11 @@ fn verify_execution_header(
     Ok(u64::from_be_bytes(anchor))
 }
 
-fn verify_execution_block<T: Encodable2718>(
-    mut fields: &[u8],
+fn verify_execution_block<'a, T: Encodable2718>(
+    mut fields: &'a [u8],
     header: &ExecutionHeader,
     transactions: &[T],
-) -> Result<(), ProjectionError> {
+) -> Result<Vec<&'a [u8]>, ProjectionError> {
     let (header_item, _) = list_item(&mut fields)?;
     let mut tx_items = RlpHeader::decode_bytes(&mut fields, true)?;
     require_empty(fields)?;
@@ -300,6 +317,7 @@ fn verify_execution_block<T: Encodable2718>(
         return Err(ProjectionError::HeaderRoundTrip);
     }
 
+    let mut transaction_bytes = Vec::new();
     for tx in transactions {
         if tx_items.is_empty() {
             return Err(ProjectionError::ExecutionTransactions);
@@ -310,11 +328,12 @@ fn verify_execution_block<T: Encodable2718>(
         if tx.encode_2718_len() != committed.len() || tx.encoded_2718() != committed {
             return Err(ProjectionError::ExecutionTransactions);
         }
+        transaction_bytes.push(committed);
     }
     if !tx_items.is_empty() {
         return Err(ProjectionError::ExecutionTransactions);
     }
-    Ok(())
+    Ok(transaction_bytes)
 }
 
 fn list_item<'a>(bytes: &mut &'a [u8]) -> Result<(&'a [u8], &'a [u8]), ProjectionError> {

@@ -73,7 +73,7 @@ raiko2-runtime = { path = "./crates/runtime" }
 raiko2-stateless = { path = "./crates/stateless" }
 raiko2-protocol = { path = "./crates/protocol" }
 raiko2-protocol-shasta = { path = "./crates/protocol-shasta" }
-raiko2-protocol-etna = { path = "./crates/protocol-etna", default-features = false }
+raiko2-protocol-etna = { path = "./crates/protocol-etna" }
 raiko2-primitives-shasta = { path = "./crates/primitives-shasta" }
 raiko2-queue = { path = "./crates/queue" }
 raiko2-guests = { path = "./crates/guests" }

@@ -1,7 +1,7 @@
 //! Behavioral tests for the proof-specific Etna execution projection.
-use alloy_consensus::{Header, TxEnvelope, proofs::calculate_transaction_root};
+use alloy_consensus::{Header, Signed, TxEnvelope, proofs::calculate_transaction_root};
 use alloy_eips::eip2718::{Decodable2718, Encodable2718};
-use alloy_primitives::{Address, B256, U256, hex};
+use alloy_primitives::{Address, B256, U256, hex, keccak256};
 use etna_core::{
     comet::{
         APP_VERSION,
@@ -149,6 +149,7 @@ fn recovery_origin_binds_exact_execution_item_with_opaque_app_hash() {
         projection.execution_item_bytes(),
         execution_item(&fixture.execution_header, &[])
     );
+    assert!(projection.transaction_bytes().is_empty());
     assert_eq!(
         projection.execution_hash(),
         fixture.execution_header.hash_slow()
@@ -174,6 +175,14 @@ fn later_height_binds_ordered_legacy_and_typed_transactions() {
         projection.execution_item_bytes(),
         execution_item(&fixture.execution_header, &transactions)
     );
+    let [legacy, typed] = &transactions;
+    assert_eq!(
+        projection.transaction_bytes(),
+        &[
+            legacy.encoded_2718().as_slice(),
+            typed.encoded_2718().as_slice()
+        ]
+    );
     let reordered = [transactions[1].clone(), transactions[0].clone()];
     assert!(matches!(
         fixture.verify(&reordered),
@@ -198,10 +207,75 @@ fn later_height_binds_ordered_legacy_and_typed_transactions() {
         fixture.verify(&transactions),
         Err(ProjectionError::CometParent)
     ));
-    fixture.context.origin_height += 1;
+}
+
+#[test]
+fn later_height_requires_a_comet_parent() {
+    let mut fixture = Fixture::new(&[]);
+    fixture.context.origin_height -= 1;
     assert!(matches!(
-        fixture.verify(&transactions),
+        fixture.verify(&[]),
         Err(ProjectionError::CometParent)
+    ));
+}
+
+#[test]
+fn generation_first_height_rejects_even_a_matching_comet_parent() {
+    let mut fixture = Fixture::new(&[]);
+    fixture.comet_header.last_block_id = Some(tendermint::block::Id {
+        hash: Hash::Sha256(fixture.context.parent_comet_hash.into()),
+        part_set_header: tendermint::block::parts::Header::default(),
+    });
+    fixture.seal_header();
+    assert!(matches!(
+        fixture.verify(&[]),
+        Err(ProjectionError::CometParent)
+    ));
+}
+
+#[test]
+fn returns_committed_transaction_bytes_with_an_untrusted_cached_hash() {
+    let [_, canonical] = signed_transactions();
+    let fixture = Fixture::new(core::slice::from_ref(&canonical));
+    let expected_bytes =
+        hex::decode(include_str!("fixtures/projection-eip1559.hex").trim()).unwrap();
+    let original_span = fixture.comet_transactions[0]
+        .windows(expected_bytes.len())
+        .find(|bytes| *bytes == expected_bytes.as_slice())
+        .expect("the fixture must include the original signed transaction");
+    let TxEnvelope::Eip1559(signed) = &canonical else {
+        panic!("expected a typed transaction fixture");
+    };
+    let supplied = TxEnvelope::Eip1559(Signed::new_unchecked(
+        signed.tx().clone(),
+        *signed.signature(),
+        B256::repeat_byte(0xa5),
+    ));
+    assert_eq!(supplied.encoded_2718(), expected_bytes);
+    assert_ne!(supplied.tx_hash(), canonical.tx_hash());
+
+    let projection = fixture.verify(core::slice::from_ref(&supplied)).unwrap();
+    let spans = projection.transaction_bytes();
+    assert_eq!(spans, &[original_span]);
+    assert!(core::ptr::eq(spans[0], original_span));
+    assert_eq!(keccak256(spans[0]), *canonical.tx_hash());
+    assert_ne!(keccak256(spans[0]), *supplied.tx_hash());
+}
+
+#[test]
+fn rejects_a_changed_committed_transaction_payload() {
+    let [_, typed] = signed_transactions();
+    let mut fixture = Fixture::new(core::slice::from_ref(&typed));
+    let mut changed = typed.encoded_2718();
+    *changed.last_mut().unwrap() ^= 1;
+    let item = list(&[
+        &alloy_rlp::encode(&fixture.execution_header),
+        &list(&[&alloy_rlp::encode(changed.as_slice())]),
+    ]);
+    fixture.seal_envelope(envelope(&[&item, &[0xc0], &[0xc0], &[0xc0]]));
+    assert!(matches!(
+        fixture.verify(core::slice::from_ref(&typed)),
+        Err(ProjectionError::ExecutionTransactions)
     ));
 }
 
@@ -404,6 +478,19 @@ fn uint48_limits_apply_without_truncation() {
     fixture.context.height = max + 1;
     assert!(matches!(fixture.verify(&[]), Err(ProjectionError::Height)));
     fixture.context.origin_height = u64::MAX;
+    assert!(matches!(fixture.verify(&[]), Err(ProjectionError::Height)));
+}
+
+#[test]
+fn rejects_a_matching_height_above_uint48_max() {
+    let mut fixture = Fixture::new(&[]);
+    let max = (1 << 48) - 1;
+    let height = max + 1;
+    fixture.context.origin_height = max;
+    fixture.context.height = height;
+    fixture.comet_header.height = height.try_into().unwrap();
+    fixture.execution_header.number = height;
+    fixture.seal_execution(&[]);
     assert!(matches!(fixture.verify(&[]), Err(ProjectionError::Height)));
 }
 

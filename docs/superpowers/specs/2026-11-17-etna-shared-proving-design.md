@@ -1,5 +1,26 @@
 # Shared upstream Etna proving implementation
 
+## QC scope hold (2026-11-22)
+
+The user paused QC and committee implementation while the new L2-managed
+membership/penalty design is unsettled. Revisit node-code reuse only after
+its authoritative interfaces are known. This supersedes the old committee
+provenance and L1 public-input proposal as an immediate implementation target;
+#22423 remains provisional. Existing native QC components are not a completed
+or frozen future proof relation. Do not remove them or invent replacement
+interfaces during this pause.
+
+Continue independently with execution fork compatibility and exact DA payload
+binding, reusing existing executor/trie/KZG. The first DA component checks only
+that the complete decompressed bytes equal the canonical list of the projected
+original execution items, in the supplied order and within 64 MiB. The composer
+still authenticates context and complete range membership. This check neither
+inflates nor establishes blob provenance. A bounded, conforming compressed-stream
+decoder remains a separate gate; source review found acceptance differences in
+the initially considered pinned miniz streaming backend, so it is not adopted.
+The current v6 format is a component baseline only; actual DA provenance,
+FI-off profile and final guest/proof wiring remain open.
+
 ## L1 authority boundary amendment (2026-11-20)
 
 Protocol discussion: [taiko-mono #22423](https://github.com/taikoxyz/taiko-mono/pull/22423)

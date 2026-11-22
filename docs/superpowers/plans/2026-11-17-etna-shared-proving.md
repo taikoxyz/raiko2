@@ -17,6 +17,45 @@ RISC0 3.0.5 and SP1 6.8.1 at the recorded feasibility checkpoint.
 **Spec:** [Shared proving design](../specs/2026-11-17-etna-shared-proving-design.md),
 including its current planning-baseline amendment.
 
+## QC design hold and non-QC continuation (2026-11-22)
+
+The user directed that QC/committee work pause pending the revised design,
+which is expected to manage membership changes, penalties and queries on L2.
+Reusing the node implementation is a candidate after that design settles, not
+an adopted interface. Do not extend or freeze the old L1 committee-authority
+proposal, registry proof adapters, committee derivation or QC policy. Keep the
+existing tested helpers as partial components without wiring them into a final
+proof. This amendment supersedes earlier instructions to complete that path.
+
+- [ ] **QC-HOLD:** once the revised design is stable, inspect the authoritative
+  node/L2 contract APIs and decide what to reuse or verify. P03 committee and
+  P03-L01..L04 authority work, the fewer-QC discussion and final committee-related
+  statement wiring wait for that review. #22423 is a historical provisional
+  discussion and is not a blocker for independent execution/DA work.
+- [x] **P05-D01a:** bind the complete decompressed execution-list bytes to the
+  original matched item spans, with exact canonical outer RLP framing and the
+  inclusive 64 MiB bound. Retain borrowed spans and existing codecs; no second
+  expected payload, dependency or transaction/header decoder.
+- [ ] **P05-D01b:** qualify a strict bounded inflater and compose version-6
+  framing, compressed-size/dictionary/checksum/exhaustion checks with D01a and
+  the existing ordered blob/KZG path. D01a alone does not establish DA.
+
+The initially considered miniz_oxide 0.8.9 streaming backend is not adopted.
+Independent source review found missing-history and incomplete-Huffman
+admission differences from reference decoders, plus an advertised-window
+constraint that the streaming wrapper does not enforce. Byte equality and
+checksum cannot establish decoder conformance. Resolve that profile with differential malformed
+stream tests before integration; do not add a custom DEFLATE parser or present
+existing permissive Unzen decoding as strict Etna validation. A decoded-slice
+size check does not bound allocation during inflation: D01b must enforce that
+limit as output is produced.
+
+The current non-QC payload source was inspected at taiko-mono main
+`3602629758beb653423a23608fd1960810efcfac`: one version byte, one dictionary-free
+complete zlib stream, no trailing bytes, canonical RLP list items equal to the
+projected range, 64 MiB output and 124000 bytes per item. This remains a pinned
+component baseline, not a claim the evolving overall design is frozen.
+
 ## L1 authority boundary amendment (2026-11-20)
 
 Protocol discussion: [taiko-mono #22423](https://github.com/taikoxyz/taiko-mono/pull/22423)
@@ -607,6 +646,38 @@ Supplied cursor validity, execution, DA, L1/committee authority, phase-one FI-of
 profile and backend proof framing are still composing-verifier obligations.
 The result is not a full certified range or proof. No guest cycles, SDK build
 or real proof was run. R06/R07 and #22423 authority review remain open.
+
+### P05-D01a — Decompressed execution-list equality (2026-11-22)
+
+[`verify_decompressed_execution_payload`](../../../crates/protocol-etna/src/payload.rs)
+checks the canonical outer RLP list prefix followed by each original projected
+execution-item span in order, with no second full payload allocation or
+transaction/header decoder. It rejects empty ranges, mismatched bytes and
+lengths, and actual or expected encodings above 64 MiB including the prefix.
+The caller still authenticates the complete range, bounds inflation during
+execution and establishes strict compressed-stream and ordered blob provenance.
+D01b, execution, anchors, FI-profile authorization and final guest/proof
+composition remain open; this is not complete DA verification.
+
+Acceptance evidence for this bounded component:
+
+- Compiled semantic RED: all seven initial payload tests failed at the explicit
+  unimplemented seam before implementation.
+- `cargo test --locked --offline -p raiko2-protocol-etna --all-targets -- --test-threads=2`:
+  101 maintained tests and three independent scratch tests passed, including
+  seven historical earlier-relation controls. The six new maintained tests
+  cover exact original empty/signed spans, count/order/substitution, canonical
+  framing/truncation/extra roots and the exact inclusive 64 MiB boundary plus
+  one-over actual and expected sizes.
+- `cargo clippy --locked --offline -p raiko2-protocol-etna --all-targets -- -D warnings`
+  and `cargo fmt --all -- --check` passed.
+- A locked standalone `#![no_std]` consumer exporting the new API passed
+  `cargo check --locked --offline --lib`; the normal runtime feature graph
+  excluding host proc-macros contained 221 rows and no std/use_std/use-std.
+- Independent adversarial source review and independent behavioral verification
+  passed. Checks used immutable offline snapshots and the existing shared target
+  with a 15 GiB disk reserve. No manifest, lock, backend, guest entrypoint,
+  production ELF or proof-output change is included.
 
 ## P06 — Thin host and backend integration
 

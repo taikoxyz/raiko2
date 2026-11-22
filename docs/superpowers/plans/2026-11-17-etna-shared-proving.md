@@ -41,15 +41,32 @@ planning/status checks as completed implementation tasks.
    at that same range consumer. Keep checkpoint storage predicates on the
    existing proof engine; do not add a separate generic verifier.
 
-**Early checkpoint: B01-1 is blocked, zero implementation tasks completed in
-this batch.** At the exact GitHub refresh, #22426 is OPEN/DRAFT at `8268eb63`
-with no submitted reviews or comments, and its full client checks are skipped.
-The scoped 58 core / 27 adapter tests do not satisfy that full-client gate.
-Raiko2 remains at F31. B01-2/B01-3 depend on the shared-header adoption and must
-not substitute a duplicate parser, an unchecked host-provided timestamp/root,
-or an unreviewed dependency pin. Resume B01 after the upstream source gate is
-met or the user explicitly changes that gate. FI, QC management, distant-anchor
-SSZ and final committee-dependent ABI remain on their existing holds.
+**Early checkpoint: B01-1 remains incomplete, zero implementation tasks
+completed in this batch.** #22426 is OPEN/DRAFT at `8268eb63`, with no submitted
+reviews or comments. Its automatic draft checks skipped full client validation;
+the existing [manual full-client workflow](https://github.com/taikoxyz/taiko-mono/actions/runs/45017187106)
+was then dispatched and read back at that exact head. Native unit, lint,
+EL-import, full Docker lanes and checkpoint-resource jobs actually started;
+lockfile and lander artifact reproduction passed at the recorded intermediate
+snapshot. Remaining jobs were still running. Manual dispatch skips the separate
+production-image job. The scoped 58 core / 27 adapter tests remain component
+evidence, not a replacement for the pending complete gate.
+
+The F31-to-candidate source audit also found unrelated API/behavior changes in
+committee selection, parameters and ValState. In particular, core removed
+`parent_el_hash` and its bare app-hash check from `verify_body_at_origin`, while
+Raiko2's deprecated historical helper still calls the four-argument form.
+Blindly removing that argument would weaken that helper's documented relation;
+no candidate Raiko2 build or compatibility fix is claimed. The core manifest
+itself is unchanged; node-workspace Alethia pin changes are not automatically
+Etna execution adoption for Raiko2.
+
+Raiko2 remains at F31. B01-2/B01-3 depend on reviewed source-compatible adoption
+and must not substitute a duplicate parser, unchecked host timestamp/root or an
+unreviewed pin. Keep QC-dependent behavior outside this adoption while its design
+is paused. Resume after the source gate is met or the user explicitly changes
+that gate. FI, QC management, distant-anchor SSZ and final committee-dependent
+ABI remain on their existing holds.
 
 ## QC design hold and non-QC continuation (2026-11-22)
 

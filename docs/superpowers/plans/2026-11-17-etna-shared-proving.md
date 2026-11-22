@@ -535,6 +535,48 @@ mark their implementation or upstream specification alignment complete.
 No historical SSZ guest, archive provider, reference-selection host API or full
 origin/committee proof is claimed implemented by this audit.
 
+### P03-A05c — Shared raw-header prerequisite (2026-11-22)
+
+[taiko-mono #22426](https://github.com/taikoxyz/taiko-mono/pull/22426), draft at
+`8268eb63d71a6a1602880722f44550eb43bea05b`, extracts the existing ABCI raw L1
+header parser into `etna_core::l1_header::L1HeaderView`. Its source base is the
+client branch `fbcec295`, not mono main. ABCI delegates to the same parser while
+retaining its owned header/wire API. The only manifest/lock change is an existing
+local ABCI-to-core edge; no third-party source or version changes. Raiko2 remains
+pinned to F31: this is a prerequisite, not dependency adoption or proving support.
+
+- [x] **P03-A05c1 — Portable shared codec candidate:** exact borrowed raw-header
+  identity and four positional fields, original 4096-byte limit, error ordering
+  and opaque direct-item behavior. The new API has an actual ABCI caller; it
+  does not restore the unused standalone L1 verifier.
+- [ ] **P03-A05c2 — Review/source gate:** complete upstream review and full native
+  client CI before merging the draft; select a compatible reviewed pin before
+  downstream use. Recheck the F31-to-selected-source delta rather than upgrading
+  unrelated QC/committee semantics during their hold. R06 remains open.
+- [ ] **P03-A05c3 — Anchor/reference/time composition:** open the exact carried
+  header bytes against the selected authenticated near-reference ancestry,
+  compare anchor number/root to the same matched EL header and roll inherited
+  facts through the range. Only when p+1 inherits does it need the excluded
+  parent's raw anchor opening (PROOF-6.2-47). Then check the exact timestamp
+  maximum and authenticated age/origin limits, rejecting parent-time overflow.
+  Reuse the existing proof engine for required storage predicates; do not add
+  another trie or treat a host read as authenticated state.
+
+Reuse refinement: Shasta's L1 linkage lives inside a private event-bound helper
+with its own stalled-anchor policy; it is not a directly callable Etna verifier.
+Keep that policy scoped to Shasta and factor only useful low-level link checks
+when the Etna caller is present. No generic framework or new storage reader.
+
+Candidate evidence: 58 core unit tests and 27 exact-source adapter/oracle tests
+(11 delegated, 11 pinned original and five independent manual-fixture cases)
+passed offline against upstream-locked dependency identities. Strict core doc
+lint and all-target core/adapter Clippy passed. A separate no_std consumer passed,
+and its 138 normal runtime feature rows excluding host proc-macros have no std.
+The pinned formatting recipe and real native workspace metadata passed. Full
+`just verify`/native-client/Docker checks remain open on the upstream draft;
+this harness is not their substitute. No Raiko2 guest/ELF, dependency or runtime
+code change is included in this checkpoint.
+
 ### P03-A05b — Excluded-parent binding (2026-11-22)
 
 Continue A05a at the existing range and statement functions with the actual

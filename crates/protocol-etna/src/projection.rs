@@ -299,10 +299,17 @@ fn verify_execution_header(
         return Err(ProjectionError::ExecutionParent);
     }
 
-    let extra_data = header.extra_data.as_ref();
+    decode_anchor_number(header.extra_data.as_ref(), context.domain.generation)
+}
+
+/// Checks the Etna fee share and generation and decodes the encoded anchor number.
+pub(crate) fn decode_anchor_number(
+    extra_data: &[u8],
+    generation: u64,
+) -> Result<u64, ProjectionError> {
     if extra_data.len() != 13
         || extra_data[0] != BASEFEE_SHARE
-        || extra_data[1..7] != context.domain.generation.to_be_bytes()[2..]
+        || extra_data[1..7] != generation.to_be_bytes()[2..]
     {
         return Err(ProjectionError::ExtraData);
     }
@@ -324,11 +331,7 @@ fn verify_execution_block<'a, T: Encodable2718>(
     if header_item != encoded_header {
         return Err(ProjectionError::ExecutionHeader);
     }
-    let decoded: ExecutionHeader =
-        alloy_rlp::decode_exact(&encoded_header).map_err(|_| ProjectionError::HeaderRoundTrip)?;
-    if &decoded != header {
-        return Err(ProjectionError::HeaderRoundTrip);
-    }
+    verify_execution_header_round_trip(header, &encoded_header)?;
 
     let mut transaction_bytes = Vec::new();
     for tx in transactions {
@@ -347,6 +350,19 @@ fn verify_execution_block<'a, T: Encodable2718>(
         return Err(ProjectionError::ExecutionTransactions);
     }
     Ok(transaction_bytes)
+}
+
+/// Checks that the typed header fields are represented faithfully in its RLP encoding.
+pub(crate) fn verify_execution_header_round_trip(
+    header: &ExecutionHeader,
+    encoded: &[u8],
+) -> Result<(), ProjectionError> {
+    let decoded: ExecutionHeader =
+        alloy_rlp::decode_exact(encoded).map_err(|_| ProjectionError::HeaderRoundTrip)?;
+    if &decoded != header {
+        return Err(ProjectionError::HeaderRoundTrip);
+    }
+    Ok(())
 }
 
 fn list_item<'a>(bytes: &mut &'a [u8]) -> Result<(&'a [u8], &'a [u8]), ProjectionError> {

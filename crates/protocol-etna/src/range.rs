@@ -1,8 +1,9 @@
 //! Etna byte and identity projection for a complete range `(p, h]`.
 //!
 //! The caller authenticates the deployment, generation origin and range
-//! context. The projection links the Comet and execution headers, checks
-//! structural anchor transitions and preserves the original envelope spans.
+//! context. The projection binds the excluded execution parent, links the
+//! Comet and execution headers, checks structural anchor transitions and
+//! preserves the original envelope spans.
 //! [`verify_range_statement_projection`] also binds the landing statement and
 //! its interior cuts to the range.
 //! The composing verifier still checks nested witnesses, the committee
@@ -13,14 +14,15 @@
 use alloc::vec::Vec;
 use alloy_consensus::Header as ExecutionHeader;
 use alloy_eips::eip2718::Encodable2718;
-use alloy_primitives::{B256, U256};
+use alloy_primitives::{B256, U256, keccak256};
 use core::cmp::Ordering;
 use etna_core::{comet::verify::header_hash, domain::DeploymentDomain, schedule::UINT48_MAX};
 use tendermint::{Hash, block::Header as CometHeader};
 
 use crate::{
     projection::{
-        ExecutionProjection, ProjectionContext, ProjectionError, verify_execution_projection,
+        ExecutionProjection, ProjectionContext, ProjectionError, decode_anchor_number,
+        verify_execution_header_round_trip, verify_execution_projection,
     },
     statement::{LandStatement, LandStatementError, cut_leaf},
 };
@@ -95,6 +97,23 @@ pub enum RangeProjectionError {
         #[source]
         source: ProjectionError,
     },
+    /// The excluded parent execution header has the wrong height.
+    #[error("excluded Etna parent execution header has height {actual}, expected {expected}")]
+    ParentExecutionHeight {
+        /// Height authenticated by the caller.
+        expected: u64,
+        /// Height in the supplied header.
+        actual: u64,
+    },
+    /// The excluded parent execution header has the wrong hash.
+    #[error("excluded Etna parent execution header differs from expected hash")]
+    ParentExecutionHash,
+    /// The excluded parent execution header does not round-trip through its committed encoding.
+    #[error("invalid excluded Etna parent execution header encoding: {0}")]
+    ParentExecutionEncoding(#[source] ProjectionError),
+    /// The excluded parent inside the generation contains invalid Etna extra data.
+    #[error("invalid Etna extra data in the excluded parent execution header")]
+    ParentExecutionExtraData,
     /// A generation's first block or an anchor advance omitted its witness.
     #[error("missing Etna anchor witness at height {height}")]
     MissingAnchorWitness {
@@ -188,7 +207,8 @@ pub enum RangeStatementProjectionError {
 /// digest after binding the statement to the supplied range.
 ///
 /// The proof origin can be a historical block within the generation. The
-/// caller authenticates the deployment, proof origin and range context.
+/// caller authenticates the deployment, proof origin and range context and
+/// supplies the excluded execution parent header for range verification.
 /// Each post-block FI cursor is checked for its uint48 width and for a valid
 /// step relative to the previous cursor. The composing verifier authenticates
 /// the origin cursor and checks each supplied cursor against actual FI behavior.
@@ -204,6 +224,7 @@ pub fn verify_range_statement_projection<'a, T: Encodable2718>(
     context: &RangeProjectionContext,
     statement: &LandStatement<'_>,
     post_block_cursors: &[u64],
+    parent_execution_header: &ExecutionHeader,
 ) -> Result<(Vec<ExecutionProjection<'a>>, B256), RangeStatementProjectionError> {
     validate_range_block_count(context, blocks.len())?;
     let input = &statement.input;
@@ -253,7 +274,7 @@ pub fn verify_range_statement_projection<'a, T: Encodable2718>(
     statement.validate_shape()?;
     validate_cursors(context, statement, post_block_cursors, blocks.len())?;
 
-    let projections = verify_range_projection(blocks, context)?;
+    let projections = verify_range_projection(blocks, context, parent_execution_header)?;
     let terminal = blocks.last().ok_or(RangeProjectionError::InvalidRange)?;
     if input.last_state_root != terminal.execution_header.state_root {
         return Err(RangeStatementProjectionError::StatementMismatch {
@@ -323,42 +344,63 @@ fn validate_cursors(
 /// ancestry compares predecessor header hashes. Each block inherits the
 /// existing per-block `APP_VERSION` check, pending P01 policy alignment.
 ///
-/// A generation's first block must carry an anchor witness. Between adjacent
-/// blocks in the range, anchor numbers cannot decrease. An advance requires
-/// a witness. Inheritance requires an absent witness and the same nonzero
-/// anchor root in both matched headers.
+/// The excluded execution parent must match the authenticated height and hash.
+/// Within a generation, anchor numbers cannot decrease, including on the edge
+/// from the excluded parent. An advance requires a witness, and inheritance
+/// requires an absent witness and identical, present nonzero roots.
+/// At the generation origin, the first block starts a new anchor sequence
+/// with a carried witness, independently of the parent's anchor fields.
 ///
-/// The caller checks the transition from the excluded parent for a range
-/// starting mid-generation, verifies carried witnesses, and enforces the
-/// authenticated L1 origin floor, checkpoint, anchor age and timestamp rules.
-/// The caller enforces outer input framing and budgets before decoding or
-/// allocating inputs, and uses the returned spans for the remaining checks
-/// described in the module documentation.
+/// The caller verifies carried witnesses and enforces the authenticated L1
+/// origin floor, checkpoint, anchor age and timestamp rules. The caller
+/// enforces outer input framing and budgets before decoding or allocating
+/// inputs and uses the returned spans for the remaining module checks.
 ///
 /// # Errors
-/// Returns an error for invalid endpoints, excess or incorrect block count,
-/// failed per-block projection or anchor transition, or a mismatched terminal identity.
+/// Returns an error for invalid endpoints or block count, an invalid excluded
+/// parent, failed per-block projection or anchor transition, or a mismatched
+/// terminal identity.
 pub fn verify_range_projection<'a, T: Encodable2718>(
     blocks: &[RangeBlock<'a, T>],
     context: &RangeProjectionContext,
+    parent_execution_header: &ExecutionHeader,
 ) -> Result<Vec<ExecutionProjection<'a>>, RangeProjectionError> {
     validate_range_block_count(context, blocks.len())?;
-    let RangeProjectionContext {
-        domain,
-        origin_height,
-        parent_height,
-        last_height,
-        mut parent_el_hash,
-        mut parent_comet_hash,
-        last_el_hash,
-        last_comet_hash,
-        max_envelope_bytes,
-        ..
-    } = *context;
+    let parent_height = context.parent_height;
 
+    if parent_execution_header.number != parent_height {
+        return Err(RangeProjectionError::ParentExecutionHeight {
+            expected: parent_height,
+            actual: parent_execution_header.number,
+        });
+    }
+    let mut parent_el_hash = {
+        let encoded = alloy_rlp::encode(parent_execution_header);
+        let hash = keccak256(&encoded);
+        if hash != context.parent_el_hash {
+            return Err(RangeProjectionError::ParentExecutionHash);
+        }
+        verify_execution_header_round_trip(parent_execution_header, &encoded)
+            .map_err(RangeProjectionError::ParentExecutionEncoding)?;
+        hash
+    };
+
+    let mut previous_anchor = if parent_height == context.origin_height {
+        None
+    } else {
+        let anchor_number = decode_anchor_number(
+            parent_execution_header.extra_data.as_ref(),
+            context.domain.generation,
+        )
+        .map_err(|_| RangeProjectionError::ParentExecutionExtraData)?;
+        Some((
+            anchor_number,
+            parent_execution_header.parent_beacon_block_root,
+        ))
+    };
     let mut projections = Vec::new();
-    let mut previous_anchor = None;
-    for (height, block) in (parent_height + 1..=last_height).zip(blocks) {
+    let mut parent_comet_hash = context.parent_comet_hash;
+    for (height, block) in (parent_height + 1..=context.last_height).zip(blocks) {
         let Hash::Sha256(comet_hash) = header_hash(block.comet_header) else {
             return Err(RangeProjectionError::Projection {
                 height,
@@ -372,13 +414,13 @@ pub fn verify_range_projection<'a, T: Encodable2718>(
             block.execution_header,
             block.execution_transactions,
             &ProjectionContext {
-                domain,
-                origin_height,
+                domain: context.domain,
+                origin_height: context.origin_height,
                 height,
                 expected_comet_hash: comet_hash,
                 parent_comet_hash,
                 parent_el_hash,
-                max_envelope_bytes,
+                max_envelope_bytes: context.max_envelope_bytes,
             },
         )
         .map_err(|source| RangeProjectionError::Projection { height, source })?;
@@ -410,7 +452,7 @@ pub fn verify_range_projection<'a, T: Encodable2718>(
                 }
                 Ordering::Greater => {}
             }
-        } else if parent_height == origin_height && !carries_witness {
+        } else if !carries_witness {
             return Err(RangeProjectionError::MissingAnchorWitness { height });
         }
         previous_anchor = Some((anchor_number, anchor_root));
@@ -420,10 +462,10 @@ pub fn verify_range_projection<'a, T: Encodable2718>(
         projections.push(projection);
     }
 
-    if parent_comet_hash != last_comet_hash {
+    if parent_comet_hash != context.last_comet_hash {
         return Err(RangeProjectionError::TerminalCometHash);
     }
-    if parent_el_hash != last_el_hash {
+    if parent_el_hash != context.last_el_hash {
         return Err(RangeProjectionError::TerminalExecutionHash);
     }
     Ok(projections)

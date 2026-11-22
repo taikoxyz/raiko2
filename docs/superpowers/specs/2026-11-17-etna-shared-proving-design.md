@@ -21,6 +21,21 @@ the initially considered pinned miniz streaming backend, so it is not adopted.
 The current v6 format is a component baseline only; actual DA provenance,
 FI-off profile and final guest/proof wiring remain open.
 
+## Native parent/anchor boundary checkpoint (2026-11-22)
+
+The existing native range and statement functions now require the excluded
+execution parent header. Its height, canonical hash and typed field fidelity
+bind to the existing range context. The same anchor-transition checks cover
+p to p+1 and all later edges inside a generation; at generation origin, the
+parent's old anchor fields remain opaque and the first block carries a witness.
+This reuses the execution parent and covered-header codec checks, without new
+storage reads, execution logic, dependencies or final public-input fields.
+
+The context still requires independent authentication. Carried L1 witness
+contents, root/time authority, origin floor, checkpoint/rules and age checks,
+strict DA, execution and final proof acceptance remain open. The native helper
+argument does not freeze the final guest transport schema.
+
 ## L1 authority boundary amendment (2026-11-20)
 
 Protocol discussion: [taiko-mono #22423](https://github.com/taikoxyz/taiko-mono/pull/22423)

@@ -1,7 +1,7 @@
 //! Behavioral tests for the complete Etna execution byte projection.
 use alloy_consensus::{Header, TxEnvelope, proofs::calculate_transaction_root};
 use alloy_eips::eip2718::{Decodable2718, Encodable2718};
-use alloy_primitives::{Address, B256, U256, hex, keccak256};
+use alloy_primitives::{Address, B256, Bytes, U256, hex, keccak256};
 use etna_core::{
     comet::{
         APP_VERSION,
@@ -117,6 +117,7 @@ impl BlockFixture {
 
 struct RangeFixture {
     context: RangeProjectionContext,
+    parent_execution_header: Header,
     blocks: Vec<BlockFixture>,
 }
 
@@ -128,7 +129,32 @@ impl RangeFixture {
             inbox: Address::repeat_byte(0x11),
             generation: if origin_height == 0 { 0 } else { 2 },
         };
-        let parent_el_hash = B256::repeat_byte(0x20);
+        let parent_execution_header = if parent_height > origin_height {
+            let anchor_number = FIRST_ANCHOR_NUMBER - 1;
+            Header {
+                number: parent_height,
+                extra_data: anchor_extra_data(domain.generation, anchor_number).into(),
+                base_fee_per_gas: Some(1),
+                withdrawals_root: Some(B256::repeat_byte(0x67)),
+                blob_gas_used: Some(0),
+                excess_blob_gas: Some(0),
+                parent_beacon_block_root: Some(B256::left_padding_from(
+                    &anchor_number.to_be_bytes(),
+                )),
+                ..Default::default()
+            }
+        } else {
+            Header {
+                number: parent_height,
+                extra_data: if origin_height == 0 {
+                    Bytes::new()
+                } else {
+                    anchor_extra_data(domain.generation - 1, UINT48_MAX).into()
+                },
+                ..Default::default()
+            }
+        };
+        let parent_el_hash = parent_execution_header.hash_slow();
         let parent_comet_hash = B256::repeat_byte(0x30);
         let last_height = parent_height + count;
         let raw = hex::decode(include_str!("fixtures/first-block.hex").trim()).unwrap();
@@ -197,6 +223,7 @@ impl RangeFixture {
                 max_blocks: count.try_into().unwrap(),
                 max_envelope_bytes: 130_000,
             },
+            parent_execution_header,
             blocks,
         }
     }
@@ -206,7 +233,7 @@ impl RangeFixture {
     }
 
     fn verify(&self) -> Result<Vec<ExecutionProjection<'_>>, RangeProjectionError> {
-        verify_range_projection(&self.inputs(), &self.context)
+        verify_range_projection(&self.inputs(), &self.context, &self.parent_execution_header)
     }
 
     fn statement<'a>(&self, before: u64, after: u64, cut_leaves: &'a [B256]) -> LandStatement<'a> {
@@ -246,7 +273,21 @@ impl RangeFixture {
             &self.context,
             statement,
             post_block_cursors,
+            &self.parent_execution_header,
         )
+    }
+
+    fn bind_parent(&mut self) {
+        self.context.parent_el_hash = self.parent_execution_header.hash_slow();
+        self.blocks[0].execution_header.parent_hash = self.context.parent_el_hash;
+        self.reseal_execution_from(0);
+    }
+
+    fn set_parent_anchor(&mut self, number: u64, root: Option<B256>) {
+        self.parent_execution_header.extra_data =
+            anchor_extra_data(self.context.domain.generation, number).into();
+        self.parent_execution_header.parent_beacon_block_root = root;
+        self.bind_parent();
     }
 
     fn set_anchor(&mut self, index: usize, number: u64, root: Option<B256>, carries: bool) {
@@ -614,8 +655,12 @@ fn includes_external_l1_fields_and_blob_order_in_statement_digest() {
 #[test]
 fn projects_three_consecutive_blocks_and_preserves_original_spans() {
     let fixture = RangeFixture::new(17, 17, 3);
-    let projections = verify_range_projection(&fixture.inputs(), &fixture.context)
-        .expect("the complete linked range must project");
+    let projections = verify_range_projection(
+        &fixture.inputs(),
+        &fixture.context,
+        &fixture.parent_execution_header,
+    )
+    .expect("the complete linked range must project");
 
     assert_eq!(projections.len(), 3);
     for ((projection, block), transaction_count) in
@@ -770,7 +815,7 @@ fn rejects_missing_duplicate_and_reordered_blocks() {
     };
     let missing = [first.input(), third.input()];
     assert!(matches!(
-        verify_range_projection(&missing, &fixture.context),
+        verify_range_projection(&missing, &fixture.context, &fixture.parent_execution_header),
         Err(RangeProjectionError::BlockCount {
             expected: 3,
             actual: 2
@@ -778,7 +823,7 @@ fn rejects_missing_duplicate_and_reordered_blocks() {
     ));
     let extra = [first.input(), second.input(), third.input(), third.input()];
     assert!(matches!(
-        verify_range_projection(&extra, &fixture.context),
+        verify_range_projection(&extra, &fixture.context, &fixture.parent_execution_header),
         Err(RangeProjectionError::BlockCount {
             expected: 3,
             actual: 4
@@ -786,7 +831,11 @@ fn rejects_missing_duplicate_and_reordered_blocks() {
     ));
     let duplicate = [first.input(), first.input(), third.input()];
     assert!(matches!(
-        verify_range_projection(&duplicate, &fixture.context),
+        verify_range_projection(
+            &duplicate,
+            &fixture.context,
+            &fixture.parent_execution_header
+        ),
         Err(RangeProjectionError::Projection {
             height: 19,
             source: ProjectionError::Height,
@@ -794,7 +843,11 @@ fn rejects_missing_duplicate_and_reordered_blocks() {
     ));
     let reordered = [second.input(), first.input(), third.input()];
     assert!(matches!(
-        verify_range_projection(&reordered, &fixture.context),
+        verify_range_projection(
+            &reordered,
+            &fixture.context,
+            &fixture.parent_execution_header
+        ),
         Err(RangeProjectionError::Projection {
             height: 18,
             source: ProjectionError::Height,
@@ -929,7 +982,7 @@ fn rejects_empty_inverted_out_of_origin_and_overflowing_intervals() {
             ..fixture.context
         };
         assert!(matches!(
-            verify_range_projection(&inputs, &context),
+            verify_range_projection(&inputs, &context, &fixture.parent_execution_header),
             Err(RangeProjectionError::InvalidRange)
         ));
     }
@@ -1086,10 +1139,10 @@ fn requires_matching_present_nonzero_roots_for_inheritance() {
 }
 
 #[test]
-fn accepts_omitted_witness_at_a_mid_generation_range_start() {
+fn projects_an_inherited_anchor_from_the_excluded_parent() {
     let mut fixture = RangeFixture::new(17, 20, 2);
-    let root = fixture.blocks[0].execution_header.parent_beacon_block_root;
-    fixture.set_anchor(0, FIRST_ANCHOR_NUMBER, root, false);
+    let root = fixture.parent_execution_header.parent_beacon_block_root;
+    fixture.set_anchor(0, FIRST_ANCHOR_NUMBER - 1, root, false);
 
     let projections = fixture.verify().unwrap();
     assert_eq!(projections[0].anchor_witness(), None);
@@ -1113,6 +1166,246 @@ fn propagates_anchor_transition_failure_through_landing_statement() {
             RangeStatementProjectionError::Range(RangeProjectionError::MissingAnchorWitness {
                 height: 22,
             })
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn binds_parent_height_even_when_its_hash_matches() {
+    for parent_height in [17, 20] {
+        let mut fixture = RangeFixture::new(17, parent_height, 1);
+        fixture.parent_execution_header.number += 1;
+        fixture.bind_parent();
+
+        let error = fixture
+            .verify()
+            .expect_err("the excluded parent's height must match");
+        assert!(
+            matches!(error, RangeProjectionError::ParentExecutionHeight { expected, actual }
+                if expected == parent_height && actual == parent_height + 1),
+            "{error:?}"
+        );
+    }
+}
+
+#[test]
+fn rejects_changes_to_the_committed_parent_header() {
+    for parent_height in [17, 20] {
+        for changed_field in ["state root", "anchor root", "extra data"] {
+            let mut fixture = RangeFixture::new(17, parent_height, 1);
+            let parent = &mut fixture.parent_execution_header;
+            match changed_field {
+                "state root" => parent.state_root = B256::repeat_byte(0x80),
+                "anchor root" => parent.parent_beacon_block_root = Some(B256::repeat_byte(0x81)),
+                "extra data" => parent.extra_data = vec![0x82; 13].into(),
+                _ => unreachable!(),
+            }
+
+            let error = fixture
+                .verify()
+                .expect_err("the excluded parent's hash must match");
+            assert!(
+                matches!(error, RangeProjectionError::ParentExecutionHash),
+                "changed {changed_field}: {error:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn checks_bound_mid_generation_parent_extra_data() {
+    let original = anchor_extra_data(2, FIRST_ANCHOR_NUMBER - 1);
+    let mut wrong_fee = original;
+    wrong_fee[0] = 99;
+    let mut longer = original.to_vec();
+    longer.push(0);
+
+    for (label, extra_data) in [
+        ("short", original[..12].to_vec()),
+        ("long", longer),
+        ("fee share", wrong_fee.to_vec()),
+        (
+            "generation high byte",
+            anchor_extra_data(0x0100_0000_0002, FIRST_ANCHOR_NUMBER - 1).to_vec(),
+        ),
+    ] {
+        let mut fixture = RangeFixture::new(17, 20, 1);
+        fixture.parent_execution_header.extra_data = extra_data.into();
+        fixture.bind_parent();
+
+        let error = fixture
+            .verify()
+            .expect_err("mid-generation parent must have Etna extra data");
+        assert!(
+            matches!(error, RangeProjectionError::ParentExecutionExtraData),
+            "invalid {label}: {error:?}"
+        );
+    }
+}
+
+#[test]
+fn projects_a_generation_origin_with_legacy_parent_extra_data() {
+    let mut fixture = RangeFixture::new(17, 17, 1);
+    fixture.parent_execution_header.extra_data = vec![0x83; 32].into();
+    fixture.bind_parent();
+
+    let projections = fixture.verify().unwrap();
+    assert_eq!(projections[0].anchor_witness(), Some(ANCHOR));
+}
+
+#[test]
+fn checks_uint48_anchor_extremes_on_the_incoming_edge() {
+    let root = Some(B256::repeat_byte(0x84));
+    for (previous, current, carries) in [
+        (0, 0, false),
+        (0, UINT48_MAX, true),
+        (UINT48_MAX, UINT48_MAX, false),
+    ] {
+        let mut fixture = RangeFixture::new(17, UINT48_MAX - 1, 1);
+        fixture.set_parent_anchor(previous, root);
+        fixture.set_anchor(0, current, root, carries);
+
+        let projections = fixture.verify().unwrap();
+        assert_eq!(projections[0].anchor_number(), current);
+        assert_eq!(projections[0].anchor_witness(), carries.then_some(ANCHOR));
+    }
+}
+
+#[test]
+fn rejects_an_incoming_anchor_number_regression() {
+    let mut fixture = RangeFixture::new(17, 20, 1);
+    let root = fixture.blocks[0].execution_header.parent_beacon_block_root;
+    fixture.set_anchor(0, FIRST_ANCHOR_NUMBER - 2, root, true);
+
+    let error = fixture
+        .verify()
+        .expect_err("the first anchor must not regress");
+    assert!(
+        matches!(
+            error,
+            RangeProjectionError::AnchorRegression {
+                height: 21,
+                previous,
+                actual,
+            } if previous == FIRST_ANCHOR_NUMBER - 1 && actual == FIRST_ANCHOR_NUMBER - 2
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn rejects_omitting_a_witness_for_an_incoming_anchor_advance() {
+    let mut fixture = RangeFixture::new(17, 20, 1);
+    let root = fixture.blocks[0].execution_header.parent_beacon_block_root;
+    fixture.set_anchor(0, FIRST_ANCHOR_NUMBER, root, false);
+
+    let error = fixture
+        .verify()
+        .expect_err("an incoming advance needs a witness");
+    assert!(
+        matches!(
+            error,
+            RangeProjectionError::MissingAnchorWitness { height: 21 }
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn rejects_redundant_witness_when_first_block_inherits_the_parent_anchor() {
+    let mut fixture = RangeFixture::new(17, 20, 1);
+    let root = fixture.parent_execution_header.parent_beacon_block_root;
+    fixture.set_anchor(0, FIRST_ANCHOR_NUMBER - 1, root, true);
+
+    let error = fixture
+        .verify()
+        .expect_err("incoming inheritance must omit the witness");
+    assert!(
+        matches!(
+            error,
+            RangeProjectionError::UnexpectedAnchorWitness { height: 21 }
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn checks_inherited_roots_on_the_incoming_edge() {
+    let root = Some(B256::repeat_byte(0x85));
+    let zero = Some(B256::ZERO);
+    for (previous, actual) in [
+        (root, Some(B256::repeat_byte(0x86))),
+        (None, root),
+        (root, None),
+        (None, None),
+        (zero, root),
+        (root, zero),
+        (zero, zero),
+    ] {
+        let mut fixture = RangeFixture::new(17, 20, 1);
+        let anchor = FIRST_ANCHOR_NUMBER - 1;
+        fixture.set_parent_anchor(anchor, previous);
+        fixture.set_anchor(0, anchor, actual, false);
+
+        let error = fixture
+            .verify()
+            .expect_err("incoming inheritance needs matching nonzero roots");
+        assert!(
+            matches!(
+                error,
+                RangeProjectionError::InheritedAnchorRoot { height: 21 }
+            ),
+            "{previous:?} to {actual:?}: {error:?}"
+        );
+    }
+}
+
+#[test]
+fn rejects_a_typed_parent_root_alias_of_the_committed_withdrawals_root() {
+    let mut fixture = RangeFixture::new(17, 20, 1);
+    let parent = &mut fixture.parent_execution_header;
+    let withdrawals_root = parent.withdrawals_root;
+    parent.blob_gas_used = None;
+    parent.excess_blob_gas = None;
+    parent.parent_beacon_block_root = None;
+    fixture.bind_parent();
+    fixture.set_anchor(0, FIRST_ANCHOR_NUMBER - 1, withdrawals_root, false);
+
+    // These two optional B256 slots serialize identically when the earlier
+    // slot and the intervening integer slots are omitted.
+    fixture.parent_execution_header.withdrawals_root = None;
+    fixture.parent_execution_header.parent_beacon_block_root = withdrawals_root;
+    assert_eq!(
+        fixture.parent_execution_header.hash_slow(),
+        fixture.context.parent_el_hash
+    );
+    let error = fixture
+        .verify()
+        .expect_err("inheritance must use the committed anchor root");
+    assert!(
+        matches!(
+            error,
+            RangeProjectionError::ParentExecutionEncoding(ProjectionError::HeaderRoundTrip)
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn propagates_a_parent_hash_failure_through_the_landing_statement() {
+    let mut fixture = RangeFixture::new(17, 20, 2);
+    fixture.parent_execution_header.state_root = B256::repeat_byte(0x87);
+    let leaves = [cut_for(&fixture.blocks[0], 31)];
+    let statement = fixture.statement(31, 31, &leaves);
+
+    let error = fixture
+        .verify_statement(&statement, &[31, 31])
+        .expect_err("the statement verifier must also bind the excluded parent");
+    assert!(
+        matches!(
+            error,
+            RangeStatementProjectionError::Range(RangeProjectionError::ParentExecutionHash)
         ),
         "{error:?}"
     );

@@ -74,9 +74,9 @@ Completed bounded component **P03-A05a** in the existing range verifier: generat
 anchor witness presence; interior anchor-number monotonicity, witness presence
 iff advancing, and present/nonzero identical root on inheritance. This adds no
 new context schema, storage reader, EVM or detached verifier. The incoming edge
-of a mid-generation range remains open until the excluded parent's actual
-hash-bound header is available. Root/time authority, witness contents, age and
-full anchor verification remain separate acceptance requirements.
+of a mid-generation range is now checked by P03-A05b using the required,
+hash-bound excluded-parent header. Root/time authority, witness contents, age
+and full anchor verification remain separate acceptance requirements.
 
 The latest [Alethia #248 candidate](https://github.com/taikoxyz/alethia-reth/tree/ad584325c6b1e15f3c163fb25e71c04a78b194e0)
 now selects the 4-second Etna fee target, including its first block. This removes
@@ -257,7 +257,7 @@ from checkbox counts.
 | --- | --- | --- | --- | --- |
 | P00 | Portable shared core and patched SDK feasibility | DONE (earlier baseline) | — | Merged #22398; diagnostic README and checkpoint `a29b53c4` |
 | P01 | Freeze revised spec, implementation pins and ABI vectors | PARTIAL | Compatible upstream implementations | Design approval, source matrix and codec vectors recorded; native ABI/backend framing agreement pending |
-| P02 | Canonical supplied-block input and EL/Comet binding | PARTIAL: complete range projection | P01 for revised behavior | Bounded original-byte projection and Comet/EL chains bind the expected endpoints; strict nested witnesses and authenticated execution composition remain open; #22415 is optional |
+| P02 | Canonical supplied-block input and EL/Comet binding | PARTIAL: complete range/parent projection | P01 for revised behavior | Bounded original-byte projection and Comet/EL chains bind the expected endpoints; strict nested witnesses and authenticated execution composition remain open; #22415 is optional |
 | P03 | Authenticated origin, L1 context and committee schedule | PARTIAL: field binding | P01, P02 | Every current/next validator hash and neighboring schedule edge checked; authenticated origin/L1/storage/committee derivation and far-path alignment remain open |
 | P04 | Strict Etna execution; FI in phase two | TODO | P01, P02 | Phase one: existing strict execution on the matched full body; phase two: authenticated FI include/skip and singleton-equivalence cases |
 | P05 | Range consensus coverage, DA, cuts and statement | PARTIAL: codec, QCs, range and cut/statement projection | P02–P04 for full range | Matched Comet/EL identities and supplied cursor shape bind every interior cut and statement endpoint; actual FI/context authority, execution, DA and final composition remain pending |
@@ -534,6 +534,57 @@ mark their implementation or upstream specification alignment complete.
 
 No historical SSZ guest, archive provider, reference-selection host API or full
 origin/committee proof is claimed implemented by this audit.
+
+### P03-A05b — Excluded-parent binding (2026-11-22)
+
+Continue A05a at the existing range and statement functions with the actual
+excluded-parent EL header as a required native argument. Bind its number and
+canonical hash to the same existing range context. Reuse the covered-header
+round-trip check to keep the typed parent fields faithful to those same encoded
+bytes; a hash over an ambiguous optional-field representation is insufficient
+as a generic field-binding contract. This is header identity/codec verification,
+not re-execution or a new consensus engine.
+
+For a mid-generation origin, initialize the existing anchor-transition checks
+from the parent's same-generation Etna extraData and anchor root. For the fixed
+generation origin, bind identity but ignore its old anchor/extraData: genesis,
+Unzen and prior-generation recovery parents must remain supported, with a carried
+first-block witness. Do not add an optional parent or a skip-compatible path.
+The parent is already needed for execution; this freezes no final guest-input,
+ABI, committee or public-input schema and introduces no storage reads.
+
+- [x] **P03-A05b:** verify the required parent's height/hash/field fidelity and
+  the incoming mid-generation anchor edge; propagate failures through the same
+  statement wrapper and retain genesis/recovery exceptions. Add alias/parent
+  mutation and inherited/advancing/regressing boundary controls.
+
+This closes A05a's intentionally open incoming edge at the native range boundary.
+L1 witness/root/time authority, origin L1 floor, checkpoint/rules/age checks,
+strict DA and the complete execution/proof path remain separate requirements.
+
+A05b acceptance evidence:
+
+- Compiled semantic RED: 37 existing/positive range controls passed and nine
+  negative controls failed because the old loop ignored the supplied parent.
+- `cargo test --locked --offline -p raiko2-protocol-etna --all-targets -- --test-threads=2`:
+  120 maintained tests plus ten independently authored scratch tests passed,
+  including 46 maintained range tests. Parent mutations preserve or rebind the
+  intended hash as appropriate; descendant chains and endpoints are resealed.
+- `cargo clippy --locked --offline -p raiko2-protocol-etna --all-targets -- -D warnings`,
+  `cargo fmt --all -- --check` and the locked standalone no_std consumer passed.
+  The normal runtime feature audit has 221 rows and no std/use_std/use-std.
+- Independent adversarial source review and independent behavioral verification
+  passed at the same final production/test bytes. Same-RLP/hash optional-field
+  aliases, same-hash wrong height, root/extraData mutation, full generation and
+  fee/length checks, incoming witness/root transitions and uint48 boundaries
+  reject correctly; canonical shorter origin headers remain supported.
+- Two test-only lint fixes changed no production bytes or assertions. Final
+  checks used immutable offline snapshots and the existing shared target with
+  a 15 GiB reserve. No dependency, guest artifact or backend rebuild was run.
+
+The required native parameter is updated at every actual caller. No optional
+compatibility route or host bypass is retained. This is not a finalized guest
+transport schema or complete L1/anchor/proof authentication.
 
 ### P03-A05a acceptance evidence (2026-11-22)
 

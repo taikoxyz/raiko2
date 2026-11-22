@@ -1,19 +1,20 @@
 //! Etna byte and identity projection for a complete range `(p, h]`.
 //!
 //! The caller authenticates the deployment, generation origin and range
-//! context. The projection links the Comet and execution headers and preserves
-//! the original envelope spans, including any forced-inclusion witness.
+//! context. The projection links the Comet and execution headers, checks
+//! structural anchor transitions and preserves the original envelope spans.
 //! [`verify_range_statement_projection`] also binds the landing statement and
 //! its interior cuts to the range.
 //! The composing verifier still checks nested witnesses, the committee
 //! schedule, certificates, strict EL execution and state transitions,
-//! timestamps and anchors, forced inclusion, DA and blobs, and proof
+//! anchor authority and timing, forced inclusion, DA and blobs, and proof
 //! output framing.
 
 use alloc::vec::Vec;
 use alloy_consensus::Header as ExecutionHeader;
 use alloy_eips::eip2718::Encodable2718;
 use alloy_primitives::{B256, U256};
+use core::cmp::Ordering;
 use etna_core::{comet::verify::header_hash, domain::DeploymentDomain, schedule::UINT48_MAX};
 use tendermint::{Hash, block::Header as CometHeader};
 
@@ -93,6 +94,34 @@ pub enum RangeProjectionError {
         /// Failure from the per-block projection.
         #[source]
         source: ProjectionError,
+    },
+    /// A generation's first block or an anchor advance omitted its witness.
+    #[error("missing Etna anchor witness at height {height}")]
+    MissingAnchorWitness {
+        /// Height of the block.
+        height: u64,
+    },
+    /// A block carried a witness while keeping its parent's anchor number.
+    #[error("unexpected Etna anchor witness for an inherited anchor at height {height}")]
+    UnexpectedAnchorWitness {
+        /// Height of the block.
+        height: u64,
+    },
+    /// The anchor number decreased across adjacent blocks in the range.
+    #[error("Etna anchor number regressed at height {height}: {previous} to {actual}")]
+    AnchorRegression {
+        /// Height of the block.
+        height: u64,
+        /// Anchor number of the preceding block.
+        previous: u64,
+        /// Anchor number of this block.
+        actual: u64,
+    },
+    /// The matched execution headers for an inherited anchor lack the same nonzero root.
+    #[error("missing, zero or changed Etna inherited anchor root at height {height}")]
+    InheritedAnchorRoot {
+        /// Height of the block.
+        height: u64,
     },
     /// The terminal Comet header hash differs from the expected endpoint.
     #[error("terminal Etna Comet header hash differs from expected hash")]
@@ -293,13 +322,22 @@ fn validate_cursors(
 /// The first block of a generation has an empty Comet parent ID. After that,
 /// ancestry compares predecessor header hashes. Each block inherits the
 /// existing per-block `APP_VERSION` check, pending P01 policy alignment.
+///
+/// A generation's first block must carry an anchor witness. Between adjacent
+/// blocks in the range, anchor numbers cannot decrease. An advance requires
+/// a witness. Inheritance requires an absent witness and the same nonzero
+/// anchor root in both matched headers.
+///
+/// The caller checks the transition from the excluded parent for a range
+/// starting mid-generation, verifies carried witnesses, and enforces the
+/// authenticated L1 origin floor, checkpoint, anchor age and timestamp rules.
 /// The caller enforces outer input framing and budgets before decoding or
 /// allocating inputs, and uses the returned spans for the remaining checks
 /// described in the module documentation.
 ///
 /// # Errors
 /// Returns an error for invalid endpoints, excess or incorrect block count,
-/// failed per-block projection, or a mismatched terminal identity.
+/// failed per-block projection or anchor transition, or a mismatched terminal identity.
 pub fn verify_range_projection<'a, T: Encodable2718>(
     blocks: &[RangeBlock<'a, T>],
     context: &RangeProjectionContext,
@@ -319,6 +357,7 @@ pub fn verify_range_projection<'a, T: Encodable2718>(
     } = *context;
 
     let mut projections = Vec::new();
+    let mut previous_anchor = None;
     for (height, block) in (parent_height + 1..=last_height).zip(blocks) {
         let Hash::Sha256(comet_hash) = header_hash(block.comet_header) else {
             return Err(RangeProjectionError::Projection {
@@ -343,6 +382,39 @@ pub fn verify_range_projection<'a, T: Encodable2718>(
             },
         )
         .map_err(|source| RangeProjectionError::Projection { height, source })?;
+
+        let anchor_number = projection.anchor_number();
+        let anchor_root = block.execution_header.parent_beacon_block_root;
+        let carries_witness = projection.anchor_witness().is_some();
+        if let Some((previous, previous_root)) = previous_anchor {
+            match anchor_number.cmp(&previous) {
+                Ordering::Less => {
+                    return Err(RangeProjectionError::AnchorRegression {
+                        height,
+                        previous,
+                        actual: anchor_number,
+                    });
+                }
+                Ordering::Equal => {
+                    if carries_witness {
+                        return Err(RangeProjectionError::UnexpectedAnchorWitness { height });
+                    }
+                    if anchor_root != previous_root
+                        || anchor_root.is_none_or(|root| root == B256::ZERO)
+                    {
+                        return Err(RangeProjectionError::InheritedAnchorRoot { height });
+                    }
+                }
+                Ordering::Greater if !carries_witness => {
+                    return Err(RangeProjectionError::MissingAnchorWitness { height });
+                }
+                Ordering::Greater => {}
+            }
+        } else if parent_height == origin_height && !carries_witness {
+            return Err(RangeProjectionError::MissingAnchorWitness { height });
+        }
+        previous_anchor = Some((anchor_number, anchor_root));
+
         parent_comet_hash = projection.comet_hash();
         parent_el_hash = projection.execution_hash();
         projections.push(projection);

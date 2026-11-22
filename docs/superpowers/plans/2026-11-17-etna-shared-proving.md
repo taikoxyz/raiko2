@@ -56,6 +56,37 @@ complete zlib stream, no trailing bytes, canonical RLP list items equal to the
 projected range, 64 MiB output and 124000 bytes per item. This remains a pinned
 component baseline, not a claim the evolving overall design is frozen.
 
+## Pending decisions and independent work (2026-11-22)
+
+Keep design/upstream dependencies separate from engineering tasks not yet done:
+
+| Item | Disposition | Independent work that can proceed |
+| --- | --- | --- |
+| FI consumption and skip trials | Phase two deferred; authenticated FI-off profile remains required for phase one | Preserve cursor/witness slots and existing execution architecture |
+| QC management and committee authority | User hold pending L2-managed design | Retain tested helpers; do not extend the old L1 proposal or freeze replacement interfaces |
+| Final ABI, public inputs and verifier framing | Committee-dependent fields wait for the new design; the present codec is provisional | Preserve existing byte vectors; complete interface-independent body checks |
+| Etna execution source/profile | Alethia #248 remains open at `ad584325`; Raiko2's current `59e06d0` pin has no Etna fork | Audit exact strict-execution, system-call and legacy-anchor adapter boundaries; adopt a reviewed compatible revision before final execution integration |
+| Distant-anchor SSZ bridge | Historical strategy still needs normative reconciliation with the linear header-chain rule | Ordinary per-range anchor structure and the near-reference path do not require enabling the bridge |
+| Strict inflater and complete DA | Engineering/conformance gate, not a requested design hold | Keep D01a exact span binding; qualify decoder behavior and reuse existing blob/KZG verification |
+| R06/R07 and production proof acceptance | Final delivery gates, not additional protocol design decisions | Reuse shared target; rebuild final ELF/VK/provenance and run real proofs after the complete source/interface is settled |
+
+Completed bounded component **P03-A05a** in the existing range verifier: generation-first
+anchor witness presence; interior anchor-number monotonicity, witness presence
+iff advancing, and present/nonzero identical root on inheritance. This adds no
+new context schema, storage reader, EVM or detached verifier. The incoming edge
+of a mid-generation range remains open until the excluded parent's actual
+hash-bound header is available. Root/time authority, witness contents, age and
+full anchor verification remain separate acceptance requirements.
+
+The latest [Alethia #248 candidate](https://github.com/taikoxyz/alethia-reth/tree/ad584325c6b1e15f3c163fb25e71c04a78b194e0)
+now selects the 4-second Etna fee target, including its first block. This removes
+the old candidate's observed 2-second discrepancy from the current worklist;
+it is source evidence, not a successful Raiko2 adoption or guest execution.
+The candidate also uses OP-reth `op-v2.7.0-1` and Alloy consensus `2.5.0`, whereas
+this Raiko2 baseline uses its earlier OP-reth v2.6-aligned revision. Dependency
+and API/SDK compatibility still need a bounded adoption check; no pin was changed.
+Raiko2 #305 still has no newer human review than `5333d6d6` at this refresh.
+
 ## L1 authority boundary amendment (2026-11-20)
 
 Protocol discussion: [taiko-mono #22423](https://github.com/taikoxyz/taiko-mono/pull/22423)
@@ -497,11 +528,42 @@ mark their implementation or upstream specification alignment complete.
 - [ ] **P03-A03 — Header/link reuse:** wire the existing generic L1 linkage at the real Etna caller with only the raw future-field adapter, count/byte bounds and expected-root binding it needs. Do not restore the unused independent L1 verifier or a new trie/framework.
 - [ ] **P03-A04 — Distant bridge:** retain N..L, then use a short tail or one authenticated Ethereum beacon `block_roots` / `historical_summaries` bridge from L to newer Q. Bind Q's fork-specific beacon-root field from the same raw header, fork/slot/index/list length and original hash of L. Do not confuse 8191 execution blocks with 8192 beacon slots or L1 beacon roots with L2 anchor state roots. Test missed slots, period boundaries, expired reference and missing archive data.
 - [ ] **P03-A05 — Anchor/root semantics:** reuse existing MPT reads at the authenticated L1 root, check Etna witness presence/inheritance, generation/age/progression, expected addresses/slots and EL anchor-number/parentBeaconBlockRoot equality. Every new or inherited anchor and recovery snapshot keeps its required authentication.
+- [x] **P03-A05a — Structural range transitions:** enforce the generation-first and covered-interior witness/number/inherited-root relation at the existing range caller; authenticate actual L1 root/time, origin floor and the incoming mid-range edge separately.
 - [ ] **P03-A06 — Specification gate:** reconcile the retained historical bridge policy with normative PROOF-6.2-33/34 and BATCH-6.3-5..7 before enabling it; current target still describes a linear resource/recovery limit. The candidate's settled-switch exception is not a general historical-anchor bypass.
 - [ ] **P03-A07 — Settled-switch candidate:** after source/spec adoption, authenticate an ordinary S(t) with generationStartHeight < S(t) <= p through consecutive same-generation EL hashes/heights back from p's authenticated slot-285 EL hash. Use S(t)'s root only for that rotation's registry witness, still derive D(t)/origin-floor selection and H+2 activation, and reject old-generation/discarded headers. This #22419 candidate does not exempt covered block anchors or recovery R from L1 ancestry.
 
 No historical SSZ guest, archive provider, reference-selection host API or full
 origin/committee proof is claimed implemented by this audit.
+
+### P03-A05a acceptance evidence (2026-11-22)
+
+The existing `verify_range_projection` loop now checks generation-first witness
+presence and covered adjacent anchor transitions. Its statement wrapper receives
+the same rejection behavior without another API or parser. The per-block checker
+still returns original borrowed witness bytes; this is not witness authentication.
+For `p > origin`, bind p's actual EL header before claiming the incoming transition
+is verified. Future composition must also authenticate anchor roots/time, origin
+floor, checkpoints, rules, age and recovery state.
+
+- Semantic RED: the 27 original range tests and two new positive controls passed;
+  six negative tests failed because the old loop accepted the invalid transitions.
+- `cargo test --locked --offline -p raiko2-protocol-etna --all-targets -- --test-threads=2`:
+  109 maintained tests plus five independently authored scratch tests passed,
+  including 35 maintained range tests. Mutations reseal DataHash, both ancestry
+  chains and endpoints, so rejection is attributable to the new transition check.
+- `cargo clippy --locked --offline -p raiko2-protocol-etna --all-targets -- -D warnings`,
+  `cargo fmt --all -- --check`, and the locked standalone no_std consumer passed;
+  its normal runtime feature audit has 221 rows with no std/use_std/use-std.
+- Independent adversarial source review and independent behavioral verification
+  passed. Generation-origin singleton, recovery-origin, mid-generation first-edge
+  boundary, witness omission/redundancy, uint48 anchor values and changed/missing/
+  zero inherited roots have behavioral controls. Tests use immutable offline
+  snapshots and the existing shared target with a 15 GiB reserve.
+
+No source pin, manifest, lock, EVM/trie, guest entrypoint, production ELF/VK or
+final ABI changed. R06/R07 and the complete proving path remain open. The current
+head's xtask failure was read back as the existing RISC0 source-fingerprint gate,
+not a failing native protocol test.
 
 ### Immediate BFT schedule binding / QC requirements
 
@@ -587,9 +649,12 @@ An inspected upstream candidate `efc3c162` supplies timestamp-gated strict
 committed-list/anchorless execution and a devnet override; it is not an adopted
 runtime pin. Raiko2 still needs the matching trusted fork profile and narrow
 scoping of legacy zero-root, first-successful-receipt and anchor assumptions.
-The inspected candidate's 2 s fee target also needs reconciliation if #22422's
-proposed Etna 4 s rule is adopted. Network timestamps are configuration, not a
-reason to duplicate the upstream executor or trust a host fork override.
+The old `efc3c162` candidate's 2 s fee target was an audit finding, not the
+latest source: #248 at `ad584325` now selects 4 s for Etna, including the first
+Etna block. This resolves that source difference only. The PR remains unmerged,
+and its runtime/API/SDK compatibility has not been tested in Raiko2. Network
+timestamps are configuration, not a reason to duplicate the upstream executor
+or trust a host fork override.
 
 The provider's Beacon fetch/order path and both guests' shared KZG/versioned-
 hash checks are reusable. Etna's remaining DA seam is strict version-6 payload

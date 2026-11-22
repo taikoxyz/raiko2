@@ -22,6 +22,7 @@ use tendermint::{
     block::{Header as CometHeader, Id, parts},
 };
 
+const FIRST_ANCHOR_NUMBER: u64 = 0x01_02_03;
 const ANCHOR: &[u8] = &[0xc1, 0x11];
 const COMMITTEE: &[u8] = &[0xc1, 0x22];
 const FORCED: &[u8] = &[0xc1, 0x33];
@@ -51,11 +52,20 @@ fn comet_parent(hash: B256) -> Id {
     }
 }
 
+fn anchor_extra_data(generation: u64, anchor_number: u64) -> [u8; 13] {
+    let mut extra_data = [0; 13];
+    extra_data[0] = 100;
+    extra_data[1..7].copy_from_slice(&generation.to_be_bytes()[2..]);
+    extra_data[7..].copy_from_slice(&anchor_number.to_be_bytes()[2..]);
+    extra_data
+}
+
 struct BlockFixture {
     comet_header: CometHeader,
     comet_transactions: [Vec<u8>; 1],
     execution_header: Header,
     transactions: Vec<TxEnvelope>,
+    carries_anchor: bool,
 }
 
 impl BlockFixture {
@@ -70,11 +80,16 @@ impl BlockFixture {
     }
 
     fn seal_execution(&mut self) {
+        let anchor = if self.carries_anchor {
+            list(&[ANCHOR])
+        } else {
+            vec![0xc0]
+        };
         self.comet_transactions[0] = [
             vec![6],
             list(&[
                 &self.execution_item(),
-                &list(&[ANCHOR]),
+                &anchor,
                 &list(&[COMMITTEE]),
                 &list(&[FORCED]),
             ]),
@@ -111,7 +126,7 @@ impl RangeFixture {
             l1_chain_id: U256::from(1),
             l2_chain_id: U256::from(167_001),
             inbox: Address::repeat_byte(0x11),
-            generation: 2,
+            generation: if origin_height == 0 { 0 } else { 2 },
         };
         let parent_el_hash = B256::repeat_byte(0x20);
         let parent_comet_hash = B256::repeat_byte(0x30);
@@ -140,6 +155,7 @@ impl RangeFixture {
             comet_header.height = height.try_into().unwrap();
             comet_header.last_block_id =
                 (height > origin_height + 1).then(|| comet_parent(previous_comet_hash));
+            let anchor_number = FIRST_ANCHOR_NUMBER + (height - parent_height - 1);
             let transactions = transactions[..index % 3].to_vec();
             let mut block = BlockFixture {
                 comet_header,
@@ -148,11 +164,19 @@ impl RangeFixture {
                     number: height,
                     parent_hash: el_hash,
                     beneficiary: Address::repeat_byte(0x42),
-                    extra_data: hex!("64000000000002000000010203").into(),
+                    extra_data: anchor_extra_data(domain.generation, anchor_number).into(),
                     transactions_root: calculate_transaction_root(&transactions),
+                    base_fee_per_gas: Some(1),
+                    withdrawals_root: Some(B256::repeat_byte(0x67)),
+                    blob_gas_used: Some(0),
+                    excess_blob_gas: Some(0),
+                    parent_beacon_block_root: Some(B256::left_padding_from(
+                        &anchor_number.to_be_bytes(),
+                    )),
                     ..Default::default()
                 },
                 transactions,
+                carries_anchor: true,
             };
             block.seal_execution();
             el_hash = block.execution_header.hash_slow();
@@ -223,6 +247,15 @@ impl RangeFixture {
             statement,
             post_block_cursors,
         )
+    }
+
+    fn set_anchor(&mut self, index: usize, number: u64, root: Option<B256>, carries: bool) {
+        let block = &mut self.blocks[index];
+        block.execution_header.extra_data =
+            anchor_extra_data(self.context.domain.generation, number).into();
+        block.execution_header.parent_beacon_block_root = root;
+        block.carries_anchor = carries;
+        self.reseal_execution_from(index);
     }
 
     fn relink_comet_after(&mut self, index: usize) {
@@ -592,7 +625,10 @@ fn projects_three_consecutive_blocks_and_preserves_original_spans() {
             projection.execution_hash(),
             block.execution_header.hash_slow()
         );
-        assert_eq!(projection.anchor_number(), 0x01_02_03);
+        assert_eq!(
+            projection.anchor_number(),
+            FIRST_ANCHOR_NUMBER + u64::try_from(transaction_count).unwrap()
+        );
         assert_eq!(projection.transaction_bytes().len(), transaction_count);
         let item = block.execution_item();
         assert!(core::ptr::eq(
@@ -623,6 +659,7 @@ fn projects_singletons_at_initial_and_nonzero_generation_origins() {
         let fixture = RangeFixture::new(origin, origin, 1);
         let projections = fixture.verify().unwrap();
         assert_eq!(projections.len(), 1);
+        assert_eq!(projections[0].anchor_witness(), Some(ANCHOR));
         assert_eq!(
             projections[0].execution_hash(),
             fixture.context.last_el_hash
@@ -927,4 +964,156 @@ fn applies_the_envelope_byte_limit_at_every_height() {
             source: ProjectionError::EnvelopeSize,
         })
     ));
+}
+
+#[test]
+fn projects_an_inherited_anchor_between_advances() {
+    let mut fixture = RangeFixture::new(17, 17, 4);
+    let previous_root = fixture.blocks[1].execution_header.parent_beacon_block_root;
+    fixture.set_anchor(2, FIRST_ANCHOR_NUMBER + 1, previous_root, false);
+
+    let projections = fixture.verify().unwrap();
+    assert_eq!(projections.len(), 4);
+    assert_eq!(projections[2].anchor_number(), FIRST_ANCHOR_NUMBER + 1);
+    assert_eq!(projections[2].anchor_witness(), None);
+    assert_eq!(projections[3].anchor_number(), FIRST_ANCHOR_NUMBER + 3);
+    assert_eq!(projections[3].anchor_witness(), Some(ANCHOR));
+}
+
+#[test]
+fn rejects_a_missing_witness_in_an_origin_singleton() {
+    for origin in [0, 17] {
+        let mut fixture = RangeFixture::new(origin, origin, 1);
+        let root = fixture.blocks[0].execution_header.parent_beacon_block_root;
+        fixture.set_anchor(0, FIRST_ANCHOR_NUMBER, root, false);
+
+        let error = fixture
+            .verify()
+            .expect_err("the first block of a generation must carry an anchor witness");
+        assert!(
+            matches!(error, RangeProjectionError::MissingAnchorWitness { height } if height == origin + 1),
+            "{error:?}"
+        );
+    }
+}
+
+#[test]
+fn rejects_a_missing_witness_on_an_anchor_advance() {
+    let mut fixture = RangeFixture::new(17, 20, 2);
+    let root = fixture.blocks[1].execution_header.parent_beacon_block_root;
+    fixture.set_anchor(1, FIRST_ANCHOR_NUMBER + 1, root, false);
+
+    let error = fixture
+        .verify()
+        .expect_err("an anchor advance must carry an anchor witness");
+    assert!(
+        matches!(
+            error,
+            RangeProjectionError::MissingAnchorWitness { height: 22 }
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn rejects_a_witness_for_an_inherited_anchor() {
+    let mut fixture = RangeFixture::new(17, 17, 2);
+    let previous_root = fixture.blocks[0].execution_header.parent_beacon_block_root;
+    fixture.set_anchor(1, FIRST_ANCHOR_NUMBER, previous_root, true);
+
+    let error = fixture
+        .verify()
+        .expect_err("an inherited anchor must omit the witness");
+    assert!(
+        matches!(
+            error,
+            RangeProjectionError::UnexpectedAnchorWitness { height: 19 }
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn rejects_an_anchor_number_regression_even_with_a_witness() {
+    let mut fixture = RangeFixture::new(17, 17, 2);
+    let root = fixture.blocks[1].execution_header.parent_beacon_block_root;
+    fixture.set_anchor(1, FIRST_ANCHOR_NUMBER - 1, root, true);
+
+    let error = fixture
+        .verify()
+        .expect_err("a new witness cannot permit a regressing anchor number");
+    assert!(
+        matches!(
+            error,
+            RangeProjectionError::AnchorRegression {
+                height: 19,
+                previous: FIRST_ANCHOR_NUMBER,
+                actual,
+            } if actual == FIRST_ANCHOR_NUMBER - 1
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn requires_matching_present_nonzero_roots_for_inheritance() {
+    let root = Some(B256::repeat_byte(0x61));
+    let zero = Some(B256::ZERO);
+    for (previous, actual) in [
+        (root, Some(B256::repeat_byte(0x62))),
+        (None, root),
+        (root, None),
+        (None, None),
+        (zero, root),
+        (root, zero),
+        (zero, zero),
+    ] {
+        let mut fixture = RangeFixture::new(17, 17, 2);
+        fixture.set_anchor(0, FIRST_ANCHOR_NUMBER, previous, true);
+        fixture.set_anchor(1, FIRST_ANCHOR_NUMBER, actual, false);
+
+        let error = fixture
+            .verify()
+            .expect_err("inherited anchor roots must be present, nonzero and equal");
+        assert!(
+            matches!(
+                error,
+                RangeProjectionError::InheritedAnchorRoot { height: 19 }
+            ),
+            "{previous:?} to {actual:?}: {error:?}"
+        );
+    }
+}
+
+#[test]
+fn accepts_omitted_witness_at_a_mid_generation_range_start() {
+    let mut fixture = RangeFixture::new(17, 20, 2);
+    let root = fixture.blocks[0].execution_header.parent_beacon_block_root;
+    fixture.set_anchor(0, FIRST_ANCHOR_NUMBER, root, false);
+
+    let projections = fixture.verify().unwrap();
+    assert_eq!(projections[0].anchor_witness(), None);
+    assert_eq!(projections[1].anchor_witness(), Some(ANCHOR));
+}
+
+#[test]
+fn propagates_anchor_transition_failure_through_landing_statement() {
+    let mut fixture = RangeFixture::new(17, 20, 2);
+    let root = fixture.blocks[1].execution_header.parent_beacon_block_root;
+    fixture.set_anchor(1, FIRST_ANCHOR_NUMBER + 1, root, false);
+    let leaves = [cut_for(&fixture.blocks[0], 31)];
+    let statement = fixture.statement(31, 31, &leaves);
+
+    let error = fixture
+        .verify_statement(&statement, &[31, 31])
+        .expect_err("statement verification must also check anchor transitions");
+    assert!(
+        matches!(
+            error,
+            RangeStatementProjectionError::Range(RangeProjectionError::MissingAnchorWitness {
+                height: 22,
+            })
+        ),
+        "{error:?}"
+    );
 }

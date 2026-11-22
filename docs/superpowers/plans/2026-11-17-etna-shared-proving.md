@@ -17,6 +17,40 @@ RISC0 3.0.5 and SP1 6.8.1 at the recorded feasibility checkpoint.
 **Spec:** [Shared proving design](../specs/2026-11-17-etna-shared-proving-design.md),
 including its current planning-baseline amendment.
 
+## Three-task checkpoint cadence (2026-11-22)
+
+The user authorized continuing the remaining settled work in groups of three
+completed tasks. Pause after each group and summarize its results and review
+needs. Pause sooner on an external dependency or a material implementation
+choice requiring confirmation; do not work around an unmet source gate or count
+planning/status checks as completed implementation tasks.
+
+### Batch B01 — Ordinary anchor verification
+
+1. **B01-1 / P03-A05c2 — Shared-header source gate:** obtain review and the
+   required full native-client verification for taiko-mono #22426, then verify
+   compatibility with Raiko2's F31 baseline before choosing an immutable pin.
+   Keep unrelated QC/committee changes outside adoption during the design hold.
+2. **B01-2 / P03-A03, P03-A05c3 — Near-reference anchor composition:** bind the
+   carried raw headers to consecutive L1 ancestry ending at the authenticated
+   reference and to the same matched EL anchor numbers/roots. Preserve the
+   excluded-parent opening only when the first covered block inherits. Reuse
+   useful existing linkage primitives at the actual caller.
+3. **B01-3 / P03-A05c3 — Anchor time and age composition:** check the exact
+   timestamp maximum, parent-time overflow and authenticated age/origin limits
+   at that same range consumer. Keep checkpoint storage predicates on the
+   existing proof engine; do not add a separate generic verifier.
+
+**Early checkpoint: B01-1 is blocked, zero implementation tasks completed in
+this batch.** At the exact GitHub refresh, #22426 is OPEN/DRAFT at `8268eb63`
+with no submitted reviews or comments, and its full client checks are skipped.
+The scoped 58 core / 27 adapter tests do not satisfy that full-client gate.
+Raiko2 remains at F31. B01-2/B01-3 depend on the shared-header adoption and must
+not substitute a duplicate parser, an unchecked host-provided timestamp/root,
+or an unreviewed dependency pin. Resume B01 after the upstream source gate is
+met or the user explicitly changes that gate. FI, QC management, distant-anchor
+SSZ and final committee-dependent ABI remain on their existing holds.
+
 ## QC design hold and non-QC continuation (2026-11-22)
 
 The user directed that QC/committee work pause pending the revised design,

@@ -48,9 +48,14 @@ the existing [manual full-client workflow](https://github.com/taikoxyz/taiko-mon
 was then dispatched and read back at that exact head. Native unit, lint,
 EL-import, full Docker lanes and checkpoint-resource jobs actually started;
 lockfile and lander artifact reproduction passed at the recorded intermediate
-snapshot. Remaining jobs were still running. Manual dispatch skips the separate
-production-image job. The scoped 58 core / 27 adapter tests remain component
-evidence, not a replacement for the pending complete gate.
+snapshot. The completed run subsequently failed the supervisor and both Docker
+lanes, while native unit/lint, EL-import, resources, lockfile, artifacts and
+signer checks passed. The supervisor fixture failed before the Rust parser;
+devnet expected an absent FI witness; native checkpoint import encountered
+peer admission refusals. Exact-base reproduction was not performed, so this is
+not a blanket claim that all failures are unrelated. Manual dispatch skips the
+separate production-image job. The scoped 58 core / 27 adapter tests remain
+component evidence, not a replacement for the red full-client gate.
 
 The F31-to-candidate source audit also found unrelated API/behavior changes in
 committee selection, parameters and ValState. In particular, core removed
@@ -67,6 +72,86 @@ unreviewed pin. Keep QC-dependent behavior outside this adoption while its desig
 is paused. Resume after the source gate is met or the user explicitly changes
 that gate. FI, QC management, distant-anchor SSZ and final committee-dependent
 ABI remain on their existing holds.
+
+## DA derivation scope amendment and batch B02 (2026-11-22)
+
+The user clarified the proof relation: the guest derives the proposal-bound
+public blob bytes successfully, consumes the complete input, compares the
+complete decoded payload with the exact proven block range, and proves its
+execution/state-root relation. Any failure terminates verification and cannot
+produce an accepted proof. Host success flags, partial/default payloads and
+successful execution of only a prefix are not substitutes.
+
+Reuse the existing blob codec and a mature zlib implementation. Keep the
+protocol's v6 framing, complete-stream/exhaustion and byte/size constraints;
+checks already implemented by the selected decoder are not reimplemented.
+Do not create a custom DEFLATE parser, malformed-input recovery, fallback
+blocks, or a separate general-purpose decoder-hardening/conformance project.
+Prover timeout/OOM handling is separate from the proof relation. The decoder's
+success semantics must still agree with public derivation; known inconsistent
+backends cannot be selected merely because they return success.
+
+B01 ordinary-anchor adoption remains pending independently. It does not block
+this batch, which preserves current source pins, EVM/trie/KZG and QC/FI holds:
+
+- [x] **B02-1 / P05-D02 — Blob packing adapter:** at the existing guest-common
+  Etna seam, delegate to the already-used `BlobCoder`, enforce the Etna 1..6
+  blob limit, first field-element high bits and full non-final chunks, and
+  concatenate in supplied order. Do not implement another codec or KZG engine.
+- [x] **B02-2 / P05-D01b — Complete v6 derivation:** use the existing flate2
+  dependency/backend to decode one v6 zlib stream; require successful end and
+  complete input consumption, retain the 64 MiB protocol limit and fail directly.
+  Confirm the actual selected backend rather than assuming default-only miniz.
+- [x] **B02-3 / P05-D03 — Payload/range composition:** compose those checks
+  with `verify_decompressed_execution_payload` in the existing protocol crate,
+  preserving complete ordered execution-item equality and error propagation.
+  Add focused positive and altered/truncated/extra-input regression cases and
+  independent review/behavior checks before publishing the bounded component.
+
+The production guest entrypoints and full range execution are not wired by
+these native DA components. Existing KZG verification must authenticate the same
+ordered blobs and statement hash list at final composition; this batch does not
+accept a host-provided KZG/decode/execution success flag. Keep the portable
+protocol-etna closure intact and place adapters over existing std-dependent
+guest codecs in guest-common. Final backend builds/proofs remain P07/R07.
+
+B02 native-component acceptance evidence:
+
+- Each task had a compiled semantic RED: 8 packing failures; then 8 existing
+  pass / 7 stream failures; then 15 existing pass / 5 composition failures.
+  Failures reached explicit implementation seams, not setup errors.
+- Frozen exact-source adapter tests passed **20 maintained + 4 independently
+  authored cases**. The harness compiled byte-identical guest-common code and
+  the pinned client `06bd6b0` BlobCoder source, without its service stack. Tests
+  cover real complete range projection and signed transactions, stored/dynamic
+  alternate streams, complete input/trailers/checksum/dictionary failure,
+  exact 64 MiB/+1, one/full/six blobs, padding/order and deep typed equality
+  failures. Independent fixtures manually pack blobs and stored streams.
+- Scoped `cargo clippy --locked --offline -p etna-da-adapter-check --all-targets
+  -- -D warnings` passed after checked counter conversions. Existing Etna
+  regression tests passed: 120 maintained plus ten inherited independent-parent
+  controls. Independent adversarial source review and behavioral verification
+  passed at the final source bytes.
+- Actual production-workspace `cargo fmt --all -- --check` and full
+  `cargo metadata --locked --offline --format-version 1` passed. All 1,208
+  package identities/sources/versions/checksums remain unchanged; the root lock
+  adds only guest-common's four dependency edges. The direct Alloy EIPS 1.8.3
+  edge matches the pinned codec's builder trait; flate2 explicitly selects the
+  already-present C-zlib feature. The pure protocol-etna sources are unchanged.
+- The native harness linked system `libz.so.1`; feature selection alone is not
+  final target-library identity evidence. The complete guest-common build and
+  workspace Clippy, standalone guest lock refresh, both guest targets, ELF/VK/
+  provenance, cycle measurements and genuine proofs were not run. Standalone
+  guest locks still predate the new Etna dependency closure (including RISC0's
+  existing flate2 version difference). Keep those explicit P07/R07 gates.
+- Whole diagnostic-workspace formatting reported differences in the preserved
+  upstream codec and scratch edition formatting; actual production-workspace
+  formatting passed. Diagnostics are not product code. Checks reused the
+  existing shared target with bounded jobs/disk growth; no SDK/ELF build,
+  duplicate target, cleanup or deployment occurred.
+
+The three B02 native tasks are complete; this is the requested checkpoint,
+not completion of P05, the final guest relation or #305.
 
 ## QC design hold and non-QC continuation (2026-11-22)
 
@@ -87,19 +172,21 @@ proof. This amendment supersedes earlier instructions to complete that path.
   original matched item spans, with exact canonical outer RLP framing and the
   inclusive 64 MiB bound. Retain borrowed spans and existing codecs; no second
   expected payload, dependency or transaction/header decoder.
-- [ ] **P05-D01b:** qualify a strict bounded inflater and compose version-6
-  framing, compressed-size/dictionary/checksum/exhaustion checks with D01a and
-  the existing ordered blob/KZG path. D01a alone does not establish DA.
+- [x] **P05-D01b:** reuse the selected mature decoder for complete v6
+  derivation and bind its entire output to D01a, through the B02 native
+  guest-common adapter. A failed derivation directly fails verification; no
+  default manifest, partial execution or decoder-recovery branch is added.
+- [ ] **P05-D04:** wire the existing guest KZG checks over those same ordered
+  blobs and bind their hash list to the actual final range/statement consumer;
+  compose execution and final guest output. B02 alone does not authenticate DA.
 
-The initially considered miniz_oxide 0.8.9 streaming backend is not adopted.
-Independent source review found missing-history and incomplete-Huffman
-admission differences from reference decoders, plus an advertised-window
-constraint that the streaming wrapper does not enforce. Byte equality and
-checksum cannot establish decoder conformance. Resolve that profile with differential malformed
-stream tests before integration; do not add a custom DEFLATE parser or present
-existing permissive Unzen decoding as strict Etna validation. A decoded-slice
-size check does not bound allocation during inflation: D01b must enforce that
-limit as output is produced.
+The earlier miniz-only streaming proposal was not adopted because its success
+semantics differed from public derivation. That source-review result remains
+historical evidence for backend selection, not a requirement to write a custom
+strict inflater. Inspect the real dependency feature union: the pinned client
+protocol already enables flate2's C-zlib backend in the existing guest closure.
+Reuse its built-in checks and a thin complete-stream wrapper. No separate RFC
+hardening campaign or new decoder implementation is part of the accepted scope.
 
 The current non-QC payload source was inspected at taiko-mono main
 `3602629758beb653423a23608fd1960810efcfac`: one version byte, one dictionary-free
@@ -118,7 +205,7 @@ Keep design/upstream dependencies separate from engineering tasks not yet done:
 | Final ABI, public inputs and verifier framing | Committee-dependent fields wait for the new design; the present codec is provisional | Preserve existing byte vectors; complete interface-independent body checks |
 | Etna execution source/profile | Alethia #248 remains open at `ad584325`; Raiko2's current `59e06d0` pin has no Etna fork | Audit exact strict-execution, system-call and legacy-anchor adapter boundaries; adopt a reviewed compatible revision before final execution integration |
 | Distant-anchor SSZ bridge | Historical strategy still needs normative reconciliation with the linear header-chain rule | Ordinary per-range anchor structure and the near-reference path do not require enabling the bridge |
-| Strict inflater and complete DA | Engineering/conformance gate, not a requested design hold | Keep D01a exact span binding; qualify decoder behavior and reuse existing blob/KZG verification |
+| Complete DA derivation | Independent integration work under B02 | Reuse existing codecs/decoder; require complete successful derivation and exact D01a range equality; no custom strict decoder or recovery |
 | R06/R07 and production proof acceptance | Final delivery gates, not additional protocol design decisions | Reuse shared target; rebuild final ELF/VK/provenance and run real proofs after the complete source/interface is settled |
 
 Completed bounded component **P03-A05a** in the existing range verifier: generation-first

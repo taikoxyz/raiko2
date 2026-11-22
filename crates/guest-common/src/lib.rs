@@ -1,5 +1,7 @@
 //! Helpers for zkVM guest programs.
 
+pub mod etna;
+
 use alethia_reth_block::config::{TaikoEvmConfig, TaikoNextBlockEnvAttributes};
 use alethia_reth_chainspec::{
     hardfork::{TaikoHardfork, TaikoHardforks},

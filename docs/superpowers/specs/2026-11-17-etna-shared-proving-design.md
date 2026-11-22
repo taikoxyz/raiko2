@@ -13,13 +13,49 @@ interfaces during this pause.
 Continue independently with execution fork compatibility and exact DA payload
 binding, reusing existing executor/trie/KZG. The first DA component checks only
 that the complete decompressed bytes equal the canonical list of the projected
-original execution items, in the supplied order and within 64 MiB. The composer
-still authenticates context and complete range membership. This check neither
-inflates nor establishes blob provenance. A bounded, conforming compressed-stream
-decoder remains a separate gate; source review found acceptance differences in
-the initially considered pinned miniz streaming backend, so it is not adopted.
-The current v6 format is a component baseline only; actual DA provenance,
-FI-off profile and final guest/proof wiring remain open.
+original execution items, in order and within 64 MiB; the caller authenticates
+context and complete range membership.
+
+The user's DA clarification selects a fail-fast derivation relation: the guest
+uses the existing blob codec and a mature zlib decoder over the proposal-bound
+bytes, requires successful complete derivation with no remaining input, and
+asserts exact equality with the entire proven block range. Execution and the
+state-root relation remain proved by the existing executor. Any failure stops
+verification; no recovery, default payload, shortened execution or host success
+flag can produce an accepted proof.
+
+Do not implement a separate strict DEFLATE decoder or generic malformed-input
+hardening project. Reuse library checks and retain protocol framing/size limits.
+The chosen decoder still has to agree with public derivation. The earlier
+miniz-only streaming proposal's acceptance differences explain why it was not
+adopted, not a requirement to patch miniz. The actual pinned client dependency
+already enables flate2's C-zlib backend in the existing guest closure; inspect
+that selection before adding another dependency. Keep std codec adapters in
+existing guest-common and the pure protocol-etna byte-binding layer portable.
+B02 in the existing plan tracks packing, complete derivation and composition.
+Actual blob/KZG provenance, FI-off profile and final guest/proof wiring stay open.
+
+## Native DA composition checkpoint (2026-11-22)
+
+`raiko2_guest_common::etna::verify_blob_execution_payload` now composes the existing
+pinned BlobCoder, complete v6 C-zlib decode and the existing portable
+payload-to-projection matcher. It borrows raw blob views, preserves chunk/item
+order and fails directly on packing, derivation/exhaustion or exact-byte mismatch.
+No EVM, trie, KZG implementation, default-block fallback or custom DEFLATE
+parser was added. The root lock adds only existing dependency edges.
+
+The selected adapter matches the current native lander, including nonempty final
+chunks. Bare BlobCoder accepts an empty chunk and ENC-A-23c states only its upper
+bound; this implementation does not relax the public decoder or redefine that
+specification. Host/native success is not final guest acceptance.
+
+The 20 maintained plus four independent source-harness tests and focused lint
+passed. Actual production-workspace formatting and locked metadata passed;
+existing Etna regressions passed. Complete guest-common/workspace validation,
+standalone guest lock updates and actual target-library/ELF/proof evidence remain
+open. The native harness used system zlib; final profiles must confirm their
+selected backend/library. Existing ordered KZG/hash/statement bindings and full
+range execution must still be composed before any accepted proof output.
 
 ## Native parent/anchor boundary checkpoint (2026-11-22)
 

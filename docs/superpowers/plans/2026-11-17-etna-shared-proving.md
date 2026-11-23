@@ -213,6 +213,79 @@ The three B03 native components are complete. Stop at this batch checkpoint;
 metadata repair is a separately reviewed prerequisite, not a claim of final
 proof or main-merge readiness.
 
+## B04 execution preflight and early checkpoint (2026-11-23)
+
+No B04 implementation task is complete. The source preflight reached an actual
+execution dependency, so pause this batch under the three-task cadence rather
+than introduce an unused adapter or duplicate the execution engine.
+
+The checked Raiko2 source is `fdb99fff91850652a1e10985d341538cc290ae33`.
+Alethia main was refreshed at `fce87eff1d7b720852468e566a6df686b5487dbc`;
+its hardfork enum and executor still contain no Etna branch. The current
+Raiko2 execution pin `59e06d049beed8442218e7ab258138c060511c87` also predates
+Etna. [Alethia #248](https://github.com/taikoxyz/alethia-reth/pull/248)
+remains open at `ad584325c6b1e15f3c163fb25e71c04a78b194e0`.
+Per the repository's canonical-source rule, adopt a reviewed compatible commit
+from Alethia main after the required fork implementation lands there. Merely
+relaxing Raiko2's anchor assertions or changing activation time cannot provide
+Etna fee rules, system calls or anchorless execution.
+
+The existing supplied-block path is already strict at its pinned dispatch:
+`Executor::execute` calls OP-reth `BasicBlockExecutor::execute_one`, whose
+ordinary path executes each committed transaction with propagated errors.
+Alethia's legacy `prover` filtering override is reached through different
+paths, including the state-hook path; it is not evidence that this ordinary
+Raiko2 call filters transactions. Recheck dispatch after adopting the candidate's
+new OP-reth revision. Preserve the existing supplied-block validator, signer
+recovery, ancestor checks, WitnessDatabase, SparseState and post-state-root
+check. Shasta candidate reconstruction retains its existing filtering semantics.
+
+The next implementation batch, after canonical compatible source is available:
+
+- [ ] **B04-1 / P04-E01 — Execution dependency adoption:** adopt the reviewed
+  main revision and aligned OP-reth/Alloy closure without an SDK upgrade. Check
+  native and guest dependency compatibility and trusted fork activation. Verify
+  first-Etna fee behavior and real EIP-2935/EIP-4788 writes through the existing
+  executor. Do not replace source provenance with a host activation flag.
+- [ ] **B04-2 / P04-E02 — Fork-scoped supplied-block validation:** keep legacy
+  zero-root, anchor and first-receipt assertions for Unzen. Apply the upstream
+  Etna root/extraData and ordinary transaction rules at the same existing
+  validator, selected from its trusted chain spec. Test empty blocks, ordinary
+  tx0 revert/OOG, missing/zero PBBR, interior zk-gas overflow, missing system-call
+  witness and changed receipt/header/state roots. Golden-touch transactions
+  become ordinary transactions; do not add a new sender ban.
+- [ ] **B04-3 / P05-D05a — DA-bound native range replay:** at the actual
+  consumer, construct bodies from the exact matched header and original
+  EIP-2718 spans using the existing codec, then replay every ordered block with
+  its witness and existing ancestor rollover. Bind the first parent/history and
+  terminal root to the same range before returning an execution result. Test
+  count/order, parent/history and later-witness substitutions. This native
+  integration does not close QC, context/anchor authority or final guest output.
+
+Current CI for `fdb99fff` has green ordinary Rust lanes, but two artifact
+acquisition failures prevent full acceptance:
+
+- [xtask](https://github.com/taikoxyz/raiko2/actions/runs/45104591258/job/137462917945)
+  stops while compiling host dependency `risc0-circuit-recursion 4.0.4`: the
+  pinned recursion archive returns HTTP 403. Tests, locked-metadata assertions
+  and guest provenance checks were not reached. The existing build script can
+  accept an independently provisioned checksum-matched archive through
+  `RECURSION_SRC_PATH`; finding a local copy does not provision CI.
+- [CUDA image](https://github.com/taikoxyz/raiko2/actions/runs/45104591472/job/137462844574)
+  stops in existing `rzup 0.5.1` installation of `risc0-groth16 0.1.0`:
+  distribution metadata returns S3 AccessDenied. The parallel host build is
+  cancelled. The relevant installer/workflow and pinned dependency inputs are
+  unchanged from the comparison base; no base rerun or endpoint root cause is
+  established. Restore official artifact access before rerunning these gates.
+
+Do not bypass downloads, SDK checks or provenance, or hand-edit ELF metadata to
+make these jobs green. No SDK/guest build, proof, cycle measurement, dependency
+adoption, cleanup or source implementation was performed at this checkpoint.
+B01 still waits for #22426; QC/FI/distant-anchor/final committee ABI holds remain.
+B02/B03's authenticated DA components remain complete; their execution consumer
+and final proof acceptance do not. These are separate dependencies, not a claim
+that the whole design or native component verification failed.
+
 ## QC design hold and non-QC continuation (2026-11-22)
 
 The user directed that QC/committee work pause pending the revised design,
@@ -268,7 +341,7 @@ Keep design/upstream dependencies separate from engineering tasks not yet done:
 | Final ABI, public inputs and verifier framing | Committee-dependent fields wait for the new design; the present codec is provisional | Preserve existing byte vectors; complete interface-independent body checks |
 | Etna execution source/profile | Alethia #248 remains open at `ad584325`; Raiko2's current `59e06d0` pin has no Etna fork | Audit exact strict-execution, system-call and legacy-anchor adapter boundaries; adopt a reviewed compatible revision before final execution integration |
 | Distant-anchor SSZ bridge | Historical strategy still needs normative reconciliation with the linear header-chain rule | Ordinary per-range anchor structure and the near-reference path do not require enabling the bridge |
-| Complete DA derivation | Independent integration work under B02 | Reuse existing codecs/decoder; require complete successful derivation and exact D01a range equality; no custom strict decoder or recovery |
+| Complete DA derivation | B02/B03 native derivation and KZG/range binding complete; actual execution and guest consumer remain | Reuse the completed components at B04-3/P05-D05; no custom decoder or idle parallel adapter |
 | R06/R07 and production proof acceptance | Final delivery gates, not additional protocol design decisions | Reuse shared target; rebuild final ELF/VK/provenance and run real proofs after the complete source/interface is settled |
 
 Completed bounded component **P03-A05a** in the existing range verifier: generation-first

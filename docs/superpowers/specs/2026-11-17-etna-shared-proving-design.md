@@ -1,5 +1,21 @@
 # Shared upstream Etna proving implementation
 
+## Internal-testnet delivery order (2026-11-23)
+
+The first internal-testnet acceptance uses SGX alone: collect a real Etna range,
+run the complete shared verifier inside the enclave, sign its correctly domain-
+bound statement, and have the selected testnet verifier accept the proof and
+landing. ZK integration follows. Do not hold this first milestone on SP1/RISC0
+builds or a production two-proof requirement.
+
+All actual execution, DA, consensus and authenticated-context obligations stay
+in the shared verifier. The SGX-only proof policy belongs to the explicit
+internal-testnet verifier configuration, not a host skip flag. Existing quote,
+signer and proof transport can be reused after Etna input/hash framing matches.
+Native fixed-signer checks are not real enclave/onchain acceptance. The plan's
+SGX-01..04 tasks track the remaining implementation and acceptance separately
+from deployment/registration authorization and subsequent ZK work.
+
 ## QC scope hold (2026-11-22)
 
 The user paused QC and committee implementation while the new L2-managed

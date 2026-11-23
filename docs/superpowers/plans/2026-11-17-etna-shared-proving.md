@@ -17,6 +17,49 @@ RISC0 3.0.5 and SP1 6.8.1 at the recorded feasibility checkpoint.
 **Spec:** [Shared proving design](../specs/2026-11-17-etna-shared-proving-design.md),
 including its current planning-baseline amendment.
 
+## Internal-testnet acceptance: SGX first, ZK later (2026-11-23)
+
+The user explicitly chose a single-SGX first internal-testnet milestone. Do not
+require SP1/RISC0 proofs or the production two-subproof policy before accepting
+this milestone. This supersedes the earlier native/SP1 priority and the
+phase-one requirement below to complete both ZK guests. Later ZK integration
+must consume the same complete shared verification relation and statement.
+
+The first acceptance path is real range collection -> complete native/enclave
+Etna verification -> SGX signature -> internal-testnet verifier/landing receipt.
+No partial projection digest, host success flag or signature over unchecked
+execution/context can substitute for the complete verification relation.
+QC, anchor/context authority, phase-one FI-off profile and source adoption gates
+remain as recorded; choosing SGX does not remove these checks.
+
+- [ ] **SGX-01 / P04–P05:** compose the complete actual Etna range verifier,
+  including existing EVM replay/state-root, DA, anchor/context/rules and adopted
+  consensus checks. Reuse it unchanged in native and SGX paths.
+- [ ] **SGX-02 / P06:** connect an Etna input/response path to the existing SGX
+  runtime, provider and pipeline. Preserve Shasta behavior and range/task
+  identity. Sign only after complete verification succeeds.
+- [ ] **SGX-03 / P07:** align Etna statement, verifier-domain hash and proof
+  bytes with the actual internal-testnet SGX verifier. Reuse existing signer,
+  quote and proof-format infrastructure where compatible; do not pass an Etna
+  digest through the Shasta carry-data hash relation.
+- [ ] **SGX-04 / P07–P08:** validate the new enclave measurement and instance
+  registration, and exercise successful range landing plus altered execution,
+  DA, context and signature rejection on the selected internal-testnet fixture.
+  Actual deployment, registration and chain writes need their own execution
+  authorization; this plan does not perform them.
+
+The existing mono `AnyVerifier` can accept one SGX_RETH subproof. It is a
+candidate for an explicitly scoped internal-testnet verifier configuration,
+not a claim about what the current testnet runs. Check the actual pinned Etna
+Inbox/verifier wiring at integration. Keep the SGX-only acceptance policy in
+that testnet verifier/deployment configuration; add no host-controlled proof
+bypass and do not change the production verifier policy for this milestone.
+
+SP1/RISC0 guest builds, ELF/VK refresh and ZK proof acceptance remain unchecked
+later tasks. The SGX milestone does require an actual enclave artifact, valid
+attestation/registration and matching onchain signature acceptance; a native
+fixed-signer run is only an earlier diagnostic.
+
 ## Continuous closeout authorization (2026-11-23)
 
 The user authorized completing all remaining independent work without pausing
@@ -85,7 +128,7 @@ helpers for the actual deferred integration:
 | Strict full-body execution/range replay | Reviewed compatible canonical Alethia source, host compiler compatibility, retained legacy Unzen API and trusted Etna activation |
 | Anchor/context/time/rules/stop authentication | Reviewed raw-header source adoption and authoritative L1/profile inputs; F31's node-only stop grid predates the current timestamp stop rule |
 | QC, FI phase two, distant-anchor bridge and final committee ABI | Existing design holds; phase-one disabled/empty-queue profile authentication remains required |
-| Provider/pipeline/guest output, aggregation and genuine proofs | The complete verified relation and concrete authoritative input/output first; then native/SP1 acceptance, with RISC0 lower priority |
+| Provider/pipeline/guest output, aggregation and genuine proofs | The complete verified relation and concrete authoritative input/output first; then native/SGX internal-testnet acceptance; ZK follows later |
 
 These completed guards do not close P01–P08, authenticate a profile or establish
 full execution/proof acceptance. Full workspace Clippy and actual guest/proof
@@ -569,8 +612,9 @@ unrestricted normative proof relation is already implemented.
   entries, due checks, consumed-cursor updates and the necessary trial. It must
   retain the phase-one range/statement/input architecture and existing EVM/MPT.
 - P04's FI items and FI-specific P07 worst-case trials move to phase two. P03,
-  non-FI execution, DA/range/output binding, both real guests and the applicable
-  proof/ABI/provenance gates remain mandatory for phase one.
+  non-FI execution and DA/range/output binding remain mandatory. The later SGX-
+  first amendment selects one real SGX path for the initial internal testnet;
+  both ZK guests and their proof/ELF/VK gates move to the subsequent ZK stage.
 - The fewer-QC design challenge is open in [#305](https://github.com/taikoxyz/raiko2/pull/305#issuecomment-7030686273).
   Do not silently alter QC policy or claim protocol consensus while proceeding
   with independent byte/identity composition.

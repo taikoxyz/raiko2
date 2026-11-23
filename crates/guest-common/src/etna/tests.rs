@@ -1,7 +1,11 @@
 //! Exercises Etna blob packing and V6 derivation.
 
-use super::{decode_blob_payload, decode_execution_payload, verify_blob_execution_payload};
-use alloy_consensus::{proofs::calculate_transaction_root, Header, TxEnvelope};
+use super::{
+    decode_blob_payload, decode_execution_payload, verify_authenticated_blob_execution_payload,
+    verify_blob_authentication, verify_blob_execution_payload,
+    verify_blob_range_statement_projection,
+};
+use alloy_consensus::{proofs::calculate_transaction_root, Header};
 use alloy_eips::eip4844::{builder::SidecarBuilder, BYTES_PER_BLOB};
 use alloy_primitives::{hex, Address, B256, U256};
 use etna_core::{
@@ -14,12 +18,24 @@ use etna_core::{
     domain::{chain_id, DeploymentDomain},
 };
 use flate2::{write::ZlibEncoder, Compress, Compression, FlushCompress, Status};
+use raiko2_primitives::{
+    blob::util::{blob_to_commitment, blob_to_proof_of_equivalence, commitment_to_version_hash},
+    RaikoError,
+};
+use raiko2_protocol::InputDataSource;
 use raiko2_protocol_etna::{
     payload::PayloadError,
     projection::ExecutionProjection,
-    range::{verify_range_projection, RangeBlock, RangeProjectionContext},
+    range::{
+        verify_range_projection, RangeBlock, RangeProjectionContext, RangeStatementProjectionError,
+    },
+    statement::{cut_leaf, LandInput, LandStatement},
 };
-use std::io::{self, Read, Write};
+use reth_ethereum_primitives::TransactionSigned;
+use std::{
+    io::{self, Read, Write},
+    sync::OnceLock,
+};
 use taiko_client_protocol::shasta::BlobCoder;
 
 fn pack(payload: &[u8]) -> Vec<Vec<u8>> {
@@ -238,7 +254,7 @@ fn list(items: &[&[u8]]) -> Vec<u8> {
 struct BlockFixture {
     comet: CometBlock,
     execution: Header,
-    transactions: Vec<TxEnvelope>,
+    transactions: Vec<TransactionSigned>,
     item: Vec<u8>,
 }
 
@@ -281,7 +297,7 @@ impl RangeFixture {
             let (transactions, encoded_transactions) = if index == 0 {
                 (Vec::new(), vec![0xc0])
             } else {
-                let tx: TxEnvelope = alloy_rlp::decode_exact(&signed_wire).unwrap();
+                let tx: TransactionSigned = alloy_rlp::decode_exact(&signed_wire).unwrap();
                 let item = alloy_rlp::encode(signed_wire.as_slice());
                 (vec![tx], list(&[&item]))
             };
@@ -341,9 +357,8 @@ impl RangeFixture {
         }
     }
 
-    fn project(&self) -> Vec<ExecutionProjection<'_>> {
-        let inputs: Vec<_> = self
-            .blocks
+    fn inputs(&self) -> Vec<RangeBlock<'_, TransactionSigned>> {
+        self.blocks
             .iter()
             .map(|block| RangeBlock {
                 comet_header: &block.comet.header,
@@ -351,8 +366,53 @@ impl RangeFixture {
                 execution_header: &block.execution,
                 execution_transactions: &block.transactions,
             })
-            .collect();
-        verify_range_projection(&inputs, &self.context, &self.parent).unwrap()
+            .collect()
+    }
+
+    fn project(&self) -> Vec<ExecutionProjection<'_>> {
+        verify_range_projection(&self.inputs(), &self.context, &self.parent).unwrap()
+    }
+
+    fn cut_leaves(&self) -> Vec<B256> {
+        self.blocks[..self.blocks.len() - 1]
+            .iter()
+            .map(|block| {
+                cut_leaf(
+                    U256::from(block.execution.number),
+                    block.execution.hash_slow(),
+                    B256::from_slice(header_hash(&block.comet.header).as_bytes()),
+                    U256::ZERO,
+                )
+            })
+            .collect()
+    }
+
+    fn statement<'a>(&self, hashes: &'a [B256], cut_leaves: &'a [B256]) -> LandStatement<'a> {
+        let context = self.context;
+        LandStatement {
+            l1_chain_id: context.domain.l1_chain_id,
+            l2_chain_id: context.domain.l2_chain_id,
+            inbox: context.domain.inbox,
+            registry: Address::repeat_byte(0x65),
+            generation: U256::from(context.domain.generation),
+            parent_hash: context.parent_el_hash,
+            parent_comet_hash: context.parent_comet_hash,
+            committee_config_hash: B256::repeat_byte(0x66),
+            input: LandInput {
+                parent_height: U256::from(context.parent_height),
+                last_height: U256::from(context.last_height),
+                last_block_hash: context.last_el_hash,
+                last_comet_hash: context.last_comet_hash,
+                last_state_root: self.blocks.last().unwrap().execution.state_root,
+                l1_reference_block_number: U256::from(2_050),
+                forced_inclusion_head: U256::ZERO,
+                active_committee_snapshot: U256::from(50),
+            },
+            l1_reference_block_hash: B256::repeat_byte(0x67),
+            blob_hashes: hashes,
+            forced_inclusion_head_before: U256::ZERO,
+            cut_leaves,
+        }
     }
 
     fn decoded_payload(&self) -> Vec<u8> {
@@ -458,4 +518,427 @@ fn propagates_inner_blob_and_compression_failures() {
             "failure must precede execution-list equality: {error:?}"
         );
     }
+}
+
+fn prove_blobs(blobs: Vec<Vec<u8>>) -> (InputDataSource, Vec<B256>) {
+    let mut source = InputDataSource {
+        tx_data_from_blob: blobs,
+        ..InputDataSource::default()
+    };
+    let mut hashes = Vec::new();
+    for blob in &source.tx_data_from_blob {
+        let commitment = blob_to_commitment(blob).unwrap();
+        let proof = blob_to_proof_of_equivalence(blob, &commitment).unwrap();
+        source.blob_commitments.push(commitment.to_vec());
+        source.blob_proofs.push(proof.to_vec());
+        hashes.push(commitment_to_version_hash(&commitment));
+    }
+    (source, hashes)
+}
+
+fn authenticated_blob_fixture() -> &'static (InputDataSource, Vec<B256>) {
+    static FIXTURE: OnceLock<(InputDataSource, Vec<B256>)> = OnceLock::new();
+    FIXTURE.get_or_init(|| {
+        let mut first = vec![0; BYTES_PER_BLOB];
+        first[31] = 7;
+        let mut second = vec![0; BYTES_PER_BLOB];
+        second[63] = 11;
+        let fixture = prove_blobs(vec![first, second]);
+        assert_ne!(fixture.1[0], fixture.1[1]);
+        fixture
+    })
+}
+
+#[test]
+fn authenticates_single_and_multiple_ordered_blobs() {
+    let (source, hashes) = authenticated_blob_fixture();
+    let singleton = InputDataSource {
+        tx_data_from_blob: source.tx_data_from_blob[..1].to_vec(),
+        blob_commitments: source.blob_commitments[..1].to_vec(),
+        blob_proofs: source.blob_proofs[..1].to_vec(),
+        ..InputDataSource::default()
+    };
+
+    verify_blob_authentication(&singleton, &hashes[..1]).unwrap();
+    verify_blob_authentication(source, hashes).unwrap();
+}
+
+#[test]
+fn rejects_empty_and_oversized_kzg_batches() {
+    assert!(verify_blob_authentication(&InputDataSource::default(), &[]).is_err());
+
+    let (source, hashes) = authenticated_blob_fixture();
+    let oversized = InputDataSource {
+        tx_data_from_blob: vec![source.tx_data_from_blob[0].clone(); 7],
+        blob_commitments: vec![source.blob_commitments[0].clone(); 7],
+        blob_proofs: vec![source.blob_proofs[0].clone(); 7],
+        ..InputDataSource::default()
+    };
+    assert!(verify_blob_authentication(&oversized, &[hashes[0]; 7]).is_err());
+}
+
+#[test]
+fn rejects_each_kzg_collection_count_mismatch() {
+    let (source, hashes) = authenticated_blob_fixture();
+    let mut missing_blob = source.clone();
+    missing_blob.tx_data_from_blob.pop();
+    let mut missing_commitment = source.clone();
+    missing_commitment.blob_commitments.pop();
+    let mut missing_proof = source.clone();
+    missing_proof.blob_proofs.pop();
+
+    for malformed in [missing_blob, missing_commitment, missing_proof] {
+        assert!(verify_blob_authentication(&malformed, hashes).is_err());
+    }
+    assert!(verify_blob_authentication(source, &hashes[..1]).is_err());
+}
+
+#[test]
+fn rejects_legacy_inline_and_forced_source_fields() {
+    let (source, hashes) = authenticated_blob_fixture();
+    let mut inline = source.clone();
+    inline.tx_data_from_calldata.push(0x06);
+    let mut forced = source.clone();
+    forced.is_forced_inclusion = true;
+
+    assert!(verify_blob_authentication(&inline, hashes).is_err());
+    assert!(verify_blob_authentication(&forced, hashes).is_err());
+}
+
+#[test]
+fn requires_commitments_and_proofs_to_be_exactly_48_bytes() {
+    let (source, hashes) = authenticated_blob_fixture();
+    for width in [47, 49] {
+        let mut bad_commitment_width = source.clone();
+        bad_commitment_width.blob_commitments[0].resize(width, 0);
+        assert!(verify_blob_authentication(&bad_commitment_width, hashes).is_err());
+
+        let mut bad_proof_width = source.clone();
+        bad_proof_width.blob_proofs[0].resize(width, 0);
+        assert!(verify_blob_authentication(&bad_proof_width, hashes).is_err());
+    }
+}
+
+#[test]
+fn compares_versioned_hashes_by_position() {
+    let (source, hashes) = authenticated_blob_fixture();
+    let mut wrong_hash = hashes.clone();
+    wrong_hash[0][1] ^= 1;
+    assert!(verify_blob_authentication(source, &wrong_hash).is_err());
+
+    let mut reversed_hashes = hashes.clone();
+    reversed_hashes.reverse();
+    assert!(verify_blob_authentication(source, &reversed_hashes).is_err());
+
+    let mut reversed_source = source.clone();
+    reversed_source.tx_data_from_blob.reverse();
+    reversed_source.blob_commitments.reverse();
+    reversed_source.blob_proofs.reverse();
+    assert!(verify_blob_authentication(&reversed_source, hashes).is_err());
+    verify_blob_authentication(&reversed_source, &reversed_hashes).unwrap();
+}
+
+#[test]
+fn rejects_malformed_and_transplanted_proofs() {
+    let (source, hashes) = authenticated_blob_fixture();
+    let mut malformed = source.clone();
+    malformed.blob_proofs[0].fill(0);
+    assert!(verify_blob_authentication(&malformed, hashes).is_err());
+
+    let mut swapped = source.clone();
+    swapped.blob_proofs.swap(0, 1);
+    assert!(verify_blob_authentication(&swapped, hashes).is_err());
+}
+
+#[test]
+fn checks_the_actual_blob_and_commitment_relation() {
+    let (source, hashes) = authenticated_blob_fixture();
+    let mut modified = source.clone();
+    modified.tx_data_from_blob[0][31] ^= 1;
+    assert!(verify_blob_authentication(&modified, hashes).is_err());
+
+    let mut wrong_commitment = source.clone();
+    wrong_commitment.blob_commitments[0] = source.blob_commitments[1].clone();
+    assert!(verify_blob_authentication(&wrong_commitment, &[hashes[1], hashes[1]]).is_err());
+}
+
+#[test]
+fn rejects_invalid_raw_kzg_width_and_scalar_encoding() {
+    let (source, hashes) = authenticated_blob_fixture();
+    let mut short = source.clone();
+    short.tx_data_from_blob[0].pop();
+    assert!(verify_blob_authentication(&short, hashes).is_err());
+
+    let mut bad_scalar = source.clone();
+    bad_scalar.tx_data_from_blob[0][..32].fill(0xff);
+    assert!(verify_blob_authentication(&bad_scalar, hashes).is_err());
+}
+
+struct AuthenticatedRangeFixture {
+    range: RangeFixture,
+    source: InputDataSource,
+    hashes: Vec<B256>,
+}
+
+impl AuthenticatedRangeFixture {
+    fn new(count: usize) -> Self {
+        let range = RangeFixture::new(count);
+        let (source, hashes) = prove_blobs(pack(&v6_payload(
+            &range.decoded_payload(),
+            Compression::default(),
+        )));
+        Self {
+            range,
+            source,
+            hashes,
+        }
+    }
+
+    fn verify_statement(
+        &self,
+        statement: &LandStatement<'_>,
+        cursors: &[u64],
+    ) -> anyhow::Result<(Vec<ExecutionProjection<'_>>, B256)> {
+        verify_blob_range_statement_projection(
+            &self.source,
+            &self.range.inputs(),
+            &self.range.context,
+            statement,
+            cursors,
+            &self.range.parent,
+        )
+    }
+}
+
+fn authenticated_range_fixture() -> &'static AuthenticatedRangeFixture {
+    static FIXTURE: OnceLock<AuthenticatedRangeFixture> = OnceLock::new();
+    FIXTURE.get_or_init(|| AuthenticatedRangeFixture::new(2))
+}
+
+#[test]
+fn authenticates_and_derives_the_complete_projected_range() {
+    let fixture = authenticated_range_fixture();
+    let projected = fixture.range.project();
+    assert_eq!(projected.len(), 2);
+    assert_eq!(projected[1].transaction_bytes().len(), 1);
+
+    verify_authenticated_blob_execution_payload(&fixture.source, &fixture.hashes, &projected)
+        .unwrap();
+}
+
+#[test]
+fn rejects_corrupt_or_transplanted_proofs_for_the_same_execution_payload() {
+    let fixture = authenticated_range_fixture();
+    let projected = fixture.range.project();
+    verify_blob_execution_payload(&fixture.source.tx_data_from_blob, &projected).unwrap();
+
+    let mut corrupted = fixture.source.clone();
+    corrupted.blob_proofs[0].fill(0);
+    let mut transplanted = fixture.source.clone();
+    transplanted.blob_proofs[0] = authenticated_blob_fixture().0.blob_proofs[0].clone();
+
+    for source in [corrupted, transplanted] {
+        let error =
+            verify_authenticated_blob_execution_payload(&source, &fixture.hashes, &projected)
+                .unwrap_err();
+        assert!(error.downcast_ref::<RaikoError>().is_some(), "{error:?}");
+    }
+}
+
+#[test]
+fn rejects_tampered_blob_bytes_before_derivation() {
+    let fixture = authenticated_range_fixture();
+    let projected = fixture.range.project();
+    let mut source = fixture.source.clone();
+    source.tx_data_from_blob[0][6] ^= 1;
+
+    let error = verify_authenticated_blob_execution_payload(&source, &fixture.hashes, &projected)
+        .unwrap_err();
+    assert!(error.downcast_ref::<RaikoError>().is_some(), "{error:?}");
+}
+
+#[test]
+fn rejects_authenticated_payloads_with_substituted_or_reordered_items() {
+    let fixture = authenticated_range_fixture();
+    let projected = fixture.range.project();
+    let first = fixture.range.blocks[0].item.as_slice();
+    let second = fixture.range.blocks[1].item.as_slice();
+    let mut substituted = second.to_vec();
+    *substituted.last_mut().unwrap() ^= 1;
+
+    for decoded in [list(&[first, &substituted]), list(&[second, first])] {
+        let (source, hashes) = prove_blobs(pack(&v6_payload(&decoded, Compression::default())));
+        verify_blob_authentication(&source, &hashes).unwrap();
+
+        let error =
+            verify_authenticated_blob_execution_payload(&source, &hashes, &projected).unwrap_err();
+        assert!(
+            matches!(
+                error.downcast_ref::<PayloadError>(),
+                Some(PayloadError::PayloadMismatch)
+            ),
+            "{error:?}"
+        );
+    }
+}
+
+fn authenticated_singleton_fixture() -> &'static AuthenticatedRangeFixture {
+    static FIXTURE: OnceLock<AuthenticatedRangeFixture> = OnceLock::new();
+    FIXTURE.get_or_init(|| AuthenticatedRangeFixture::new(1))
+}
+
+#[test]
+fn binds_an_authenticated_singleton_to_its_statement() {
+    let fixture = authenticated_singleton_fixture();
+    let statement = fixture.range.statement(&fixture.hashes, &[]);
+    let (projected, digest) = fixture.verify_statement(&statement, &[0]).unwrap();
+
+    assert_eq!(digest, statement.try_digest().unwrap());
+    assert_eq!(projected.len(), 1);
+    assert_eq!(
+        projected[0].execution_item_bytes(),
+        fixture.range.blocks[0].item
+    );
+}
+
+#[test]
+fn binds_an_authenticated_range_with_an_interior_cut() {
+    let fixture = authenticated_range_fixture();
+    let leaves = fixture.range.cut_leaves();
+    assert_eq!(leaves.len(), 1);
+    let statement = fixture.range.statement(&fixture.hashes, &leaves);
+    let (projected, digest) = fixture.verify_statement(&statement, &[0, 0]).unwrap();
+
+    assert_eq!(digest, statement.try_digest().unwrap());
+    assert_eq!(projected.len(), 2);
+    for (projection, block) in projected.iter().zip(&fixture.range.blocks) {
+        assert_eq!(projection.execution_item_bytes(), block.item);
+    }
+}
+
+#[test]
+fn rejects_statement_hash_values_and_counts_that_disagree_with_the_source() {
+    let fixture = authenticated_singleton_fixture();
+    let expected_hash = fixture.hashes[0];
+    let mut wrong_hash = expected_hash;
+    wrong_hash[1] ^= 1;
+    let statement = fixture
+        .range
+        .statement(core::slice::from_ref(&wrong_hash), &[]);
+    let error = fixture.verify_statement(&statement, &[0]).unwrap_err();
+    assert!(
+        error.to_string().contains("versioned hash mismatch"),
+        "{error:?}"
+    );
+
+    for (hashes, message) in [
+        (&[][..], "requires between 1 and 6 blobs"),
+        (&[expected_hash; 2][..], "counts differ"),
+        (&[expected_hash; 7][..], "requires between 1 and 6 blobs"),
+    ] {
+        let statement = fixture.range.statement(hashes, &[]);
+        let error = fixture.verify_statement(&statement, &[0]).unwrap_err();
+        assert!(error.to_string().contains(message), "{error:?}");
+    }
+}
+
+#[test]
+fn rejects_statement_hash_reordering_against_individually_authentic_blobs() {
+    let fixture = authenticated_singleton_fixture();
+    let (source, hashes) = authenticated_blob_fixture();
+    verify_blob_authentication(source, hashes).unwrap();
+    let reversed = [hashes[1], hashes[0]];
+    let statement = fixture.range.statement(&reversed, &[]);
+    let error = verify_blob_range_statement_projection(
+        source,
+        &fixture.range.inputs(),
+        &fixture.range.context,
+        &statement,
+        &[0],
+        &fixture.range.parent,
+    )
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("blob 0 versioned hash mismatch"),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn propagates_origin_and_terminal_statement_mismatches() {
+    type MutateStatement = fn(&mut LandStatement<'_>);
+    let fixture = authenticated_range_fixture();
+    let leaves = fixture.range.cut_leaves();
+    let mutations: [(&str, MutateStatement); 3] = [
+        ("parent_hash", |statement| {
+            statement.parent_hash = B256::ZERO;
+        }),
+        ("last_block_hash", |statement| {
+            statement.input.last_block_hash = B256::ZERO;
+        }),
+        ("last_state_root", |statement| {
+            statement.input.last_state_root = B256::repeat_byte(0x6a);
+        }),
+    ];
+    for (expected, mutate) in mutations {
+        let mut statement = fixture.range.statement(&fixture.hashes, &leaves);
+        mutate(&mut statement);
+        let error = fixture.verify_statement(&statement, &[0, 0]).unwrap_err();
+        assert!(
+            matches!(
+                error.downcast_ref::<RangeStatementProjectionError>(),
+                Some(RangeStatementProjectionError::StatementMismatch { field }) if *field == expected
+            ),
+            "{expected}: {error:?}"
+        );
+    }
+}
+
+#[test]
+fn propagates_invalid_cursor_shape_and_cut_leaf() {
+    let fixture = authenticated_range_fixture();
+    let leaves = fixture.range.cut_leaves();
+    let statement = fixture.range.statement(&fixture.hashes, &leaves);
+    let error = fixture.verify_statement(&statement, &[0, 2]).unwrap_err();
+    assert!(
+        matches!(
+            error.downcast_ref::<RangeStatementProjectionError>(),
+            Some(RangeStatementProjectionError::CursorStep { height: 19, .. })
+        ),
+        "{error:?}"
+    );
+
+    let statement = fixture.range.statement(&fixture.hashes, &[B256::ZERO]);
+    let error = fixture.verify_statement(&statement, &[0, 0]).unwrap_err();
+    assert!(
+        matches!(
+            error.downcast_ref::<RangeStatementProjectionError>(),
+            Some(RangeStatementProjectionError::CutLeaf { height: 18 })
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn rejects_a_statement_whose_authentic_blobs_derive_a_different_range() {
+    let fixture = authenticated_range_fixture();
+    let singleton = authenticated_singleton_fixture();
+    let leaves = fixture.range.cut_leaves();
+    let statement = fixture.range.statement(&singleton.hashes, &leaves);
+    let error = verify_blob_range_statement_projection(
+        &singleton.source,
+        &fixture.range.inputs(),
+        &fixture.range.context,
+        &statement,
+        &[0, 0],
+        &fixture.range.parent,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            error.downcast_ref::<PayloadError>(),
+            Some(PayloadError::PayloadMismatch)
+        ),
+        "{error:?}"
+    );
 }

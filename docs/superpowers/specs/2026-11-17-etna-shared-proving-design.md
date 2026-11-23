@@ -35,6 +35,28 @@ existing guest-common and the pure protocol-etna byte-binding layer portable.
 B02 in the existing plan tracks packing, complete derivation and composition.
 Actual blob/KZG provenance, FI-off profile and final guest/proof wiring stay open.
 
+## Native authenticated DA / statement checkpoint (2026-11-23)
+
+B03 composes the existing primitive proof-of-equivalence and versioned-hash
+helpers with the same InputDataSource blob vector used for complete derivation.
+The outer native range/statement function takes its expected hashes directly
+from `LandStatement::blob_hashes`, invokes the existing range checker with the
+actual execution transaction type, and returns the projections/digest only after
+real KZG and exact payload checks succeed. It adds no cryptography, transport,
+strategy selector, duplicate execution path or host-success bypass.
+
+Forty maintained plus four independent native tests with real KZG proofs and
+focused lint passed; original crypto sources are unchanged. Real production
+formatting and default/bench locked metadata for both guests passed. The two
+standalone locks now contain the existing Etna dependency closure and preserve
+SDK/crypto pins; their prior metadata-resolution failures are repaired without
+building ELFs. RISC0's flate2 lock is aligned to the existing root 1.1.8 constraint.
+
+L1 authority, EVM execution/state root, anchors/time/rules, QC/FI and final
+production guest/output/proof integration remain separate. The existing ABI
+codec is provisional. These native checks do not establish ELF/VK freshness,
+actual guest library linkage, target performance or accepted ZK proofs.
+
 ## Native DA composition checkpoint (2026-11-22)
 
 `raiko2_guest_common::etna::verify_blob_execution_payload` now composes the existing

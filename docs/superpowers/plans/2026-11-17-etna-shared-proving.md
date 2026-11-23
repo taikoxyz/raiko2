@@ -153,6 +153,66 @@ B02 native-component acceptance evidence:
 The three B02 native tasks are complete; this is the requested checkpoint,
 not completion of P05, the final guest relation or #305.
 
+## Batch B03 — Same-blob authentication and statement binding (2026-11-23)
+
+Continue independently of B01's source gate and the QC/FI/distant-anchor holds.
+Reuse the existing InputDataSource, primitive proof-of-equivalence verifier and
+versioned-hash helper; no new transport, cryptography, EVM or generic framework.
+
+- [x] **B03-1 / P05-D04a:** authenticate 1..6 positional blob/commitment/proof
+  tuples against the supplied hash list using existing real KZG helpers. Check
+  exact counts and 48-byte fields; reject legacy inline/transport skip flags.
+- [x] **B03-2 / P05-D04b:** pass those exact same authenticated blob bytes to
+  B02's complete derivation and full projected-payload equality checks.
+- [x] **B03-3 / P05-D04c:** compose the existing range/statement verifier and
+  authenticated DA, using `statement.blob_hashes` directly. Return the original
+  projections/digest only after both succeed; add no independently supplied
+  digest or alternative blob list. Use the existing native execution transaction
+  type rather than adding an abstraction just for codec-version traits.
+
+Acceptance needs real commitments/equivalence proofs and the real existing Rust
+verifier in positive and altered/order/count/payload/statement tests, independent
+review/verification, and no package/revision drift. The existing `kzg-host`
+feature may be enabled on the test dependency for fixture generation only.
+A host callback or mock success is not evidence of KZG binding. Full execution,
+L1/committee/rules/time/FI authority, final guest entrypoints/locks/ELFs and real
+proofs remain separate. Pause after these three components or earlier on an
+actual blocker or decision requiring the user.
+
+B03 acceptance checkpoint:
+
+- Real-crypto semantic RED stages compiled and reached their explicit seams:
+  20 prior pass / 9 new failures; then 29 / 4; then 33 / 7. GREEN preserved
+  those controls. Final native source tests passed **40 maintained + four
+  independently authored cases**, including actual native TransactionSigned,
+  real c-kzg-generated equivalence proofs, unchanged Rust kzg-rs verification,
+  pairing-reaching substitutions, authenticated wrong payloads and changed
+  statement hashes/cuts/endpoints. Scoped strict Clippy passed after two
+  test-only semicolons. Existing protocol regressions passed (120 maintained
+  plus ten inherited independent-parent controls).
+- Independent source review and behavioral verification passed. The narrow
+  offline harness compiled byte-identical adapter and original crypto utility
+  sources against the pinned real curve/setup libraries; its small diagnostic
+  error/transport facades omit unrelated service types, not verification. It
+  does not establish a complete guest build or cryptographic audit.
+- Actual production formatting, root locked offline metadata and both guests'
+  default/bench locked metadata passed. No root package/source/SDK pin changed;
+  the only new manifest feature is test-only `kzg-host` on the existing dev edge.
+- The prior head's ordinary Rust CI passed, including guest-common. Its xtask
+  lane actually failed 43 pass / 5 fail while resolving stale standalone guest
+  locks, before ELF freshness checks. Separate commit `ae0708c2` synchronizes
+  those two locks: existing SDK/git/crypto pins preserved, new Etna closure
+  aligned with root, RISC0 flate2 1.1.9 replaced by the already-required 1.1.8.
+  Default and bench locked graphs pass independently for both. This closes the
+  dependency-resolution prerequisite, not R07 artifact validity.
+- New source/SDK target builds, static library/ELF/VK/source provenance and ZK
+  proofs were not run. L1 authority, QC, anchor/rules/time, actual FI consumption,
+  EVM state-root verification and final guest/public-output framing remain open.
+
+The three B03 native components are complete. Stop at this batch checkpoint;
+metadata repair is a separately reviewed prerequisite, not a claim of final
+proof or main-merge readiness.
+
 ## QC design hold and non-QC continuation (2026-11-22)
 
 The user directed that QC/committee work pause pending the revised design,
@@ -176,9 +236,12 @@ proof. This amendment supersedes earlier instructions to complete that path.
   derivation and bind its entire output to D01a, through the B02 native
   guest-common adapter. A failed derivation directly fails verification; no
   default manifest, partial execution or decoder-recovery branch is added.
-- [ ] **P05-D04:** wire the existing guest KZG checks over those same ordered
-  blobs and bind their hash list to the actual final range/statement consumer;
-  compose execution and final guest output. B02 alone does not authenticate DA.
+- [x] **P05-D04:** compose existing KZG helpers with the same ordered blob
+  bytes, B02 derivation and the existing native range/statement projection.
+  B03 uses the statement's exact hash list and returns its digest only on success.
+- [ ] **P05-D05:** wire this native composition into actual guest entrypoints
+  with authoritative context, complete execution and final public output.
+  Native DA binding alone is not full proof acceptance.
 
 The earlier miniz-only streaming proposal was not adopted because its success
 semantics differed from public derivation. That source-review result remains
@@ -398,7 +461,7 @@ from checkbox counts.
 | P02 | Canonical supplied-block input and EL/Comet binding | PARTIAL: complete range/parent projection | P01 for revised behavior | Bounded original-byte projection and Comet/EL chains bind the expected endpoints; strict nested witnesses and authenticated execution composition remain open; #22415 is optional |
 | P03 | Authenticated origin, L1 context and committee schedule | PARTIAL: field binding | P01, P02 | Every current/next validator hash and neighboring schedule edge checked; authenticated origin/L1/storage/committee derivation and far-path alignment remain open |
 | P04 | Strict Etna execution; FI in phase two | TODO | P01, P02 | Phase one: existing strict execution on the matched full body; phase two: authenticated FI include/skip and singleton-equivalence cases |
-| P05 | Range consensus coverage, DA, cuts and statement | PARTIAL: codec, QCs, range and cut/statement projection | P02–P04 for full range | Matched Comet/EL identities and supplied cursor shape bind every interior cut and statement endpoint; actual FI/context authority, execution, DA and final composition remain pending |
+| P05 | Range consensus coverage, DA, cuts and statement | PARTIAL: native authenticated DA/range/statement composition | P02–P04 for full range | Matched Comet/EL identities and supplied cursor shape bind every interior cut and statement endpoint; actual FI/context authority, execution, DA and final composition remain pending |
 | P06 | Provider, pipeline and backend wiring | TODO | P02–P05 | Existing task lifecycle produces and consumes the complete Etna input |
 | P07 | Both real guests, aggregation and proof acceptance | TODO | P05, P06 | Real proofs, child continuity, permitted L1 verifier combination and resource bounds |
 | P08 | Regression, independent final review and ready handoff | TODO | P01–P07 | Required checks, Unzen regressions and exact-head review; no unresolved material findings |

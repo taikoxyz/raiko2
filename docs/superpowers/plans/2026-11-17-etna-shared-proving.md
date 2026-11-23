@@ -286,6 +286,31 @@ B02/B03's authenticated DA components remain complete; their execution consumer
 and final proof acceptance do not. These are separate dependencies, not a claim
 that the whole design or native component verification failed.
 
+## Native/SP1 priority and candidate preflight (2026-11-23)
+
+The user lowered RISC0 priority. Keep its artifact-download, compiler and proof
+work as eventual R07 gates, but do not put them ahead of independent native/SP1
+integration. This changes scheduling, not final backend support or acceptance.
+
+The [candidate compatibility checkpoint](../../research/2026-11-23-etna-execution-candidate-compatibility.md)
+records three completed preflight investigations, not completed B04 implementation:
+
+1. Reproduced the pin-only Cargo conflict, then resolved the isolated candidate's
+   aligned Alethia/OP-reth/Alloy native graph without changing production pins.
+2. Independently passed native and SP1 default/bench locked offline metadata;
+   existing SP1 SDK/guest and crypto patch identities remain unchanged.
+3. Verified the exact supplied-block API boundary and ran native compiler
+   preflight. The candidate declares Rust 1.99, so the pinned host 1.95 check
+   stops before compilation. Source inspection also found the removed delayed
+   Unzen clone method still used by Raiko2. The Etna setter is not equivalent.
+
+The next actual execution work needs canonical source adoption, host toolchain
+compatibility and preservation of that legacy Unzen API/behavior. A temporary
+candidate graph is not authority to pin an unmerged source, bypass native MSRV,
+rename the old setter or remove Unzen support. SP1 compilation remains untested;
+metadata and declared MSRV alone establish neither success nor an SDK-upgrade
+requirement. B04-1/2/3 remain unchecked. No RISC0 build was attempted.
+
 ## QC design hold and non-QC continuation (2026-11-22)
 
 The user directed that QC/committee work pause pending the revised design,

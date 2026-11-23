@@ -1112,15 +1112,10 @@ fn rejects_an_anchor_number_regression_even_with_a_witness() {
 fn requires_matching_present_nonzero_roots_for_inheritance() {
     let root = Some(B256::repeat_byte(0x61));
     let zero = Some(B256::ZERO);
-    for (previous, actual) in [
-        (root, Some(B256::repeat_byte(0x62))),
-        (None, root),
-        (root, None),
-        (None, None),
-        (zero, root),
-        (root, zero),
-        (zero, zero),
-    ] {
+    // Keep the preceding covered block valid so this reaches inheritance.
+    // Missing/zero carried roots are rejected earlier and tested separately.
+    for actual in [Some(B256::repeat_byte(0x62)), None, zero] {
+        let previous = root;
         let mut fixture = RangeFixture::new(17, 17, 2);
         fixture.set_anchor(0, FIRST_ANCHOR_NUMBER, previous, true);
         fixture.set_anchor(1, FIRST_ANCHOR_NUMBER, actual, false);
@@ -1409,4 +1404,39 @@ fn propagates_a_parent_hash_failure_through_the_landing_statement() {
         ),
         "{error:?}"
     );
+}
+
+#[test]
+fn rejects_missing_or_zero_carried_roots_at_generation_start() {
+    for origin in [0, 17] {
+        for root in [None, Some(B256::ZERO)] {
+            let mut fixture = RangeFixture::new(origin, origin, 1);
+            fixture.set_anchor(0, FIRST_ANCHOR_NUMBER, root, true);
+            let error = fixture
+                .verify()
+                .expect_err("a carried anchor needs a nonzero root");
+            assert!(
+                matches!(error, RangeProjectionError::CarriedAnchorRoot { height } if height == origin + 1),
+                "{error:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn rejects_missing_or_zero_carried_roots_on_advances() {
+    for (parent, index) in [(17, 1), (20, 0), (20, 1)] {
+        for root in [None, Some(B256::ZERO)] {
+            let mut fixture = RangeFixture::new(17, parent, 2);
+            let anchor = FIRST_ANCHOR_NUMBER + u64::try_from(index).unwrap();
+            fixture.set_anchor(index, anchor, root, true);
+            let error = fixture
+                .verify()
+                .expect_err("an advancing anchor needs a nonzero root");
+            assert!(
+                matches!(error, RangeProjectionError::CarriedAnchorRoot { height } if height == parent + u64::try_from(index).unwrap() + 1),
+                "{error:?}"
+            );
+        }
+    }
 }

@@ -35,6 +35,17 @@ existing guest-common and the pure protocol-etna byte-binding layer portable.
 B02 in the existing plan tracks packing, complete derivation and composition.
 Actual blob/KZG provenance, FI-off profile and final guest/proof wiring stay open.
 
+## Independent native closeout (2026-11-23)
+
+The phase-one native authenticated range/statement composer rejects every FI
+witness and cursor consumption, while retaining unchanged nonzero historical
+cursors and the generic FI-capable projection. The existing range verifier now
+requires present/nonzero roots on first/advancing carried anchors as well as
+its existing inheritance checks. The excluded origin parent remains opaque.
+Neither check authenticates the disabled/empty-queue deployment profile, L1
+anchor root, execution result or final proof. The plan records exact native
+regression and independent review evidence and the remaining source gates.
+
 ## Native authenticated DA / statement checkpoint (2026-11-23)
 
 B03 composes the existing primitive proof-of-equivalence and versioned-hash

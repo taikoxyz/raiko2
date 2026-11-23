@@ -17,6 +17,80 @@ RISC0 3.0.5 and SP1 6.8.1 at the recorded feasibility checkpoint.
 **Spec:** [Shared proving design](../specs/2026-11-17-etna-shared-proving-design.md),
 including its current planning-baseline amendment.
 
+## Continuous closeout authorization (2026-11-23)
+
+The user authorized completing all remaining independent work without pausing
+after each three tasks. This supersedes the checkpoint cadence below for future
+work; preserve its historical completed batches. Stop only for a real design
+choice or unmet dependency, keeping settled native checks separate from the
+known QC/FI/profile, execution-source/compiler/API, anchor-source and final
+proof-interface gates. RISC0 stays lower priority.
+
+The current independent closeout scope uses existing public/native consumers:
+
+- [x] **P05-PH1:** restrict the existing native authenticated range/statement
+  composer to phase one: absent FI witnesses and unchanged before/after cursor.
+  Reuse the checked monotone cursor sequence instead of duplicating it. This
+  does not authenticate the disabled/empty-queue deployment profile. Keep the
+  generic protocol projection and all statement/envelope fields FI-capable.
+- [x] **P03-A05d:** require present/nonzero carried anchor roots for generation-
+  first and advancing covered blocks in the existing range verifier. Preserve
+  inherited-root and witness-error behavior and the excluded origin-parent
+  exception. No L1 parser/root authentication or storage read is added.
+- [x] Complete the independent remaining-work audit, relevant regressions and
+  adversarial/behavioral review; publish one consolidated status and distinguish
+  these component checks from full Etna execution/proof acceptance.
+
+### Independent closeout acceptance
+
+The existing native composer now rejects FI witnesses at every covered height
+and any before/after cursor change, after the generic projector validates the
+complete monotone sequence and its cuts. Nonzero and maximum uint48 constant
+cursors remain valid. The generic protocol range/statement checker remains
+FI-capable. The existing range verifier also rejects absent/zero carried roots
+at generation-first and advancing blocks; inheritance and excluded-origin-parent
+semantics remain intact. These checks authenticate no deployment or L1 root.
+
+Acceptance evidence for the exact reviewed product bytes:
+
+- Compiled semantic RED reached both FI rejection cases with otherwise valid
+  real KZG/range/statement inputs, and both carried-root rejection cases. The
+  nonzero/max cursor positive passed before implementation.
+- The frozen native component run passed 50 adapter and 132 protocol tests,
+  including three new independently authored controls. Strict all-target
+  Clippy passed for both harness packages. The harness compiles byte-identical
+  product code and the existing crypto/codec, with small diagnostic transport
+  and error support; it is not a production guest or full-workspace build.
+- Independent adversarial source review and behavioral verification passed.
+  Tests include valid cut/statement cursor consumption, optional FI witness
+  presence even with opaque empty/malformed contents, exact carried-root error
+  heights, incoming and interior advances, and the opaque origin-parent case.
+- An old inheritance fixture with an invalid carried prefix now rejects earlier;
+  the maintained inheritance case uses a valid prefix, while all seven incoming
+  excluded-parent root combinations remain covered. A historical scratch case
+  also accepts the correct earlier typed rejection. No production check was
+  relaxed. The shared root predicate avoids duplicate conditions/lint exceptions.
+- Actual workspace formatting, locked offline metadata and diff whitespace
+  checks passed. Dependency pins, manifests/locks, SDKs, EVM/trie, guest inputs,
+  final ABI and generated artifacts are unchanged. Checks used the existing
+  shared target, 11 GiB disk reserve and 256 MiB per-run growth cap; no new
+  target/profile, SDK/guest/ELF build, cleanup, merge or deployment occurred.
+
+The remaining-work audit found no additional current-pin implementation slice
+with both a settled rule and usable existing consumer. Do not substitute unused
+helpers for the actual deferred integration:
+
+| Remaining group | Actual prerequisite |
+| --- | --- |
+| Strict full-body execution/range replay | Reviewed compatible canonical Alethia source, host compiler compatibility, retained legacy Unzen API and trusted Etna activation |
+| Anchor/context/time/rules/stop authentication | Reviewed raw-header source adoption and authoritative L1/profile inputs; F31's node-only stop grid predates the current timestamp stop rule |
+| QC, FI phase two, distant-anchor bridge and final committee ABI | Existing design holds; phase-one disabled/empty-queue profile authentication remains required |
+| Provider/pipeline/guest output, aggregation and genuine proofs | The complete verified relation and concrete authoritative input/output first; then native/SP1 acceptance, with RISC0 lower priority |
+
+These completed guards do not close P01–P08, authenticate a profile or establish
+full execution/proof acceptance. Full workspace Clippy and actual guest/proof
+builds were not run in this bounded component check and remain delivery gates.
+
 ## Three-task checkpoint cadence (2026-11-22)
 
 The user authorized continuing the remaining settled work in groups of three
@@ -559,7 +633,7 @@ from checkbox counts.
 | P02 | Canonical supplied-block input and EL/Comet binding | PARTIAL: complete range/parent projection | P01 for revised behavior | Bounded original-byte projection and Comet/EL chains bind the expected endpoints; strict nested witnesses and authenticated execution composition remain open; #22415 is optional |
 | P03 | Authenticated origin, L1 context and committee schedule | PARTIAL: field binding | P01, P02 | Every current/next validator hash and neighboring schedule edge checked; authenticated origin/L1/storage/committee derivation and far-path alignment remain open |
 | P04 | Strict Etna execution; FI in phase two | TODO | P01, P02 | Phase one: existing strict execution on the matched full body; phase two: authenticated FI include/skip and singleton-equivalence cases |
-| P05 | Range consensus coverage, DA, cuts and statement | PARTIAL: native authenticated DA/range/statement composition | P02–P04 for full range | Matched Comet/EL identities and supplied cursor shape bind every interior cut and statement endpoint; actual FI/context authority, execution, DA and final composition remain pending |
+| P05 | Range consensus coverage, DA, cuts and statement | PARTIAL: native authenticated DA/range/statement composition | P02–P04 for full range | Matched Comet/EL identities and supplied cursor shape bind every interior cut and statement endpoint; actual FI/context authority, execution and final guest composition remain pending |
 | P06 | Provider, pipeline and backend wiring | TODO | P02–P05 | Existing task lifecycle produces and consumes the complete Etna input |
 | P07 | Both real guests, aggregation and proof acceptance | TODO | P05, P06 | Real proofs, child continuity, permitted L1 verifier combination and resource bounds |
 | P08 | Regression, independent final review and ready handoff | TODO | P01–P07 | Required checks, Unzen regressions and exact-head review; no unresolved material findings |

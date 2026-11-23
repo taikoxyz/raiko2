@@ -196,18 +196,22 @@ pub fn verify_authenticated_blob_execution_payload(
     verify_blob_execution_payload(&source.tx_data_from_blob, projected)
 }
 
-/// Binds the ordered blob payload, projected range and current landing statement.
+/// Binds the ordered blob payload, projected range and phase-one landing statement.
 ///
 /// The statement supplies the same ordered blob hashes for authentication
 /// and digest construction. The caller authenticates the deployment, proof
 /// origin and L1 context, verifies anchor state, timing, rules, committee
-/// authority and certificates, and checks actual forced inclusion and strict
-/// execution of the matched blocks before applying backend proof framing.
+/// authority and certificates, and checks strict execution of the matched
+/// blocks before applying backend proof framing. It must restrict the proof
+/// to an authenticated phase-one deployment with FI disabled and no pending
+/// queue entries. This function rejects FI witnesses and cursor consumption;
+/// it does not authenticate that deployment profile or the queue state.
 ///
 /// # Errors
 ///
-/// Returns an error if range or statement projection, blob authentication,
-/// payload derivation or execution-list equality fails.
+/// Returns an error if FI witnesses or cursor consumption are present, or if
+/// range or statement projection, blob authentication, payload derivation or
+/// execution-list equality fails.
 pub fn verify_blob_range_statement_projection<'a>(
     source: &InputDataSource,
     blocks: &[RangeBlock<'a, TransactionSigned>],
@@ -224,6 +228,19 @@ pub fn verify_blob_range_statement_projection<'a>(
         post_block_cursors,
         parent_execution_header,
     )?;
+    // The checked cursor sequence is nondecreasing and ends at this terminal
+    // cursor, so equal endpoints require every intermediate cursor to stay put.
+    ensure!(
+        statement.input.forced_inclusion_head == statement.forced_inclusion_head_before,
+        "phase-one Etna range consumes forced inclusion entries"
+    );
+    for (block, projection) in blocks.iter().zip(&projected) {
+        ensure!(
+            projection.forced_witness().is_none(),
+            "phase-one Etna range carries an FI witness at height {}",
+            block.execution_header.number
+        );
+    }
     verify_authenticated_blob_execution_payload(source, statement.blob_hashes, &projected)?;
     Ok((projected, digest))
 }

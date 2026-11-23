@@ -942,3 +942,102 @@ fn rejects_a_statement_whose_authentic_blobs_derive_a_different_range() {
         "{error:?}"
     );
 }
+
+fn cut_leaves_for_constant_cursor(range: &RangeFixture, cursor: u64) -> Vec<B256> {
+    range.blocks[..range.blocks.len() - 1]
+        .iter()
+        .map(|block| {
+            cut_leaf(
+                U256::from(block.execution.number),
+                block.execution.hash_slow(),
+                B256::from_slice(header_hash(&block.comet.header).as_bytes()),
+                U256::from(cursor),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn phase_one_preserves_nonzero_and_maximum_cursors() {
+    let fixture = authenticated_range_fixture();
+    for cursor in [7, etna_core::schedule::UINT48_MAX] {
+        let cuts = cut_leaves_for_constant_cursor(&fixture.range, cursor);
+        let mut statement = fixture.range.statement(&fixture.hashes, &cuts);
+        statement.forced_inclusion_head_before = U256::from(cursor);
+        statement.input.forced_inclusion_head = U256::from(cursor);
+        let (_, digest) = fixture
+            .verify_statement(&statement, &[cursor, cursor])
+            .unwrap();
+        assert_eq!(digest, statement.try_digest().unwrap());
+    }
+}
+
+#[test]
+fn phase_one_rejects_consumption_with_consistent_statement_and_cuts() {
+    let fixture = authenticated_range_fixture();
+    for cursors in [[0, 1], [1, 1]] {
+        let cuts = cut_leaves_for_constant_cursor(&fixture.range, cursors[0]);
+        let mut statement = fixture.range.statement(&fixture.hashes, &cuts);
+        statement.input.forced_inclusion_head = U256::from(1);
+        raiko2_protocol_etna::range::verify_range_statement_projection(
+            &fixture.range.inputs(),
+            &fixture.range.context,
+            &statement,
+            &cursors,
+            &fixture.range.parent,
+        )
+        .unwrap();
+        let error = fixture
+            .verify_statement(&statement, &cursors)
+            .expect_err("phase one must reject actual cursor consumption");
+        assert!(error.to_string().contains("phase-one Etna"), "{error:?}");
+    }
+}
+
+#[test]
+fn phase_one_rejects_carried_fi_witnesses_without_cursor_consumption() {
+    let fixture = authenticated_range_fixture();
+    for index in 0..2 {
+        let mut range = RangeFixture::new(2);
+        let mut envelope = vec![0x06];
+        envelope.extend(list(&[
+            &range.blocks[index].item,
+            &[0xc2, 0xc1, 0x01],
+            &[0xc0],
+            &[0xc2, 0xc1, 0x01],
+        ]));
+        range.blocks[index].comet.data = vec![envelope];
+        let mut previous = None;
+        for block in &mut range.blocks {
+            if let Some(hash) = previous {
+                block.comet.header.last_block_id.as_mut().unwrap().hash = hash;
+            }
+            block.comet.header.data_hash = Some(data_hash(&block.comet.data));
+            previous = Some(header_hash(&block.comet.header));
+        }
+        range.context.last_comet_hash = B256::from_slice(previous.unwrap().as_bytes());
+        let cuts = range.cut_leaves();
+        let statement = range.statement(&fixture.hashes, &cuts);
+        let (projected, _) = raiko2_protocol_etna::range::verify_range_statement_projection(
+            &range.inputs(),
+            &range.context,
+            &statement,
+            &[0, 0],
+            &range.parent,
+        )
+        .unwrap();
+        assert!(projected[index].forced_witness().is_some());
+        verify_authenticated_blob_execution_payload(&fixture.source, &fixture.hashes, &projected)
+            .unwrap();
+        let error = verify_blob_range_statement_projection(
+            &fixture.source,
+            &range.inputs(),
+            &range.context,
+            &statement,
+            &[0, 0],
+            &range.parent,
+        )
+        .expect_err("phase one must reject a carried FI witness even with unchanged cursors");
+        assert!(error.to_string().contains("phase-one Etna"), "{error:?}");
+    }
+}

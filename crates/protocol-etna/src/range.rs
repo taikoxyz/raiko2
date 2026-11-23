@@ -142,6 +142,12 @@ pub enum RangeProjectionError {
         /// Height of the block.
         height: u64,
     },
+    /// A covered block carrying an anchor witness lacks a present nonzero root.
+    #[error("missing or zero Etna carried anchor root at height {height}")]
+    CarriedAnchorRoot {
+        /// Height of the block.
+        height: u64,
+    },
     /// The terminal Comet header hash differs from the expected endpoint.
     #[error("terminal Etna Comet header hash differs from expected hash")]
     TerminalCometHash,
@@ -349,7 +355,8 @@ fn validate_cursors(
 /// from the excluded parent. An advance requires a witness, and inheritance
 /// requires an absent witness and identical, present nonzero roots.
 /// At the generation origin, the first block starts a new anchor sequence
-/// with a carried witness, independently of the parent's anchor fields.
+/// with a carried witness, independently of the parent's anchor fields. Every
+/// covered block carrying a witness must have a present nonzero anchor root.
 ///
 /// The caller verifies carried witnesses and enforces the authenticated L1
 /// origin floor, checkpoint, anchor age and timestamp rules. The caller
@@ -441,9 +448,7 @@ pub fn verify_range_projection<'a, T: Encodable2718>(
                     if carries_witness {
                         return Err(RangeProjectionError::UnexpectedAnchorWitness { height });
                     }
-                    if anchor_root != previous_root
-                        || anchor_root.is_none_or(|root| root == B256::ZERO)
-                    {
+                    if anchor_root != previous_root || !has_nonzero_anchor_root(anchor_root) {
                         return Err(RangeProjectionError::InheritedAnchorRoot { height });
                     }
                 }
@@ -454,6 +459,9 @@ pub fn verify_range_projection<'a, T: Encodable2718>(
             }
         } else if !carries_witness {
             return Err(RangeProjectionError::MissingAnchorWitness { height });
+        }
+        if carries_witness && !has_nonzero_anchor_root(anchor_root) {
+            return Err(RangeProjectionError::CarriedAnchorRoot { height });
         }
         previous_anchor = Some((anchor_number, anchor_root));
 
@@ -469,6 +477,10 @@ pub fn verify_range_projection<'a, T: Encodable2718>(
         return Err(RangeProjectionError::TerminalExecutionHash);
     }
     Ok(projections)
+}
+
+fn has_nonzero_anchor_root(root: Option<B256>) -> bool {
+    root.is_some_and(|root| root != B256::ZERO)
 }
 
 fn validate_range_block_count(

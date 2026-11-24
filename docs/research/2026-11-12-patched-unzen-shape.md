@@ -1,5 +1,9 @@
 # Patched-Unzen workload-shape checkpoint
 
+This is the historical first-76 checkpoint. The [finite pressure-tail and historical-packing
+follow-up](2026-11-24-patched-unzen-tail.md) completes the original 322-input comparison;
+the original failures and this opened-cohort shape result remain preserved.
+
 On this opened cohort, a simple scalar-aware ECMUL reserve added to Unzen has slightly
 lower normalized prediction error than the current complete model. This does not establish
 that either model safely bounds workload at an admission limit, or that the other model's

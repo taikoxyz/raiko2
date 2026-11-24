@@ -19,7 +19,7 @@ anyhow.workspace = true
 bincode.workspace = true
 raiko2-guest-common.workspace = true
 raiko2-primitives-shasta.workspace = true
-raiko2-stateless = { workspace = true, features = ["mpt-metrics"] }
+raiko2-stateless = { workspace = true, features = ["mpt-metrics", "workload-lab"] }
 reth-ethereum-primitives.workspace = true
 reth-evm.workspace = true
 reth-execution-types.workspace = true

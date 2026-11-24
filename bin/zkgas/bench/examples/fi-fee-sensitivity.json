@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "evidence_kind": "sensitivity",
+  "base_fee_wei": "10000000000000000",
+  "doubling_thresholds": [50, 200, 1000],
+  "initial_pending": 0,
+  "enqueue_count": 900,
+  "pending_samples": [0, 25, 49, 50, 100, 200, 300, 400, 900],
+  "sp1_usd_per_billion_pgu": "0.5",
+  "eth_usd": "2000",
+  "reserve_multiplier": "1.5",
+  "fi_extra_pgu_scenarios": [
+    {"name": "hypothetical 0.2B PGU", "pgu": "200000000"},
+    {"name": "hypothetical 1B PGU", "pgu": "1000000000"},
+    {"name": "hypothetical 3.6B PGU", "pgu": "3600000000"},
+    {"name": "hypothetical 15B PGU", "pgu": "15000000000"}
+  ]
+}

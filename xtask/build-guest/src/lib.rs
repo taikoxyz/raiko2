@@ -1331,6 +1331,7 @@ mod tests {
         let root = repo_root();
         let workspace = parse_git_revs(&root.join("Cargo.toml")).unwrap();
         let guest_common = parse_git_revs(&root.join("crates/guest-common/Cargo.toml")).unwrap();
+        let xtask = parse_git_revs(&root.join("xtask/Cargo.toml")).unwrap();
         let risc0_lock = parse_lock_git_rev_sets(&root.join("guests/risc0/Cargo.lock")).unwrap();
         let sp1_lock = parse_lock_git_rev_sets(&root.join("guests/sp1/Cargo.lock")).unwrap();
 
@@ -1345,6 +1346,11 @@ mod tests {
             guest_common.get("alethia-reth"),
             Some(workspace_alethia),
             "guest-common alethia-reth rev must match workspace"
+        );
+        assert_eq!(
+            xtask.get("alethia-reth"),
+            Some(workspace_alethia),
+            "xtask alethia-reth rev must match workspace"
         );
         assert!(
             risc0_lock

@@ -10,6 +10,7 @@ workspace = true
 [features]
 default = []
 mpt-metrics = ["dep:serde"]
+workload-lab = ["dep:alethia-reth-evm", "dep:serde"]
 
 [dependencies]
 # Alloy
@@ -37,6 +38,7 @@ serde = { workspace = true, features = ["derive"], optional = true }
 alethia-reth-chainspec.workspace = true
 alethia-reth-block.workspace = true
 alethia-reth-consensus.workspace = true
+alethia-reth-evm = { workspace = true, optional = true }
 
 [dev-dependencies]
 raiko2-primitives-shasta.workspace = true

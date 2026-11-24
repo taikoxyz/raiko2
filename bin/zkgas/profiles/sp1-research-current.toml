@@ -1,0 +1,16 @@
+# Compatibility for the frozen execute-only research observations, not production-program or
+# GPU proving-time certification. Historical calibration/normalization remains an explicit profile.
+schema_version = 1
+
+[[profiles]]
+profile_id = "sp1-research-current"
+model_id = "80160649d7d29a85879cd9524b35c271a4b8638f64de94eef91d016e56121cf8"
+runtime_spec_sha256 = "80160649d7d29a85879cd9524b35c271a4b8638f64de94eef91d016e56121cf8"
+backend = "sp1"
+backend_version = "6.3.0"
+prediction_unit = "sp1_pgu"
+observation_unit = "sp1_pgu"
+measurement_stage = "execute"
+
+[profiles.program]
+elf_sha256 = "b76baf2e0f3fa3fe6f8a20fe53dbf82f58601ed14b370dfc0f8d31db2069e034"

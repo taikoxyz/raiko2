@@ -1,5 +1,21 @@
 # Shared upstream Etna proving implementation
 
+## Native L1 root authentication (2026-11-24)
+
+The native Etna range/statement composer now requires bounded raw L1 ancestry
+ending at the same statement's reference number/hash. It reuses Unzen's private
+consecutive-link walk and the upstream raw-header codec, binds every matched EL
+anchor number/PBBR to its chain member and requires carried witness header
+bytes to equal that exact raw member. Inherited anchors use the same chain
+opening; generation-origin parent exceptions remain. No anchor transaction,
+new storage reader or independent host root/success flag is introduced.
+
+The core pin is the reviewed F31-only codec carrier `4827fea0`; other core/QC
+behavior stays unchanged. This authentication is relative to L1's statement
+reference. It does not verify Inbox storage predicates, anchor time/age/rules,
+committee authority, EVM execution or SGX acceptance by itself. The existing
+plan records the native regressions, source proof and remaining compile gates.
+
 ## Internal-testnet delivery order (2026-11-23)
 
 The first internal-testnet acceptance uses SGX alone: collect a real Etna range,

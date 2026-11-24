@@ -3,7 +3,7 @@
 use super::{
     decode_blob_payload, decode_execution_payload, verify_authenticated_blob_execution_payload,
     verify_blob_authentication, verify_blob_execution_payload,
-    verify_blob_range_statement_projection,
+    verify_blob_range_statement_projection, L1AnchorProof,
 };
 use alloy_consensus::{proofs::calculate_transaction_root, Header};
 use alloy_eips::eip4844::{builder::SidecarBuilder, BYTES_PER_BLOB};
@@ -251,17 +251,29 @@ fn list(items: &[&[u8]]) -> Vec<u8> {
     encoded
 }
 
+fn raw_l1_header(number: u64, parent_hash: B256, state_root: B256) -> Vec<u8> {
+    alloy_rlp::encode(Header {
+        number,
+        parent_hash,
+        state_root,
+        timestamp: number + 1_000,
+        ..Default::default()
+    })
+}
+
 struct BlockFixture {
     comet: CometBlock,
     execution: Header,
     transactions: Vec<TransactionSigned>,
     item: Vec<u8>,
+    anchor_witness: Option<Vec<u8>>,
 }
 
 struct RangeFixture {
     parent: Header,
     blocks: Vec<BlockFixture>,
     context: RangeProjectionContext,
+    l1_headers: Vec<Vec<u8>>,
 }
 
 impl RangeFixture {
@@ -288,7 +300,19 @@ impl RangeFixture {
         let mut el_hash = parent_el_hash;
         let mut previous_comet = None;
         let mut blocks = Vec::new();
-        for index in 0..count {
+        let mut l1_headers = Vec::new();
+        let mut l1_parent = B256::ZERO;
+        for offset in 0..count + 2 {
+            let number = 18 + u64::try_from(offset).unwrap();
+            let raw = raw_l1_header(
+                number,
+                l1_parent,
+                B256::left_padding_from(&number.to_be_bytes()),
+            );
+            l1_parent = alloy_primitives::keccak256(&raw);
+            l1_headers.push(raw);
+        }
+        for (index, raw_l1) in l1_headers.iter().enumerate().take(count) {
             let height = parent.number + u64::try_from(index).unwrap() + 1;
             let mut extra_data = hex!("64000000000002000000000000");
             extra_data[7..].copy_from_slice(&height.to_be_bytes()[2..]);
@@ -316,7 +340,9 @@ impl RangeFixture {
             let item = list(&[&alloy_rlp::encode(&execution), &encoded_transactions]);
             let mut envelope = vec![0x06];
             // The range fixture exercises structural anchor carriage on each advance.
-            envelope.extend(list(&[&item, &[0xc2, 0xc1, 0x01], &[0xc0], &[0xc0]]));
+            let anchor_witness = list(&[&alloy_rlp::encode(raw_l1.as_slice()), &[0xc0]]);
+            let optional_anchor = list(&[&anchor_witness]);
+            envelope.extend(list(&[&item, &optional_anchor, &[0xc0], &[0xc0]]));
 
             let (_, mut comet) = decode_canonical_block(&stock_block).unwrap();
             comet.header.chain_id = chain_id(&domain).unwrap().parse().unwrap();
@@ -336,6 +362,7 @@ impl RangeFixture {
                 execution,
                 transactions,
                 item,
+                anchor_witness: Some(anchor_witness),
             });
         }
 
@@ -354,7 +381,34 @@ impl RangeFixture {
             },
             parent,
             blocks,
+            l1_headers,
         }
+    }
+
+    fn l1_proof(&self) -> L1AnchorProof<'_> {
+        L1AnchorProof {
+            raw_headers: &self.l1_headers,
+            max_headers: 131_072,
+        }
+    }
+
+    fn reseal(&mut self) {
+        let mut previous = None;
+        for block in &mut self.blocks {
+            let optional_anchor = block
+                .anchor_witness
+                .as_ref()
+                .map_or_else(|| vec![0xc0], |raw| list(&[raw]));
+            let mut envelope = vec![0x06];
+            envelope.extend(list(&[&block.item, &optional_anchor, &[0xc0], &[0xc0]]));
+            block.comet.data = vec![envelope];
+            if let Some(hash) = previous {
+                block.comet.header.last_block_id.as_mut().unwrap().hash = hash;
+            }
+            block.comet.header.data_hash = Some(data_hash(&block.comet.data));
+            previous = Some(header_hash(&block.comet.header));
+        }
+        self.context.last_comet_hash = B256::from_slice(previous.unwrap().as_bytes());
     }
 
     fn inputs(&self) -> Vec<RangeBlock<'_, TransactionSigned>> {
@@ -404,11 +458,11 @@ impl RangeFixture {
                 last_block_hash: context.last_el_hash,
                 last_comet_hash: context.last_comet_hash,
                 last_state_root: self.blocks.last().unwrap().execution.state_root,
-                l1_reference_block_number: U256::from(2_050),
+                l1_reference_block_number: U256::from(17 + self.l1_headers.len()),
                 forced_inclusion_head: U256::ZERO,
                 active_committee_snapshot: U256::from(50),
             },
-            l1_reference_block_hash: B256::repeat_byte(0x67),
+            l1_reference_block_hash: alloy_primitives::keccak256(self.l1_headers.last().unwrap()),
             blob_hashes: hashes,
             forced_inclusion_head_before: U256::ZERO,
             cut_leaves,
@@ -706,6 +760,7 @@ impl AuthenticatedRangeFixture {
             statement,
             cursors,
             &self.range.parent,
+            self.range.l1_proof(),
         )
     }
 }
@@ -856,6 +911,7 @@ fn rejects_statement_hash_reordering_against_individually_authentic_blobs() {
         &statement,
         &[0],
         &fixture.range.parent,
+        fixture.range.l1_proof(),
     )
     .unwrap_err();
     assert!(
@@ -932,6 +988,7 @@ fn rejects_a_statement_whose_authentic_blobs_derive_a_different_range() {
         &statement,
         &[0, 0],
         &fixture.range.parent,
+        fixture.range.l1_proof(),
     )
     .unwrap_err();
     assert!(
@@ -1002,7 +1059,7 @@ fn phase_one_rejects_carried_fi_witnesses_without_cursor_consumption() {
         let mut envelope = vec![0x06];
         envelope.extend(list(&[
             &range.blocks[index].item,
-            &[0xc2, 0xc1, 0x01],
+            &list(&[range.blocks[index].anchor_witness.as_ref().unwrap()]),
             &[0xc0],
             &[0xc2, 0xc1, 0x01],
         ]));
@@ -1036,8 +1093,320 @@ fn phase_one_rejects_carried_fi_witnesses_without_cursor_consumption() {
             &statement,
             &[0, 0],
             &range.parent,
+            range.l1_proof(),
         )
         .expect_err("phase one must reject a carried FI witness even with unchanged cursors");
         assert!(error.to_string().contains("phase-one Etna"), "{error:?}");
+    }
+}
+
+fn verify_l1_range(
+    range: &RangeFixture,
+    source: &InputDataSource,
+    hashes: &[B256],
+    raw_headers: &[Vec<u8>],
+    max_headers: usize,
+) -> anyhow::Result<()> {
+    let cuts = range.cut_leaves();
+    let statement = range.statement(hashes, &cuts);
+    verify_blob_range_statement_projection(
+        source,
+        &range.inputs(),
+        &range.context,
+        &statement,
+        &vec![0; range.blocks.len()],
+        &range.parent,
+        L1AnchorProof {
+            raw_headers,
+            max_headers,
+        },
+    )?;
+    Ok(())
+}
+
+#[test]
+fn l1_authentication_accepts_generation_first_and_multiple_headers() {
+    for fixture in [
+        authenticated_singleton_fixture(),
+        authenticated_range_fixture(),
+    ] {
+        let (_, digest) = fixture
+            .verify_statement(
+                &fixture
+                    .range
+                    .statement(&fixture.hashes, &fixture.range.cut_leaves()),
+                &vec![0; fixture.range.blocks.len()],
+            )
+            .unwrap();
+        assert_ne!(digest, B256::ZERO);
+    }
+}
+
+#[test]
+fn l1_authentication_rejects_wrong_reference_number_hash_and_upper_bits() {
+    let fixture = authenticated_range_fixture();
+    let cuts = fixture.range.cut_leaves();
+    for case in 0..3 {
+        let mut statement = fixture.range.statement(&fixture.hashes, &cuts);
+        match case {
+            0 => statement.input.l1_reference_block_number += U256::from(1),
+            1 => statement.l1_reference_block_hash = B256::repeat_byte(0xef),
+            _ => statement.input.l1_reference_block_number += U256::from(1) << 64,
+        }
+        let error = fixture
+            .verify_statement(&statement, &[0, 0])
+            .expect_err("Q must bind both full-width fields");
+        assert!(error.to_string().contains("L1"), "{error:?}");
+    }
+}
+
+#[test]
+fn l1_authentication_rejects_missing_reordered_duplicate_and_unlinked_headers() {
+    let fixture = authenticated_range_fixture();
+    let original = &fixture.range.l1_headers;
+    let mut gap = original.clone();
+    gap.remove(1);
+    let mut swapped = original.clone();
+    swapped.swap(0, 1);
+    let mut duplicate = original.clone();
+    duplicate.insert(1, original[0].clone());
+    let mut unlinked = original.clone();
+    unlinked[1] = raw_l1_header(
+        19,
+        B256::repeat_byte(0xfa),
+        B256::left_padding_from(&19u64.to_be_bytes()),
+    );
+    let missing_anchor = original[1..].to_vec();
+    for headers in [gap, swapped, duplicate, unlinked, missing_anchor] {
+        let error = verify_l1_range(
+            &fixture.range,
+            &fixture.source,
+            &fixture.hashes,
+            &headers,
+            100,
+        )
+        .expect_err("every anchor must be on one consecutive authenticated L1 chain");
+        assert!(
+            error.to_string().contains("L1") || error.to_string().contains("anchor"),
+            "{error:?}"
+        );
+    }
+}
+
+#[test]
+fn l1_authentication_bounds_count_before_decoding_and_rejects_bad_raw_headers() {
+    let fixture = authenticated_range_fixture();
+    let original = &fixture.range.l1_headers;
+    verify_l1_range(
+        &fixture.range,
+        &fixture.source,
+        &fixture.hashes,
+        original,
+        original.len(),
+    )
+    .unwrap();
+    for (headers, max, expected) in [
+        (vec![], 10, "empty"),
+        (vec![vec![0xff]; 2], 1, "count"),
+        (vec![vec![0xff]], 0, "count"),
+        (vec![vec![0xff]], 1, "L1"),
+        (vec![vec![0; 4097]], 1, "L1"),
+    ] {
+        let error = verify_l1_range(
+            &fixture.range,
+            &fixture.source,
+            &fixture.hashes,
+            &headers,
+            max,
+        )
+        .expect_err("invalid or unbounded raw ancestry must be rejected");
+        assert!(
+            error.to_string().contains(expected),
+            "{expected}: {error:?}"
+        );
+    }
+    let mut trailing = original.clone();
+    trailing[0].push(0x80);
+    assert!(verify_l1_range(
+        &fixture.range,
+        &fixture.source,
+        &fixture.hashes,
+        &trailing,
+        100
+    )
+    .is_err());
+}
+
+#[test]
+fn l1_authentication_rejects_malformed_inner_anchor_witness_framing() {
+    let fixture = authenticated_range_fixture();
+    let raw = &fixture.range.l1_headers[0];
+    let encoded = alloy_rlp::encode(raw.as_slice());
+    for witness in [
+        vec![0xc0],
+        list(&[&encoded]),
+        list(&[&encoded, &[0x80]]),
+        list(&[&encoded, &[0xc0], &[0xc0]]),
+        list(&[raw, &[0xc0]]),
+    ] {
+        let mut range = RangeFixture::new(2);
+        range.blocks[0].anchor_witness = Some(witness);
+        range.reseal();
+        let projected = range.project();
+        verify_authenticated_blob_execution_payload(&fixture.source, &fixture.hashes, &projected)
+            .unwrap();
+        let error = verify_l1_range(
+            &range,
+            &fixture.source,
+            &fixture.hashes,
+            &range.l1_headers,
+            100,
+        )
+        .expect_err("inner anchor shape must be opened, not treated as an opaque list");
+        assert!(error.to_string().contains("anchor witness"), "{error:?}");
+    }
+}
+
+#[test]
+fn l1_authentication_rejects_a_different_carried_header_with_the_same_number_and_root() {
+    let fixture = authenticated_range_fixture();
+    let mut range = RangeFixture::new(2);
+    let mut forged: Header = alloy_rlp::decode_exact(&range.l1_headers[0]).unwrap();
+    forged.timestamp += 1;
+    let encoded = alloy_rlp::encode(alloy_rlp::encode(&forged).as_slice());
+    range.blocks[0].anchor_witness = Some(list(&[&encoded, &[0xc0]]));
+    range.reseal();
+    verify_authenticated_blob_execution_payload(&fixture.source, &fixture.hashes, &range.project())
+        .unwrap();
+    let error = verify_l1_range(
+        &range,
+        &fixture.source,
+        &fixture.hashes,
+        &range.l1_headers,
+        100,
+    )
+    .expect_err("equal number/root cannot substitute different raw L1 bytes");
+    assert!(error.to_string().contains("anchor witness"), "{error:?}");
+}
+
+#[test]
+fn l1_authentication_rejects_an_authentic_chain_root_that_differs_from_the_el_root() {
+    let fixture = authenticated_range_fixture();
+    let mut range = RangeFixture::new(2);
+    let mut parent = B256::ZERO;
+    for (index, raw) in range.l1_headers.iter_mut().enumerate() {
+        let mut header: Header = alloy_rlp::decode_exact(raw.as_slice()).unwrap();
+        header.parent_hash = parent;
+        if index == 0 {
+            header.state_root = B256::repeat_byte(0xfe);
+        }
+        *raw = alloy_rlp::encode(&header);
+        parent = alloy_primitives::keccak256(&*raw);
+    }
+    range.blocks[0].anchor_witness = Some(list(&[
+        &alloy_rlp::encode(range.l1_headers[0].as_slice()),
+        &[0xc0],
+    ]));
+    range.reseal();
+    verify_authenticated_blob_execution_payload(&fixture.source, &fixture.hashes, &range.project())
+        .unwrap();
+    let error = verify_l1_range(
+        &range,
+        &fixture.source,
+        &fixture.hashes,
+        &range.l1_headers,
+        100,
+    )
+    .expect_err("the committed EL root must be the authenticated L1 state root");
+    assert!(error.to_string().contains("state root"), "{error:?}");
+}
+
+#[test]
+fn l1_authentication_preserves_unknown_future_raw_header_fields() {
+    let fixture = authenticated_range_fixture();
+    let mut range = RangeFixture::new(2);
+    let mut parent = B256::ZERO;
+    for raw in &mut range.l1_headers {
+        let mut header: Header = alloy_rlp::decode_exact(raw.as_slice()).unwrap();
+        header.parent_hash = parent;
+        let encoded = alloy_rlp::encode(&header);
+        let mut cursor = encoded.as_slice();
+        let alloy_rlp::PayloadView::List(mut fields) =
+            alloy_rlp::Header::decode_raw(&mut cursor).unwrap()
+        else {
+            panic!()
+        };
+        fields.push(&[0x81, 0xf1]);
+        *raw = list(&fields);
+        parent = alloy_primitives::keccak256(&*raw);
+    }
+    for (index, block) in range.blocks.iter_mut().enumerate() {
+        block.anchor_witness = Some(list(&[
+            &alloy_rlp::encode(range.l1_headers[index].as_slice()),
+            &[0xc0],
+        ]));
+    }
+    range.reseal();
+    verify_l1_range(
+        &range,
+        &fixture.source,
+        &fixture.hashes,
+        &range.l1_headers,
+        100,
+    )
+    .unwrap();
+}
+
+fn rebuild_execution_items(range: &mut RangeFixture) {
+    let mut parent = range.parent.hash_slow();
+    for block in &mut range.blocks {
+        block.execution.parent_hash = parent;
+        parent = block.execution.hash_slow();
+        let mut cursor = block.item.as_slice();
+        let alloy_rlp::PayloadView::List(fields) =
+            alloy_rlp::Header::decode_raw(&mut cursor).unwrap()
+        else {
+            panic!()
+        };
+        block.item = list(&[&alloy_rlp::encode(&block.execution), fields[1]]);
+    }
+    range.context.parent_el_hash = range.parent.hash_slow();
+    range.context.last_el_hash = parent;
+    range.reseal();
+}
+
+#[test]
+fn l1_authentication_accepts_covered_and_incoming_inheritance() {
+    for incoming in [false, true] {
+        let mut range = RangeFixture::new(2);
+        // At a non-origin boundary the excluded parent binds the inherited anchor.
+        if incoming {
+            range.context.origin_height = 16;
+            let id = range.blocks[1].comet.header.last_block_id.unwrap();
+            range.context.parent_comet_hash = B256::from_slice(id.hash.as_bytes());
+            range.blocks[0].comet.header.last_block_id = Some(id);
+            range.parent.extra_data = range.blocks[0].execution.extra_data.clone();
+            // PBBR follows these fields in header RLP; include them so the
+            // excluded parent remains a canonically represented typed header.
+            range.parent.base_fee_per_gas = range.blocks[0].execution.base_fee_per_gas;
+            range.parent.withdrawals_root = range.blocks[0].execution.withdrawals_root;
+            range.parent.blob_gas_used = range.blocks[0].execution.blob_gas_used;
+            range.parent.excess_blob_gas = range.blocks[0].execution.excess_blob_gas;
+            range.parent.parent_beacon_block_root =
+                range.blocks[0].execution.parent_beacon_block_root;
+            range.blocks[0].anchor_witness = None;
+        }
+        range.blocks[1].execution.extra_data = range.blocks[0].execution.extra_data.clone();
+        range.blocks[1].execution.parent_beacon_block_root =
+            range.blocks[0].execution.parent_beacon_block_root;
+        range.blocks[1].anchor_witness = None;
+        rebuild_execution_items(&mut range);
+        let (source, hashes) = prove_blobs(pack(&v6_payload(
+            &range.decoded_payload(),
+            Compression::default(),
+        )));
+        verify_l1_range(&range, &source, &hashes, &range.l1_headers, 100).unwrap();
+        let missing_anchor = &range.l1_headers[1..];
+        assert!(verify_l1_range(&range, &source, &hashes, missing_anchor, 100).is_err());
     }
 }

@@ -2391,7 +2391,7 @@ checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 [[package]]
 name = "etna-core"
 version = "2.3.0"
-source = "git+https://github.com/taikoxyz/taiko-mono?rev=f31e7ec55345ac7faf99756504535b0cc9929ec0#f31e7ec55345ac7faf99756504535b0cc9929ec0"
+source = "git+https://github.com/taikoxyz/taiko-mono?rev=4827fea0e844236d14cceafd6bd84a820bff2dd0#4827fea0e844236d14cceafd6bd84a820bff2dd0"
 dependencies = [
  "alloy-primitives",
  "alloy-rlp",
@@ -4053,6 +4053,7 @@ dependencies = [
  "alloy-rlp",
  "alloy-sol-types",
  "anyhow",
+ "etna-core",
  "flate2",
  "protocol",
  "raiko2-primitives",

@@ -4,6 +4,7 @@ use alloy_consensus::Header;
 use alloy_eips::eip4844::{Blob, BYTES_PER_BLOB};
 use alloy_primitives::B256;
 use anyhow::{ensure, Context, Result};
+use etna_core::l1_header::L1HeaderView;
 use flate2::{Decompress, FlushDecompress, Status};
 use raiko2_primitives::blob::util::{
     commitment_to_version_hash, verify_blob_proof_of_equivalence, KzgCommitmentBytes,
@@ -196,22 +197,114 @@ pub fn verify_authenticated_blob_execution_payload(
     verify_blob_execution_payload(&source.tx_data_from_blob, projected)
 }
 
+/// Borrowed native L1 ancestry input; it is not a serialized witness or transport.
+#[derive(Clone, Copy)]
+pub struct L1AnchorProof<'a> {
+    /// Ascending raw execution headers ending at the statement's L1 reference.
+    pub raw_headers: &'a [Vec<u8>],
+    /// Authenticated deployment profile's maximum supplied header count.
+    pub max_headers: usize,
+}
+
+// Open only the original two-field anchor box. Inbox account/storage proofs
+// remain opaque here and must be verified by the later state-proof component.
+fn anchor_witness_header(witness: &[u8]) -> Result<&[u8]> {
+    let mut outer = witness;
+    let mut fields = alloy_rlp::Header::decode_bytes(&mut outer, true)?;
+    ensure!(outer.is_empty(), "trailing bytes after anchor witness");
+    let raw = alloy_rlp::Header::decode_bytes(&mut fields, false)?;
+    let _inbox_witness = alloy_rlp::Header::decode_bytes(&mut fields, true)?;
+    ensure!(fields.is_empty(), "extra anchor witness fields");
+    Ok(raw)
+}
+
+fn verify_l1_anchor_roots(
+    blocks: &[RangeBlock<'_, TransactionSigned>],
+    projected: &[ExecutionProjection<'_>],
+    statement: &LandStatement<'_>,
+    proof: L1AnchorProof<'_>,
+) -> Result<()> {
+    ensure!(
+        !proof.raw_headers.is_empty(),
+        "Etna L1 ancestry must not be empty"
+    );
+    ensure!(
+        proof.raw_headers.len() <= proof.max_headers,
+        "Etna L1 header count exceeds the configured limit"
+    );
+    let reference_number = u64::try_from(statement.input.l1_reference_block_number)
+        .map_err(|_| anyhow::anyhow!("Etna L1 reference number exceeds u64"))?;
+    let mut anchor_index = 0;
+    let headers = proof.raw_headers.iter().enumerate().map(|(index, raw)| {
+        let header = L1HeaderView::from_raw(raw)
+            .with_context(|| format!("invalid Etna L1 header at index {index}"))?;
+        while let Some(projection) = projected.get(anchor_index) {
+            if projection.anchor_number() != header.number() {
+                break;
+            }
+            let execution = blocks[anchor_index].execution_header;
+            ensure!(
+                execution.parent_beacon_block_root == Some(header.state_root()),
+                "Etna L1 anchor state root mismatch at height {}",
+                execution.number
+            );
+            if let Some(witness) = projection.anchor_witness() {
+                let carried =
+                    anchor_witness_header(witness).context("invalid Etna anchor witness")?;
+                ensure!(
+                    carried == header.raw(),
+                    "Etna anchor witness header differs from authenticated L1 chain at height {}",
+                    execution.number
+                );
+            }
+            anchor_index += 1;
+        }
+        Ok(crate::l1::L1HeaderLink {
+            number: header.number(),
+            hash: header.hash(),
+            parent_hash: header.parent_hash(),
+        })
+    });
+    crate::l1::verify_l1_header_chain(
+        headers,
+        reference_number,
+        statement.l1_reference_block_hash,
+        "Etna L1 ancestry",
+    )?;
+    ensure!(
+        anchor_index == projected.len(),
+        "Etna L1 ancestry does not contain every projected anchor"
+    );
+    Ok(())
+}
+
 /// Binds the ordered blob payload, projected range and phase-one landing statement.
 ///
 /// The statement supplies the same ordered blob hashes for authentication
 /// and digest construction. The caller authenticates the deployment, proof
-/// origin and L1 context, verifies anchor state, timing, rules, committee
-/// authority and certificates, and checks strict execution of the matched
+/// origin and the statement's exact L1 reference number and hash, verifies
+/// anchor Inbox state proofs, timing, rules, committee authority and
+/// certificates, and checks strict execution of the matched
 /// blocks before applying backend proof framing. It must restrict the proof
 /// to an authenticated phase-one deployment with FI disabled and no pending
 /// queue entries. This function rejects FI witnesses and cursor consumption;
 /// it does not authenticate that deployment profile or the queue state.
 ///
+/// The required native L1 proof authenticates every covered anchor root through
+/// consecutive raw execution headers ending at that same statement reference.
+/// Carried anchor boxes must open the exact authenticated raw header. Inherited
+/// anchors use the chain member directly, including the incoming parent boundary;
+/// the excluded generation-origin parent remains outside this relation. The
+/// caller supplies the authenticated profile's header-count budget (131,072 for
+/// BATCH-6.3-6). This does not authenticate the reference itself, Inbox proofs,
+/// anchor age, timestamps or rules. The outer landing relation must bind the
+/// reference to L1 authority before accepting the returned digest.
+///
 /// # Errors
 ///
 /// Returns an error if FI witnesses or cursor consumption are present, or if
 /// range or statement projection, blob authentication, payload derivation or
-/// execution-list equality fails.
+/// execution-list equality, raw L1 ancestry or anchor-root binding fails.
 pub fn verify_blob_range_statement_projection<'a>(
     source: &InputDataSource,
     blocks: &[RangeBlock<'a, TransactionSigned>],
@@ -219,6 +312,7 @@ pub fn verify_blob_range_statement_projection<'a>(
     statement: &LandStatement<'_>,
     post_block_cursors: &[u64],
     parent_execution_header: &Header,
+    l1_anchor_proof: L1AnchorProof<'_>,
 ) -> Result<(Vec<ExecutionProjection<'a>>, B256)> {
     validate_blob_count(statement.blob_hashes.len())?;
     let (projected, digest) = verify_range_statement_projection(
@@ -241,6 +335,7 @@ pub fn verify_blob_range_statement_projection<'a>(
             block.execution_header.number
         );
     }
+    verify_l1_anchor_roots(blocks, &projected, statement, l1_anchor_proof)?;
     verify_authenticated_blob_execution_payload(source, statement.blob_hashes, &projected)?;
     Ok((projected, digest))
 }

@@ -17,6 +17,98 @@ RISC0 3.0.5 and SP1 6.8.1 at the recorded feasibility checkpoint.
 **Spec:** [Shared proving design](../specs/2026-11-17-etna-shared-proving-design.md),
 including its current planning-baseline amendment.
 
+## L1 root authentication reuse (2026-11-24)
+
+The user authorized completing Etna root authentication using Unzen's existing
+trusted-reference/header-ancestry pattern. This is not a new Anchor transaction
+or contract interface. Keep the existing EVM system-call implementation; bind
+its supplied root to L1 before returning the native statement result.
+
+- [x] **P03-A08a:** reuse #22426's exact portable raw-header codec extraction on
+  the existing F31 baseline, preserving all other core and QC behavior. Review
+  and test the narrow source delta independently before selecting an immutable
+  development pin. Do not repin to the unrelated committee/parameter changes
+  in the full candidate. Keep the upstream full-client merge gate separate.
+- [x] **P03-A08b:** factor only Unzen's consecutive header hash/number walk at
+  the existing guest-common seam; retain its event origin, timestamp, source,
+  stalled-anchor and parent-checkpoint policies. Etna uses the same walk with
+  hashes of original header bytes and the statement's reference number/hash.
+- [x] **P03-A08c:** at the existing native Etna composer, bound
+  the raw chain before decoding, open carried AnchorWitness header bytes using
+  existing RLP, and match each covered block's anchor number and PBBR to that
+  authenticated chain member. The same chain supplies the incoming inherited
+  anchor opening; no extra parent witness or host root/success flag. Preserve
+  generation-origin parent exceptions, FI-off restrictions and real KZG/DA.
+- [x] Verify valid future-header extensions, altered references/ancestry/root/
+  witness bytes, inheritance and bounds, including independent regression
+  controls and source review. No guest/SDK build or new target/profile.
+
+This scoped source adoption replaces the earlier all-or-nothing use of #22426
+as a global root-verification blocker. It does not merge that PR or complete
+full client verification. The native borrowed proof view does not freeze a
+serialized SGX input or final ABI. Reference authority still comes from L1's
+reconstructed statement; Inbox MPT facts, exact time/age/rules, committee policy,
+execution and final SGX acceptance remain separate obligations.
+
+### Root-authentication acceptance checkpoint
+
+The required borrowed `L1AnchorProof` is checked at the existing native
+`verify_blob_range_statement_projection` caller. The same statement supplies
+both expected reference fields; checked u64 conversion rejects upper bits.
+Every raw header participates in a bounded consecutive hash/number walk. Each
+covered block's PBBR matches its anchor member's state root; each carried box
+opens exactly that member's original raw bytes. Incoming inheritance uses the
+same chain opening, without a second host root or parent witness argument.
+
+The private walk is shared with Unzen after its existing policy checks. Its
+stalled/source/parent-checkpoint/time behavior is retained. One multiply-invalid
+input may report a checkpoint error before a simultaneous link error; both
+reject. Number wrap now rejects through checked addition. Header hashing is
+not duplicated by the shared walk.
+
+Current source is [4827fea0](https://github.com/taikoxyz/taiko-mono/commit/4827fea0e844236d14cceafd6bd84a820bff2dd0),
+a direct F31 child replaying exactly #22426's five-file extraction. All 30 other
+core files, including F31's committee/parameters/ValState and GRID_INTERVAL,
+remain byte-identical. ABCI uses the same parser. This is a reviewed development
+source carrier; upstream full-client merge and durable R06 provenance remain
+open. It does not adopt the newer committee or execution implementation.
+
+Acceptance evidence:
+
+- Semantic RED compiled with 45 maintained cases passing and seven intended
+  rejection cases failing at the ignored native seam; all positive fixture
+  setup paths worked. Two mutable-slice setup errors were fixed before that
+  RED. The incoming-parent fixture's optional fields were corrected for the
+  existing canonical round-trip check before final GREEN.
+- Against the published Git revision, the exact-source native harness passed
+  **64 adapter + 132 protocol tests**. The adapter includes 52 maintained and
+  12 independent tests, restoring all seven earlier independent cases with
+  actual raw openings. The independent shared-walk oracle compares 14 real
+  Alloy Header/checkpoint cases using the original and refactored Unzen
+  post-policy bodies. Future opaque fields, exact-Q/fork/tail substitutions,
+  malformed boxes, resource bounds and both inheritance paths are covered.
+- Strict scoped all-target Clippy and independent source/behavior review passed.
+  Two item-scoped lint expectations keep the helper crate-private: the compiler
+  rejects plain pub via unreachable_pub while Clippy flags restricted visibility
+  within the private module. No verification check or broader lint is disabled.
+- The source carrier passed 51 core unit tests, 27 original-parser adapter/oracle
+  tests and strict all-target Clippy. Root and both standalone default/bench
+  locked metadata resolve. Package counts remain 1,208 / 561 / 602; only the
+  etna-core source identity changes, plus the normal guest-common core edge.
+  Existing SDK/crypto pins are unchanged. Actual workspace formatting, locked
+  offline metadata and diff whitespace checks pass.
+- The diagnostic harness compiles identical product/crypto/codec sources with
+  small transport/error support, not the complete production guest stack.
+  Full guest-common library checking stopped before Cargo at the 6 GiB disk
+  reserve, so it is not a passing compile claim. Source collection and small
+  native checks reused the shared target with resource caps. No new target,
+  SDK/SGX/ZK build, ELF edit, cleanup, registration, deployment or chain write.
+
+The caller still supplies L1 authority for the statement reference, Inbox
+account/storage proofs, exact anchor time/age/rules, authenticated profile,
+consensus and actual execution. This closes native reference/anchor-root
+binding, not the complete SGX verification/landing relation.
+
 ## Internal-testnet acceptance: SGX first, ZK later (2026-11-23)
 
 The user explicitly chose a single-SGX first internal-testnet milestone. Do not
@@ -126,7 +218,7 @@ helpers for the actual deferred integration:
 | Remaining group | Actual prerequisite |
 | --- | --- |
 | Strict full-body execution/range replay | Reviewed compatible canonical Alethia source, host compiler compatibility, retained legacy Unzen API and trusted Etna activation |
-| Anchor/context/time/rules/stop authentication | Reviewed raw-header source adoption and authoritative L1/profile inputs; F31's node-only stop grid predates the current timestamp stop rule |
+| Anchor/context/time/rules/stop authentication | Native root linkage is complete under A08; authoritative L1/profile inputs, Inbox facts and exact time/rules remain. F31's node-only stop grid predates the current timestamp stop rule |
 | QC, FI phase two, distant-anchor bridge and final committee ABI | Existing design holds; phase-one disabled/empty-queue profile authentication remains required |
 | Provider/pipeline/guest output, aggregation and genuine proofs | The complete verified relation and concrete authoritative input/output first; then native/SGX internal-testnet acceptance; ZK follows later |
 
@@ -183,7 +275,9 @@ no candidate Raiko2 build or compatibility fix is claimed. The core manifest
 itself is unchanged; node-workspace Alethia pin changes are not automatically
 Etna execution adoption for Raiko2.
 
-Raiko2 remains at F31. B01-2/B01-3 depend on reviewed source-compatible adoption
+At that checkpoint Raiko2 remained at F31. A08 now adopts the narrow compatible
+codec carrier and completes native B01-2 root linkage; B01-3 timing still depends
+on authenticated context. The earlier batch depended on source-compatible adoption
 and must not substitute a duplicate parser, unchecked host timestamp/root or an
 unreviewed pin. Keep QC-dependent behavior outside this adoption while its design
 is paused. Resume after the source gate is met or the user explicitly changes
@@ -550,7 +644,7 @@ as proof of an L1-authorized committee or complete Etna proving.
 
 ## Current state and source authority
 
-Updated 2026-11-20. This plan is the authoritative progress tracker for
+Updated 2026-11-24. This plan is the authoritative progress tracker for
 [Raiko2 #305](https://github.com/taikoxyz/raiko2/pull/305).
 The user resumed implementation on 2026-11-19. Work now includes source
 alignment, the bounded statement/cut codec, proof-specific execution projection
@@ -561,7 +655,7 @@ alter this plan. Keep shared build caches and resource limits in place.
 | Source | Exact revision | Meaning |
 | --- | --- | --- |
 | Existing Raiko2 checkpoint | `845ecbcbe9c5cb81e1c09d0ca37464e58c2dbc18` | Implemented and tested consensus-input slice under the earlier design |
-| Shared dependency | `f31e7ec55345ac7faf99756504535b0cc9929ec0` | Squash-merged #22398 into feat/taiko-client-rs-abci; reviewed development pin, not main |
+| Shared dependency | `4827fea0e844236d14cceafd6bd84a820bff2dd0` | Reviewed F31 child with only the shared raw-header extraction; no new QC behavior; not main |
 | Patched SDK diagnostic | `a29b53c462b69035ef2acfb5785d78ba20067605` | Historical CPU guest feasibility with the then-current patch tables; diagnostics are no longer active workspace members |
 | Merged design target | `93b59fe629dc8987ecb03c7d59d1f66004de068f` | taiko-mono #22412; reviewed head merged as `2e6763e2`, implementation adoption still separate |
 | Shared body API candidate | `d7c6c3e30599463177152346d21dee6610f9f7f0` | [taiko-mono #22415](https://github.com/taikoxyz/taiko-mono/pull/22415), optional full-original-body helper; ready for external review; not the current Raiko2 dependency |
@@ -635,8 +729,8 @@ statement composition remain separate gates.
 
 The first external review at 0c218cbd/aeda3262 is tracked alongside implementation.
 The source inspection confirmed #22398 merged into feat/taiko-client-rs-abci,
-not taiko-mono main. The immutable F31 development pin is intentional for this
-draft. Before merging into Raiko2 main, use an appropriate reviewed upstream
+not taiko-mono main. The immutable F31-based development pin (now the narrow
+4827fea0 codec carrier) is intentional for this draft. Before merging into Raiko2 main, use an appropriate reviewed upstream
 main/tag revision or explicitly resolve the source-lifetime/build-reproducibility
 gate with reviewers; do not call feature-branch integration mainline adoption.
 The obsolete e6 diagnostic pin is removed with its executable diagnostic targets.
@@ -675,7 +769,7 @@ from checkbox counts.
 | P00 | Portable shared core and patched SDK feasibility | DONE (earlier baseline) | — | Merged #22398; diagnostic README and checkpoint `a29b53c4` |
 | P01 | Freeze revised spec, implementation pins and ABI vectors | PARTIAL | Compatible upstream implementations | Design approval, source matrix and codec vectors recorded; native ABI/backend framing agreement pending |
 | P02 | Canonical supplied-block input and EL/Comet binding | PARTIAL: complete range/parent projection | P01 for revised behavior | Bounded original-byte projection and Comet/EL chains bind the expected endpoints; strict nested witnesses and authenticated execution composition remain open; #22415 is optional |
-| P03 | Authenticated origin, L1 context and committee schedule | PARTIAL: field binding | P01, P02 | Every current/next validator hash and neighboring schedule edge checked; authenticated origin/L1/storage/committee derivation and far-path alignment remain open |
+| P03 | Authenticated origin, L1 context and committee schedule | PARTIAL: native L1 ancestry/anchor-root binding | P01, P02 | Reference/anchor binding and structural schedule checks complete as components; origin/profile/Inbox authority, time/rules, committee derivation and distant path remain open |
 | P04 | Strict Etna execution; FI in phase two | TODO | P01, P02 | Phase one: existing strict execution on the matched full body; phase two: authenticated FI include/skip and singleton-equivalence cases |
 | P05 | Range consensus coverage, DA, cuts and statement | PARTIAL: native authenticated DA/range/statement composition | P02–P04 for full range | Matched Comet/EL identities and supplied cursor shape bind every interior cut and statement endpoint; actual FI/context authority, execution and final guest composition remain pending |
 | P06 | Provider, pipeline and backend wiring | TODO | P02–P05 | Existing task lifecycle produces and consumes the complete Etna input |
@@ -942,7 +1036,7 @@ mark their implementation or upstream specification alignment complete.
 
 - [ ] **P03-A01 — Range/root inventory:** derive N and L from the actual covered blocks, cross-check requested latest anchor L, include every required origin/committee/rules root and bind selected Q's number/hash to the same job and landing statement.
 - [ ] **P03-A02 — Near reference/headroom:** prefer Q=L when it covers the inventory and remains queryable through proving, queueing, retries and inclusion. Cover BLOCKHASH ages 1/256, EIP-2935 ages 257/8191 and expiry at 8192 execution blocks; prefer finalized Q where the query window allows.
-- [ ] **P03-A03 — Header/link reuse:** wire the existing generic L1 linkage at the real Etna caller with only the raw future-field adapter, count/byte bounds and expected-root binding it needs. Do not restore the unused independent L1 verifier or a new trie/framework.
+- [x] **P03-A03 — Header/link reuse (native A08 composition):** wire the existing generic L1 linkage at the real Etna caller with only the raw future-field adapter, count/byte bounds and expected-root binding it needs. Do not restore the unused independent L1 verifier or a new trie/framework.
 - [ ] **P03-A04 — Distant bridge:** retain N..L, then use a short tail or one authenticated Ethereum beacon `block_roots` / `historical_summaries` bridge from L to newer Q. Bind Q's fork-specific beacon-root field from the same raw header, fork/slot/index/list length and original hash of L. Do not confuse 8191 execution blocks with 8192 beacon slots or L1 beacon roots with L2 anchor state roots. Test missed slots, period boundaries, expired reference and missing archive data.
 - [ ] **P03-A05 — Anchor/root semantics:** reuse existing MPT reads at the authenticated L1 root, check Etna witness presence/inheritance, generation/age/progression, expected addresses/slots and EL anchor-number/parentBeaconBlockRoot equality. Every new or inherited anchor and recovery snapshot keeps its required authentication.
 - [x] **P03-A05a — Structural range transitions:** enforce the generation-first and covered-interior witness/number/inherited-root relation at the existing range caller; authenticate actual L1 root/time, origin floor and the incoming mid-range edge separately.
@@ -960,7 +1054,8 @@ header parser into `etna_core::l1_header::L1HeaderView`. Its source base is the
 client branch `fbcec295`, not mono main. ABCI delegates to the same parser while
 retaining its owned header/wire API. The only manifest/lock change is an existing
 local ABCI-to-core edge; no third-party source or version changes. Raiko2 remains
-pinned to F31: this is a prerequisite, not dependency adoption or proving support.
+pinned to F31 at that checkpoint. A08 now adopts the exact extraction on its
+own F31 child for the real native caller, without the unrelated source delta.
 
 - [x] **P03-A05c1 — Portable shared codec candidate:** exact borrowed raw-header
   identity and four positional fields, original 4096-byte limit, error ordering
@@ -970,7 +1065,9 @@ pinned to F31: this is a prerequisite, not dependency adoption or proving suppor
   client CI before merging the draft; select a compatible reviewed pin before
   downstream use. Recheck the F31-to-selected-source delta rather than upgrading
   unrelated QC/committee semantics during their hold. R06 remains open.
-- [ ] **P03-A05c3 — Anchor/reference/time composition:** open the exact carried
+- [ ] **P03-A05c3 — Anchor/reference/time composition:** native raw-header/root
+  linkage is complete under A08; remaining time/age and Inbox facts are pending.
+  The combined requirement is to open the exact carried
   header bytes against the selected authenticated near-reference ancestry,
   compare anchor number/root to the same matched EL header and roll inherited
   facts through the range. Only when p+1 inherits does it need the excluded

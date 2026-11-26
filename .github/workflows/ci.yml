@@ -308,6 +308,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler
 
+      # risc0-circuit-recursion's build script downloads from a retired S3 bucket; see the script.
+      - name: fetch RISC0 recursion programs
+        run: scripts/ci/fetch-risc0-recursion-zkr.sh "$RUNNER_TEMP/risc0/recursion_zkr.zip"
+
       - uses: rui314/setup-mold@da13e0b42e392e3a45d1215033a2270b849d7d36 # v1
 
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
@@ -351,6 +355,10 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.11'
+
+      # risc0-circuit-recursion's build script downloads from a retired S3 bucket; see the script.
+      - name: fetch RISC0 recursion programs
+        run: scripts/ci/fetch-risc0-recursion-zkr.sh "$RUNNER_TEMP/risc0/recursion_zkr.zip"
 
       - name: install protobuf compiler
         run: |

@@ -15,6 +15,8 @@
 #
 # Usage: scripts/ci/fetch-risc0-recursion-zkr.sh <destination-file>
 # In GitHub Actions the script also exports RECURSION_SRC_PATH through $GITHUB_ENV.
+# CARGO_LOCK selects the lockfile to check (default: this checkout's Cargo.lock), for workflows that
+# run this copy of the script against another checkout.
 set -euo pipefail
 
 readonly CRATE_VERSION="4.0.4"
@@ -32,17 +34,18 @@ if [ "$#" -ne 1 ]; then
 fi
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cargo_lock="${CARGO_LOCK:-$repo_root/Cargo.lock}"
 dest="$1"
 mkdir -p "$(dirname "$dest")"
 dest="$(cd "$(dirname "$dest")" && pwd)/$(basename "$dest")"
 
-locked="$(awk '$0 == "name = \"risc0-circuit-recursion\"" { getline; gsub(/version = |"/, ""); print; exit }' "$repo_root/Cargo.lock")"
+locked="$(awk '$0 == "name = \"risc0-circuit-recursion\"" { getline; gsub(/version = |"/, ""); print; exit }' "$cargo_lock")"
 if [ -z "$locked" ]; then
-  echo "risc0-circuit-recursion is not in Cargo.lock; nothing to fetch"
+  echo "risc0-circuit-recursion is not in $cargo_lock; nothing to fetch"
   exit 0
 fi
 if [ "$locked" != "$CRATE_VERSION" ]; then
-  echo "Cargo.lock has risc0-circuit-recursion $locked, but this script pins the $CRATE_VERSION" \
+  echo "$cargo_lock has risc0-circuit-recursion $locked, but this script pins the $CRATE_VERSION" \
     "recursion_zkr.zip. Update CRATE_VERSION/ZKR_SHA256/RISC0_COMMIT here and in the Dockerfiles." >&2
   exit 1
 fi

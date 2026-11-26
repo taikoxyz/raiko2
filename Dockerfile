@@ -55,6 +55,14 @@ RUN cargo chef prepare --recipe-path recipe.json
 
 FROM chef AS builder
 
+# risc0-circuit-recursion 4.0.4's build script downloads recursion_zkr.zip from RISC Zero's retired
+# S3 bucket (HTTP 403). Fetch the same file from their current artifact host; the build script
+# re-checks the sha256. Keep in sync with scripts/ci/fetch-risc0-recursion-zkr.sh.
+ADD --checksum=sha256:744b999f0a35b3c86753311c7efb2a0054be21727095cf105af6ee7d3f4d8849 \
+    https://artifacts.risczero.net/zkr/744b999f0a35b3c86753311c7efb2a0054be21727095cf105af6ee7d3f4d8849.zip \
+    /opt/risc0/recursion_zkr.zip
+ENV RECURSION_SRC_PATH=/opt/risc0/recursion_zkr.zip
+
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY --from=planner /app/recipe.json ./recipe.json
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \

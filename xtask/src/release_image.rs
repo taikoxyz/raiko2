@@ -520,6 +520,36 @@ mod tests {
     }
 
     #[test]
+    fn dockerfiles_pin_the_ci_recursion_zkr() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("xtask lives in the workspace root");
+        let script = fs::read_to_string(root.join("scripts/ci/fetch-risc0-recursion-zkr.sh"))
+            .expect("fetch script is readable");
+        let sha256 = script
+            .lines()
+            .find_map(|line| line.strip_prefix("readonly ZKR_SHA256=\""))
+            .and_then(|rest| rest.strip_suffix('"'))
+            .expect("fetch script pins ZKR_SHA256");
+
+        // Both images feed risc0-circuit-recursion the same recursion_zkr.zip as CI does.
+        for name in ["Dockerfile", "Dockerfile.cuda"] {
+            let dockerfile = fs::read_to_string(root.join(name))
+                .unwrap_or_else(|err| panic!("{name} is readable: {err}"));
+            for expected in [
+                format!("ADD --checksum=sha256:{sha256} "),
+                format!("https://artifacts.risczero.net/zkr/{sha256}.zip"),
+                "ENV RECURSION_SRC_PATH=/opt/risc0/recursion_zkr.zip".to_string(),
+            ] {
+                assert!(
+                    dockerfile.contains(&expected),
+                    "{name} must contain `{expected}` to match the fetch script"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn host_image_skips_guest_refresh_by_default() {
         let refresh = resolve_guest_refresh_backend(ImageBackend::Host, false, false, None)
             .expect("host image default should be valid");

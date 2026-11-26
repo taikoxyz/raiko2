@@ -73,6 +73,10 @@ jobs:
           git rev-parse HEAD
           git branch --show-current
 
+      # risc0-circuit-recursion's build script downloads from a retired S3 bucket; see the script.
+      - name: fetch RISC0 recursion programs
+        run: scripts/ci/fetch-risc0-recursion-zkr.sh "$RUNNER_TEMP/risc0/recursion_zkr.zip"
+
       - name: check prover smoke
         run: cargo check -p raiko2-prover -p guest-launcher --tests
 

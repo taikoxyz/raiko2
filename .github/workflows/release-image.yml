@@ -122,6 +122,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler
 
+      # The host-side xtask build links risc0-zkvm, whose risc0-circuit-recursion build script
+      # downloads from a retired S3 bucket; see the script.
+      - name: Fetch RISC0 recursion programs
+        run: scripts/ci/fetch-risc0-recursion-zkr.sh "$RUNNER_TEMP/risc0/recursion_zkr.zip"
+
       # Fail fast instead of letting release-image rebuild stale guests for hours and then stop on
       # the dirty tree. release-image re-checks provenance itself before building.
       - name: Verify guest ELF provenance

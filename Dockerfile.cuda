@@ -60,6 +60,14 @@ ARG SP1_VERSION=6.8.1
 
 ENV RUSTFLAGS="${RUSTFLAGS}"
 
+# risc0-circuit-recursion 4.0.4's build script downloads recursion_zkr.zip from RISC Zero's retired
+# S3 bucket (HTTP 403). Fetch the same file from their current artifact host; the build script
+# re-checks the sha256. Keep in sync with scripts/ci/fetch-risc0-recursion-zkr.sh.
+ADD --checksum=sha256:744b999f0a35b3c86753311c7efb2a0054be21727095cf105af6ee7d3f4d8849 \
+    https://artifacts.risczero.net/zkr/744b999f0a35b3c86753311c7efb2a0054be21727095cf105af6ee7d3f4d8849.zip \
+    /opt/risc0/recursion_zkr.zip
+ENV RECURSION_SRC_PATH=/opt/risc0/recursion_zkr.zip
+
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates ./crates
 COPY bin ./bin
@@ -98,7 +106,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 # RISC0 Groth16 (`snark = true`) on CUDA needs the `risc0-groth16` rzup component at runtime.
 FROM toolchain AS risc0-groth16
 
-ARG RZUP_VERSION=0.5.1
+# rzup 0.6.0 downloads from artifacts.risczero.net; 0.5.x is hardwired to the retired S3 bucket.
+ARG RZUP_VERSION=0.6.0
 ARG RISC0_GROTH16_VERSION=0.1.0
 
 ENV RISC0_HOME=/opt/risc0

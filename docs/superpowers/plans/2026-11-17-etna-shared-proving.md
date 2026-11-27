@@ -168,10 +168,13 @@ behavioral results, exact source hashes and remaining native-versus-runtime limi
   regressions and compare Unzen policy/source seams. Read current CI failures
   separately from source outcomes; do not call RISC0 artifact 403 a passing
   full build or hide it with a bypass.
-- [ ] **Step 4: Resolve confirmed findings and recheck.** Use independent source
+- [x] **Step 4: Resolve confirmed findings and recheck.** Use independent source
   review and behavioral verification, then publish/read back the exact draft
   head and update plan/Notion. Keep SGX/ZK/ELF/provenance/upstream activation
   limitations explicit. No merge or deployment.
+  Published source checkpoint `71152347` and its exact draft head/body were
+  read back; the Notion anchor-linkage page was updated without warnings.
+  New-head CI remains separate from the recorded native validation.
 
 ## Target amendment: explicit lander-selected Q (2026-11-27)
 

@@ -1,5 +1,59 @@
 # Shared upstream Etna proving implementation
 
+## Agreed direction: last-anchor boundary, optional historical reference (2026-11-27)
+
+This records the user's chosen direction, not an implemented SSZ verifier or a
+frozen contract ABI. It supersedes the target policy in the older recovered
+near/far section; the 2026-11-24 consecutive-header component remains the actual
+implementation checkpoint until the specification and source are changed.
+
+- Let `L` be the last L1 anchor used by the covered L2 range, `a_i` each covered
+  block's L1 anchor, and `P` the eventual L1 landing height. `L` is the fixed L1
+  synchronization/state boundary of the range, chosen before its execution
+  proof. A newer reference must never make the range claim to have synchronized
+  newer L1 state.
+- The target core statement binds `L` and `H(L)`, with its existing domain,
+  range, execution and DA commitments. Authenticate the original raw L header
+  under that hash. Its state root authenticates anchors equal to L directly.
+  Authenticate earlier distinct anchors through a uniform SSZ relation rooted
+  in L's authenticated parent beacon block commitment, sharing witness nodes
+  where applicable. This is not a gap-threshold or dense/sparse chain policy.
+  Bind every block's anchor number/root and original carried witness; retain
+  monotonicity, inheritance, generation boundaries and the existing exceptions.
+- The exact SSZ paths remain to be specified and tested: the parent beacon
+  block's own execution payload, its state root, recent block roots, completed
+  historical summaries/legacy roots, fork-specific generalized indices, slots
+  and list lengths are distinct objects. Authenticate every other required L1
+  fact as well; coverage cannot be inferred from a host-supplied common root.
+- In ordinary landing, authenticate H(L) directly from L1 history. There is no
+  additional Q and no L-to-Q tail in the core execution proof. The available
+  direct route has BLOCKHASH ages 1..256 or an enabled EIP-2935 history window
+  through age 8191, subject to activation/availability.
+- Only when that direct lookup is no longer available, allow a separate optional
+  historical-authentication attachment using a newer reference `Q > L`. L1
+  must authenticate Q's number/hash; a verified raw Q header and fork-aware
+  beacon/history path then authenticate the same original L number/hash.
+  Q is an authentication endpoint, not another synchronized state boundary.
+  Long downtime followed by resumption is the expected use case, but the
+  trigger is lookup availability, including an unusually delayed ordinary job.
+- Keep optional Q outside the immutable core execution statement so that the
+  original execution proof can be reused. Choose it before creating the attachment; refreshing
+  it requires a new attachment, not a changed execution public input or another
+  EVM replay. The contract or a separately verified wrapper must check that
+  attachment and bind it to exactly the core statement's L number/hash and
+  domain. A witness root or success flag supplied by the host is insufficient.
+  The attachment/wrapper ABI, verification cost and accepted reference window
+  remain open; merely adding an optional field would not close this relation.
+- This fallback addresses historical authentication, not governance recovery.
+  A recovery that changes generation or otherwise invalidates the old statement
+  retains its normal rejection rules. It cannot revive a discarded suffix or
+  bypass FI, committee, origin, rules, execution or proof-policy requirements.
+
+The current normative raw-parentHash requirement and linear-budget/recovery
+consequence (PROOF-6.2-33/34, BATCH-6.3-5..7) require explicit reconciliation.
+No implementation, performance, proof reuse or onchain acceptance is claimed
+by recording this direction.
+
 ## Native L1 root authentication (2026-11-24)
 
 The native Etna range/statement composer now requires bounded raw L1 ancestry

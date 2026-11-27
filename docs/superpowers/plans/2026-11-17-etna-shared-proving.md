@@ -17,6 +17,43 @@ RISC0 3.0.5 and SP1 6.8.1 at the recorded feasibility checkpoint.
 **Spec:** [Shared proving design](../specs/2026-11-17-etna-shared-proving-design.md),
 including its current planning-baseline amendment.
 
+## Target amendment: fixed last anchor and optional Q (2026-11-27)
+
+User-selected direction; implementation and final protocol/ABI approval remain
+pending. This supersedes the target reference-selection policy in P03-A02/A04
+and the older recovered near/far prose, without marking the current linear
+header implementation as SSZ-capable.
+
+- [x] **P03-A09a — Record target:** fix the range's synchronization boundary to
+  last anchor L; bind L/H(L) in the core statement. Earlier anchors use uniform
+  SSZ authentication under the authenticated L header's parent beacon block
+  commitment, with direct identity for anchors equal to L and witness-node
+  sharing where applicable. No fixed gap threshold or intervening filler chain.
+- [ ] **P03-A09b — Specify the full relation:** enumerate actual beacon block,
+  execution hash/raw-header/number/root, state/history paths and fork/slot/list
+  boundaries; prove coverage for every anchor and other required L1 fact.
+  Preserve monotonicity, inherited anchors and generation-origin exceptions.
+- [ ] **P03-A09c — Ordinary L1 authentication:** obtain the exact L hash through
+  BLOCKHASH/EIP-2935 where available; test ages 1/256/257/8191/8192 and activation.
+  Do not silently replace L with a newer synchronized state or bind eventual P.
+- [ ] **P03-A09d — Optional historical attachment:** only when the direct lookup
+  has expired, authenticate newer Q on L1 and use its verified beacon/history
+  commitment to authenticate the original L number/hash. Keep Q outside the
+  immutable execution statement to preserve proof reuse; a contract or separately
+  verified wrapper must bind the attachment to that statement and domain. Test
+  absent/invalid attachments, changed Q with unchanged base proof, wrong roots,
+  overwritten references and generation changes. No host authentication bypass.
+- [ ] **P03-A09e — Protocol and ABI review:** reconcile PROOF-6.2-33/34 and
+  BATCH-6.3-5..7, select the attachment/wrapper interface, bound actual witness
+  resources and measure verification costs before implementing or enabling.
+
+Long downtime followed by resumption is the expected historical-path case;
+lookup expiry, not an operator label, is its trigger. This is distinct from
+DAO/governance recovery: discarded/old-generation statements remain invalid.
+Refreshing Q may rebuild the authentication attachment, never the original
+execution public input. Existing QC/FI/distant-path implementation holds and
+SGX-first delivery priorities remain in effect until their gates are resolved.
+
 ## L1 root authentication reuse (2026-11-24)
 
 The user authorized completing Etna root authentication using Unzen's existing

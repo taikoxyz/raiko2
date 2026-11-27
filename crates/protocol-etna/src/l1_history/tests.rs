@@ -566,7 +566,7 @@ fn owned_input_independent_replays_public_mainnet_sparse_history() {
                 "state_root" => changed.beacon.as_mut().unwrap().state_helpers[0].root[0] ^= 1,
                 "state_index" => changed.beacon.as_mut().unwrap().state_helpers[0].index = 0,
                 "period_root" => {
-                    changed.beacon.as_mut().unwrap().periods[0].helpers[0].root[0] ^= 1
+                    changed.beacon.as_mut().unwrap().periods[0].helpers[0].root[0] ^= 1;
                 }
                 "period_index" => changed.beacon.as_mut().unwrap().periods[0].helpers[0].index = 0,
                 "summary_length" => changed.beacon.as_mut().unwrap().summary_length = None,

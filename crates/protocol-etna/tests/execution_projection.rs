@@ -149,7 +149,7 @@ fn recovery_origin_binds_exact_execution_item_with_opaque_app_hash() {
         projection.execution_item_bytes(),
         execution_item(&fixture.execution_header, &[])
     );
-    assert!(projection.transaction_bytes().is_empty());
+    assert_eq!(projection.transaction_bytes(), &[] as &[&[u8]]);
     assert_eq!(
         projection.execution_hash(),
         fixture.execution_header.hash_slow()
@@ -570,7 +570,7 @@ fn etna_extra_data_binds_the_complete_29_byte_layout() {
         extra[13..].copy_from_slice(&bitmap.to_be_bytes());
         fixture.execution_header.extra_data = extra.into();
         fixture.seal_execution(&[]);
-        assert_eq!(fixture.verify(&[]).unwrap().anchor_number(), 0x010203);
+        assert_eq!(fixture.verify(&[]).unwrap().anchor_number(), 0x0001_0203);
     }
     // No bitmap policy is invented here: byte equality binds all 128 bits;
     // external committee/QC rules remain separately authenticated authority.

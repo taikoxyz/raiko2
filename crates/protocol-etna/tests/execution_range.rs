@@ -403,7 +403,7 @@ fn binds_singleton_statement_at_nonzero_generation_origin() {
     assert_eq!(digest, expected_digest(&statement));
     assert_eq!(projections.len(), 1);
     assert_eq!(projections[0].comet_hash(), fixture.context.last_comet_hash);
-    assert!(projections[0].transaction_bytes().is_empty());
+    assert_eq!(projections[0].transaction_bytes(), &[] as &[&[u8]]);
     assert!(core::ptr::eq(
         projections[0].execution_item_bytes(),
         fixture.blocks[0].original_span(&fixture.blocks[0].execution_item()),

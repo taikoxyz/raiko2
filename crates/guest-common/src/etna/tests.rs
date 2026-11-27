@@ -608,7 +608,7 @@ impl RangeFixture {
 fn verifies_a_singleton_with_no_transactions() {
     let fixture = RangeFixture::new(1);
     let projected = fixture.project();
-    assert!(projected[0].transaction_bytes().is_empty());
+    assert_eq!(projected[0].transaction_bytes(), &[] as &[&[u8]]);
     let blobs = pack(&v6_payload(
         &fixture.decoded_payload(),
         Compression::default(),

@@ -17,47 +17,44 @@ RISC0 3.0.5 and SP1 6.8.1 at the recorded feasibility checkpoint.
 **Spec:** [Shared proving design](../specs/2026-11-17-etna-shared-proving-design.md),
 including its current planning-baseline amendment.
 
-## Target amendment: fixed last anchor and optional Q (2026-11-27)
+## Target amendment: explicit lander-selected Q (2026-11-27)
 
-User-selected direction; implementation and final protocol/ABI approval remain
-pending. This supersedes the target reference-selection policy in P03-A02/A04
-and the older recovered near/far prose, without marking the current linear
-header implementation as SSZ-capable.
+The user replaced the earlier optional-Q/outer-attachment direction with one
+explicit Q for every proving job. The lander chooses Q and supplies witnesses;
+Raiko2 verifies the Q-bound relation without reference-selection policy. This
+supersedes the target selection/attachment policy in P03-A02/A04 and the older
+recovered near/far prose. Current native source remains linear, not SSZ-capable.
 
-- [x] **P03-A09a — Record target:** fix the range's synchronization boundary to
-  last anchor L; bind L/H(L) in the core statement. Earlier anchors use uniform
-  SSZ authentication under the authenticated L header's parent beacon block
-  commitment, with direct identity for anchors equal to L and witness-node
-  sharing where applicable. No fixed gap threshold or intervening filler chain.
-- [ ] **P03-A09b — Specify the full relation:** enumerate actual beacon block,
-  execution hash/raw-header/number/root, state/history paths and fork/slot/list
-  boundaries; prove coverage for every anchor and other required L1 fact.
-  Preserve monotonicity, inherited anchors and generation-origin exceptions.
-- [ ] **P03-A09c — Ordinary L1 authentication:** obtain the exact L hash through
-  BLOCKHASH/EIP-2935 where available; test ages 1/256/257/8191/8192 and activation.
-  Do not silently replace L with a newer synchronized state or bind eventual P.
-- [ ] **P03-A09d — Optional historical attachment:** only when the direct lookup
-  has expired, authenticate newer Q on L1 and use its verified beacon/history
-  commitment to authenticate the original L number/hash. Keep Q outside the
-  immutable execution statement to preserve proof reuse; a contract or separately
-  verified wrapper must bind the attachment to that statement and domain. Test
-  absent/invalid attachments, changed Q with unchanged base proof, wrong roots,
-  overwritten references and generation changes. No host authentication bypass.
-- [ ] **P03-A09e — Protocol and ABI review:** reconcile PROOF-6.2-33/34 and
-  BATCH-6.3-5..7, select the attachment/wrapper interface, bound actual witness
-  resources and measure verification costs before implementing or enabling.
+- [x] **P03-A09a — Record target:** keep L as the fixed synchronized last-anchor
+  boundary and Q as a separate authentication reference with L<=Q. Always supply
+  Q explicitly; Q=L is valid when usable. Bind Q number/hash in the existing
+  statement shape. Remove None mode and the outer optional attachment target.
+- [ ] **P03-A09b — Specify uniform authentication:** verify the raw Q header
+  against its statement hash, authenticate earlier distinct anchors with SSZ
+  and shared witness nodes, and use direct header identity for anchors equal
+  to Q. Specify beacon block/state/history paths, execution hash/raw-header/
+  number/root mapping, fork/slot/list boundaries and every other required L1
+  fact. Retain monotonicity, inheritance and generation-origin exceptions.
+- [ ] **P03-A09c — L1 Q authentication:** obtain H(Q) through the actual enabled
+  history interface, testing ages 1/256/257/8191/8192 and activation. Reject an
+  unavailable Q. Check actual inclusion, not broadcast time. Do not substitute
+  newer synchronized state for the blocks' real last anchor L.
+- [ ] **P03-A09d — Lander ownership and rebinding:** the external lander selects
+  Q, prepares witnesses and requests the Q-bound proof; Raiko2 has no automatic
+  choice/switch/refresh/expiry-retry behavior. Test inconsistent Q/raw-header/
+  statement bindings, root substitution, wrong heights and a changed Q paired
+  with the old proof. Changing Q requires a new proof binding, not merely new
+  witness bytes; execution-child reuse is unestablished and not promised.
+- [ ] **P03-A09e — Protocol/interface review:** reconcile PROOF-6.2-33/34 and
+  BATCH-6.3-5..7, retain existing statement fields where appropriate, specify the
+  SSZ witness and resource bounds, and measure costs before implementation.
 
-`None` is the direct Q=L case. Check 1 <= P-L <= 8191 at actual landing
-(or <= 256 for BLOCKHASH only); an explicit Q must meet the same P-Q lookup
-window. Expiry requires a new Q/authentication attachment, not another execution
-proof. Broadcasting inside the window does not guarantee valid inclusion.
-
-Long downtime followed by resumption is the expected historical-path case;
-lookup expiry, not an operator label, is its trigger. This is distinct from
-DAO/governance recovery: discarded/old-generation statements remain invalid.
-Refreshing Q may rebuild the authentication attachment, never the original
-execution public input. Existing QC/FI/distant-path implementation holds and
-SGX-first delivery priorities remain in effect until their gates are resolved.
+Require 1<=P-Q<=8191 at actual landing under enabled/data-available EIP-2935,
+or <=256 for BLOCKHASH alone. An expired Q must be handled by the lander with
+another Q-bound proof; an unqueryable Q never becomes an accepted fallback.
+The state boundary L stays fixed. This does not revive old-generation or
+discarded statements after governance recovery. Existing QC/FI implementation
+holds, full SSZ specification gates and SGX-first priorities remain in effect.
 
 ## L1 root authentication reuse (2026-11-24)
 

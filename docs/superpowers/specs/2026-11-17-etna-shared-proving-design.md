@@ -1,63 +1,60 @@
 # Shared upstream Etna proving implementation
 
-## Agreed direction: last-anchor boundary, optional historical reference (2026-11-27)
+## Agreed direction: one explicit reference Q, owned by the lander (2026-11-27)
 
-This records the user's chosen direction, not an implemented SSZ verifier or a
-frozen contract ABI. It supersedes the target policy in the older recovered
-near/far section; the 2026-11-24 consecutive-header component remains the actual
-implementation checkpoint until the specification and source are changed.
+This replaces the optional-Q/outer-attachment amendment discussed earlier on
+this date. The user chose one explicit reference for every job. This is a design
+direction, not an implemented SSZ verifier or a frozen protocol interface. The
+2026-11-24 native consecutive-header component remains the actual source
+checkpoint until the normative requirements and verifier are changed.
 
-- Let `L` be the last L1 anchor used by the covered L2 range, `a_i` each covered
-  block's L1 anchor, and `P` the eventual L1 landing height. `L` is the fixed L1
-  synchronization/state boundary of the range, chosen before its execution
-  proof. A newer reference must never make the range claim to have synchronized
-  newer L1 state.
-- The target core statement binds `L` and `H(L)`, with its existing domain,
-  range, execution and DA commitments. Authenticate the original raw L header
-  under that hash. Its state root authenticates anchors equal to L directly.
-  Authenticate earlier distinct anchors through a uniform SSZ relation rooted
-  in L's authenticated parent beacon block commitment, sharing witness nodes
-  where applicable. This is not a gap-threshold or dense/sparse chain policy.
-  Bind every block's anchor number/root and original carried witness; retain
-  monotonicity, inheritance, generation boundaries and the existing exceptions.
-- The exact SSZ paths remain to be specified and tested: the parent beacon
-  block's own execution payload, its state root, recent block roots, completed
-  historical summaries/legacy roots, fork-specific generalized indices, slots
-  and list lengths are distinct objects. Authenticate every other required L1
-  fact as well; coverage cannot be inferred from a host-supplied common root.
-- In ordinary landing, authenticate H(L) directly from L1 history. There is no
-  additional Q and no L-to-Q tail in the core execution proof. The available
-  direct route has BLOCKHASH ages 1..256 or an enabled EIP-2935 history window
-  through age 8191, subject to activation/availability. `None` is the direct
-  self-reference case Q=L: require 1 <= P-L <= 8191 at actual execution, or
-  <= 256 for a BLOCKHASH-only route; this is not a bound on L's absolute height.
-- Only when that direct lookup is no longer available, allow a separate optional
-  historical-authentication attachment using a newer reference `Q > L`. L1
-  must authenticate Q's number/hash; a verified raw Q header and fork-aware
-  beacon/history path then authenticate the same original L number/hash.
-  Q is an authentication endpoint, not another synchronized state boundary.
-  Long downtime followed by resumption is the expected use case, but the
-  trigger is lookup availability, including an unusually delayed ordinary job.
-- Keep optional Q outside the immutable core execution statement so that the
-  original execution proof can be reused. Choose it before creating the attachment; refreshing
-  it requires a new attachment, not a changed execution public input or another
-  EVM replay. The same direct-lookup window applies to Q at actual inclusion
-  (1 <= P-Q <= 8191, or <= 256 for BLOCKHASH alone). Broadcasting within the
-  window is insufficient; if Q expires, choose a new Q and rebuild only the
-  attachment. The contract or a separately verified wrapper must check that
-  attachment and bind it to exactly the core statement's L number/hash and
-  domain. A witness root or success flag supplied by the host is insufficient.
-  The attachment/wrapper ABI, verification cost and accepted reference window
-  remain open; merely adding an optional field would not close this relation.
-- This fallback addresses historical authentication, not governance recovery.
-  A recovery that changes generation or otherwise invalidates the old statement
-  retains its normal rejection rules. It cannot revive a discarded suffix or
-  bypass FI, committee, origin, rules, execution or proof-policy requirements.
+- Let `a_i` be each covered L2 block's L1 anchor, `L` the last such anchor, `Q`
+  the lander's explicit L1 authentication reference, and `P` the eventual L1
+  landing height. Keep `a_i <= L <= Q < P`. L remains the range's synchronized
+  L1 state boundary. Q only authenticates history; choosing a later Q cannot
+  make the supplied blocks claim to have synchronized later L1 state.
+- The lander selects Q and prepares the associated witnesses before requesting
+  the Q-bound proof. Q=L is a normal explicit value if usable; an old L may
+  require a newer Q. There is no None mode, optional Q, automatic reference
+  selection, switch, refresh or expiry-retry policy in Raiko2.
+- The proof statement binds Q's number/hash alongside its existing domain,
+  range, DA and execution commitments. This retains the current native
+  LandStatement reference shape rather than introducing an outer historical
+  attachment that permits Q changes without rebinding the statement.
+- Raiko2 verifies the supplied raw Q header against that exact public hash,
+  derives the required fork-aware parent beacon block commitment from those
+  authenticated bytes, and checks each actual anchor against the same Q.
+  The target uses uniform SSZ history authentication with shared witness nodes,
+  not fixed gap thresholds or intervening filler execution-header chains. An
+  anchor equal to Q is authenticated directly by the same raw Q header.
+- Keep number/root/raw-header and execution-payload hash bindings, every block's
+  mapping to its anchor, monotonicity, carried/inherited anchors, generation
+  boundaries and required origin/rules/committee facts. A witness root supplied
+  by the lander is not authoritative without the verified connection to Q.
+  Raiko2 verifies these relations even though it does not choose the reference.
+- Exact paths remain open: the parent beacon block's own execution payload,
+  its state root, recent block roots, completed historical summaries/legacy
+  roots, fork-specific generalized indices, slots and list lengths must be
+  distinguished and checked. A shared multiproof does not by itself prove that
+  these objects authenticate all required execution headers.
+- At landing, L1 independently obtains H(Q) through BLOCKHASH for ages 1..256
+  or an enabled/data-available EIP-2935 path through age 8191. The actual P-Q
+  lookup condition, not broadcast time, determines availability. An unqueryable
+  Q rejects; no older-root bypass or host success flag can replace the lookup.
+  Selecting sufficient headroom and reselecting after expiry are lander duties.
+- Since Q is bound into the statement, changing it requires a newly generated
+  proof bound to the new Q. Replacing witness bytes alone cannot preserve the
+  old proof's validity. Any reuse of existing execution child proofs would need
+  separately verified composition support; this amendment does not claim that
+  reuse or promise that changing Q avoids all execution/proving work.
+- This authentication mechanism does not bypass governance recovery: a new
+  generation, discarded suffix or otherwise invalidated statement retains its
+  normal rejection rules. Existing FI/committee/execution/proof requirements
+  and the SGX-first delivery order remain unchanged.
 
-The current normative raw-parentHash requirement and linear-budget/recovery
-consequence (PROOF-6.2-33/34, BATCH-6.3-5..7) require explicit reconciliation.
-No implementation, performance, proof reuse or onchain acceptance is claimed
-by recording this direction.
+Explicitly reconcile PROOF-6.2-33/34 and BATCH-6.3-5..7 before adopting SSZ in
+place of their raw-parentHash/linear-budget relation. No implementation, measured
+performance, reusable proof artifact or onchain acceptance is claimed here.
 
 ## Native L1 root authentication (2026-11-24)
 

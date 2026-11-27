@@ -8,7 +8,7 @@ pub use consensus::{
 mod execution;
 pub use execution::{verify_blob_range_statement_execution, EtnaBlockExecutionWitness};
 mod input;
-pub use input::verify_range_input_execution;
+pub use input::{verify_range_input_consensus, verify_range_input_execution};
 
 use alloy_consensus::Header;
 use alloy_eips::eip4844::{Blob, BYTES_PER_BLOB};

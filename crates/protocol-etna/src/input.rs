@@ -283,3 +283,69 @@ pub struct RangeInput {
     /// Original raw L1 and SSZ authentication material.
     pub l1_history: L1HistoryInput,
 }
+
+/// Owned proof resources for one distinct L1 anchor; its root is derived by the verifier.
+///
+/// `W` is the caller's existing account/storage witness type. The generic carrier avoids a
+/// second proof representation and does not make a deserialized witness authoritative.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct L1CommitteeInput<W> {
+    /// Number matched against an authenticated L1 header, never an independent root.
+    pub anchor_number: u64,
+    /// Existing account/storage proof resources for Inbox slots 278 and 279.
+    pub witness: W,
+    /// Preimage that must match the proven anchor fallback-key hash.
+    pub fallback_keys: etna_core::fallback::FallbackKeys,
+}
+
+/// Owned parent consensus bootstrap, required only when p exceeds the generation origin.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ParentConsensusInput {
+    /// Existing Comet header representation, hashed against the authenticated parent identity.
+    pub header: CometHeader,
+    /// Native keys and powers that must open the parent's validators_hash.
+    pub active: Vec<(etna_core::key::ConsensusKey, u64)>,
+    /// Native keys and powers that must open the parent's next_validators_hash.
+    pub next: Vec<(etna_core::key::ConsensusKey, u64)>,
+    /// Exact raw p-anchor header used only by the parent-anchor exception.
+    pub anchor_header: Vec<u8>,
+}
+
+/// Owned consensus inputs consumed by the state-authenticated native range verifier.
+///
+/// Original native blocks and certificates remain canonical protobuf bytes. Only the parent
+/// bootstrap supplies sets directly, and its keys/powers are checked against the actual parent
+/// header. Every later set is derived from authenticated state by the shared committee core.
+/// No context, resource limit, signer authorization, or host-verified flag is carried here.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConsensusInput<W> {
+    /// Original canonical native Comet block bytes for every covered height.
+    pub original_blocks: Vec<Vec<u8>>,
+    /// Exactly the required standalone native certificates, in ascending height order.
+    pub required_commits: Vec<Vec<u8>>,
+    /// Preimage of the generation origin's fixed fallback hash.
+    pub origin_fallback_keys: etna_core::fallback::FallbackKeys,
+    /// Existing Inbox account/storage resources under the authenticated L1 reference root.
+    pub reference_state: W,
+    /// Existing resources for each distinct covered or parent anchor, in increasing number order.
+    pub anchors: Vec<L1CommitteeInput<W>>,
+    /// Parent bootstrap required exactly when p is above the generation origin.
+    pub parent: Option<ParentConsensusInput>,
+}
+
+/// Owned range plus its native committee, original-body and certificate proof resources.
+///
+/// Existing block execution witnesses and shared-node pools remain separate caller arguments.
+/// The guest instantiates `W` with the existing execution-witness type; serialization conveys
+/// no authority. Encoded input bytes must be capped before deserializing this transport.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConsensusRangeInput<W> {
+    /// Existing owned DA/range/SSZ request.
+    pub range: RangeInput,
+    /// Original native consensus bytes and existing state proof resources.
+    pub consensus: ConsensusInput<W>,
+}

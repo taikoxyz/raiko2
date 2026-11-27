@@ -28,7 +28,9 @@ implementation checkpoint until the specification and source are changed.
 - In ordinary landing, authenticate H(L) directly from L1 history. There is no
   additional Q and no L-to-Q tail in the core execution proof. The available
   direct route has BLOCKHASH ages 1..256 or an enabled EIP-2935 history window
-  through age 8191, subject to activation/availability.
+  through age 8191, subject to activation/availability. `None` is the direct
+  self-reference case Q=L: require 1 <= P-L <= 8191 at actual execution, or
+  <= 256 for a BLOCKHASH-only route; this is not a bound on L's absolute height.
 - Only when that direct lookup is no longer available, allow a separate optional
   historical-authentication attachment using a newer reference `Q > L`. L1
   must authenticate Q's number/hash; a verified raw Q header and fork-aware
@@ -39,7 +41,10 @@ implementation checkpoint until the specification and source are changed.
 - Keep optional Q outside the immutable core execution statement so that the
   original execution proof can be reused. Choose it before creating the attachment; refreshing
   it requires a new attachment, not a changed execution public input or another
-  EVM replay. The contract or a separately verified wrapper must check that
+  EVM replay. The same direct-lookup window applies to Q at actual inclusion
+  (1 <= P-Q <= 8191, or <= 256 for BLOCKHASH alone). Broadcasting within the
+  window is insufficient; if Q expires, choose a new Q and rebuild only the
+  attachment. The contract or a separately verified wrapper must check that
   attachment and bind it to exactly the core statement's L number/hash and
   domain. A witness root or success flag supplied by the host is insufficient.
   The attachment/wrapper ABI, verification cost and accepted reference window

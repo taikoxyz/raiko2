@@ -47,6 +47,11 @@ header implementation as SSZ-capable.
   BATCH-6.3-5..7, select the attachment/wrapper interface, bound actual witness
   resources and measure verification costs before implementing or enabling.
 
+`None` is the direct Q=L case. Check 1 <= P-L <= 8191 at actual landing
+(or <= 256 for BLOCKHASH only); an explicit Q must meet the same P-Q lookup
+window. Expiry requires a new Q/authentication attachment, not another execution
+proof. Broadcasting inside the window does not guarantee valid inclusion.
+
 Long downtime followed by resumption is the expected historical-path case;
 lookup expiry, not an operator label, is its trigger. This is distinct from
 DAO/governance recovery: discarded/old-generation statements remain invalid.

@@ -6,6 +6,7 @@
 //! to the matched header and transactions decoded from the returned payloads,
 //! and strictly decode and authenticate the witness items.
 
+use alethia_reth_primitives::EtnaExtraData;
 use alloc::vec::Vec;
 use alloy_consensus::Header as ExecutionHeader;
 use alloy_eips::eip2718::Encodable2718;
@@ -23,7 +24,6 @@ use tendermint::Hash;
 
 const ENVELOPE_VERSION: u8 = 6;
 const MAX_EXECUTION_ITEM_BYTES: usize = 124_000;
-const BASEFEE_SHARE: u8 = 100;
 
 /// Deployment and chain position independently authenticated by the caller.
 #[derive(Clone, Copy, Debug)]
@@ -307,15 +307,13 @@ pub(crate) fn decode_anchor_number(
     extra_data: &[u8],
     generation: u64,
 ) -> Result<u64, ProjectionError> {
-    if extra_data.len() != 13
-        || extra_data[0] != BASEFEE_SHARE
-        || extra_data[1..7] != generation.to_be_bytes()[2..]
-    {
+    let fields = EtnaExtraData::decode(extra_data).ok_or(ProjectionError::ExtraData)?;
+    if fields.generation() != generation {
         return Err(ProjectionError::ExtraData);
     }
-    let mut anchor = [0; 8];
-    anchor[2..].copy_from_slice(&extra_data[7..]);
-    Ok(u64::from_be_bytes(anchor))
+    // Every bitmap bit remains committed by the header/envelope/DA equality.
+    // Committee and missed-signature semantics require independent authority.
+    Ok(fields.anchor_block_number())
 }
 
 fn verify_execution_block<'a, T: Encodable2718>(

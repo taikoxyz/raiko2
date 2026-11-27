@@ -17,6 +17,81 @@ RISC0 3.0.5 and SP1 6.8.1 at the recorded feasibility checkpoint.
 **Spec:** [Shared proving design](../specs/2026-11-17-etna-shared-proving-design.md),
 including its current planning-baseline amendment.
 
+## Native execution source checkpoint (2026-11-27)
+
+B04-1/2/3 now have an implemented native entrypoint:
+`verify_blob_range_statement_execution`. It composes existing DA/range/SSZ
+checks with the existing strict supplied-block witness/EVM/post-state verifier.
+It decodes the exact committed transactions afresh, recovers actual signers,
+normalizes full witness headers, and binds every witness parent to the incoming
+parent or preceding verified block. No candidate filtering, new executor or
+trie is introduced. Projection-only entrypoints remain explicitly partial.
+
+The source adopts current Etna 29-byte extraData and automatic staking calls
+through immutable development carrier `9ecf843d` ([Alethia #272](https://github.com/taikoxyz/alethia-reth/pull/272)),
+based on #248 `b4c4bb97`. The carrier restores only the old Unzen library helper,
+its genesis constant and dependency edge; existing Unzen behavior is retained.
+Normal host/MSRV, CI and image build declarations align to Rust 1.99. The
+legacy BlobCoder EIPs edge remains separate from modern execution traits.
+
+Genuine EVM/MPT regression sources cover empty/full/two-block ranges, ordinary
+first reverts/OOG, system-call state changes, invalid interior transactions,
+poisoned caches and forged parent/body/receipt/post-state commitments. Fixtures
+use synthetic consensus/L1 context; no fetched devnet run is claimed.
+
+Local exact old-decoder RED reproduced both shape defects (29 rejected/13
+accepted). The full Rust 1.99 RED run hit a 512 MiB growth guard before product
+compilation; no EVM test pass is claimed from that attempt. Subsequent native
+compilation/tests/lint are assigned to CI because shared disk is constrained.
+Actual metadata/lock identity and formatting checks passed; source and
+independent mutation regressions have been reviewed. Tasks remain unchecked
+until their behavioral acceptance evidence is recorded. No SDK/ELF/image or
+proof build, SGX acceptance, merge, deployment or chain write was performed.
+
+The new entrypoint has a native regression consumer, not a production SGX
+provider/pipeline route. SGX-02..04 and authenticated context/QC/FI/profile,
+L1 lookup and normative SSZ/recovery gates remain open. Mainnet/Hoodi Etna
+activation rejects until upstream supplies their trusted staking addresses;
+this batch's execution fixtures use the supported devnet.
+
+## Active SGX execution batch (2026-11-27)
+
+The user authorized direct implementation of B04-1/2/3. RISC0 recovery and
+proof builds are outside this milestone; first compose native verification for
+SGX. Existing QC management/FI-phase-two/context/contract gates remain separate.
+
+### Task 11: Adopt current execution source and compose strict replay
+
+- [ ] Adopt immutable Alethia #248 source and compatible OP-reth/Alloy dependency
+  identities. Preserve the deleted devnet Unzen API additively upstream rather
+  than duplicating genesis policy in Raiko2. Development-branch pins are
+  explicitly authorized for this draft; canonical-main adoption remains a
+  merge-readiness gate. Use the source's required native Rust 1.99 toolchain
+  without MSRV bypasses; keep SDK/ELF/image/proof builds out of this batch.
+- [ ] Add failing real-EVM regressions, then scope zero-root and privileged
+  anchor/first-receipt assumptions by the trusted fork schedule. Keep legacy
+  behavior and strict full-body execution, ordinary reverts/empty blocks and
+  computed post-state checks. Never use candidate filtering for committed blocks.
+- [ ] Decode current 29-byte Etna extraData through the authoritative upstream
+  type, retaining generation/anchor bindings. The upstream executor consumes
+  the header's miss bitmap in its automatic block-start call. QC/miss-bitmap
+  semantic authentication remains part of the held consensus design; no new
+  policy or replacement executor is introduced here.
+- [ ] Connect the existing DA/range/SSZ composer to the existing witness-backed
+  validator for every block, with exact committed transaction bytes, recovered
+  signers, parent/header/body/state-root checks. Return the statement digest
+  only after all replay succeeds. Keep projection-only APIs clearly partial.
+
+### Task 12: Independent verification and draft publication
+
+- [ ] Independently inspect the complete dependency/source/carrier diff, fork
+  behavior and failure paths. Independently exercise real EVM/MPT fixtures and
+  parent/body/state mutations. Fix/recheck confirmed in-scope findings.
+- [ ] Validate normal metadata/locks, focused tests/lint and actual formatting;
+  bind receipts to frozen product bytes. No new shared target or profile.
+- [ ] Update this plan/design and draft #305 with exact validation and remaining
+  native-versus-SGX/runtime gates. No merge, deploy, registration or chain write.
+
 ## Native SSZ checkpoint (2026-11-27)
 
 Tasks 9-10 now provide a native Q-bound verifier and Etna composer integration.

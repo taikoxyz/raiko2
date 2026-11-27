@@ -3,13 +3,14 @@ name = "raiko2-protocol-etna"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-rust-version = "1.91"
+rust-version.workspace = true
 description = "Etna consensus input verification for Raiko V2"
 
 [lints]
 workspace = true
 
 [dependencies]
+alethia-reth-primitives.workspace = true
 alloy-consensus.workspace = true
 alloy-eips.workspace = true
 alloy-primitives.workspace = true

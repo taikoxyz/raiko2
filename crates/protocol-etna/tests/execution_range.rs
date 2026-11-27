@@ -52,11 +52,11 @@ fn comet_parent(hash: B256) -> Id {
     }
 }
 
-fn anchor_extra_data(generation: u64, anchor_number: u64) -> [u8; 13] {
-    let mut extra_data = [0; 13];
+fn anchor_extra_data(generation: u64, anchor_number: u64) -> [u8; 29] {
+    let mut extra_data = [0; 29];
     extra_data[0] = 100;
     extra_data[1..7].copy_from_slice(&generation.to_be_bytes()[2..]);
-    extra_data[7..].copy_from_slice(&anchor_number.to_be_bytes()[2..]);
+    extra_data[7..13].copy_from_slice(&anchor_number.to_be_bytes()[2..]);
     extra_data
 }
 
@@ -921,7 +921,8 @@ fn rejects_a_different_deployment_or_generation_domain() {
 #[test]
 fn rejects_a_different_generation_in_execution_extra_data() {
     let mut fixture = RangeFixture::new(17, 17, 2);
-    fixture.blocks[1].execution_header.extra_data = hex!("64000000000003000000010203").into();
+    fixture.blocks[1].execution_header.extra_data =
+        hex!("6400000000000300000001020300000000000000000000000000000000").into();
     fixture.reseal_execution_from(1);
 
     assert!(matches!(

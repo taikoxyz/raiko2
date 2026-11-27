@@ -1,4 +1,7 @@
-//! Etna blob payload derivation.
+//! Etna blob payload projection and native strict execution.
+
+mod execution;
+pub use execution::{verify_blob_range_statement_execution, EtnaBlockExecutionWitness};
 
 use alloy_consensus::Header;
 use alloy_eips::eip4844::{Blob, BYTES_PER_BLOB};

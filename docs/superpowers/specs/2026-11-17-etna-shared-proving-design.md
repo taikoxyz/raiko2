@@ -116,6 +116,25 @@ reference. It does not verify Inbox storage predicates, anchor time/age/rules,
 committee authority, EVM execution or SGX acceptance by itself. The existing
 plan records the native regressions, source proof and remaining compile gates.
 
+## Native strict execution composition (2026-11-27)
+
+The native execution entrypoint now joins DA/range/L1-history authentication to
+Raiko2's existing strict witness-backed block verifier. It derives fresh
+transactions from committed EIP2718 bytes, normalizes full ancestor metadata,
+authenticates the incoming and every interior parent header, and checks the
+complete original body, receipts and computed post-state at every height before
+returning the statement digest. Empty blocks and ordinary first-transaction
+reverts are valid under Etna; legacy privileged-anchor checks remain on Unzen.
+
+Current development source uses upstream's 29-byte EtnaExtraData decoder and
+its existing block-start staking/EIP2935/EIP4788 execution. The committed bitmap
+is consumed exactly as supplied in the header; its committee/QC semantics still
+need the held consensus design. No filtering/reconstruction path substitutes
+for committed-block replay. Development source `9ecf843d` and native Rust 1.99
+are recorded in the plan. This is a native library component with synthetic
+context and genuine EVM/MPT regression sources, awaiting CI compilation and
+execution; it does not establish an enclave input route, SGX proof or landing.
+
 ## Internal-testnet delivery order (2026-11-23)
 
 The first internal-testnet acceptance uses SGX alone: collect a real Etna range,

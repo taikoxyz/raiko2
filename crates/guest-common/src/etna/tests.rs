@@ -410,8 +410,8 @@ impl RangeFixture {
         let l1_headers = fixture_l1_headers(count);
         for (index, raw_l1) in l1_headers.iter().enumerate().take(count) {
             let height = parent.number + u64::try_from(index).unwrap() + 1;
-            let mut extra_data = hex!("64000000000002000000000000");
-            extra_data[7..].copy_from_slice(&height.to_be_bytes()[2..]);
+            let mut extra_data = hex!("6400000000000200000000000000000000000000000000000000000000");
+            extra_data[7..13].copy_from_slice(&height.to_be_bytes()[2..]);
 
             // The fixture is a legacy transaction, whose network encoding is its original RLP.
             let (transactions, encoded_transactions) = if index == 0 {
@@ -1550,3 +1550,5 @@ fn l1_authentication_accepts_covered_and_incoming_inheritance() {
         assert!(verify_l1_range(&range, &source, &hashes, missing_anchor, 100).is_err());
     }
 }
+
+mod execution;

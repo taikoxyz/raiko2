@@ -13,26 +13,32 @@ raiko2-protocol-etna.workspace = true
 raiko2-protocol-shasta = { path = "../protocol-shasta" }
 raiko2-stateless = { path = "../stateless" }
 taiko-client-protocol.workspace = true
-alethia-reth-chainspec = { git = "https://github.com/taikoxyz/alethia-reth", rev = "59e06d049beed8442218e7ab258138c060511c87", default-features = false }
-alethia-reth-block = { git = "https://github.com/taikoxyz/alethia-reth", rev = "59e06d049beed8442218e7ab258138c060511c87", default-features = false, features = [
+alethia-reth-chainspec = { git = "https://github.com/taikoxyz/alethia-reth", rev = "9ecf843d9f753127a703c39786b040b753c40edd", default-features = false }
+alethia-reth-block = { git = "https://github.com/taikoxyz/alethia-reth", rev = "9ecf843d9f753127a703c39786b040b753c40edd", default-features = false, features = [
     "prover",
     "serde",
 ] }
 alethia-reth-consensus.workspace = true
-alethia-reth-primitives = { git = "https://github.com/taikoxyz/alethia-reth", rev = "59e06d049beed8442218e7ab258138c060511c87", default-features = false }
+alethia-reth-primitives = { git = "https://github.com/taikoxyz/alethia-reth", rev = "9ecf843d9f753127a703c39786b040b753c40edd", default-features = false }
 alloy-primitives = { version = "=1.6.1", default-features = false }
-alloy-consensus = { version = "=2.4.2", default-features = false, features = ["serde"] }
+alloy-consensus = { version = "=2.5.0", default-features = false, features = ["serde"] }
 alloy-eips = { version = "=1.8.3", default-features = false }
+alloy-eips-execution = { package = "alloy-eips", version = "=2.5.0", default-features = false }
 alloy-sol-types = { version = "=1.6.1", default-features = false }
 alloy-rlp = { version = "=0.3.16", default-features = false }
-alloy-hardforks = "=0.4.8"
+alloy-hardforks = "=0.4.9"
 anyhow = "=1.0.102"
 flate2 = { workspace = true, features = ["zlib"] }
-reth-ethereum-primitives = { git = "https://github.com/ethereum-optimism/reth", rev = "d9bd9875fe88dcc0183d78b187ce2ceab0c93e93", default-features = false, features = [
+reth-ethereum-primitives = { git = "https://github.com/ethereum-optimism/reth", tag = "op-v2.7.0-1", default-features = false, features = [
     "serde",
 ] }
 
 [dev-dependencies]
+alloy-trie.workspace = true
+reth-evm.workspace = true
+reth-revm.workspace = true
+reth-primitives-traits.workspace = true
+reth-trie-common.workspace = true
 sha2.workspace = true
 raiko2-primitives = { path = "../primitives", features = ["chain-spec-json", "kzg-host"] }
 alloy-signer = { version = "2.0", default-features = false }

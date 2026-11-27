@@ -54,7 +54,7 @@ impl Fixture {
         let execution_header = Header {
             number: 18,
             parent_hash: parent_el_hash,
-            extra_data: hex!("64000000000002000000010203").into(),
+            extra_data: hex!("6400000000000200000001020300000000000000000000000000000000").into(),
             timestamp,
             transactions_root: calculate_transaction_root(transactions),
             ..Default::default()

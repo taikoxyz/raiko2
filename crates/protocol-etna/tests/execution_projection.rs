@@ -73,7 +73,7 @@ impl Fixture {
             number: 18,
             parent_hash: parent_el_hash,
             beneficiary: Address::repeat_byte(0x42),
-            extra_data: hex!("64000000000002000000010203").into(),
+            extra_data: hex!("6400000000000200000001020300000000000000000000000000000000").into(),
             transactions_root: calculate_transaction_root(transactions),
             ..Default::default()
         };
@@ -466,7 +466,8 @@ fn uint48_limits_apply_without_truncation() {
     fixture.comet_header.height = max.try_into().unwrap();
     fixture.comet_header.chain_id = chain_id(&fixture.context.domain).unwrap().parse().unwrap();
     fixture.execution_header.number = max;
-    fixture.execution_header.extra_data = hex!("64ffffffffffffffffffffffff").into();
+    fixture.execution_header.extra_data =
+        hex!("64ffffffffffffffffffffffff00000000000000000000000000000000").into();
     fixture.seal_execution(&[]);
     assert_eq!(fixture.verify(&[]).unwrap().anchor_number(), max);
 
@@ -556,6 +557,57 @@ fn rejects_empty_and_multiple_comet_transactions() {
                 &fixture.context,
             ),
             Err(ProjectionError::CometTransactionCount)
+        ));
+    }
+}
+
+#[test]
+fn etna_extra_data_binds_the_complete_29_byte_layout() {
+    let mut fixture = Fixture::new(&[]);
+    assert_eq!(fixture.execution_header.extra_data.len(), 29);
+    for bitmap in [0u128, 1, 1 << 127, u128::MAX] {
+        let mut extra = fixture.execution_header.extra_data.to_vec();
+        extra[13..].copy_from_slice(&bitmap.to_be_bytes());
+        fixture.execution_header.extra_data = extra.into();
+        fixture.seal_execution(&[]);
+        assert_eq!(fixture.verify(&[]).unwrap().anchor_number(), 0x010203);
+    }
+    // No bitmap policy is invented here: byte equality binds all 128 bits;
+    // external committee/QC rules remain separately authenticated authority.
+    for len in [7, 13, 28, 30] {
+        let mut extra = fixture.execution_header.extra_data.to_vec();
+        extra.resize(len, 0);
+        fixture.execution_header.extra_data = extra.into();
+        fixture.seal_execution(&[]);
+        assert!(matches!(
+            fixture.verify(&[]),
+            Err(ProjectionError::ExtraData)
+        ));
+    }
+}
+
+#[test]
+fn etna_projection_rejects_old_thirteen_byte_layout_and_wrong_29_byte_fields() {
+    let mut fixture = Fixture::new(&[]);
+    let canonical = fixture.execution_header.extra_data.to_vec();
+    for altered in [
+        canonical[..13].to_vec(),
+        {
+            let mut bytes = canonical.clone();
+            bytes[0] = 99;
+            bytes
+        },
+        {
+            let mut bytes = canonical.clone();
+            bytes[6] ^= 1;
+            bytes
+        },
+    ] {
+        fixture.execution_header.extra_data = altered.into();
+        fixture.seal_execution(&[]);
+        assert!(matches!(
+            fixture.verify(&[]),
+            Err(ProjectionError::ExtraData)
         ));
     }
 }

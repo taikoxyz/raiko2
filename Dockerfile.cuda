@@ -20,7 +20,7 @@
 
 ARG CUDA_VERSION=12.8.1
 ARG UBUNTU_VERSION=24.04
-ARG RUST_IMAGE=rust:1.95.0-bookworm
+ARG RUST_IMAGE=rust:1.99.0-bookworm
 
 FROM ${RUST_IMAGE} AS rust
 
@@ -45,7 +45,7 @@ RUN apt-get update && \
 ENV RUSTUP_HOME=/usr/local/rustup
 ENV CARGO_HOME=/usr/local/cargo
 ENV PATH=/usr/local/cargo/bin:${PATH}
-ENV RUSTUP_TOOLCHAIN=1.95.0-x86_64-unknown-linux-gnu
+ENV RUSTUP_TOOLCHAIN=1.99.0-x86_64-unknown-linux-gnu
 COPY --from=rust /usr/local/rustup /usr/local/rustup
 COPY --from=rust /usr/local/cargo /usr/local/cargo
 
@@ -89,8 +89,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     NVCC_APPEND_FLAGS="${NVCC_APPEND_FLAGS} --generate-code=arch=compute_${arch},code=[sm_${arch},compute_${arch}]"; \
     done; \
     export NVCC_APPEND_FLAGS; \
-    cargo +1.95.0 build --release --locked -p raiko2 ${BIN_FEATURES}; \
-    cargo +1.95.0 build --release --locked -p guest-launcher --features cuda; \
+    cargo +1.99.0 build --release --locked -p raiko2 ${BIN_FEATURES}; \
+    cargo +1.99.0 build --release --locked -p guest-launcher --features cuda; \
     mkdir -p /app/build-output; \
     cp /app/target/release/raiko2 /app/build-output/raiko2; \
     cp /app/target/release/guest-launcher /app/build-output/guest-launcher
@@ -105,7 +105,7 @@ ENV RISC0_HOME=/opt/risc0
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
-    cargo +1.95.0 install --locked rzup --version ${RZUP_VERSION} --root /opt/rzup
+    cargo +1.99.0 install --locked rzup --version ${RZUP_VERSION} --root /opt/rzup
 
 # Outside the registry cache mount, so the long download does not stall the builder stage.
 RUN /opt/rzup/bin/rzup install risc0-groth16 ${RISC0_GROTH16_VERSION} && \

@@ -486,7 +486,7 @@ pub(crate) fn shasta_image_id_words_from_uuid(raw: &str) -> Result<[u32; 8], Str
         }
 
         let mut words = [0u32; 8];
-        for (index, chunk) in bytes.chunks_exact(4).enumerate() {
+        for (index, chunk) in bytes.as_chunks::<4>().0.iter().enumerate() {
             let mut word = [0u8; 4];
             word.copy_from_slice(chunk);
             words[index] = u32::from_le_bytes(word);

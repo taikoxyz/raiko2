@@ -132,8 +132,10 @@ is consumed exactly as supplied in the header; its committee/QC semantics still
 need the held consensus design. No filtering/reconstruction path substitutes
 for committed-block replay. Development source `9ecf843d` and native Rust 1.99
 are recorded in the plan. This is a native library component with synthetic
-context and genuine EVM/MPT regression sources, awaiting CI compilation and
-execution; it does not establish an enclave input route, SGX proof or landing.
+context and genuine EVM/MPT regressions. CI on source `ea27a735` passed
+fmt, Clippy, foundation, pipeline and runtime; all 20 new execution test names
+passed and were independently checked. This does not establish an enclave
+input route, SGX proof or landing.
 
 ## Internal-testnet delivery order (2026-11-23)
 

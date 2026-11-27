@@ -51,9 +51,11 @@ behavioral verification read the actual checkout and test names/results.
 Clippy found one misplaced import and Rust 1.99 warnings from async-trait's
 injected must_use attributes; a separately reviewed behavior-preserving fix
 moves the import and adds trait-scoped expectations for that generated lint.
-Final lint acceptance remains pending CI on the fixed head. Actual metadata,
-lock identities, formatting and independent source review passed. No SDK/ELF/image or
-proof build, SGX acceptance, merge, deployment or chain write was performed.
+Final source `ea27a735` passed fmt, Clippy, foundation, pipeline and runtime
+CI; actual native test names/results were independently checked. RISC0 checks
+are outside the SGX-first milestone. Actual metadata, lock identities, formatting
+and independent source review passed. No local SDK/ELF/image or proof build,
+SGX acceptance, merge, deployment or chain write was performed.
 
 The new entrypoint has a native regression consumer, not a production SGX
 provider/pipeline route. SGX-02..04 and authenticated context/QC/FI/profile,
@@ -91,12 +93,12 @@ SGX. Existing QC management/FI-phase-two/context/contract gates remain separate.
 
 ### Task 12: Independent verification and draft publication
 
-- [ ] Independently inspect the complete dependency/source/carrier diff, fork
+- [x] Independently inspect the complete dependency/source/carrier diff, fork
   behavior and failure paths. Independently exercise real EVM/MPT fixtures and
   parent/body/state mutations. Fix/recheck confirmed in-scope findings.
-- [ ] Validate normal metadata/locks, focused tests/lint and actual formatting;
+- [x] Validate normal metadata/locks, focused tests/lint and actual formatting;
   bind receipts to frozen product bytes. No new shared target or profile.
-- [ ] Update this plan/design and draft #305 with exact validation and remaining
+- [x] Update this plan/design and draft #305 with exact validation and remaining
   native-versus-SGX/runtime gates. No merge, deploy, registration or chain write.
 
 ## Native SSZ checkpoint (2026-11-27)
@@ -1053,10 +1055,10 @@ from checkbox counts.
 | --- | --- | --- | --- | --- |
 | P00 | Portable shared core and patched SDK feasibility | DONE (earlier baseline) | — | Merged #22398; diagnostic README and checkpoint `a29b53c4` |
 | P01 | Freeze revised spec, implementation pins and ABI vectors | PARTIAL | Compatible upstream implementations | Design approval, source matrix and codec vectors recorded; native ABI/backend framing agreement pending |
-| P02 | Canonical supplied-block input and EL/Comet binding | PARTIAL: complete range/parent projection | P01 for revised behavior | Bounded original-byte projection and Comet/EL chains bind the expected endpoints; strict nested witnesses and authenticated execution composition remain open; #22415 is optional |
-| P03 | Authenticated origin, L1 context and committee schedule | PARTIAL: native L1 ancestry/anchor-root binding | P01, P02 | Reference/anchor binding and structural schedule checks complete as components; origin/profile/Inbox authority, time/rules, committee derivation and distant path remain open |
-| P04 | Strict Etna execution; FI in phase two | TODO | P01, P02 | Phase one: existing strict execution on the matched full body; phase two: authenticated FI include/skip and singleton-equivalence cases |
-| P05 | Range consensus coverage, DA, cuts and statement | PARTIAL: native authenticated DA/range/statement composition | P02–P04 for full range | Matched Comet/EL identities and supplied cursor shape bind every interior cut and statement endpoint; actual FI/context authority, execution and final guest composition remain pending |
+| P02 | Canonical supplied-block input and EL/Comet binding | PARTIAL: complete range/parent projection | P01 for revised behavior | Bounded original-byte projection and Comet/EL chains bind the expected endpoints; native DA/SSZ/execution composition is tested; strict context witnesses and authority remain open; #22415 is optional |
+| P03 | Authenticated origin, L1 context and committee schedule | PARTIAL: native uniform SSZ/anchor-root binding | P01, P02 | Reference/anchor history and structural schedule checks complete as components; origin/profile/Inbox authority, time/rules, committee derivation and normative SSZ/recovery coordination remain open |
+| P04 | Strict Etna execution; FI in phase two | PARTIAL: native strict supplied-block replay complete | P01, P02 | B04 native execution/DA composition tested with genuine EVM/MPT; canonical-main source adoption, complete authenticated context and actual SGX consumer remain; FI phase two stays held |
+| P05 | Range consensus coverage, DA, cuts and statement | PARTIAL: native authenticated DA/range/statement composition | P02–P04 for full range | Matched Comet/EL identities and supplied cursor shape bind every interior cut and statement endpoint; native strict execution is joined; actual FI/context authority and final guest composition remain pending |
 | P06 | Provider, pipeline and backend wiring | TODO | P02–P05 | Existing task lifecycle produces and consumes the complete Etna input |
 | P07 | Both real guests, aggregation and proof acceptance | TODO | P05, P06 | Real proofs, child continuity, permitted L1 verifier combination and resource bounds |
 | P08 | Regression, independent final review and ready handoff | TODO | P01–P07 | Required checks, Unzen regressions and exact-head review; no unresolved material findings |

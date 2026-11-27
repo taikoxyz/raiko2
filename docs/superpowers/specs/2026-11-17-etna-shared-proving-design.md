@@ -4,9 +4,9 @@
 
 This replaces the optional-Q/outer-attachment amendment discussed earlier on
 this date. The user chose one explicit reference for every job. This is a design
-direction, not an implemented SSZ verifier or a frozen protocol interface. The
-2026-11-24 native consecutive-header component remains the actual source
-checkpoint until the normative requirements and verifier are changed.
+direction with a native SSZ component implemented in the checkpoint below; the
+protocol interface and runtime activation are not frozen. The 2026-11-24
+consecutive-header description is retained as historical context.
 
 - Let `a_i` be each covered L2 block's L1 anchor, `L` the last such anchor, `Q`
   the lander's explicit L1 authentication reference, and `P` the eventual L1
@@ -22,8 +22,9 @@ checkpoint until the normative requirements and verifier are changed.
   LandStatement reference shape rather than introducing an outer historical
   attachment that permits Q changes without rebinding the statement.
 - Raiko2 verifies the supplied raw Q header against that exact public hash,
-  derives the required fork-aware parent beacon block commitment from those
-  authenticated bytes, and checks each actual anchor against the same Q.
+  and checks each actual anchor against the same Q. When a required anchor
+  precedes Q, it derives the fork-aware parent beacon block commitment from
+  those authenticated bytes and verifies the beacon history below.
   The target uses uniform SSZ history authentication with shared witness nodes,
   not fixed gap thresholds or intervening filler execution-header chains. An
   anchor equal to Q is authenticated directly by the same raw Q header.
@@ -32,10 +33,10 @@ checkpoint until the normative requirements and verifier are changed.
   boundaries and required origin/rules/committee facts. A witness root supplied
   by the lander is not authoritative without the verified connection to Q.
   Raiko2 verifies these relations even though it does not choose the reference.
-- Exact paths remain open: the parent beacon block's own execution payload,
-  its state root, recent block roots, completed historical summaries/legacy
-  roots, fork-specific generalized indices, slots and list lengths must be
-  distinguished and checked. A shared multiproof does not by itself prove that
+- The native verifier distinguishes and checks the parent beacon block's own
+  execution payload, its state root, recent block roots, completed historical
+  summaries/legacy roots, fork-specific generalized indices, slots and list
+  lengths. A shared multiproof does not by itself prove that
   these objects authenticate all required execution headers.
 - At landing, L1 independently obtains H(Q) through BLOCKHASH for ages 1..256
   or an enabled/data-available EIP-2935 path through age 8191. The actual P-Q
@@ -53,10 +54,53 @@ checkpoint until the normative requirements and verifier are changed.
   and the SGX-first delivery order remain unchanged.
 
 Explicitly reconcile PROOF-6.2-33/34 and BATCH-6.3-5..7 before adopting SSZ in
-place of their raw-parentHash/linear-budget relation. No implementation, measured
-performance, reusable proof artifact or onchain acceptance is claimed here.
+place of their raw-parentHash/linear-budget relation in the runtime. The native
+implementation below does not establish measured proving performance, reusable
+proof artifacts or onchain acceptance.
 
-## Native L1 root authentication (2026-11-24)
+## Native uniform SSZ authentication (2026-11-27)
+
+Etna now calls `protocol_etna::l1_history::verify_l1_history` through its existing
+native statement composer. The seventh argument remains `L1AnchorProof`, now a
+borrowed view of original Q bytes, sorted distinct anchor openings and shared
+root-scoped beacon witnesses. No statement fields or reference policy changed.
+
+The verifier always hashes the original raw Q header. If every required anchor
+is Q, exact raw identity and domain/block bindings suffice; no beacon material
+or EIP-4788 field is required. Otherwise it reads Q's EIP-4788 field 19 with a
+thin Alloy RLP adapter over the upstream validated header view and authenticates
+the five-field parent BeaconBlockHeader. It then proves state.slot and the scheduled
+Fork.current_version, uses each target's actual beacon slot for payload layout,
+and checks its original execution-header hash against that authenticated payload.
+Missed slots are allowed. Q itself uses exact raw-header identity.
+
+Recent targets use block_roots for ages 1..8192 slots. Older targets use completed
+historical_summaries or legacy HistoricalBatch roots; authenticated list lengths
+and the reference slot derive the exact period indices. Canonical minimal
+multiproofs share helpers only under the same root and reject unused, duplicate,
+conflicting or shadowing material. Header and aggregate helper limits are checked
+before parsing/allocation, including legacy state_roots siblings. Every supplied
+anchor opening must be used by a projected block; every covered block's root and
+carried raw header must match its authenticated opening. Inheritance, generation,
+real KZG/DA and FI-off controls remain in the composer. Unzen keeps its existing
+private consecutive-header walker and policy.
+
+Checked-in official network schedules cover mainnet, Sepolia and Hoodi through
+Fulu. Traversed unknown schemas or authenticated fork versions reject; Sepolia's
+configured Gloas epoch is explicitly unsupported. This is not a blanket claim of
+support for arbitrary future forks or other chains. Budgets must come from an
+authenticated deployment/profile in the eventual runtime, not arbitrary host input.
+
+The native checkpoint passed 213 exact-source diagnostic tests and strict scoped
+Clippy, including real mainnet sparse witnesses and independent synthetic
+boundary/mutation checks. Independent source review and behavioral verification
+passed after fixing unused openings and the legacy sibling budget charge.
+The diagnostic facade omits unrelated service/error types; no full production
+library, SDK/ELF/image build, SGX/ZK proof or L1 landing was established. The
+existing F31-only codec pin remains unchanged. See the paired plan for remaining
+L1 lookup/ABI, normative recovery, profile/source and SGX/runtime gates.
+
+## Historical native L1 root authentication (2026-11-24)
 
 The native Etna range/statement composer now requires bounded raw L1 ancestry
 ending at the same statement's reference number/hash. It reuses Unzen's private

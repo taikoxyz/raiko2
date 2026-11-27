@@ -8540,6 +8540,7 @@ dependencies = [
  "raiko2-stateless",
  "reth-ethereum-primitives 2.6.0",
  "risc0-ethereum-trie",
+ "sha2 0.10.9",
 ]
 
 [[package]]
@@ -8652,6 +8653,8 @@ dependencies = [
  "etna-core",
  "k256",
  "prost 0.13.5",
+ "serde_json",
+ "sha2 0.10.9",
  "tendermint",
  "tendermint-proto",
  "thiserror 2.0.18",

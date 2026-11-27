@@ -17,44 +17,205 @@ RISC0 3.0.5 and SP1 6.8.1 at the recorded feasibility checkpoint.
 **Spec:** [Shared proving design](../specs/2026-11-17-etna-shared-proving-design.md),
 including its current planning-baseline amendment.
 
+## Native SSZ checkpoint (2026-11-27)
+
+Tasks 9-10 now provide a native Q-bound verifier and Etna composer integration.
+The public mainnet vectors include an actual 1,100,000-execution-block gap;
+synthetic vectors cover history/fork/slot/budget boundaries. Frozen exact-source
+native checks passed **213 tests**, and scoped all-target Clippy with
+`-D warnings` passed. Independent source review and behavioral verification
+completed; the two findings (unused anchor openings and uncharged legacy
+state-root siblings) were fixed and rechecked, including a failing-before-fix
+budget control. The existing upstream pin and Unzen policy remain unchanged.
+
+These checks use a diagnostic facade with byte-identical product modules and
+real cryptographic libraries; unrelated transport/error types are excluded.
+They do not establish a full production guest-common build or SGX acceptance.
+Production root/SP1/RISC0 default and guest bench metadata resolve offline;
+lock package identities, checksums and SDK pins are unchanged. No SDK, ELF,
+image or real proof build was run. The broader local library check remains
+unstarted below its 6 GiB disk reserve; native checks used the narrower recorded
+resource policy below. Existing CI artifact-download 403s remain separate.
+
+Remaining activation gates: authenticated deployment/profile budgets, full
+runtime/witness acquisition, L1's independent H(Q) lookup and contract wiring,
+normative linear-recovery reconciliation, and existing source/provenance,
+SGX/context, QC and FI holds. Q selection/retry stays outside Raiko2.
+
+## Uniform SSZ native implementation batch (2026-11-27)
+
+The user authorized implementation of the explicit-Q direction. Execute Tasks
+9 and 10 in this existing worktree; no second project, target directory or SDK
+build. Existing P00-P08 delivery and QC/FI gates remain distinct from this native
+anchor-authentication component.
+
+### Global Constraints for Tasks 9-10
+
+- Lander chooses Q before requesting the Q-bound proof. Raiko2 does not choose,
+  refresh, switch or retry Q. Preserve the existing statement/domain/DA fields.
+- Preserve EVM, CachedTrie, witnesses, provider/pipeline, backend/ELF/image pins
+  and Unzen policy. Replace only Etna's linear ancestry caller; no parallel
+  linear-versus-SSZ runtime selector or fixed anchor-gap threshold.
+- Reuse etna-core L1HeaderView for original RLP identity and four fields. Decode
+  Q's EIP-4788 field 19 only as a thin consumer adapter with existing Alloy RLP;
+  never reconstruct headers or replace the authoritative general codec.
+- Select traversed SSZ schemas from the authenticated beacon header's own slot
+  and checked-in official mainnet/Sepolia/Hoodi schedules keyed by statement
+  chain ID; no host-defined generalized paths or network profile. Reject an
+  unknown chain/schema and an unrecognized authenticated fork version.
+- Share canonical proof nodes within their authenticated tree; local indices
+  in different roots never share one unscoped node map. Bound inputs before
+  maps/allocation, reject duplicate/conflicting/unconsumed helpers and periods,
+  and compare every reconstructed subtree against its authenticated parent.
+- Existing raw-header size bound is 4096 bytes. Use the caller's authenticated
+  deployment/profile budgets for headers and aggregate proof nodes; do not
+  treat host-selected budgets as final profile authority.
+- Cached native checks use the existing shared target, offline isolated
+  snapshots and two build jobs. After measured cache-only runs, root allowed a
+  5.75 GiB floor with a stricter 128 MiB per-run growth budget for only the
+  protocol/composer test and lint packages. Other/broader checks retain the
+  6 GiB floor; stop at either bound. No full guest/SDK/ELF/image build,
+  cleanup, deployment, registration or chain write is part of this batch.
+- Normative PROOF-6.2-33/34 and BATCH-6.3-5..7 reconciliation remains a separate
+  activation gate. A tested native component is not complete SGX acceptance.
+
+### Task 9: Native Q-bound sparse Ethereum history and composer
+
+**Files:**
+- Create: crates/protocol-etna/src/l1_history/mod.rs, merkle.rs and tests.rs.
+- Modify: crates/protocol-etna/src/lib.rs and Cargo.toml (existing sha2 only;
+  test-only serde_json if required by public fixtures).
+- Create: crates/protocol-etna/tests/fixtures/l1-history/ public vectors and
+  README.md with input provenance, hashes, exact Q bytes and adaptation limits.
+- Modify: crates/guest-common/src/etna.rs and etna/tests.rs.
+- Modify: crates/guest-common/src/lib.rs to remove the CI-confirmed unused bail
+  import, with no behavioral change to Unzen.
+- Reconcile: root and standalone guest Cargo.lock files without SDK/pin drift.
+
+**Interfaces:**
+- Export native borrowed L1HistoryProof, L1HistoryLimits, AnchorHeaderWitness,
+  BeaconHistoryWitness, BeaconHeader, HistoricalPeriodWitness and SszProofNode
+  from protocol-etna::l1_history. Limits contain max_headers/max_proof_nodes;
+  they are caller/profile policy, not authority inferred from the witness.
+- L1HistoryProof contains reference_header bytes, sorted unique anchor openings,
+  optional beacon-history material only when anchors precede Q, and limits.
+  Each opening contains original raw header bytes and, below Q, the target's
+  BeaconHeader plus execution-payload hash siblings. Historical-period groups
+  contain their period, block_roots root, legacy state_roots root only where
+  needed and a root-scoped vector multiproof. Reference state has one shared
+  helper set and authenticated historical list lengths. Paths are derived.
+- Export verify_l1_history(chain_id: U256, reference_number: u64,
+  reference_hash: B256, proof: &L1HistoryProof<'a>)
+  -> Result<Vec<L1HeaderView<'a>>, L1HistoryError>. All supplied openings must
+  verify before any authenticated views are returned. Source reference fields
+  directly from the same LandStatement used for the final digest.
+- Guest-common exposes the borrowed proof at its current seventh argument,
+  retains its public L1AnchorProof name as the integrated view, and binds every
+  projected anchor and carried raw witness to returned authenticated views.
+  Keep FI guards and genuine KZG/blob/payload equality in the same composer.
+
+- [x] **Step 1: Write intended rejection tests and a semantic RED.** Cover a
+  forged Q raw hash/number, detached root, wrong slot/version/schema, missing
+  anchor, changed raw carried header with matching number/root, malformed
+  helpers/extra nodes and resource counts before parsing. Preserve old real-DA
+  and FI tests by supplying valid SSZ fixtures, not weakening their assertions.
+  Compile RED using a frozen exact-source native harness before implementation;
+  failures must reach the new relation rather than fixture setup errors.
+- [x] **Step 2: Implement canonical SHA-256 multiproof verification.** Derive
+  minimal helper positions from required leaves; check positive u64 generalized
+  indices, antichain/duplicate/overlap rules and exact root. Fold only correctly
+  scoped trees. Prove reference state.slot and scheduled Fork.current_version
+  under the authenticated reference BeaconHeader's state root.
+- [x] **Step 3: Implement header-history relation.** Check exact original Q
+  bytes, number/hash and parent beacon commitment before using any metadata.
+  Recompute each target BeaconHeader and authenticate its execution block_hash
+  from its body under the target slot's Bellatrix/Capella or Deneb+ schema.
+  Anchors equal to Q use exact raw identity, not an unrelated beacon opening.
+- [x] **Step 4: Implement all history positions.** With W=8192, R=reference
+  beacon slot and target actual slot s: s=R uses reference beacon identity;
+  0<R-s<=W uses block_roots[s%W]. Older completed periods use summaries or
+  legacy roots, never the current partial period. Authenticate list lengths;
+  C=R/W, first_summary_period=C-summary_len and index=target_period-first.
+  Legacy index=target_period; open HistoricalBatch(block_roots,state_roots).
+  Check both lengths/period arithmetic and their expected network relation.
+- [x] **Step 5: Integrate the existing native composer.** Validate every supplied
+  opening and every matched block; use exactly the statement's chain/Q context.
+  No host callback, replacement root flag, new trie, execution or transport.
+- [x] **Step 6: GREEN and focused lint.** Run the full exact-source native suite
+  and protocol tests with public recent/completed-period witnesses where full
+  input is recoverable; label any synthetic tests. Run strict scoped all-target
+  Clippy, actual formatting, locked metadata and lock/package-identity checks.
+  Commit only after complete diff review and independent review/verification.
+
+### Task 10: Independent behavioral verification and source review
+
+**Files:** Task-9 complete diff, native/test fixtures, plan and design; scratch
+verification reports stay in this plan's ignored workspace or temporary outputs.
+
+**Interfaces:** Consume the actual full diff and original explicit-Q requirement,
+not only the implementer's explanation. Produce independent source verdict,
+behavioral results, exact source hashes and remaining native-versus-runtime limits.
+
+- [x] **Step 1: Challenge proof scope and tree composition.** Independently
+  mutate Q, public statement, target header, beacon root, fork, slot, period,
+  list length, node position/value and carried/inherited opening. Keep shape
+  valid where needed so each intended predicate is actually reached.
+- [x] **Step 2: Exercise protocol boundaries.** Cover Q=L with earlier anchors,
+  reference-parent payload itself, W/W+1, exact rollover, zero summaries,
+  last legacy/first summary, missed slots, body/state fork transitions, sparse
+  anchors, shared helpers, upper u64 bits and declared resource limits.
+- [x] **Step 3: Verify integration controls.** Retain all real KZG/DA and FI-off
+  regressions and compare Unzen policy/source seams. Read current CI failures
+  separately from source outcomes; do not call RISC0 artifact 403 a passing
+  full build or hide it with a bypass.
+- [ ] **Step 4: Resolve confirmed findings and recheck.** Use independent source
+  review and behavioral verification, then publish/read back the exact draft
+  head and update plan/Notion. Keep SGX/ZK/ELF/provenance/upstream activation
+  limitations explicit. No merge or deployment.
+
 ## Target amendment: explicit lander-selected Q (2026-11-27)
 
 The user replaced the earlier optional-Q/outer-attachment direction with one
 explicit Q for every proving job. The lander chooses Q and supplies witnesses;
 Raiko2 verifies the Q-bound relation without reference-selection policy. This
 supersedes the target selection/attachment policy in P03-A02/A04 and the older
-recovered near/far prose. Current native source remains linear, not SSZ-capable.
+recovered near/far prose. The native SSZ checkpoint above now supersedes the
+2026-11-24 Etna linear caller; full activation gates remain open.
 
 - [x] **P03-A09a — Record target:** keep L as the fixed synchronized last-anchor
   boundary and Q as a separate authentication reference with L<=Q. Always supply
   Q explicitly; Q=L is valid when usable. Bind Q number/hash in the existing
   statement shape. Remove None mode and the outer optional attachment target.
-- [ ] **P03-A09b — Specify uniform authentication:** verify the raw Q header
+- [x] **P03-A09b — Complete native uniform authentication:** verify the raw Q header
   against its statement hash, authenticate earlier distinct anchors with SSZ
   and shared witness nodes, and use direct header identity for anchors equal
   to Q. Specify beacon block/state/history paths, execution hash/raw-header/
-  number/root mapping, fork/slot/list boundaries and every other required L1
-  fact. Retain monotonicity, inheritance and generation-origin exceptions.
+  number/root mapping and fork/slot/list boundaries for required anchor facts.
+  Retain monotonicity, inheritance and generation-origin exceptions.
+  Native anchor-history relation is tested; other required L1 predicates retain
+  their own pending authenticated-context tasks.
 - [ ] **P03-A09c — L1 Q authentication:** obtain H(Q) through the actual enabled
   history interface, testing ages 1/256/257/8191/8192 and activation. Reject an
   unavailable Q. Check actual inclusion, not broadcast time. Do not substitute
   newer synchronized state for the blocks' real last anchor L.
-- [ ] **P03-A09d — Lander ownership and rebinding:** the external lander selects
+- [x] **P03-A09d — Lander ownership and rebinding:** the external lander selects
   Q, prepares witnesses and requests the Q-bound proof; Raiko2 has no automatic
   choice/switch/refresh/expiry-retry behavior. Test inconsistent Q/raw-header/
   statement bindings, root substitution, wrong heights and a changed Q paired
   with the old proof. Changing Q requires a new proof binding, not merely new
-  witness bytes; execution-child reuse is unestablished and not promised.
+  witness bytes; execution-child reuse is unestablished and not promised. Native
+  statement/raw-header binding and absence of Q-selection policy are checked; external lander deployment and
+  expired-Q onchain acceptance tests belong to A09c, not this native component.
 - [ ] **P03-A09e — Protocol/interface review:** reconcile PROOF-6.2-33/34 and
   BATCH-6.3-5..7, retain existing statement fields where appropriate, specify the
-  SSZ witness and resource bounds, and measure costs before implementation.
+  SSZ witness and resource bounds, and measure costs before runtime activation.
 
 Require 1<=P-Q<=8191 at actual landing under enabled/data-available EIP-2935,
 or <=256 for BLOCKHASH alone. An expired Q must be handled by the lander with
 another Q-bound proof; an unqueryable Q never becomes an accepted fallback.
 The state boundary L stays fixed. This does not revive old-generation or
 discarded statements after governance recovery. Existing QC/FI implementation
-holds, full SSZ specification gates and SGX-first priorities remain in effect.
+holds, normative SSZ activation gates and SGX-first priorities remain in effect.
 
 ## L1 root authentication reuse (2026-11-24)
 

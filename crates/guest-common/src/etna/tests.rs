@@ -24,6 +24,9 @@ use raiko2_primitives::{
 };
 use raiko2_protocol::InputDataSource;
 use raiko2_protocol_etna::{
+    l1_history::{
+        AnchorHeaderWitness, BeaconHeader, BeaconHistoryWitness, L1HistoryLimits, SszProofNode,
+    },
     payload::PayloadError,
     projection::ExecutionProjection,
     range::{
@@ -32,6 +35,7 @@ use raiko2_protocol_etna::{
     statement::{cut_leaf, LandInput, LandStatement},
 };
 use reth_ethereum_primitives::TransactionSigned;
+use sha2::{Digest, Sha256};
 use std::{
     io::{self, Read, Write},
     sync::OnceLock,
@@ -251,14 +255,117 @@ fn list(items: &[&[u8]]) -> Vec<u8> {
     encoded
 }
 
+// Synthetic Fulu state/body openings. Each omitted sibling is a fixed zero commitment.
+const PARENT_SLOT: u64 = 13_200_000;
+const STATE_HELPERS: [SszProofNode; 7] = {
+    let indices = [3, 5, 9, 17, 32, 135, 268];
+    let mut result = [SszProofNode {
+        index: 0,
+        root: B256::ZERO,
+    }; 7];
+    let mut i = 0;
+    while i < indices.len() {
+        result[i].index = indices[i];
+        i += 1;
+    }
+    result
+};
+
+fn test_tree(index: u64, leaves: &[(u64, B256)]) -> B256 {
+    if let Some((_, root)) = leaves.iter().find(|(leaf, _)| *leaf == index) {
+        return *root;
+    }
+    let contains = leaves.iter().any(|(leaf, _)| {
+        leaf.ilog2() > index.ilog2() && leaf >> (leaf.ilog2() - index.ilog2()) == index
+    });
+    if !contains {
+        return B256::ZERO;
+    }
+    let left = test_tree(index * 2, leaves);
+    let right = test_tree(index * 2 + 1, leaves);
+    B256::from(<[u8; 32]>::from(
+        Sha256::new()
+            .chain_update(left)
+            .chain_update(right)
+            .finalize(),
+    ))
+}
+
+fn slot_root() -> B256 {
+    let mut root = B256::ZERO;
+    root[..8].copy_from_slice(&PARENT_SLOT.to_le_bytes());
+    root
+}
+
+fn parent_beacon(raw: &[u8]) -> BeaconHeader {
+    let mut version = B256::ZERO;
+    version[0] = 6;
+    BeaconHeader {
+        slot: PARENT_SLOT,
+        proposer_index: 0,
+        parent_root: B256::ZERO,
+        state_root: test_tree(1, &[(66, slot_root()), (269, version)]),
+        body_root: test_tree(1, &[(812, alloy_primitives::keccak256(raw))]),
+    }
+}
+
+fn bind_parent_beacon(headers: &mut [Vec<u8>]) {
+    if let [parent, q] = headers {
+        let beacon = parent_beacon(parent);
+        let leaves = [
+            slot_root(),
+            B256::ZERO,
+            B256::ZERO,
+            beacon.state_root,
+            beacon.body_root,
+            B256::ZERO,
+            B256::ZERO,
+            B256::ZERO,
+        ];
+        let leaves: Vec<_> = (8..16).zip(leaves).collect();
+        let root_field = alloy_rlp::encode(test_tree(1, &leaves));
+        let mut cursor = q.as_slice();
+        let alloy_rlp::PayloadView::List(mut fields) =
+            alloy_rlp::Header::decode_raw(&mut cursor).unwrap()
+        else {
+            panic!()
+        };
+        fields[19] = &root_field;
+        *q = list(&fields);
+    }
+}
+
 fn raw_l1_header(number: u64, parent_hash: B256, state_root: B256) -> Vec<u8> {
     alloy_rlp::encode(Header {
         number,
         parent_hash,
         state_root,
-        timestamp: number + 1_000,
+        timestamp: 1_606_824_023 + (PARENT_SLOT + number - 18) * 12,
+        base_fee_per_gas: Some(1),
+        withdrawals_root: Some(B256::ZERO),
+        blob_gas_used: Some(0),
+        excess_blob_gas: Some(0),
+        parent_beacon_block_root: Some(B256::ZERO),
         ..Default::default()
     })
+}
+
+fn fixture_l1_headers(count: usize) -> Vec<Vec<u8>> {
+    let mut l1_headers = Vec::new();
+    let mut l1_parent = B256::ZERO;
+    assert!((1..=2).contains(&count));
+    for offset in 0..count {
+        let number = 18 + u64::try_from(offset).unwrap();
+        let raw = raw_l1_header(
+            number,
+            l1_parent,
+            B256::left_padding_from(&number.to_be_bytes()),
+        );
+        l1_parent = alloy_primitives::keccak256(&raw);
+        l1_headers.push(raw);
+    }
+    bind_parent_beacon(&mut l1_headers);
+    l1_headers
 }
 
 struct BlockFixture {
@@ -300,18 +407,7 @@ impl RangeFixture {
         let mut el_hash = parent_el_hash;
         let mut previous_comet = None;
         let mut blocks = Vec::new();
-        let mut l1_headers = Vec::new();
-        let mut l1_parent = B256::ZERO;
-        for offset in 0..count + 2 {
-            let number = 18 + u64::try_from(offset).unwrap();
-            let raw = raw_l1_header(
-                number,
-                l1_parent,
-                B256::left_padding_from(&number.to_be_bytes()),
-            );
-            l1_parent = alloy_primitives::keccak256(&raw);
-            l1_headers.push(raw);
-        }
+        let l1_headers = fixture_l1_headers(count);
         for (index, raw_l1) in l1_headers.iter().enumerate().take(count) {
             let height = parent.number + u64::try_from(index).unwrap() + 1;
             let mut extra_data = hex!("64000000000002000000000000");
@@ -385,10 +481,39 @@ impl RangeFixture {
         }
     }
 
-    fn l1_proof(&self) -> L1AnchorProof<'_> {
+    fn openings<'a>(&self, headers: &'a [Vec<u8>]) -> Vec<AnchorHeaderWitness<'a>> {
+        let q = self.l1_headers.last().unwrap();
+        headers
+            .iter()
+            .map(|raw| {
+                let is_parent = raw != q && self.l1_headers.len() == 2;
+                AnchorHeaderWitness {
+                    raw_header: raw,
+                    beacon_header: is_parent.then(|| parent_beacon(&self.l1_headers[0])),
+                    payload_siblings: if is_parent { &[B256::ZERO; 9] } else { &[] },
+                }
+            })
+            .collect()
+    }
+
+    fn l1_proof<'a>(&'a self, anchors: &'a [AnchorHeaderWitness<'a>]) -> L1AnchorProof<'a> {
         L1AnchorProof {
-            raw_headers: &self.l1_headers,
-            max_headers: 131_072,
+            reference_header: self.l1_headers.last().unwrap(),
+            anchors,
+            beacon: anchors
+                .iter()
+                .find_map(|anchor| anchor.beacon_header)
+                .map(|reference| BeaconHistoryWitness {
+                    reference,
+                    state_helpers: &STATE_HELPERS,
+                    summary_length: None,
+                    legacy_length: None,
+                    periods: &[],
+                }),
+            limits: L1HistoryLimits {
+                max_headers: 131_072,
+                max_proof_nodes: 128,
+            },
         }
     }
 
@@ -760,7 +885,8 @@ impl AuthenticatedRangeFixture {
             statement,
             cursors,
             &self.range.parent,
-            self.range.l1_proof(),
+            self.range
+                .l1_proof(&self.range.openings(&self.range.l1_headers)),
         )
     }
 }
@@ -911,7 +1037,9 @@ fn rejects_statement_hash_reordering_against_individually_authentic_blobs() {
         &statement,
         &[0],
         &fixture.range.parent,
-        fixture.range.l1_proof(),
+        fixture
+            .range
+            .l1_proof(&fixture.range.openings(&fixture.range.l1_headers)),
     )
     .unwrap_err();
     assert!(
@@ -988,7 +1116,9 @@ fn rejects_a_statement_whose_authentic_blobs_derive_a_different_range() {
         &statement,
         &[0, 0],
         &fixture.range.parent,
-        fixture.range.l1_proof(),
+        fixture
+            .range
+            .l1_proof(&fixture.range.openings(&fixture.range.l1_headers)),
     )
     .unwrap_err();
     assert!(
@@ -1093,7 +1223,7 @@ fn phase_one_rejects_carried_fi_witnesses_without_cursor_consumption() {
             &statement,
             &[0, 0],
             &range.parent,
-            range.l1_proof(),
+            range.l1_proof(&range.openings(&range.l1_headers)),
         )
         .expect_err("phase one must reject a carried FI witness even with unchanged cursors");
         assert!(error.to_string().contains("phase-one Etna"), "{error:?}");
@@ -1117,8 +1247,11 @@ fn verify_l1_range(
         &vec![0; range.blocks.len()],
         &range.parent,
         L1AnchorProof {
-            raw_headers,
-            max_headers,
+            limits: L1HistoryLimits {
+                max_headers,
+                max_proof_nodes: 128,
+            },
+            ..range.l1_proof(&range.openings(raw_headers))
         },
     )?;
     Ok(())
@@ -1161,7 +1294,7 @@ fn l1_authentication_rejects_wrong_reference_number_hash_and_upper_bits() {
 }
 
 #[test]
-fn l1_authentication_rejects_missing_reordered_duplicate_and_unlinked_headers() {
+fn l1_authentication_rejects_missing_reordered_duplicate_and_substituted_headers() {
     let fixture = authenticated_range_fixture();
     let original = &fixture.range.l1_headers;
     let mut gap = original.clone();
@@ -1185,7 +1318,7 @@ fn l1_authentication_rejects_missing_reordered_duplicate_and_unlinked_headers() 
             &headers,
             100,
         )
-        .expect_err("every anchor must be on one consecutive authenticated L1 chain");
+        .expect_err("every supplied anchor must authenticate to the statement reference");
         assert!(
             error.to_string().contains("L1") || error.to_string().contains("anchor"),
             "{error:?}"
@@ -1202,15 +1335,15 @@ fn l1_authentication_bounds_count_before_decoding_and_rejects_bad_raw_headers() 
         &fixture.source,
         &fixture.hashes,
         original,
-        original.len(),
+        original.len() + 1,
     )
     .unwrap();
     for (headers, max, expected) in [
         (vec![], 10, "empty"),
         (vec![vec![0xff]; 2], 1, "count"),
         (vec![vec![0xff]], 0, "count"),
-        (vec![vec![0xff]], 1, "L1"),
-        (vec![vec![0; 4097]], 1, "L1"),
+        (vec![vec![0xff]], 2, "L1"),
+        (vec![vec![0; 4097]], 2, "L1"),
     ] {
         let error = verify_l1_range(
             &fixture.range,
@@ -1303,6 +1436,7 @@ fn l1_authentication_rejects_an_authentic_chain_root_that_differs_from_the_el_ro
         *raw = alloy_rlp::encode(&header);
         parent = alloy_primitives::keccak256(&*raw);
     }
+    bind_parent_beacon(&mut range.l1_headers);
     range.blocks[0].anchor_witness = Some(list(&[
         &alloy_rlp::encode(range.l1_headers[0].as_slice()),
         &[0xc0],
@@ -1340,6 +1474,7 @@ fn l1_authentication_preserves_unknown_future_raw_header_fields() {
         *raw = list(&fields);
         parent = alloy_primitives::keccak256(&*raw);
     }
+    bind_parent_beacon(&mut range.l1_headers);
     for (index, block) in range.blocks.iter_mut().enumerate() {
         block.anchor_witness = Some(list(&[
             &alloy_rlp::encode(range.l1_headers[index].as_slice()),
@@ -1405,7 +1540,12 @@ fn l1_authentication_accepts_covered_and_incoming_inheritance() {
             &range.decoded_payload(),
             Compression::default(),
         )));
-        verify_l1_range(&range, &source, &hashes, &range.l1_headers, 100).unwrap();
+        verify_l1_range(&range, &source, &hashes, &range.l1_headers[..1], 100).unwrap();
+        // Q is still authenticated as the reference. Opening it a second time as
+        // an anchor would add a valid header that neither covered block uses.
+        let error = verify_l1_range(&range, &source, &hashes, &range.l1_headers, 100)
+            .expect_err("a valid unused Q opening must be rejected");
+        assert!(error.to_string().contains("unused L1 anchor"), "{error:?}");
         let missing_anchor = &range.l1_headers[1..];
         assert!(verify_l1_range(&range, &source, &hashes, missing_anchor, 100).is_err());
     }

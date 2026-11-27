@@ -33,6 +33,7 @@ reth-ethereum-primitives = { git = "https://github.com/ethereum-optimism/reth", 
 ] }
 
 [dev-dependencies]
+sha2.workspace = true
 raiko2-primitives = { path = "../primitives", features = ["chain-spec-json", "kzg-host"] }
 alloy-signer = { version = "2.0", default-features = false }
 alloy-signer-local = { version = "2.0", default-features = false }

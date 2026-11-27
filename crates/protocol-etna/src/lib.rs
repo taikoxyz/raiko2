@@ -24,6 +24,7 @@
 extern crate alloc;
 
 pub mod coverage;
+pub mod l1_history;
 pub mod payload;
 pub mod projection;
 pub mod range;

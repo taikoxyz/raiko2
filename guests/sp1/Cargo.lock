@@ -3867,6 +3867,7 @@ dependencies = [
  "alloy-rlp",
  "alloy-sol-types",
  "etna-core",
+ "sha2 0.10.9",
  "tendermint",
  "thiserror 2.0.18",
 ]

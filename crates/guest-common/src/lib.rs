@@ -15,7 +15,7 @@ use alloy_consensus::{
 };
 use alloy_primitives::{Address, B256, U256};
 use alloy_sol_types::{sol, SolCall};
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{ensure, Context, Result};
 use raiko2_primitives::{
     builtin_taiko_chain_spec, shasta_checkpoint_storage_slots, shasta_checkpoint_store_address,
     shasta_taiko_l2_address, StatelessInput, WitnessHeader,

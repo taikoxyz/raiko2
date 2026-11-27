@@ -1,5 +1,33 @@
 # Shared upstream Etna proving implementation
 
+## Retained devnet relation and SGX API checkpoint (2026-11-27)
+
+The active user-approved PoC omits FI and reuses the existing Unzen/Shasta
+execution/witness/SGX infrastructure. `verify_range_input_acceptance` closes the
+retained domain/origin/anchor/rules/time/U/gas/mix predicates around the existing
+DA/SSZ/EVM/QC composer. L1 recomputes statement domain, Q and retained parent
+identity; the guest adds no duplicate RPC approval of those public words. Q
+selection and window retry remain with the lander. No unrelated positive-FI-
+delay gate is imposed when checking the shared word's maximum-anchor-age field.
+
+`POST /prove/etna` consumes the owned supplied-block/QC input and existing witness
+resources, verifies the complete retained relation, checks the immutable client
+statement digest, then uses the existing generic five-word SGX hash and 89-byte
+subproof framing. The fixed serving profile is internal devnet 167001, 45M gas
+and ruleset 0; no arbitrary serialized chainspec is accepted. The main `/v4`
+queue is not extended by this backend endpoint. Switching-start profiles need
+reviewed constants; the initial factory rejects an unsupported switching start.
+
+Source `f94ece85` passed independent source review and exact native/SGX CI at
+[run 45978411297](https://github.com/taikoxyz/raiko2/actions/runs/45978411297),
+including all 111 focused functions and the explicitly executed generated
+EVM/MPT/QC request through native HTTP/software signing. All 31 inspected blobs
+match effective merge `b076eccb`. This establishes source integration, not a real
+enclave, instance registration or L1 receipt. External client backend adaptation
+and uniform SSZ history witness transport are listed in the
+[client handoff](../../etna-client-integration.md). Older dated status below is
+historical where superseded by this checkpoint and the current plan table.
+
 ## L2-managed committee adoption (2026-11-27)
 
 The user resumed implementation against #22425 at `4bb5cff1`, #22280 at

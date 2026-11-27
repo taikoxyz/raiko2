@@ -28,16 +28,16 @@ uniform SSZ authentication remains selected; do not silently replace it with a
 second raw-header runtime mode. These instructions supersede older blanket
 QC/FI/profile holds for the current PoC, not production acceptance requirements.
 
-- [ ] **Task 18 / P06:** serialize existing supplied native consensus resources
+- [x] **Task 18 / P06:** serialize existing supplied native consensus resources
   and connect the owned-input adapter to the actual QC/DA/SSZ/EVM composer.
   Preserve existing execution witnesses/shared pooling and reject malformed,
   missing, reordered and unsupported inputs without host-approved flags.
-- [ ] **Task 19 / SGX-01:** close remaining deterministic context predicates
+- [x] **Task 19 / SGX-01:** close remaining deterministic context predicates
   with existing MPT reads: generation/origin, per-anchor checkpoint/U/rules,
   exact timestamp/age/gas/mix, and applicable switching-start implementations.
   Derive public deployment/Q/parent identities from the exact L1-bound statement;
   add no redundant enclave RPC approval of those words.
-- [ ] **Task 20 / SGX-02..03:** add explicit Etna request/HTTP wiring to the
+- [x] **Task 20 / SGX-02..03:** add explicit Etna request/HTTP wiring to the
   existing signer and response envelope; reuse the generic five-word SGX hash
   and 89-byte proof framing. Record concrete client transport gaps in
   [the integration handoff](../../etna-client-integration.md), add focused native
@@ -49,6 +49,34 @@ chain staking addresses and trusted switching-start deployment constants must
 be supplied by their reviewed upstream profiles; untrusted request metadata
 cannot invent them. SDK/ELF/image/attestation/registration/chain execution stays
 outside this source integration batch. No duplicate target or local heavy build.
+
+### Verified source integration checkpoint
+
+Source `f94ece85` passed [exact native/SGX CI](https://github.com/taikoxyz/raiko2/actions/runs/45978411297),
+effective merge `b076eccb` into base `3f4ec387`. Independent verification
+matched all 31 reviewed/supporting source blobs against the effective tree and
+observed all 111 focused test functions passing. Fmt, all four native/Etna/
+engine/SGX Clippy steps, foundation, pipeline and runtime passed. The SGX
+runtime's 41 ordinary tests passed; its generated-fixture test was explicitly
+executed and passed after the real native EVM/MPT/QC fixture export. It exercises
+successful direct/HTTP verification, contract-domain signature recovery and six
+altered-input rejection paths with no key/quote access. Synthetic key/quote only.
+
+Whole-batch independent source review passed after rechecking fixture/import/
+lint fixes. Existing witness JSON decoding canonicalizes state-node order; the
+roundtrip test preserves all ordered native inputs and normalizes only those
+proof-node arrays. The full fixture now passes the same parent-derived mix hash
+to execution and assembly, leaving production predicates unchanged. Local fmt,
+diff and locked/offline/no-deps metadata checks passed; no local compilation or
+SDK/image build was run. The RISC0-dependent xtask lane still fails downloading
+an external recursion artifact with HTTP 403; these native results do not claim
+all PR checks are green.
+
+Tasks 18–20 complete the retained native devnet relation, dedicated SGX backend
+API and concrete client handoff. The main asynchronous `/v4` queue has no Etna
+task variant. Client HTTP/backend adaptation and uniform-SSZ witness production,
+actual switching-start deployment constants, real enclave/instance and L1
+acceptance remain separate. FI and RISC0/SP1 stay outside this first PoC.
 
 ## Native L2-managed QC checkpoint (2026-11-27)
 
@@ -1264,12 +1292,12 @@ from checkbox counts.
 | --- | --- | --- | --- | --- |
 | P00 | Portable shared core and patched SDK feasibility | DONE (earlier baseline) | — | Merged #22398; diagnostic README and checkpoint `a29b53c4` |
 | P01 | Freeze revised spec, implementation pins and ABI vectors | PARTIAL: current native core and ABI aligned | Compatible upstream implementations | Current 19-word/7-field/3-part vectors and immutable development pins verified; canonical-main adoption, final interface freeze and backend framing remain |
-| P02 | Canonical supplied-block input and EL/Comet binding | PARTIAL: complete range/parent projection | P01 for revised behavior | Bounded original-byte projection and Comet/EL chains bind the expected endpoints; native DA/SSZ/execution composition is tested; strict context witnesses and authority remain open; #22415 is optional |
-| P03 | Authenticated origin, L1 context and committee schedule | PARTIAL: native QC authority and uniform SSZ | P01, P02 | Generation/config/origin and per-anchor governance/L2 snapshot inputs authenticated for native QC; broader profile/Inbox/time/rules and normative SSZ/recovery coordination remain |
-| P04 | Strict Etna execution; FI in phase two | PARTIAL: native strict supplied-block replay complete | P01, P02 | B04 native execution/DA composition tested with genuine EVM/MPT; canonical-main source adoption, complete authenticated context and actual SGX consumer remain; FI phase two stays held |
-| P05 | Range consensus coverage, DA, cuts and statement | PARTIAL: native QC/bitmap/DA/SSZ/execution composition | P02–P04 for full range | Provided canonical certificates and authenticated current/next sets/bitmaps join strict execution and current statement; full FI/context and production guest acceptance remain pending |
-| P06 | Provider, pipeline and backend wiring | PARTIAL: owned input and native composed verifier | P02–P05 | Client-supplied Etna input adaptation, task identities and SGX/provider/pipeline consumption remain; no vote/QC collector is part of Raiko2 |
-| P07 | Both real guests, aggregation and proof acceptance | TODO | P05, P06 | Real proofs, child continuity, permitted L1 verifier combination and resource bounds |
+| P02 | Canonical supplied-block input and EL/Comet binding | PARTIAL: complete retained devnet range relation | P01 for revised behavior | Bounded original-byte projection and Comet/EL chains bind the expected endpoints; native DA/SSZ/execution/QC plus retained context is tested through owned inputs and SGX HTTP; production source/profile acceptance remains; #22415 is optional |
+| P03 | Authenticated origin, L1 context and committee schedule | PARTIAL: native QC authority and uniform SSZ | P01, P02 | Generation/config/origin, per-anchor governance/rules/time/U and L2 snapshots authenticated in the retained native devnet wrapper; production profile and normative SSZ/recovery coordination remain |
+| P04 | Strict Etna execution; FI in phase two | PARTIAL: native strict supplied-block replay complete | P01, P02 | B04 native execution/DA composition tested with genuine EVM/MPT; retained context and dedicated SGX HTTP consumer are tested; canonical-main adoption, actual enclave acceptance and FI phase two remain |
+| P05 | Range consensus coverage, DA, cuts and statement | PARTIAL: native QC/bitmap/DA/SSZ/execution composition | P02–P04 for full range | Provided certificates and derived current/next sets/bitmaps join strict execution, retained context and statement through native/software-SGX acceptance; FI and production enclave acceptance remain |
+| P06 | Provider, pipeline and backend wiring | PARTIAL: owned consensus input and dedicated SGX HTTP API | P02–P05 | Owned inputs and dedicated SGX consumption tested; external client backend/SSZ adaptation and main queue integration remain; no vote/QC collector belongs to Raiko2 |
+| P07 | Both real guests, aggregation and proof acceptance | PARTIAL: native/software-SGX relation and framing tested | P05, P06 | Real enclave/registration/L1 acceptance first; ZK, aggregation and production proof policy later |
 | P08 | Regression, independent final review and ready handoff | TODO | P01–P07 | Required checks, Unzen regressions and exact-head review; no unresolved material findings |
 
 

@@ -90,7 +90,9 @@ are not implicitly part of an inline witness. `staking_reads` values and
   APIs. Supplement untouched staking snapshot and missing-validator seat slots
   with standard historical `eth_getProof`, pinned to each exact parent hash.
   `HeightReads` alone contains values, not the required MPT nodes. This does not
-  require a new custom execution-node RPC.
+  require a new custom execution-node RPC. Existing Raiko2 host code already
+  exposes `L2Provider::batch_storage_proof_witnesses`; reuse existing fetching
+  and node types rather than duplicate trie verification.
 - [ ] Supply a fallback-key preimage for each anchor required by the current
   Raiko2 composer, including anchors where the candidate wins. The client's
   existing list-by-hash lookup can provide it; `fallback_key_lists` currently
@@ -108,6 +110,15 @@ are not implicitly part of an inline witness. `staking_reads` values and
 Only the SSZ transport/builder is a new witness capability in this inventory.
 Other items use existing data, existing RPCs or ordinary backend adaptation.
 No missing API is represented by a host-approved flag inside the verifier.
+
+## Verified source checkpoint
+
+At `f94ece85`, [native/SGX CI](https://github.com/taikoxyz/raiko2/actions/runs/45978411297)
+passed all five relevant jobs, including SGX all-target Clippy, genuine native
+request export and explicit HTTP/software-signature acceptance. Independent
+review and behavioral verification passed all 111 focused functions and matched
+31 source blobs against the actual effective merge. The RISC0-dependent xtask
+job remains red at a third-party recursion-artifact download (HTTP 403).
 
 ## Validation boundary
 

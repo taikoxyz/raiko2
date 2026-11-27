@@ -152,7 +152,8 @@ fn owned_ssz_roundtrip_preserves_all_material_and_metadata() {
 fn json_cannot_supply_limits_or_extra_carrier_fields() {
     for field in ["limits", "max_headers", "max_proof_nodes", "host_verified"] {
         let mut encoded = serde_json::to_value(history()).unwrap();
-        encoded[field] = serde_json::json!({ "max_headers": 1_000_000, "max_proof_nodes": 1_000_000 });
+        encoded[field] =
+            serde_json::json!({ "max_headers": 1_000_000, "max_proof_nodes": 1_000_000 });
         assert!(
             serde_json::from_value::<L1HistoryInput>(encoded).is_err(),
             "{field}"

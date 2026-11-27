@@ -17,7 +17,7 @@ RISC0 3.0.5 and SP1 6.8.1 at the recorded feasibility checkpoint.
 **Spec:** [Shared proving design](../specs/2026-11-17-etna-shared-proving-design.md),
 including its current planning-baseline amendment.
 
-## Active SGX input batch (2026-11-27)
+## Native input checkpoint (2026-11-27)
 
 Continue the SGX-first plan through owned input plumbing. The current native
 range relation remains a component: authenticated context/profile/committee and
@@ -27,29 +27,58 @@ No new prover architecture, SGX endpoint or signing path is introduced by this
 batch. The encoded-input byte limit is an outer caller obligation; serde is not
 a pre-allocation resource limiter.
 
+Native checks at source `95c93ad8` passed in
+[CI](https://github.com/taikoxyz/raiko2/actions/runs/45956473290), effective merge
+`82366763` into base `3f4ec387`: workspace formatting, full native Clippy
+(including Etna all-target tests and engine core), foundation, pipeline and runtime. Independent verification read
+the actual checkout/effective merge and all 15 new test names, each successful.
+The foundation logs record 559 passing test invocations, zero failures and one
+ignored pre-existing doctest across 33 summaries; repeated MPT tests are included.
+Five new cases were independently authored. Coverage includes real EVM/MPT
+range roundtrips, list-count mismatches, malformed/interior transactions,
+Q/raw-header and authority-field mutations, caller budgets, and public-mainnet
+sparse SSZ roundtrip/helper mutations. Consensus/context in the EVM fixtures
+remains synthetic. No fetched devnet, enclave signature or onchain acceptance
+is established by these native tests.
+
+Independent source review passed on the exact source. Full native tests ran
+in CI; local RED/GREEN compilation was not run at the shared-disk reserve.
+Local workspace fmt/diff checks and offline locked metadata passed. All package
+versions, sources and checksums remain unchanged; only already-resolved serde
+edges were added to the locks. CI lint corrections changed documentation,
+equivalent test literals, a unit-statement semicolon and line wrapping; no
+runtime or verification policy changed.
+
+Tasks 13–14 are complete as a native input component. SGX-01..04 remain open at
+their stated boundaries: no production provider/pipeline route, complete
+consensus/context composition, actual enclave signature or landing is claimed.
+RISC0/SP1 artifact checks are outside this SGX-first batch, not waived merge gates.
+No local Cargo build, new target, image, deployment, registration or chain write
+was performed. This draft stays unmerged.
+
 ### Task 13: Owned native input and existing-verifier adapter
 
-- [ ] Add owned serializable range, statement and L1-history witness inputs in
+- [x] Add owned serializable range, statement and L1-history witness inputs in
   `protocol-etna`, preserving original bytes, explicit Q, complete range/cut
   lists and every SSZ helper/length field. Reject unknown JSON fields. Reuse the
   existing statement and leaf types; keep deployment context, resource limits
   and EVM configuration outside the serialized request.
-- [ ] Borrow those inputs into the existing native verifier through a narrow
+- [x] Borrow those inputs into the existing native verifier through a narrow
   `guest-common` adapter. Decode canonical original transaction bytes, reuse
   existing per-block execution witnesses and shared state nodes, and return a
   digest only after unchanged full native replay succeeds. Keep the same
   context, consensus and authority obligations as the existing entrypoint.
-- [ ] Add deserialized real-EVM range success and mutation regressions, exact
+- [x] Add deserialized real-EVM range success and mutation regressions, exact
   statement/history roundtrips and caller-owned budget/authority controls.
   Record RED/GREEN execution separately from source-only checks. No local
   Cargo/SDK/ELF/image build while the shared disk is at its reserve.
 
 ### Task 14: Independent verification and draft publication
 
-- [ ] Independently review original requirements, complete source diff and
+- [x] Independently review original requirements, complete source diff and
   allocation/borrowing/failure paths; independently exercise the serialized
   input through real native tests. Recheck any material fixes.
-- [ ] Run formatting, exact dependency/lock checks and focused native CI; read
+- [x] Run formatting, exact dependency/lock checks and focused native CI; read
   actual checkout SHA, test names and outcomes. Update this plan and draft #305
   with observed evidence, keeping SGX-01..04 and existing merge gates distinct.
 
@@ -1105,7 +1134,7 @@ from checkbox counts.
 | P03 | Authenticated origin, L1 context and committee schedule | PARTIAL: native uniform SSZ/anchor-root binding | P01, P02 | Reference/anchor history and structural schedule checks complete as components; origin/profile/Inbox authority, time/rules, committee derivation and normative SSZ/recovery coordination remain open |
 | P04 | Strict Etna execution; FI in phase two | PARTIAL: native strict supplied-block replay complete | P01, P02 | B04 native execution/DA composition tested with genuine EVM/MPT; canonical-main source adoption, complete authenticated context and actual SGX consumer remain; FI phase two stays held |
 | P05 | Range consensus coverage, DA, cuts and statement | PARTIAL: native authenticated DA/range/statement composition | P02–P04 for full range | Matched Comet/EL identities and supplied cursor shape bind every interior cut and statement endpoint; native strict execution is joined; actual FI/context authority and final guest composition remain pending |
-| P06 | Provider, pipeline and backend wiring | TODO | P02–P05 | Existing task lifecycle produces and consumes the complete Etna input |
+| P06 | Provider, pipeline and backend wiring | PARTIAL: owned native input and existing-verifier adapter | P02–P05 | Serialization/replay component tested; actual collection, task identities and SGX/provider/pipeline consumption of the complete authenticated input remain |
 | P07 | Both real guests, aggregation and proof acceptance | TODO | P05, P06 | Real proofs, child continuity, permitted L1 verifier combination and resource bounds |
 | P08 | Regression, independent final review and ready handoff | TODO | P01–P07 | Required checks, Unzen regressions and exact-head review; no unresolved material findings |
 

@@ -5,7 +5,7 @@ use raiko2_protocol_etna::{input::LandStatementInput, statement::LandInput};
 fn statement() -> LandStatementInput {
     LandStatementInput {
         l1_chain_id: U256::from(1),
-        l2_chain_id: U256::from(167001),
+        l2_chain_id: U256::from(167_001),
         inbox: Address::repeat_byte(0x11),
         generation: U256::from(3),
         parent_hash: B256::repeat_byte(4),

@@ -117,7 +117,7 @@ pub struct HistoricalPeriodInput {
     pub period: u64,
     /// Block-roots commitment.
     pub block_roots: B256,
-    /// Original other half of a legacy HistoricalBatch.
+    /// Original other half of a legacy `HistoricalBatch`.
     pub legacy_state_roots: Option<B256>,
     /// Original root-scoped helper nodes in supplied order.
     pub helpers: Vec<SszProofNode>,

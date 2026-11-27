@@ -17,7 +17,7 @@ RISC0 3.0.5 and SP1 6.8.1 at the recorded feasibility checkpoint.
 **Spec:** [Shared proving design](../specs/2026-11-17-etna-shared-proving-design.md),
 including its current planning-baseline amendment.
 
-## Active L2-managed QC integration (2026-11-27)
+## Native L2-managed QC checkpoint (2026-11-27)
 
 The user explicitly resumed QC implementation against [design #22425 at
 `4bb5cff1`](https://github.com/taikoxyz/taiko-mono/tree/4bb5cff1e9e4f96506a8ee971e430014188619ac/packages/protocol/docs/etna),
@@ -27,49 +27,88 @@ target. These are development pins, not merged/frozen/released deployment claims
 Preserve the existing EVM, sparse trie, witnesses, queues and providers. FI phase
 two and actual SDK/ELF/image/deployment/chain acceptance remain separately gated.
 
+Tasks 15–17 are complete as a native provided-input verification component.
+The composed consumer is `verify_blob_range_statement_consensus`: existing
+DA/SSZ/strict EVM verification followed by authenticated L1/L2 state, shared-core
+committee decisions, exact required native QCs and LastCommit-derived bitmaps.
+It adds no vote/QC collector, RPC acquisition, synchronizer, producer or signer.
+The configured staking address is checked against the EVM's actual block-start
+target before execution. The old certified-envelope API had no consumer beyond
+its obsolete tests and was removed; native codec/body regression coverage remains.
+
+Native source `a33e33c6` passed [locked CI](https://github.com/taikoxyz/raiko2/actions/runs/45967555948),
+effective merge `dcd1d71d` into base `3f4ec387`: workspace fmt, main native
+Clippy, Etna all-target Clippy, engine-core Clippy, foundation, pipeline and
+runtime. Independent behavioral verification compared 14 reviewed source blobs
+against the actual effective tree and observed all 74 focused test functions
+passing. The native lane records 592 passing test invocations: 528 main,
+58 MPT-metrics and six net-feature invocations, with zero failures and one
+pre-existing ignored doctest. These are invocations, not 592 unique tests.
+The 13 native EVM/MPT/QC integration functions include eleven named native
+consensus cases and two independent full-composer controls. The multi-anchor
+case is a focused real-MPT governance-helper test, not a fetched devnet replay.
+
+Independent source review passed after fixing the staking-target binding and
+missing normal dependency edges in both guest locks. The independent storage
+fixture was corrected to use explicit shared-pool indices; the existing sparse
+reader's inline/indexed semantics were preserved, including unresolved-child
+rejection. CI also caught a test shift-type ambiguity and lint-only expression,
+array and literal formatting; final corrections preserve runtime policy. Local
+fmt/diff checks, ABI oracle and package-identity checks passed. Local Cargo
+RED/GREEN, SDK, ELF, image, proof and enclave runs were not performed at the disk
+reserve. All lock package identities except etna-core's source revision remain
+unchanged. Native tests use synthetic consensus/context plus genuine EVM/MPT
+and native signatures; no real SGX or onchain acceptance is established.
+
+The core pin is #22426 at `ddce3fb8`, current client `87f95412` plus the exact
+existing raw-L1-header extraction. Its five-file diff and history-preserving
+update were read back; no force push or duplicate upstream PR was used.
+Execution remains #272 at `9ecf843d`. Both are development pins, not mainline
+adoption. #305 and #22426 remain draft; no PR merge or operational action.
+
 ### Task 15: Current shared core and landing encoding
 
-- [ ] Carry the existing exact raw-L1-header API onto current no_std etna-core
+- [x] Carry the existing exact raw-L1-header API onto current no_std etna-core
   without restoring registry/epoch APIs or reorganizing the client. Preserve
   the existing #22426 extraction history; no duplicate dependency PR or force
   update of the shared development branch. Inspect the complete minimal carrier.
-- [ ] Adopt the immutable carrier; align current params/domain/member APIs and
+- [x] Adopt the immutable carrier; align current params/domain/member APIs and
   seven-field LandInput / 19-word (608-byte) statement and the current
   three-field `[block, anchor, forced]` envelope. Reject the old four-field
   committee-witness form and preserve forced-witness positioning. Reuse authoritative
   config hashing. Reject old registry/active-snapshot inputs, preserve every
   ordered cut and full-width public field, and retire the unused superseded
   certified-envelope gate rather than add an always-failing compatibility path.
-- [ ] Independently check encoding against current contract ABI and exercise
+- [x] Independently check encoding against current contract ABI and exercise
   codec/range regressions through exact-source native CI.
 
 ### Task 16: Authenticated state to committee, bitmap and certificates
 
-- [ ] Reuse core committee::decide, staking storage layout, fallback keys and
+- [x] Reuse core committee::decide, staking storage layout, fallback keys and
   miss bitmap functions. Derive all inputs from authenticated L2 parent/post-state
   and SSZ-bound L1 anchor state; verify origin/bootstrap and current/next hashes.
   No supplied schedule, detached state root or host approval authorizes a set.
   This is input verification only: no vote/QC collection, RPC acquisition,
   synchronization, signing, validator updates or producer policy is added.
-- [ ] Read required snapshot/key-to-seat/Inbox words using the existing sparse
+- [x] Read required snapshot/key-to-seat/Inbox words using the existing sparse
   witness engine, with one hydration per batch. Missing material fails; proven
   absence remains distinguishable. Do not duplicate account/trie verification
   or reimplement staking penalties that the existing EVM executes.
-- [ ] Authenticate LastCommit bytes and derive every bitmap without adding
+- [x] Authenticate LastCommit bytes and derive every bitmap without adding
   signature checks the spec omits for that purpose. Verify strict weighted QCs
   at the terminal and before actual key/power changes, with exact coverage,
   stock canonical bytes, generation domain and parent/range boundary checks.
-- [ ] Compose these checks with existing strict DA/SSZ/EVM verification in an
+- [x] Compose these checks with existing strict DA/SSZ/EVM verification in an
   actual native consumer. Keep remaining profile/time/rules/FI and L1 landing
   authority obligations explicit; no partial-result signing route.
 
 ### Task 17: Independent integration verification and publication
 
-- [ ] Independently review the complete source/pins/ABI and exercise genuine
+- [x] Independently review the complete source/pins/ABI and exercise genuine
   EVM/MPT plus signed-QC success and mutation cases, including parent bootstrap,
   fallback, source-equivalent sets, absent witness material and forged roots.
   Fix and have the raiser recheck all material findings.
-- [ ] Run focused native CI at the exact source and effective merge, inspect
+- [x] Run focused native CI at the exact source and effective merge, inspect
   actual tests and steps, update this plan and draft #305, and report remaining
   gates. Use the existing shared target only; at the current disk reserve do
   not start local Cargo/SDK/ELF/image builds. Record unexecuted RED separately.
@@ -1182,7 +1221,7 @@ source availability. R06/R07 remain unchecked and #305 remains draft.
 
 ## Milestone progress
 
-`DONE (earlier baseline)` records reusable evidence, not conformance to #22412.
+`DONE (earlier baseline)` records reusable evidence, not conformance to the current L2-managed target.
 `PARTIAL` means the listed code exists but its remaining acceptance gate is open.
 `TODO` means no completion claim. Dependencies are deliverable gates, not a
 requirement to run independent inspections serially. No percentage is inferred
@@ -1191,12 +1230,12 @@ from checkbox counts.
 | ID | Deliverable | Status | Depends on | Completion gate / evidence |
 | --- | --- | --- | --- | --- |
 | P00 | Portable shared core and patched SDK feasibility | DONE (earlier baseline) | — | Merged #22398; diagnostic README and checkpoint `a29b53c4` |
-| P01 | Freeze revised spec, implementation pins and ABI vectors | PARTIAL | Compatible upstream implementations | Design approval, source matrix and codec vectors recorded; native ABI/backend framing agreement pending |
+| P01 | Freeze revised spec, implementation pins and ABI vectors | PARTIAL: current native core and ABI aligned | Compatible upstream implementations | Current 19-word/7-field/3-part vectors and immutable development pins verified; canonical-main adoption, final interface freeze and backend framing remain |
 | P02 | Canonical supplied-block input and EL/Comet binding | PARTIAL: complete range/parent projection | P01 for revised behavior | Bounded original-byte projection and Comet/EL chains bind the expected endpoints; native DA/SSZ/execution composition is tested; strict context witnesses and authority remain open; #22415 is optional |
-| P03 | Authenticated origin, L1 context and committee schedule | PARTIAL: native uniform SSZ/anchor-root binding | P01, P02 | Reference/anchor history and structural schedule checks complete as components; origin/profile/Inbox authority, time/rules, committee derivation and normative SSZ/recovery coordination remain open |
+| P03 | Authenticated origin, L1 context and committee schedule | PARTIAL: native QC authority and uniform SSZ | P01, P02 | Generation/config/origin and per-anchor governance/L2 snapshot inputs authenticated for native QC; broader profile/Inbox/time/rules and normative SSZ/recovery coordination remain |
 | P04 | Strict Etna execution; FI in phase two | PARTIAL: native strict supplied-block replay complete | P01, P02 | B04 native execution/DA composition tested with genuine EVM/MPT; canonical-main source adoption, complete authenticated context and actual SGX consumer remain; FI phase two stays held |
-| P05 | Range consensus coverage, DA, cuts and statement | PARTIAL: native authenticated DA/range/statement composition | P02–P04 for full range | Matched Comet/EL identities and supplied cursor shape bind every interior cut and statement endpoint; native strict execution is joined; actual FI/context authority and final guest composition remain pending |
-| P06 | Provider, pipeline and backend wiring | PARTIAL: owned native input and existing-verifier adapter | P02–P05 | Serialization/replay component tested; actual collection, task identities and SGX/provider/pipeline consumption of the complete authenticated input remain |
+| P05 | Range consensus coverage, DA, cuts and statement | PARTIAL: native QC/bitmap/DA/SSZ/execution composition | P02–P04 for full range | Provided canonical certificates and authenticated current/next sets/bitmaps join strict execution and current statement; full FI/context and production guest acceptance remain pending |
+| P06 | Provider, pipeline and backend wiring | PARTIAL: owned input and native composed verifier | P02–P05 | Client-supplied Etna input adaptation, task identities and SGX/provider/pipeline consumption remain; no vote/QC collector is part of Raiko2 |
 | P07 | Both real guests, aggregation and proof acceptance | TODO | P05, P06 | Real proofs, child continuity, permitted L1 verifier combination and resource bounds |
 | P08 | Regression, independent final review and ready handoff | TODO | P01–P07 | Required checks, Unzen regressions and exact-head review; no unresolved material findings |
 
@@ -1783,7 +1822,7 @@ adding Etna provider code and `crates/pipeline/src/forks/etna` when needed; new
 No Etna provider/pipeline fork module exists at checkpoint `845ecbcb`.
 
 - [ ] Define and review the concrete complete guest-input/output types from P02–P05 before wiring collection. Use the existing Preflight/Validation/PipelineSpec and GuestInputCodec seams; do not invent a generic Protocol framework.
-- [ ] Collect raw consensus/execution/L1/FI/DA material, distinguish missing history from authenticated contradictions and feed the same guest relation on both backends.
+- [ ] Accept supplied raw consensus/execution/L1/FI/DA material, distinguish missing history from authenticated contradictions and feed the same verifier relation on both backends. Do not add vote/QC collection or consensus networking.
 - [ ] Bind task/cache/artifact identities to range origin, generation, rules/spec ABI, image and ordered content/reference; preserve retry/restart and cancellation behavior without reinterpreting existing Unzen proposal IDs.
 - [ ] Reuse the existing request/provider/pipeline/queue ownership and update API/config documentation only for actual surface changes.
 

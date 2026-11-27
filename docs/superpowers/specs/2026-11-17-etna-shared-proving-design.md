@@ -21,6 +21,18 @@ architecture and SGX-first delivery. Broader context/time/rules and normative
 anchor/landing gates stay explicit. Native component completion is not actual
 enclave signing, image registration or L1 acceptance.
 
+The native implementation now consumes supplied canonical Comet blocks, required
+certificates and authenticated state witnesses through
+`verify_blob_range_statement_consensus`. Source `a33e33c6` passed locked native
+CI and independent review/behavioral verification, including all 74 focused
+functions. It binds the staking configuration to the actual EVM target and
+reads committee/bitmap inputs through the existing batched sparse witness engine.
+It does not collect votes/QCs, synchronize nodes, produce blocks or sign messages.
+The current envelope is exactly `[block, anchor, forced]`; the previous committee
+witness slot and old landing fields reject. This is native component evidence;
+complete profile/time/rules/FI authority and SGX request/signature/landing
+integration remain separate gates.
+
 ## Agreed direction: one explicit reference Q, owned by the lander (2026-11-27)
 
 This replaces the optional-Q/outer-attachment amendment discussed earlier on

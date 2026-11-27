@@ -34,6 +34,7 @@ reth-ethereum-primitives = { git = "https://github.com/ethereum-optimism/reth", 
 ] }
 
 [dev-dependencies]
+serde_json.workspace = true
 alloy-trie.workspace = true
 reth-evm.workspace = true
 reth-revm.workspace = true

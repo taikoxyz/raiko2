@@ -17,7 +17,8 @@ pub struct L1HistoryLimits {
 }
 
 /// One auxiliary node, indexed relative to its own tree root.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SszProofNode {
     /// Positive generalized index. Helpers are supplied in ascending order.
     pub index: u64,
@@ -26,7 +27,8 @@ pub struct SszProofNode {
 }
 
 /// The five consensus-layer `BeaconBlockHeader` fields.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BeaconHeader {
     /// Produced beacon slot.
     pub slot: u64,

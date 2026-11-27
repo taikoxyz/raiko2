@@ -11,6 +11,7 @@ use alethia_reth_chainspec::{spec::TaikoDevnetConfigExt, TAIKO_DEVNET};
 use alethia_reth_consensus::eip4396::{calculate_next_block_eip4396_base_fee, MIN_BASE_FEE};
 use alloy_consensus::{SignableTransaction, TrieAccount, TxEip1559};
 use alloy_eips_execution::{
+    eip2718::Encodable2718,
     eip2935::{HISTORY_STORAGE_ADDRESS, HISTORY_STORAGE_CODE},
     eip4788::{BEACON_ROOTS_ADDRESS, BEACON_ROOTS_CODE},
 };
@@ -501,4 +502,353 @@ fn native_etna_recovers_signers_from_original_transaction_signatures() {
         format!("{error:#}").to_lowercase().contains("signer"),
         "{error:?}"
     );
+}
+
+impl ExecutingRange {
+    fn input(&self) -> raiko2_protocol_etna::input::RangeInput {
+        use raiko2_protocol_etna::input::{
+            L1HistoryInput, LandStatementInput, RangeBlockInput, RangeInput,
+        };
+        let range = &self.authenticated.range;
+        let cuts = range.cut_leaves();
+        let statement = range.statement(&self.authenticated.hashes, &cuts);
+        RangeInput {
+            blocks: range
+                .blocks
+                .iter()
+                .map(|block| RangeBlockInput {
+                    comet_header: block.comet.header.clone(),
+                    comet_transactions: block.comet.data.clone(),
+                    execution_header: block.execution.clone(),
+                    execution_transactions: block
+                        .transactions
+                        .iter()
+                        .map(Encodable2718::encoded_2718)
+                        .collect(),
+                })
+                .collect(),
+            statement: LandStatementInput::from(&statement),
+            post_block_cursors: vec![0; range.blocks.len()],
+            parent_execution_header: range.parent.clone(),
+            l1_history: L1HistoryInput::from(range.l1_proof(&range.openings(&range.l1_headers))),
+        }
+    }
+
+    fn verify_input(
+        &self,
+        input: &raiko2_protocol_etna::input::RangeInput,
+    ) -> anyhow::Result<B256> {
+        let resources: Vec<_> = self
+            .witnesses
+            .iter()
+            .map(|witness| EtnaBlockExecutionWitness {
+                witness,
+                ancestor_headers: &witness.headers,
+            })
+            .collect();
+        crate::etna::verify_range_input_execution(
+            input,
+            &self.authenticated.source,
+            &self.authenticated.range.context,
+            &resources,
+            &[],
+            L1HistoryLimits {
+                max_headers: 131_072,
+                max_proof_nodes: 128,
+            },
+            &config(),
+        )
+    }
+}
+
+#[test]
+fn native_etna_owned_input_roundtrip_replays_original_range() {
+    for (count, transactions) in [(1, false), (1, true), (2, true)] {
+        let fixture = ExecutingRange::new(count, transactions);
+        let input = fixture.input();
+        let encoded = serde_json::to_vec(&input).unwrap();
+        let decoded = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(
+            fixture.verify_input(&decoded).unwrap(),
+            fixture.verify().unwrap()
+        );
+        assert_eq!(serde_json::to_vec(&decoded).unwrap(), encoded);
+    }
+}
+
+#[test]
+fn native_etna_owned_input_rejects_changed_original_and_interior_transactions() {
+    let fixture = ExecutingRange::new(2, true);
+    for block in 0..2 {
+        let mut encoded = serde_json::to_value(fixture.input()).unwrap();
+        encoded["blocks"][block]["execution_transactions"][0] =
+            serde_json::to_value(transaction(99).encoded_2718()).unwrap();
+        let decoded = serde_json::from_value(encoded).unwrap();
+        assert!(fixture.verify_input(&decoded).is_err(), "block {block}");
+    }
+    for malformed in [vec![], vec![0x02], {
+        let mut raw = transaction(0).encoded_2718();
+        raw.push(0);
+        raw
+    }] {
+        let mut input = fixture.input();
+        input.blocks[0].execution_transactions[0] = malformed;
+        let decoded = serde_json::from_slice(&serde_json::to_vec(&input).unwrap()).unwrap();
+        assert!(fixture.verify_input(&decoded).is_err());
+    }
+}
+
+#[test]
+fn native_etna_owned_input_rejects_raw_header_and_statement_reference_mutations() {
+    let fixture = ExecutingRange::new(2, true);
+    for mutation in [
+        "reference",
+        "anchor",
+        "q_number",
+        "q_hash",
+        "comet_bytes",
+        "execution_header",
+    ] {
+        let mut input = fixture.input();
+        match mutation {
+            "reference" => input.l1_history.reference_header[0] ^= 1,
+            "anchor" => input.l1_history.anchors[0].raw_header[0] ^= 1,
+            "q_number" => input.statement.input.l1_reference_block_number += U256::ONE,
+            "q_hash" => input.statement.l1_reference_block_hash = B256::ZERO,
+            "comet_bytes" => input.blocks[0].comet_transactions[0][0] ^= 1,
+            "execution_header" => input.blocks[0].execution_header.state_root = B256::ZERO,
+            _ => unreachable!(),
+        }
+        let decoded = serde_json::from_slice(&serde_json::to_vec(&input).unwrap()).unwrap();
+        assert!(fixture.verify_input(&decoded).is_err(), "{mutation}");
+    }
+}
+
+#[test]
+fn native_etna_owned_input_rejects_missing_extra_blocks_and_witnesses() {
+    let mut fixture = ExecutingRange::new(2, true);
+    for extra in [false, true] {
+        let mut input = fixture.input();
+        if extra {
+            input.blocks.push(input.blocks[0].clone());
+        } else {
+            input.blocks.pop();
+        }
+        let decoded = serde_json::from_slice(&serde_json::to_vec(&input).unwrap()).unwrap();
+        assert!(fixture.verify_input(&decoded).is_err());
+    }
+    let decoded = serde_json::from_slice(&serde_json::to_vec(&fixture.input()).unwrap()).unwrap();
+    fixture.witnesses.push(fixture.witnesses[0].clone());
+    assert!(fixture.verify_input(&decoded).is_err());
+    fixture.witnesses.truncate(1);
+    assert!(fixture.verify_input(&decoded).is_err());
+}
+
+#[test]
+fn native_etna_owned_input_cannot_supply_authority_or_limits() {
+    let fixture = ExecutingRange::new(1, false);
+    for field in ["context", "limits", "config", "host_verified"] {
+        let mut encoded = serde_json::to_value(fixture.input()).unwrap();
+        encoded[field] = serde_json::json!({"max_headers": usize::MAX});
+        assert!(
+            serde_json::from_value::<raiko2_protocol_etna::input::RangeInput>(encoded).is_err(),
+            "{field}"
+        );
+    }
+    let mut encoded = serde_json::to_value(fixture.input()).unwrap();
+    encoded["l1_history"]["limits"] = serde_json::json!({"max_headers": usize::MAX});
+    assert!(serde_json::from_value::<raiko2_protocol_etna::input::RangeInput>(encoded).is_err());
+}
+
+#[test]
+fn native_etna_owned_input_preflights_counts_and_transaction_byte_budget() {
+    let fixture = ExecutingRange::new(1, true);
+    let input = fixture.input();
+    let resources: Vec<_> = fixture
+        .witnesses
+        .iter()
+        .map(|witness| EtnaBlockExecutionWitness {
+            witness,
+            ancestor_headers: &witness.headers,
+        })
+        .collect();
+    let mut context = fixture.authenticated.range.context;
+    context.max_envelope_bytes = 0;
+    let error = crate::etna::verify_range_input_execution(
+        &input,
+        &fixture.authenticated.source,
+        &context,
+        &resources,
+        &[],
+        L1HistoryLimits {
+            max_headers: 131_072,
+            max_proof_nodes: 128,
+        },
+        &config(),
+    )
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("trusted envelope limit"),
+        "{error:?}"
+    );
+    let mut input = input;
+    input.post_block_cursors.clear();
+    input.blocks[0].execution_transactions[0] = vec![0x02];
+    let error = fixture.verify_input(&input).unwrap_err();
+    assert!(error.to_string().contains("cursor count"), "{error:?}");
+}
+
+// Independent regressions reuse the existing genuine EVM/MPT fixture.
+
+fn independent_roundtrip(
+    input: &raiko2_protocol_etna::input::RangeInput,
+) -> raiko2_protocol_etna::input::RangeInput {
+    serde_json::from_slice(&serde_json::to_vec(input).unwrap()).unwrap()
+}
+
+#[test]
+fn owned_input_independent_rejects_all_list_count_mismatches() {
+    let fixture = ExecutingRange::new(2, true);
+    let original = fixture.input();
+    assert!(fixture
+        .verify_input(&independent_roundtrip(&original))
+        .is_ok());
+    for mutation in [
+        "block_missing",
+        "block_extra",
+        "cursor_missing",
+        "cursor_extra",
+        "tx_missing",
+        "tx_extra",
+        "comet_missing",
+        "comet_extra",
+        "cut_missing",
+        "cut_extra",
+    ] {
+        let mut input = independent_roundtrip(&original);
+        match mutation {
+            "block_missing" => {
+                input.blocks.pop();
+            }
+            "block_extra" => {
+                input
+                    .blocks
+                    .push(independent_roundtrip(&original).blocks.remove(1));
+            }
+            "cursor_missing" => {
+                input.post_block_cursors.pop();
+            }
+            "cursor_extra" => input.post_block_cursors.push(0),
+            "tx_missing" => {
+                input.blocks[1].execution_transactions.pop();
+            }
+            "tx_extra" => {
+                let tx = input.blocks[1].execution_transactions[0].clone();
+                input.blocks[1].execution_transactions.push(tx);
+            }
+            "comet_missing" => {
+                input.blocks[1].comet_transactions.pop();
+            }
+            "comet_extra" => {
+                let tx = input.blocks[1].comet_transactions[0].clone();
+                input.blocks[1].comet_transactions.push(tx);
+            }
+            "cut_missing" => {
+                input.statement.cut_leaves.pop();
+            }
+            "cut_extra" => input.statement.cut_leaves.push(B256::ZERO),
+            _ => unreachable!(),
+        }
+        assert!(fixture.verify_input(&input).is_err(), "{mutation}");
+    }
+}
+
+#[test]
+fn owned_input_independent_rejects_malformed_first_and_interior_transaction_bytes() {
+    let fixture = ExecutingRange::new(2, true);
+    let original = fixture.input();
+    for block_index in [0, 1] {
+        for mutation in ["empty", "truncated", "trailing", "type"] {
+            let mut input = independent_roundtrip(&original);
+            let bytes = &mut input.blocks[block_index].execution_transactions[1];
+            match mutation {
+                "empty" => bytes.clear(),
+                "truncated" => {
+                    bytes.pop();
+                }
+                "trailing" => bytes.push(0),
+                "type" => bytes[0] = 0x7f,
+                _ => unreachable!(),
+            }
+            assert!(
+                fixture.verify_input(&input).is_err(),
+                "block {block_index}, {mutation}"
+            );
+        }
+    }
+}
+
+#[test]
+fn owned_input_independent_preserves_selected_q_and_rejects_replacement() {
+    let fixture = ExecutingRange::new(2, true);
+    let original = fixture.input();
+    for mutation in ["statement_number", "statement_hash", "raw_q", "raw_anchor"] {
+        let mut input = independent_roundtrip(&original);
+        match mutation {
+            "statement_number" => input.statement.input.l1_reference_block_number += U256::ONE,
+            "statement_hash" => input.statement.l1_reference_block_hash = B256::repeat_byte(0x91),
+            "raw_q" => input.l1_history.reference_header.push(0),
+            "raw_anchor" => input.l1_history.anchors[0].raw_header.push(0),
+            _ => unreachable!(),
+        }
+        assert!(fixture.verify_input(&input).is_err(), "{mutation}");
+    }
+}
+
+#[test]
+fn owned_input_independent_rejects_foreign_authority_json() {
+    use raiko2_protocol_etna::input::RangeInput;
+    let fixture = ExecutingRange::new(1, false);
+    let original = serde_json::to_value(fixture.input()).unwrap();
+    for field in [
+        "context",
+        "domain",
+        "limits",
+        "config",
+        "execution_config",
+        "authenticated",
+        "host_verified",
+        "skip",
+        "max_blocks",
+        "max_envelope_bytes",
+    ] {
+        let mut value = original.clone();
+        value[field] = serde_json::json!(true);
+        assert!(
+            serde_json::from_value::<RangeInput>(value).is_err(),
+            "{field}"
+        );
+    }
+    for target in ["block", "statement"] {
+        let mut value = original.clone();
+        let object = if target == "block" {
+            &mut value["blocks"][0]
+        } else {
+            &mut value["statement"]
+        };
+        object["host_verified"] = serde_json::json!(true);
+        assert!(
+            serde_json::from_value::<RangeInput>(value).is_err(),
+            "{target}"
+        );
+    }
+    for value in [
+        serde_json::json!(-1),
+        serde_json::json!(256),
+        serde_json::json!("0"),
+    ] {
+        let mut encoded = original.clone();
+        encoded["l1_history"]["reference_header"][0] = value;
+        assert!(serde_json::from_value::<RangeInput>(encoded).is_err());
+    }
 }

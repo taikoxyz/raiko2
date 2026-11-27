@@ -8549,6 +8549,7 @@ dependencies = [
  "reth-revm 2.7.0",
  "reth-trie-common 2.7.0",
  "risc0-ethereum-trie",
+ "serde_json",
  "sha2 0.10.9",
 ]
 
@@ -8664,6 +8665,7 @@ dependencies = [
  "k256",
  "prost 0.13.5",
  "serde_json",
+ "serde",
  "sha2 0.10.9",
  "tendermint",
  "tendermint-proto",

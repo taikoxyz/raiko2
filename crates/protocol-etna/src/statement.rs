@@ -13,7 +13,8 @@ use etna_core::schedule::UINT48_MAX;
 
 sol! {
     /// The eight static fields of the proposed Etna Inbox landing input.
-    #[derive(Debug, PartialEq, Eq)]
+    #[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
     struct LandInput {
         /// Height of the proof origin.
         uint256 parent_height;

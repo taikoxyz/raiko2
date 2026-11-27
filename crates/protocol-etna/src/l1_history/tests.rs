@@ -513,3 +513,88 @@ fn schedules_have_explicit_unsupported_and_simultaneous_fork_boundaries() {
     assert!(mainnet.schema(144_896 * 32 - 1).is_err());
     assert!(Network::from_id((U256::from(1) << 64) + U256::from(1)).is_err());
 }
+
+#[test]
+fn owned_input_independent_replays_public_mainnet_sparse_history() {
+    use crate::input::L1HistoryInput;
+    with_mainnet(|q_number, q_hash, proof| {
+        let original = verify_l1_history(U256::from(1), q_number, q_hash, &proof).unwrap();
+        let expected: Vec<_> = original
+            .iter()
+            .map(|header| {
+                (
+                    header.number(),
+                    header.hash(),
+                    header.state_root(),
+                    header.raw().to_vec(),
+                )
+            })
+            .collect();
+        let encoded = serde_json::to_vec(&L1HistoryInput::from(proof)).unwrap();
+        let decoded: L1HistoryInput = serde_json::from_slice(&encoded).unwrap();
+        let actual = decoded
+            .with_proof(proof.limits, |borrowed| {
+                verify_l1_history(U256::from(1), q_number, q_hash, &borrowed).map(|headers| {
+                    headers
+                        .iter()
+                        .map(|header| {
+                            (
+                                header.number(),
+                                header.hash(),
+                                header.state_root(),
+                                header.raw().to_vec(),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(serde_json::to_vec(&decoded).unwrap(), encoded);
+
+        for mutation in [
+            "state_root",
+            "state_index",
+            "period_root",
+            "period_index",
+            "summary_length",
+            "raw_q",
+        ] {
+            let mut changed: L1HistoryInput = serde_json::from_slice(&encoded).unwrap();
+            match mutation {
+                "state_root" => changed.beacon.as_mut().unwrap().state_helpers[0].root[0] ^= 1,
+                "state_index" => changed.beacon.as_mut().unwrap().state_helpers[0].index = 0,
+                "period_root" => {
+                    changed.beacon.as_mut().unwrap().periods[0].helpers[0].root[0] ^= 1
+                }
+                "period_index" => changed.beacon.as_mut().unwrap().periods[0].helpers[0].index = 0,
+                "summary_length" => changed.beacon.as_mut().unwrap().summary_length = None,
+                "raw_q" => changed.reference_header.push(0),
+                _ => unreachable!(),
+            }
+            let result = changed
+                .with_proof(proof.limits, |borrowed| {
+                    verify_l1_history(U256::from(1), q_number, q_hash, &borrowed).map(|_| ())
+                })
+                .unwrap();
+            assert!(result.is_err(), "{mutation}");
+        }
+
+        for limits in [
+            L1HistoryLimits {
+                max_headers: 0,
+                max_proof_nodes: usize::MAX,
+            },
+            L1HistoryLimits {
+                max_headers: usize::MAX,
+                max_proof_nodes: 0,
+            },
+        ] {
+            assert!(matches!(
+                decoded.with_proof(limits, |_| panic!("budget callback reached")),
+                Err(L1HistoryError::Budget)
+            ));
+        }
+    });
+}

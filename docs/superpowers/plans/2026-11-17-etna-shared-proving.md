@@ -17,6 +17,52 @@ RISC0 3.0.5 and SP1 6.8.1 at the recorded feasibility checkpoint.
 **Spec:** [Shared proving design](../specs/2026-11-17-etna-shared-proving-design.md),
 including its current planning-baseline amendment.
 
+## Active SGX input batch (2026-11-27)
+
+Continue the SGX-first plan through owned input plumbing. The current native
+range relation remains a component: authenticated context/profile/committee and
+QC obligations are not replaced by a host assertion or a serialization adapter.
+Use the existing execution witnesses, shared nodes, KZG, SSZ and stateless replay.
+No new prover architecture, SGX endpoint or signing path is introduced by this
+batch. The encoded-input byte limit is an outer caller obligation; serde is not
+a pre-allocation resource limiter.
+
+### Task 13: Owned native input and existing-verifier adapter
+
+- [ ] Add owned serializable range, statement and L1-history witness inputs in
+  `protocol-etna`, preserving original bytes, explicit Q, complete range/cut
+  lists and every SSZ helper/length field. Reject unknown JSON fields. Reuse the
+  existing statement and leaf types; keep deployment context, resource limits
+  and EVM configuration outside the serialized request.
+- [ ] Borrow those inputs into the existing native verifier through a narrow
+  `guest-common` adapter. Decode canonical original transaction bytes, reuse
+  existing per-block execution witnesses and shared state nodes, and return a
+  digest only after unchanged full native replay succeeds. Keep the same
+  context, consensus and authority obligations as the existing entrypoint.
+- [ ] Add deserialized real-EVM range success and mutation regressions, exact
+  statement/history roundtrips and caller-owned budget/authority controls.
+  Record RED/GREEN execution separately from source-only checks. No local
+  Cargo/SDK/ELF/image build while the shared disk is at its reserve.
+
+### Task 14: Independent verification and draft publication
+
+- [ ] Independently review original requirements, complete source diff and
+  allocation/borrowing/failure paths; independently exercise the serialized
+  input through real native tests. Recheck any material fixes.
+- [ ] Run formatting, exact dependency/lock checks and focused native CI; read
+  actual checkout SHA, test names and outcomes. Update this plan and draft #305
+  with observed evidence, keeping SGX-01..04 and existing merge gates distinct.
+
+The generic SGX wrapper was rechecked against live protocol source
+[`87f95412`](https://github.com/taikoxyz/taiko-mono/tree/87f954124e59ce8008c20ef186531bfb1609e222/packages/protocol/contracts/layer1/verifiers):
+`LibPublicInput` hashes five ABI words (VERIFY_PROOF, L2 chain ID, SGX
+subverifier address, statement digest, instance address); `SgxVerifier` accepts
+89 bytes (uint32 instance ID, address, recoverable signature). This confirms
+reuse potential, not an Etna Inbox deployment or complete signing relation.
+The fresh branch SPEC retains the approved 21-word statement and per-height
+cuts, with no ValState settlement fields. Concrete verifier/Inbox identity,
+complete authenticated context and QC relation must precede signing and landing.
+
 ## Native execution source checkpoint (2026-11-27)
 
 B04-1/2/3 now have an implemented native entrypoint:

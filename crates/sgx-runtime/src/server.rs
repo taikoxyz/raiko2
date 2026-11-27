@@ -132,11 +132,7 @@ async fn prove_etna<P>(
 where
     P: TeeProvider + Clone + Send + Sync + 'static,
 {
-    let result = if !state.service_config.fork.eq_ignore_ascii_case("etna") {
-        Err(RequestFailure::invalid_request(
-            "Etna endpoint requires --fork etna",
-        ))
-    } else {
+    let result = if state.service_config.fork.eq_ignore_ascii_case("etna") {
         match request {
             Ok(Json(request)) => crate::etna::prove_etna_request(
                 &state.provider,
@@ -145,6 +141,10 @@ where
             ),
             Err(err) => Err(RequestFailure::invalid_json(err.body_text())),
         }
+    } else {
+        Err(RequestFailure::invalid_request(
+            "Etna endpoint requires --fork etna",
+        ))
     };
     match result {
         Ok(response) => (axum::http::StatusCode::OK, Json(response)),

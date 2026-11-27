@@ -190,14 +190,23 @@ impl ExecutingRange {
                     MIN_BASE_FEE,
                 )
             };
+            let prev_randao = if explicit_environment.is_some() {
+                let mut words = [0u8; 64];
+                words[..32].copy_from_slice(&parent.difficulty.to_be_bytes::<32>());
+                words[32..].copy_from_slice(
+                    &U256::from(parent.number.checked_add(1).unwrap()).to_be_bytes::<32>(),
+                );
+                keccak256(words)
+            } else {
+                B256::ZERO
+            };
             let attrs = TaikoNextBlockEnvAttributes {
                 timestamp: explicit_environment
                     .map_or(100 + u64::try_from(index).unwrap() * 4, |_| {
                         fixture.execution.timestamp
                     }),
                 suggested_fee_recipient: Address::with_last_byte(0x44),
-                prev_randao: explicit_environment
-                    .map_or(B256::ZERO, |_| fixture.execution.mix_hash),
+                prev_randao,
                 gas_limit: explicit_environment.map_or(30_000_000, |_| fixture.execution.gas_limit),
                 extra_data: fixture.execution.extra_data.clone(),
                 base_fee_per_gas: base_fee,
@@ -278,6 +287,7 @@ impl ExecutingRange {
                         timestamp: attrs.timestamp,
                         beneficiary: attrs.suggested_fee_recipient,
                         gas_limit: attrs.gas_limit,
+                        mix_hash: attrs.prev_randao,
                         extra_data: attrs.extra_data,
                         base_fee_per_gas: Some(attrs.base_fee_per_gas),
                         parent_beacon_block_root: attrs.parent_beacon_block_root,
@@ -298,6 +308,7 @@ impl ExecutingRange {
                 state_trie.hash_slow(),
             )
             .unwrap();
+            assert_eq!(block.header().mix_hash, attrs.prev_randao);
             fixture.execution = block.header().clone();
             fixture.transactions = transactions;
             let encoded: Vec<_> = fixture

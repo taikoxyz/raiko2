@@ -245,9 +245,6 @@ impl Fixture {
             for (index, block) in range.blocks.iter_mut().enumerate() {
                 block.execution.timestamp = anchor_timestamp + u64::try_from(index).unwrap() * 4;
                 block.execution.gas_limit = 45_000_000;
-                let mut words = [0u8; 64];
-                words[32..].copy_from_slice(&U256::from(index + 1).to_be_bytes::<32>());
-                block.execution.mix_hash = keccak256(words);
                 block.comet.header.time = tendermint::Time::from_unix_timestamp(
                     i64::try_from(block.execution.timestamp).unwrap(),
                     0,

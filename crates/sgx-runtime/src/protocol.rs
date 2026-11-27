@@ -253,7 +253,7 @@ mod etna_independent_tests {
             // Alternating test identities expose a domain/signing identity split if
             // helper stages independently reload the key during one proof operation.
             Ok(SecretKey::from_slice(
-                &[if read % 2 == 0 { 7 } else { 8 }; 32],
+                &[if read.is_multiple_of(2) { 7 } else { 8 }; 32],
             )?)
         }
         fn load_quote(&self, _: Address) -> Result<Vec<u8>> {

@@ -203,7 +203,7 @@ mod tests {
         let config_dir = temp_dir("registered");
         save_registered_instance_ids(
             &config_dir,
-            &std::collections::BTreeMap::from([("shasta".to_string(), 3131899904)]),
+            &std::collections::BTreeMap::from([("shasta".to_string(), 3_131_899_904)]),
         )
         .expect("save mapping");
         let global_opts = GlobalOpts {
@@ -214,7 +214,7 @@ mod tests {
         let serve_opts = ServeOpts::default();
 
         let config = resolve_service_config(&global_opts, &serve_opts).expect("service config");
-        assert_eq!(config.instance_id, 3131899904);
+        assert_eq!(config.instance_id, 3_131_899_904);
     }
 
     #[test]

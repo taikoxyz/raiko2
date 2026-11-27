@@ -248,7 +248,7 @@ mod tests {
     fn registered_instance_ids_roundtrip() {
         let dir = temp_dir("registered");
         let want: RegisteredInstanceIds = BTreeMap::from([
-            ("shasta".to_string(), 3131899904),
+            ("shasta".to_string(), 3_131_899_904),
             ("pacaya".to_string(), 7),
         ]);
 

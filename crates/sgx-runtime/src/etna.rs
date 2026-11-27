@@ -224,7 +224,7 @@ pub(crate) mod independent_tests {
 #[cfg(test)]
 mod generated_fixture_independent_tests {
     use super::*;
-    use alloy_primitives::B256;
+    use alloy_primitives::{Address, B256};
     use axum::{
         body::{Body, to_bytes},
         http::{Request, StatusCode},

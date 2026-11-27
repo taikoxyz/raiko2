@@ -221,7 +221,7 @@ pub fn verify_blob_range_statement_consensus(
         consensus,
         shared_state_nodes,
     )?;
-    let mut schedule = vec![if context.parent_height + 1 <= context.origin_height + 2 {
+    let mut schedule = vec![if context.parent_height < context.origin_height + 2 {
         origin_set.clone()
     } else {
         parent

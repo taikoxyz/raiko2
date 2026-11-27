@@ -254,7 +254,7 @@ impl Fixture {
             Candidate::Stale => vec![0x60, 0],
             Candidate::FullWidthHeight => {
                 let mut code = vec![0x43, 0x7f];
-                code.extend_from_slice(&(U256::from(1) << 200).to_be_bytes::<32>());
+                code.extend_from_slice(&(U256::from(1) << 200usize).to_be_bytes::<32>());
                 code.push(0x17); // OR preserves the real low height but adds an invalid high bit.
                 code
             }

@@ -249,7 +249,8 @@ mod tests {
             Address::from_str("0x00f9f60C79e38c08b785eE4F1a849900693C6630").expect("verifier");
         let proposer =
             Address::from_str("0x4444444444444444444444444444444444444444").expect("proposer");
-        let checkpoint_hash = B256::from([proposal_id as u8; 32]);
+        let fixture_byte = proposal_id.to_le_bytes()[0];
+        let checkpoint_hash = B256::from([fixture_byte; 32]);
         ProofCarryData {
             chain_id: 167_013,
             verifier,
@@ -265,8 +266,8 @@ mod tests {
                 },
                 checkpoint: raiko2_protocol_shasta::shasta::Checkpoint {
                     blockNumber: Uint::from(40u64 + proposal_id),
-                    blockHash: B256::from([proposal_id as u8 + 1; 32]),
-                    stateRoot: B256::from([proposal_id as u8 + 2; 32]),
+                    blockHash: B256::from([fixture_byte + 1; 32]),
+                    stateRoot: B256::from([fixture_byte + 2; 32]),
                 },
             },
         }

@@ -204,7 +204,7 @@ pub(crate) mod independent_tests {
             match mutation {
                 "schema" => request.schema = "raiko2-shasta-request-v1".to_owned(),
                 "wide_chain" => {
-                    request.payload.input.range.statement.l2_chain_id = U256::ONE << 64usize
+                    request.payload.input.range.statement.l2_chain_id = U256::ONE << 64usize;
                 }
                 "zero_statement" => request.payload.expected_statement_hash = B256::ZERO,
                 "zero_verifier" => request.payload.verifier_address = Address::ZERO,
@@ -292,15 +292,24 @@ mod generated_fixture_independent_tests {
         );
     }
 
-    #[tokio::test]
-    #[ignore = "requires a generated genuine acceptance request; CI runs this explicitly"]
-    async fn independent_generated_etna_request_verifies_and_signs_through_native_http() {
+    fn generated_request() -> (Raiko2EtnaRequest, Vec<u8>) {
         let path = std::env::var_os("RAIKO2_ETNA_TEST_REQUEST_OUTPUT")
             .expect("CI must export the genuine acceptance request before this test");
         let bytes = std::fs::read(path).unwrap();
         let request: Raiko2EtnaRequest = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(request.schema, RAIKO2_ETNA_REQUEST_SCHEMA);
-        assert!(!request.payload.input.consensus.required_commits.is_empty());
+        let no_commits: &[Vec<u8>] = &[];
+        assert_ne!(
+            request.payload.input.consensus.required_commits.as_slice(),
+            no_commits
+        );
+        (request, bytes)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a generated genuine acceptance request; CI runs this explicitly"]
+    async fn independent_generated_etna_request_verifies_and_signs_through_native_http() {
+        let (request, bytes) = generated_request();
         let statement = request.payload.expected_statement_hash;
         let verifier = request.payload.verifier_address;
         let chain = u64::try_from(request.payload.input.range.statement.l2_chain_id).unwrap();

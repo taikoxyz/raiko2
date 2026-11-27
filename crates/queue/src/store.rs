@@ -72,6 +72,10 @@ impl Error for TaskStoreError {
 }
 
 #[async_trait]
+#[expect(
+    clippy::double_must_use,
+    reason = "async-trait adds must_use to already must-use boxed futures"
+)]
 pub trait TaskStore<P, O, Id>: Send + Sync
 where
     P: Send + 'static,

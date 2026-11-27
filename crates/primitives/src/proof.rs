@@ -87,6 +87,10 @@ impl std::fmt::Display for Proof {
 
 /// Trait for storing proof IDs.
 #[async_trait::async_trait]
+#[expect(
+    clippy::double_must_use,
+    reason = "async-trait adds must_use to already must-use boxed futures"
+)]
 pub trait IdWrite: Send {
     async fn store_id(&mut self, key: ProofKey, id: String) -> RaikoResult<()>;
     async fn remove_id(&mut self, key: ProofKey) -> RaikoResult<()>;
@@ -94,6 +98,10 @@ pub trait IdWrite: Send {
 
 /// Trait for reading proof IDs.
 #[async_trait::async_trait]
+#[expect(
+    clippy::double_must_use,
+    reason = "async-trait adds must_use to already must-use boxed futures"
+)]
 pub trait IdStore: IdWrite {
     async fn read_id(&mut self, key: ProofKey) -> RaikoResult<String>;
 }

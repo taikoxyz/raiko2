@@ -76,6 +76,10 @@ impl RemotePollerConfig {
 }
 
 #[async_trait::async_trait]
+#[expect(
+    clippy::double_must_use,
+    reason = "async-trait adds must_use to already must-use boxed futures"
+)]
 pub trait RemoteStatusSource: Send + Sync + 'static {
     async fn poll(
         &self,

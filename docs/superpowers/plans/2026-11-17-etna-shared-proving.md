@@ -34,18 +34,25 @@ its genesis constant and dependency edge; existing Unzen behavior is retained.
 Normal host/MSRV, CI and image build declarations align to Rust 1.99. The
 legacy BlobCoder EIPs edge remains separate from modern execution traits.
 
-Genuine EVM/MPT regression sources cover empty/full/two-block ranges, ordinary
+Genuine EVM/MPT regression tests cover empty/full/two-block ranges, ordinary
 first reverts/OOG, system-call state changes, invalid interior transactions,
 poisoned caches and forged parent/body/receipt/post-state commitments. Fixtures
 use synthetic consensus/L1 context; no fetched devnet run is claimed.
 
 Local exact old-decoder RED reproduced both shape defects (29 rejected/13
 accepted). The full Rust 1.99 RED run hit a 512 MiB growth guard before product
-compilation; no EVM test pass is claimed from that attempt. Subsequent native
-compilation/tests/lint are assigned to CI because shared disk is constrained.
-Actual metadata/lock identity and formatting checks passed; source and
-independent mutation regressions have been reviewed. Tasks remain unchecked
-until their behavioral acceptance evidence is recorded. No SDK/ELF/image or
+compilation; no EVM test pass is claimed from that attempt. CI at source
+`c05e20b6` (effective merge `295b8d9` into `3f4ec387`) then passed foundation,
+pipeline and runtime. The foundation log records 544 passes over 32 summaries,
+zero failures and one ignored pre-existing doctest; this includes repeated MPT
+metrics tests. All 20 new execution test names passed: nine composer cases and
+11 stateless cases, the latter also repeated under MPT metrics. Independent
+behavioral verification read the actual checkout and test names/results.
+Clippy found one misplaced import and Rust 1.99 warnings from async-trait's
+injected must_use attributes; a separately reviewed behavior-preserving fix
+moves the import and adds trait-scoped expectations for that generated lint.
+Final lint acceptance remains pending CI on the fixed head. Actual metadata,
+lock identities, formatting and independent source review passed. No SDK/ELF/image or
 proof build, SGX acceptance, merge, deployment or chain write was performed.
 
 The new entrypoint has a native regression consumer, not a production SGX
@@ -62,22 +69,22 @@ SGX. Existing QC management/FI-phase-two/context/contract gates remain separate.
 
 ### Task 11: Adopt current execution source and compose strict replay
 
-- [ ] Adopt immutable Alethia #248 source and compatible OP-reth/Alloy dependency
+- [x] Adopt immutable Alethia #248 source and compatible OP-reth/Alloy dependency
   identities. Preserve the deleted devnet Unzen API additively upstream rather
   than duplicating genesis policy in Raiko2. Development-branch pins are
   explicitly authorized for this draft; canonical-main adoption remains a
   merge-readiness gate. Use the source's required native Rust 1.99 toolchain
   without MSRV bypasses; keep SDK/ELF/image/proof builds out of this batch.
-- [ ] Add failing real-EVM regressions, then scope zero-root and privileged
+- [x] Add failing real-EVM regressions, then scope zero-root and privileged
   anchor/first-receipt assumptions by the trusted fork schedule. Keep legacy
   behavior and strict full-body execution, ordinary reverts/empty blocks and
   computed post-state checks. Never use candidate filtering for committed blocks.
-- [ ] Decode current 29-byte Etna extraData through the authoritative upstream
+- [x] Decode current 29-byte Etna extraData through the authoritative upstream
   type, retaining generation/anchor bindings. The upstream executor consumes
   the header's miss bitmap in its automatic block-start call. QC/miss-bitmap
   semantic authentication remains part of the held consensus design; no new
   policy or replacement executor is introduced here.
-- [ ] Connect the existing DA/range/SSZ composer to the existing witness-backed
+- [x] Connect the existing DA/range/SSZ composer to the existing witness-backed
   validator for every block, with exact committed transaction bytes, recovered
   signers, parent/header/body/state-root checks. Return the statement digest
   only after all replay succeeds. Keep projection-only APIs clearly partial.

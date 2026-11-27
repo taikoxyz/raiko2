@@ -1057,6 +1057,8 @@ impl ChainSpec {
     ///
     /// Returns an error when the chain is not Taiko or not supported.
     pub fn to_taiko_chain_spec(&self) -> Result<Arc<TaikoChainSpec>> {
+        use alethia_reth_chainspec::hardfork::TaikoHardforks as _;
+
         if !self.is_taiko {
             bail!(
                 "chain spec is not a Taiko chain and cannot be converted (chain_id={})",
@@ -1069,7 +1071,6 @@ impl ChainSpec {
         let mut spec = self.base_taiko_chain_spec_with_configured_devnet_unzen(base.as_ref())?;
         self.apply_configured_taiko_forks(&mut spec);
         alethia_reth_chainspec::spec::validate_etna_staking_address(&spec)?;
-        use alethia_reth_chainspec::hardfork::TaikoHardforks as _;
         match spec.taiko_fork_activation(AlethiaTaikoHardfork::Etna) {
             AlethiaForkCondition::Never => {}
             AlethiaForkCondition::Timestamp(timestamp) => ensure!(

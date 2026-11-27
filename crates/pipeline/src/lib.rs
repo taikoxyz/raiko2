@@ -448,6 +448,10 @@ impl<T> PipelineStageResult<T> {
 
 /// Build and validate a guest input for the hardfork.
 #[async_trait::async_trait]
+#[expect(
+    clippy::double_must_use,
+    reason = "async-trait adds must_use to already must-use boxed futures"
+)]
 pub trait Preflight: Send + Sync {
     type Input;
     async fn preflight<P: Provider>(
@@ -459,6 +463,10 @@ pub trait Preflight: Send + Sync {
 
 /// Build Taiko manifests for guest execution.
 #[async_trait::async_trait]
+#[expect(
+    clippy::double_must_use,
+    reason = "async-trait adds must_use to already must-use boxed futures"
+)]
 pub trait ManifestBuilder: Send + Sync {
     type Manifest: Send + Sync + 'static;
     async fn taiko_manifest(

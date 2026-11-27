@@ -191,6 +191,10 @@ pub trait RuntimeStoreScope: std::fmt::Debug + Send + Sync {
 }
 
 #[async_trait]
+#[expect(
+    clippy::double_must_use,
+    reason = "async-trait adds must_use to already must-use boxed futures"
+)]
 pub trait ProofObjectStore: RuntimeStoreScope {
     async fn put_if_absent(
         &self,
@@ -210,6 +214,10 @@ pub trait ProofObjectStore: RuntimeStoreScope {
 }
 
 #[async_trait]
+#[expect(
+    clippy::double_must_use,
+    reason = "async-trait adds must_use to already must-use boxed futures"
+)]
 pub trait RuntimeStateStore: RuntimeStoreScope {
     async fn load_runtime_state(&self) -> Result<Option<RuntimeStateObject>>;
 

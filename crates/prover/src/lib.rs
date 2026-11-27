@@ -221,6 +221,10 @@ pub(crate) async fn acquire_submission_checkpoint_permit(
 }
 
 #[async_trait::async_trait]
+#[expect(
+    clippy::double_must_use,
+    reason = "async-trait adds must_use to already must-use boxed futures"
+)]
 pub trait ProverProgressObserver: Send + Sync {
     async fn acquire_submission_checkpoint_permit(
         &self,
@@ -585,6 +589,10 @@ fn require_external_aggregate_proof_carry(
 
 /// Common prover trait for all proving backends.
 #[async_trait::async_trait]
+#[expect(
+    clippy::double_must_use,
+    reason = "async-trait adds must_use to already must-use boxed futures"
+)]
 pub trait Prover<B>: Send + Sync
 where
     B: ProverBackend,

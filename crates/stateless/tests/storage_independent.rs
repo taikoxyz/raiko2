@@ -45,14 +45,28 @@ fn independent_batch_combines_shared_nodes_and_rejects_unresolved_storage_child(
         storage_nodes.len() > 1,
         "fixture must require hashed child nodes"
     );
-    let shared: Vec<_> = storage_nodes
+    // Existing witnesses select either inline state or indexed shared state;
+    // the shared mode must index both account nodes and storage nodes.
+    let shared: Vec<_> = witness
+        .state
         .iter()
         .cloned()
-        .map(WitnessStateNode::from_bytes)
+        .chain(
+            storage_nodes
+                .iter()
+                .cloned()
+                .map(WitnessStateNode::from_bytes),
+        )
+        .collect();
+    let mut shared_witness = witness.clone();
+    shared_witness.state.clear();
+    shared_witness.state_indices = (0..shared.len())
+        .map(|index| u32::try_from(index).unwrap())
         .collect();
     let requests = [(account, U256::from(1)), (account, U256::from(999))];
     assert_eq!(
-        read_storage_batch_with_witness_resources(root, &requests, &witness, &shared).unwrap(),
+        read_storage_batch_with_witness_resources(root, &requests, &shared_witness, &shared)
+            .unwrap(),
         vec![U256::MAX - U256::ONE, U256::ZERO]
     );
     // Supply the authenticated account and actual storage root node, but no child opening.

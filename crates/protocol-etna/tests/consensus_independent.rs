@@ -50,11 +50,8 @@ fn independent_invalid_candidate_is_fallback_but_invalid_fallback_opening_is_err
     let valid = snapshot(&keys, 9);
     // A usable candidate still needs the deciding anchor's real fallback preimage.
     assert!(derive_signers(41, &valid, U256::ZERO, B256::ZERO, &keys).is_err());
-    for mut invalid in [
-        snapshot(&keys, 0),
-        snapshot(&keys, MAX_TOTAL_POWER + 1),
-        valid.clone(),
-    ] {
+    for power in [0, MAX_TOTAL_POWER + 1, 9] {
+        let mut invalid = snapshot(&keys, power);
         if invalid == valid {
             invalid.records[0] = invalid.records[127]; // duplicate key, not an empty seat
         }

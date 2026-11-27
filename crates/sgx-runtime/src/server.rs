@@ -36,6 +36,10 @@ where
 {
     Router::new()
         .route("/health", get(health))
+        .route(
+            "/prove/etna",
+            post(prove_etna::<P>).layer(DefaultBodyLimit::max(64 * 1024 * 1024)),
+        )
         .route("/prove/shasta", post(prove_shasta::<P>))
         .route("/prove/shasta-aggregate", post(prove_shasta_aggregate::<P>))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
@@ -115,6 +119,40 @@ fn aggregate_proposal_id_summary(
         first.to_string()
     } else {
         format!("{first}..{last}")
+    }
+}
+
+async fn prove_etna<P>(
+    State(state): State<SgxProver<P>>,
+    request: Result<Json<raiko2_prover::remote_prover::protocol::Raiko2EtnaRequest>, JsonRejection>,
+) -> (
+    axum::http::StatusCode,
+    Json<raiko2_prover::remote_prover::protocol::Raiko2ProofResponse>,
+)
+where
+    P: TeeProvider + Clone + Send + Sync + 'static,
+{
+    let result = if !state.service_config.fork.eq_ignore_ascii_case("etna") {
+        Err(RequestFailure::invalid_request(
+            "Etna endpoint requires --fork etna",
+        ))
+    } else {
+        match request {
+            Ok(Json(request)) => crate::etna::prove_etna_request(
+                &state.provider,
+                state.service_config.instance_id,
+                &request,
+            ),
+            Err(err) => Err(RequestFailure::invalid_json(err.body_text())),
+        }
+    };
+    match result {
+        Ok(response) => (axum::http::StatusCode::OK, Json(response)),
+        Err(failure) => {
+            warn!(instance_id = state.service_config.instance_id, code = failure.code,
+                  message = %failure.message, "sgx Etna prove request failed");
+            failure.into_response()
+        }
     }
 }
 
@@ -479,5 +517,71 @@ mod tests {
         };
 
         assert_eq!(aggregate_proposal_id_summary(&aggregate), "2222..2333");
+    }
+}
+
+// Append to sgx-runtime/src/server.rs; router oneshot needs no listener, keys or SGX device.
+#[cfg(test)]
+mod etna_http_independent_tests {
+    use super::*;
+    use crate::etna::independent_tests::{NoSignProvider, request};
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode},
+    };
+    use std::sync::atomic::Ordering;
+    use tower::util::ServiceExt;
+
+    #[tokio::test]
+    async fn independent_etna_http_enforces_fork_json_and_request_validation_before_signing() {
+        for (fork, body, expected_code, expected_message) in [
+            (
+                "shasta",
+                serde_json::to_vec(&request()).unwrap(),
+                "INVALID_REQUEST",
+                "fork etna",
+            ),
+            ("etna", b"{".to_vec(), "INVALID_JSON", ""),
+            (
+                "ETNA",
+                serde_json::to_vec(&request()).unwrap(),
+                "INVALID_REQUEST",
+                "empty",
+            ),
+        ] {
+            let provider = NoSignProvider::default();
+            let app = router(SgxProver {
+                provider: provider.clone(),
+                service_config: ServiceConfig {
+                    listen_addr: "127.0.0.1:0".to_owned(),
+                    fork: fork.to_owned(),
+                    instance_id: 1,
+                },
+            });
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/prove/etna")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{fork}");
+            let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+            let response: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(response["schema"], "raiko2-proof-v1");
+            assert_eq!(response["error"]["code"], expected_code);
+            assert!(
+                response["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains(expected_message)
+            );
+            assert!(response.get("result").is_none());
+            assert_eq!(provider.0.load(Ordering::SeqCst), 0);
+        }
     }
 }

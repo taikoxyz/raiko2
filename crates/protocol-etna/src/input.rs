@@ -305,9 +305,9 @@ pub struct L1CommitteeInput<W> {
 pub struct ParentConsensusInput {
     /// Existing Comet header representation, hashed against the authenticated parent identity.
     pub header: CometHeader,
-    /// Native keys and powers that must open the parent's validators_hash.
+    /// Native keys and powers that must open the parent's `validators_hash`.
     pub active: Vec<(etna_core::key::ConsensusKey, u64)>,
-    /// Native keys and powers that must open the parent's next_validators_hash.
+    /// Native keys and powers that must open the parent's `next_validators_hash`.
     pub next: Vec<(etna_core::key::ConsensusKey, u64)>,
     /// Exact raw p-anchor header used only by the parent-anchor exception.
     pub anchor_header: Vec<u8>,

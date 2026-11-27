@@ -130,7 +130,26 @@ fn owned_consensus_roundtrip_verifies_real_execution_qcs_and_parent_bootstrap() 
         let encoded = serde_json::to_vec(&input).unwrap();
         let decoded =
             serde_json::from_slice::<ConsensusRangeInput<ExecutionWitness>>(&encoded).unwrap();
-        assert_eq!(serde_json::to_vec(&decoded).unwrap(), encoded);
+        // JSON deserialization canonicalizes existing witness nodes by hash. Compare only
+        // those node bags without order; all native bytes, range lists and other arrays stay exact.
+        let normalize_state_order = |value: &mut serde_json::Value| {
+            let consensus = &mut value["consensus"];
+            consensus["reference_state"]["state"]
+                .as_array_mut()
+                .unwrap()
+                .sort_by_cached_key(|node| node.to_string());
+            for anchor in consensus["anchors"].as_array_mut().unwrap() {
+                anchor["witness"]["state"]
+                    .as_array_mut()
+                    .unwrap()
+                    .sort_by_cached_key(|node| node.to_string());
+            }
+        };
+        let mut expected: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        let mut actual = serde_json::to_value(&decoded).unwrap();
+        normalize_state_order(&mut expected);
+        normalize_state_order(&mut actual);
+        assert_eq!(actual, expected);
         assert_eq!(
             verify_owned(&fixture, start, &decoded, &source, &context, &parameters()).unwrap(),
             decoded.range.statement.as_statement().try_digest().unwrap()
@@ -382,3 +401,5 @@ fn independent_owned_wrong_trusted_domain_and_reference_remain_rejected() {
         );
     }
 }
+
+mod acceptance;

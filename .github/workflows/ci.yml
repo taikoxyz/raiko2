@@ -164,6 +164,9 @@ jobs:
       - name: clippy engine core
         run: cargo clippy --locked -p raiko2-engine --no-default-features -- -D warnings
 
+      - name: clippy SGX runtime
+        run: cargo clippy --locked -p raiko2-sgx-runtime --all-targets -- -D warnings
+
   rust-test-foundation:
     needs: changes
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflow == 'true' || github.event_name == 'workflow_dispatch'
@@ -284,6 +287,27 @@ jobs:
       # in the PR gate.
       - name: test engine core
         run: cargo test -p raiko2-engine --no-default-features
+
+      # The SGX service disables prover defaults, so this exercises the complete
+      # native Etna HTTP/signature path without RISC0/SP1 SDK artifact downloads.
+      - name: test SGX runtime
+        run: cargo test --locked -p raiko2-sgx-runtime --all-targets
+
+      - name: export genuine Etna request fixture
+        env:
+          RAIKO2_ETNA_TEST_REQUEST_OUTPUT: ${{ runner.temp }}/etna-request.json
+        run: >
+          cargo test --locked -p raiko2-guest-common
+          etna::tests::execution::consensus::owned::acceptance::native_acceptance_verifies_genuine_ranges_and_exports_sgx_request
+          -- --exact
+
+      - name: verify generated Etna request through SGX HTTP
+        env:
+          RAIKO2_ETNA_TEST_REQUEST_OUTPUT: ${{ runner.temp }}/etna-request.json
+        run: >
+          cargo test --locked -p raiko2-sgx-runtime
+          etna::generated_fixture_independent_tests::independent_generated_etna_request_verifies_and_signs_through_native_http
+          -- --ignored --exact
 
   # Keep prover and guest-launcher unit tests in the PR gate.
   rust-test-prover:

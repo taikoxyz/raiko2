@@ -13,6 +13,8 @@ raiko2-guest-common.workspace = true
 raiko2-primitives = { workspace = true, default-features = false }
 raiko2-primitives-shasta.workspace = true
 raiko2-protocol-shasta.workspace = true
+raiko2-protocol.workspace = true
+raiko2-protocol-etna.workspace = true
 raiko2-pipeline = { path = "../pipeline", default-features = false }
 raiko2-remote-poller.workspace = true
 anyhow.workspace = true

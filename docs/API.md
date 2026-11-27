@@ -1,5 +1,20 @@
 # Raiko2 API
 
+## Etna SGX development endpoint
+
+The dedicated `raiko2-sgx-prover` also exposes `POST /prove/etna` with
+`raiko2-etna-request-v1` when serving with `--fork etna`. This initial profile
+supports the built-in 167001 internal devnet and reuses existing execution
+witnesses, signer, quote and `raiko2-proof-v1` response types. It is a direct
+prover-backend API; adding it does not add an Etna task variant to the main
+asynchronous `/v4` queue. Existing Unzen/Shasta routes retain their format.
+
+See [Etna client integration](etna-client-integration.md) for the exact request
+fields, resource limits, public-input hash, witness mapping and client checklist.
+The endpoint verifies supplied blocks/QCs and complete context before signing;
+it does not collect QCs, choose Q or submit L1 transactions. FI is omitted from
+this first PoC. Software/native checks do not establish enclave or L1 acceptance.
+
 ## Overview
 
 Raiko2 exposes a `/v4` API for explicit proof-type proposal proving,

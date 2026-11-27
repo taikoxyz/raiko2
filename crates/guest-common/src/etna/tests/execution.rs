@@ -74,6 +74,13 @@ impl ExecutingRange {
     ) -> Self {
         let config = config();
         let count = range.blocks.len();
+        let explicit_environment = range
+            .blocks
+            .first()
+            .filter(|block| block.execution.gas_limit != 0)
+            .map(|block| (block.execution.timestamp, block.execution.gas_limit));
+        let first_timestamp = explicit_environment.map_or(100, |profile| profile.0);
+        let block_gas_limit = explicit_environment.map_or(30_000_000, |profile| profile.1);
         let mut db = InMemoryDB::default();
         let mut state_trie = Trie::default();
         let mut storage_tries = BTreeMap::<Address, Trie>::new();
@@ -144,8 +151,8 @@ impl ExecutingRange {
         );
         range.parent = Header {
             number: 0,
-            timestamp: 99,
-            gas_limit: 30_000_000,
+            timestamp: first_timestamp.checked_sub(1).unwrap(),
+            gas_limit: block_gas_limit,
             base_fee_per_gas: Some(25_000_000),
             state_root: state_trie.hash_slow(),
             ..Default::default()
@@ -184,10 +191,14 @@ impl ExecutingRange {
                 )
             };
             let attrs = TaikoNextBlockEnvAttributes {
-                timestamp: 100 + u64::try_from(index).unwrap() * 4,
+                timestamp: explicit_environment
+                    .map_or(100 + u64::try_from(index).unwrap() * 4, |_| {
+                        fixture.execution.timestamp
+                    }),
                 suggested_fee_recipient: Address::with_last_byte(0x44),
-                prev_randao: B256::ZERO,
-                gas_limit: 30_000_000,
+                prev_randao: explicit_environment
+                    .map_or(B256::ZERO, |_| fixture.execution.mix_hash),
+                gas_limit: explicit_environment.map_or(30_000_000, |_| fixture.execution.gas_limit),
                 extra_data: fixture.execution.extra_data.clone(),
                 base_fee_per_gas: base_fee,
                 parent_beacon_block_root: fixture.execution.parent_beacon_block_root,

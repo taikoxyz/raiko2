@@ -9,6 +9,7 @@ pub mod bootstrap;
 pub mod check;
 /// Runtime configuration support.
 pub mod config;
+mod etna;
 mod proposal;
 mod protocol;
 mod server;

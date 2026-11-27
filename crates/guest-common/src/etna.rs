@@ -1,5 +1,7 @@
 //! Etna blob payload projection and native strict execution.
 
+mod context;
+pub use context::{etna_devnet_config, verify_range_input_acceptance, EtnaAcceptancePolicy};
 mod consensus;
 pub use consensus::{
     verify_blob_range_statement_consensus, ConsensusParameters, ConsensusWitness,

@@ -12,8 +12,11 @@ asynchronous proposal-side proof requests. Every Taiko network runs the Unzen fo
 supports proposal validation and proving only for Unzen and later. Both proposal timestamps and every
 witness block timestamp must meet the input chain's built-in Unzen activation.
 
-Etna development currently exposes a native DA/range/anchor/strict-execution
-verifier; the production SGX route is still being integrated. The
+Etna development reuses the native DA/SSZ/EVM/QC verifier and the existing SGX
+runtime through an explicit internal-devnet request. See the
+[client integration contract](docs/etna-client-integration.md) for the dedicated
+endpoint, supported profile and remaining witness transport work. Real enclave
+and L1 acceptance remain unverified. The
 [Etna implementation plan](docs/superpowers/plans/2026-11-17-etna-shared-proving.md)
 records its exact development pins, native Rust 1.99 requirement and acceptance
 gates. The default network schedules remain unchanged.

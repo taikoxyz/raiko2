@@ -1,3 +1,8 @@
+mod etna;
+pub use etna::{
+    RAIKO2_ETNA_REQUEST_SCHEMA, Raiko2EtnaExecutionWitness, Raiko2EtnaPayload, Raiko2EtnaRequest,
+};
+
 use alloy_consensus::TrieAccount;
 use alloy_primitives::map::AddressMap;
 use raiko2_primitives::{

@@ -17,6 +17,39 @@ RISC0 3.0.5 and SP1 6.8.1 at the recorded feasibility checkpoint.
 **Spec:** [Shared proving design](../specs/2026-11-17-etna-shared-proving-design.md),
 including its current planning-baseline amendment.
 
+## Active SGX API integration batch (2026-11-27)
+
+The user explicitly authorized enabling Etna and connecting the existing
+Unzen/Shasta execution and SGX infrastructure. Reuse the existing primary
+codepaths; list missing client capabilities instead of redesigning the client.
+FI is omitted from the first internal-devnet PoC and is not a blocker in this
+batch. Q selection and lookup-window retry belong to the lander. Existing
+uniform SSZ authentication remains selected; do not silently replace it with a
+second raw-header runtime mode. These instructions supersede older blanket
+QC/FI/profile holds for the current PoC, not production acceptance requirements.
+
+- [ ] **Task 18 / P06:** serialize existing supplied native consensus resources
+  and connect the owned-input adapter to the actual QC/DA/SSZ/EVM composer.
+  Preserve existing execution witnesses/shared pooling and reject malformed,
+  missing, reordered and unsupported inputs without host-approved flags.
+- [ ] **Task 19 / SGX-01:** close remaining deterministic context predicates
+  with existing MPT reads: generation/origin, per-anchor checkpoint/U/rules,
+  exact timestamp/age/gas/mix, and applicable switching-start implementations.
+  Derive public deployment/Q/parent identities from the exact L1-bound statement;
+  add no redundant enclave RPC approval of those words.
+- [ ] **Task 20 / SGX-02..03:** add explicit Etna request/HTTP wiring to the
+  existing signer and response envelope; reuse the generic five-word SGX hash
+  and 89-byte proof framing. Record concrete client transport gaps in
+  [the integration handoff](../../etna-client-integration.md), add focused native
+  HTTP/signing CI, independently review/test the whole batch and read back the
+  draft PR. Do not declare a real SGX proof or L1 receipt from software tests.
+
+Initial serving scope is the built-in 167001 devnet Etna profile. Production
+chain staking addresses and trusted switching-start deployment constants must
+be supplied by their reviewed upstream profiles; untrusted request metadata
+cannot invent them. SDK/ELF/image/attestation/registration/chain execution stays
+outside this source integration batch. No duplicate target or local heavy build.
+
 ## Native L2-managed QC checkpoint (2026-11-27)
 
 The user explicitly resumed QC implementation against [design #22425 at

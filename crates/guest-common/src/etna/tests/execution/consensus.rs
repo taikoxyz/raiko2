@@ -137,10 +137,33 @@ impl Fixture {
         inbox_override: Option<(U256, U256)>,
         seat_word: U256,
     ) -> Self {
+        Self::with_fixture_parameters(
+            count,
+            candidate,
+            minimum,
+            missing,
+            &inbox_override.into_iter().collect::<Vec<_>>(),
+            seat_word,
+            false,
+        )
+    }
+
+    fn with_fixture_parameters(
+        count: usize,
+        candidate: Candidate,
+        minimum: U256,
+        missing: bool,
+        inbox_overrides: &[(U256, U256)],
+        seat_word: U256,
+        complete_context: bool,
+    ) -> Self {
         let fallback = keys();
         let params = parameters();
         let mut range = RangeFixture::new(1);
         let inbox = range.context.domain.inbox;
+        let anchor_timestamp = etna_core::l1_header::L1HeaderView::from_raw(&range.l1_headers[0])
+            .unwrap()
+            .timestamp();
         let mut storage = Trie::default();
         let mut words = vec![
             (U256::from(268), U256::from(range.context.domain.generation)),
@@ -157,12 +180,19 @@ impl Fixture {
                 .zip([
                     U256::ZERO,
                     U256::from(18),
-                    U256::from(100),
+                    U256::from(if complete_context {
+                        anchor_timestamp
+                    } else {
+                        100
+                    }),
                     U256::from_be_bytes(fallback.hash().0),
                 ])
                 .map(|(slot, value)| (U256::from_be_bytes(slot.0), value)),
         );
-        if let Some((slot, value)) = inbox_override {
+        if complete_context {
+            words.push((U256::from(282), U256::from(1) | (U256::from(1152) << 48)));
+        }
+        for &(slot, value) in inbox_overrides {
             if let Some(word) = words.iter_mut().find(|word| word.0 == slot) {
                 word.1 = value;
             } else {
@@ -211,6 +241,20 @@ impl Fixture {
             });
         }
         range.context.max_blocks = count;
+        if complete_context {
+            for (index, block) in range.blocks.iter_mut().enumerate() {
+                block.execution.timestamp = anchor_timestamp + u64::try_from(index).unwrap() * 4;
+                block.execution.gas_limit = 45_000_000;
+                let mut words = [0u8; 64];
+                words[32..].copy_from_slice(&U256::from(index + 1).to_be_bytes::<32>());
+                block.execution.mix_hash = keccak256(words);
+                block.comet.header.time = tendermint::Time::from_unix_timestamp(
+                    i64::try_from(block.execution.timestamp).unwrap(),
+                    0,
+                )
+                .unwrap();
+            }
+        }
         if missing {
             for block in range.blocks.iter_mut().skip(1) {
                 block.execution.extra_data = {

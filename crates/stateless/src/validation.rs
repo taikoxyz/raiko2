@@ -683,10 +683,10 @@ pub(crate) fn validate_block_consensus(
     ancestor_headers: &[WitnessHeader],
 ) -> Result<(), StatelessValidationError> {
     if chain_spec.is_etna_active(block.header().timestamp()) {
-        if !block
+        if block
             .header()
             .parent_beacon_block_root
-            .is_some_and(|root| !root.is_zero())
+            .is_none_or(|root| root.is_zero())
         {
             return Err(StatelessValidationError::Custom(
                 "Etna requires a non-zero parent_beacon_block_root",

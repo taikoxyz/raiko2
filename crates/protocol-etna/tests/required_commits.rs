@@ -10,7 +10,6 @@ use etna_core::{
     },
     domain::{DeploymentDomain, DomainError, chain_id},
     key::ConsensusKey,
-    types::Member,
 };
 use k256::ecdsa::SigningKey;
 use raiko2_protocol_etna::coverage::{
@@ -39,11 +38,12 @@ fn committee(signers: &[(u8, u64)]) -> Committee {
     let members: Vec<_> = keys
         .iter()
         .zip(signers)
-        .map(|(key, &(_, power))| Member {
-            pubkey: ConsensusKey::from_slice(key.verifying_key().to_encoded_point(true).as_bytes())
-                .unwrap(),
-            eff_stake: U256::ZERO,
-            power,
+        .map(|(key, &(_, power))| {
+            (
+                ConsensusKey::from_slice(key.verifying_key().to_encoded_point(true).as_bytes())
+                    .unwrap(),
+                power,
+            )
         })
         .collect();
     Committee {

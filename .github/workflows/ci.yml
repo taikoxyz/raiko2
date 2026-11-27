@@ -141,7 +141,7 @@ jobs:
       # workflow.
       - name: clippy
         run: >
-          cargo clippy
+          cargo clippy --locked
           -p raiko2-primitives
           -p raiko2-primitives-shasta
           -p raiko2-protocol
@@ -159,10 +159,10 @@ jobs:
           -D warnings
 
       - name: clippy Etna integration tests
-        run: cargo clippy -p raiko2-protocol-etna --all-targets -- -D warnings
+        run: cargo clippy --locked -p raiko2-protocol-etna --all-targets -- -D warnings
 
       - name: clippy engine core
-        run: cargo clippy -p raiko2-engine --no-default-features -- -D warnings
+        run: cargo clippy --locked -p raiko2-engine --no-default-features -- -D warnings
 
   rust-test-foundation:
     needs: changes
@@ -194,7 +194,7 @@ jobs:
       # Split test lanes by dependency weight to stay under runner disk limits.
       - name: test foundation
         run: >
-          cargo test
+          cargo test --locked
           -p raiko2-primitives
           -p raiko2-primitives-shasta
           -p raiko2-protocol
@@ -204,10 +204,10 @@ jobs:
           -p raiko2-stateless
 
       - name: test stateless MPT metrics
-        run: cargo test -p raiko2-stateless --features mpt-metrics --lib
+        run: cargo test --locked -p raiko2-stateless --features mpt-metrics --lib
 
       - name: test protocol shasta net feature
-        run: cargo test -p raiko2-protocol-shasta --features net --test net_feature
+        run: cargo test --locked -p raiko2-protocol-shasta --features net --test net_feature
 
   rust-test-pipeline:
     needs: changes

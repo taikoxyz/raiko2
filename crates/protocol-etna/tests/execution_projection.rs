@@ -109,7 +109,6 @@ impl Fixture {
             &execution_item(&self.execution_header, transactions),
             &[0xc0],
             &[0xc0],
-            &[0xc0],
         ]));
     }
 
@@ -156,7 +155,6 @@ fn recovery_origin_binds_exact_execution_item_with_opaque_app_hash() {
     );
     assert_eq!(projection.anchor_number(), 0x01_02_03);
     assert_eq!(projection.anchor_witness(), None);
-    assert_eq!(projection.committee_witness(), None);
     assert_eq!(projection.forced_witness(), None);
 }
 
@@ -272,7 +270,7 @@ fn rejects_a_changed_committed_transaction_payload() {
         &alloy_rlp::encode(&fixture.execution_header),
         &list(&[&alloy_rlp::encode(changed.as_slice())]),
     ]);
-    fixture.seal_envelope(envelope(&[&item, &[0xc0], &[0xc0], &[0xc0]]));
+    fixture.seal_envelope(envelope(&[&item, &[0xc0], &[0xc0]]));
     assert!(matches!(
         fixture.verify(core::slice::from_ref(&typed)),
         Err(ProjectionError::ExecutionTransactions)
@@ -305,7 +303,7 @@ fn legacy_transaction_requires_byte_string_wrapper() {
         &alloy_rlp::encode(&fixture.execution_header),
         &list(&[&legacy.encoded_2718()]),
     ]);
-    fixture.seal_envelope(envelope(&[&item, &[0xc0], &[0xc0], &[0xc0]]));
+    fixture.seal_envelope(envelope(&[&item, &[0xc0], &[0xc0]]));
     assert!(matches!(
         fixture.verify(&[legacy]),
         Err(ProjectionError::Rlp(_))
@@ -317,7 +315,7 @@ fn witness_substitution_requires_new_data_and_header_commitments() {
     let mut fixture = Fixture::new(&[]);
     let original_hash = fixture.context.expected_comet_hash;
     let item = execution_item(&fixture.execution_header, &[]);
-    let replacement = envelope(&[&item, &[0xc1, 0xc0], &[0xc0], &[0xc0]]);
+    let replacement = envelope(&[&item, &[0xc1, 0xc0], &[0xc0]]);
     fixture.comet_transactions = [replacement.clone()];
     assert!(matches!(
         fixture.verify(&[]),
@@ -339,14 +337,10 @@ fn nested_witness_fields_are_returned_opaque_for_strict_verification() {
     // The inner list boundary is valid, but its single byte cannot begin a complete item.
     let malformed_inner = [0xc1, 0xb8];
     let optional = list(&[&malformed_inner]);
-    fixture.seal_envelope(envelope(&[&item, &optional, &optional, &optional]));
+    fixture.seal_envelope(envelope(&[&item, &optional, &optional]));
     let projection = fixture.verify(&[]).unwrap();
     assert_eq!(
         projection.anchor_witness(),
-        Some(malformed_inner.as_slice())
-    );
-    assert_eq!(
-        projection.committee_witness(),
         Some(malformed_inner.as_slice())
     );
     assert_eq!(
@@ -356,12 +350,67 @@ fn nested_witness_fields_are_returned_opaque_for_strict_verification() {
 }
 
 #[test]
+fn three_field_envelope_preserves_anchor_and_forced_original_spans() {
+    let mut fixture = Fixture::new(&[]);
+    let item = execution_item(&fixture.execution_header, &[]);
+    let anchor = [0xc1, 0x11];
+    let forced = [0xc1, 0x22];
+    fixture.seal_envelope(envelope(&[&item, &list(&[&anchor]), &list(&[&forced])]));
+    let projection = fixture.verify(&[]).unwrap();
+    let original = &fixture.comet_transactions[0];
+    for (actual, expected) in [
+        (projection.anchor_witness().unwrap(), anchor.as_slice()),
+        (projection.forced_witness().unwrap(), forced.as_slice()),
+    ] {
+        let span = original
+            .windows(expected.len())
+            .find(|bytes| *bytes == expected)
+            .unwrap();
+        assert_eq!(actual, expected);
+        assert!(core::ptr::eq(actual, span));
+    }
+    assert_eq!(projection.execution_item_bytes(), item);
+}
+
+#[test]
+fn rejects_superseded_four_field_envelope_even_with_empty_fourth_field() {
+    let mut fixture = Fixture::new(&[]);
+    let item = execution_item(&fixture.execution_header, &[]);
+    for legacy in [
+        envelope(&[&item, &[0xc0], &[0xc0], &[0xc0]]),
+        envelope(&[&item, &[0xc0], &[0xc1, 0xc0], &[0xc1, 0xc0]]),
+    ] {
+        fixture.seal_envelope(legacy);
+        assert!(matches!(
+            fixture.verify(&[]),
+            Err(ProjectionError::TrailingData)
+        ));
+    }
+}
+
+#[test]
+fn forced_witness_in_third_field_remains_bound_to_data_hash() {
+    let mut fixture = Fixture::new(&[]);
+    let item = execution_item(&fixture.execution_header, &[]);
+    fixture.comet_transactions = [envelope(&[&item, &[0xc0], &[0xc1, 0xc0]])];
+    assert!(matches!(
+        fixture.verify(&[]),
+        Err(ProjectionError::DataHash)
+    ));
+    fixture.seal_envelope(fixture.comet_transactions[0].clone());
+    assert_eq!(
+        fixture.verify(&[]).unwrap().forced_witness(),
+        Some([0xc0].as_slice())
+    );
+}
+
+#[test]
 fn rejects_wrong_boundary_kinds_arity_and_noncanonical_lengths() {
     let mut fixture = Fixture::new(&[]);
     let header = alloy_rlp::encode(&fixture.execution_header);
     let item = execution_item(&fixture.execution_header, &[]);
     let empty = &[0xc0];
-    let wanted = envelope(&[&item, empty, empty, empty]);
+    let wanted = envelope(&[&item, empty, empty]);
     let mut trailing = wanted.clone();
     trailing.push(0xc0);
     let mut wrong_version = wanted;
@@ -371,17 +420,18 @@ fn rejects_wrong_boundary_kinds_arity_and_noncanonical_lengths() {
         trailing,
         vec![6, 0x80],
         vec![6, 0xf8, 0xff],
-        envelope(&[&item, empty, empty]),
+        envelope(&[&item, empty]),
+        envelope(&[&item, empty, empty, empty]),
         envelope(&[&item, empty, empty, empty, empty]),
-        envelope(&[&item, &[0x80], empty, empty]),
-        envelope(&[&item, &[0xc1, 0x80], empty, empty]),
-        envelope(&[&item, &[0xc2, 0xc0, 0xc0], empty, empty]),
-        envelope(&[&item, &[0xf8, 0], empty, empty]),
-        envelope(&[&item, &[0xc1, 0xc1], empty, empty]),
-        envelope(&[&list(&[&header]), empty, empty, empty]),
-        envelope(&[&list(&[&header, empty, empty]), empty, empty, empty]),
-        envelope(&[&list(&[&header, &[0x80]]), empty, empty, empty]),
-        envelope(&[&list(&[&[0x80], empty]), empty, empty, empty]),
+        envelope(&[&item, &[0x80], empty]),
+        envelope(&[&item, &[0xc1, 0x80], empty]),
+        envelope(&[&item, &[0xc2, 0xc0, 0xc0], empty]),
+        envelope(&[&item, &[0xf8, 0], empty]),
+        envelope(&[&item, &[0xc1, 0xc1], empty]),
+        envelope(&[&list(&[&header]), empty, empty]),
+        envelope(&[&list(&[&header, empty, empty]), empty, empty]),
+        envelope(&[&list(&[&header, &[0x80]]), empty, empty]),
+        envelope(&[&list(&[&[0x80], empty]), empty, empty]),
     ] {
         fixture.seal_envelope(malformed);
         assert!(fixture.verify(&[]).is_err());
@@ -609,5 +659,58 @@ fn etna_projection_rejects_old_thirteen_byte_layout_and_wrong_29_byte_fields() {
             fixture.verify(&[]),
             Err(ProjectionError::ExtraData)
         ));
+    }
+}
+
+// Append to protocol-etna/tests/execution_projection.rs after the three-field migration.
+#[test]
+fn independent_superseded_four_field_envelopes_reject_even_with_empty_committee() {
+    let mut fixture = Fixture::new(&[]);
+    let item = execution_item(&fixture.execution_header, &[]);
+    let marker = list(&[&alloy_rlp::encode(23u64)]);
+    let present = list(&[&marker]);
+    for committee in [&[0xc0][..], present.as_slice()] {
+        // Rebind DataHash and expected header hash: an old-format rejection must
+        // come from the wire format, not from stale outer commitments.
+        fixture.seal_envelope(envelope(&[&item, &[0xc0], committee, &[0xc0]]));
+        assert!(fixture.verify(&[]).is_err());
+        fixture.seal_envelope(envelope(&[&item, &[0xc0], committee, &present]));
+        assert!(fixture.verify(&[]).is_err());
+    }
+}
+
+#[test]
+fn independent_three_field_envelope_keeps_anchor_and_forced_positions_distinct() {
+    let mut fixture = Fixture::new(&[]);
+    let item = execution_item(&fixture.execution_header, &[]);
+    let anchor = list(&[&alloy_rlp::encode(23u64)]);
+    let forced = list(&[&alloy_rlp::encode(29u64)]);
+    let anchor_box = list(&[&anchor]);
+    let forced_box = list(&[&forced]);
+    for (first, third, expected_anchor, expected_forced) in [
+        (
+            anchor_box.as_slice(),
+            forced_box.as_slice(),
+            Some(anchor.as_slice()),
+            Some(forced.as_slice()),
+        ),
+        (
+            &[0xc0][..],
+            forced_box.as_slice(),
+            None,
+            Some(forced.as_slice()),
+        ),
+        (
+            forced_box.as_slice(),
+            anchor_box.as_slice(),
+            Some(forced.as_slice()),
+            Some(anchor.as_slice()),
+        ),
+    ] {
+        fixture.seal_envelope(envelope(&[&item, first, third]));
+        let projection = fixture.verify(&[]).unwrap();
+        assert_eq!(projection.anchor_witness(), expected_anchor);
+        assert_eq!(projection.forced_witness(), expected_forced);
+        assert_eq!(projection.execution_item_bytes(), item);
     }
 }

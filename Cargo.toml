@@ -80,7 +80,7 @@ raiko2-guests = { path = "./crates/guests" }
 raiko2-sgx-runtime = { path = "./crates/sgx-runtime" }
 
 # Taiko client protocol
-etna-core = { git = "https://github.com/taikoxyz/taiko-mono", rev = "4827fea0e844236d14cceafd6bd84a820bff2dd0", default-features = false }
+etna-core = { git = "https://github.com/taikoxyz/taiko-mono", rev = "ddce3fb8d70dc89cd3fa270cea03ff4762ced482", default-features = false }
 taiko-client-protocol = { git = "https://github.com/taikoxyz/taiko-mono", package = "protocol", rev = "06bd6b0ec8a6132a41253a2ba6ebe10b27ad26fd", default-features = false }
 
 # zkVM

@@ -63,8 +63,17 @@ struct ExecutingRange {
 
 impl ExecutingRange {
     fn new(count: usize, with_transactions: bool) -> Self {
+        Self::from_range(RangeFixture::new(count), with_transactions, None, &[])
+    }
+
+    fn from_range(
+        mut range: RangeFixture,
+        with_transactions: bool,
+        staking_code: Option<Bytes>,
+        staking_storage: &[(U256, U256)],
+    ) -> Self {
         let config = config();
-        let mut range = RangeFixture::new(count);
+        let count = range.blocks.len();
         let mut db = InMemoryDB::default();
         let mut state_trie = Trie::default();
         let mut storage_tries = BTreeMap::<Address, Trie>::new();
@@ -73,9 +82,11 @@ impl ExecutingRange {
             Bytes::from_static(&[0x60, 0, 0x60, 0, 0xfd]),
             HISTORY_STORAGE_CODE.clone(),
             BEACON_ROOTS_CODE.clone(),
-            Bytes::from_static(&[
-                0x60, 4, 0x35, 0x60, 0, 0x55, 0x60, 36, 0x35, 0x60, 1, 0x55, 0,
-            ]),
+            staking_code.unwrap_or_else(|| {
+                Bytes::from_static(&[
+                    0x60, 4, 0x35, 0x60, 0, 0x55, 0x60, 36, 0x35, 0x60, 1, 0x55, 0,
+                ])
+            }),
         ];
         for (address, code) in [
             TARGET,
@@ -93,12 +104,24 @@ impl ExecutingRange {
                 code: Some(Bytecode::new_raw(code.clone())),
                 ..Default::default()
             };
+            let storage_root = if address == STAKING && !staking_storage.is_empty() {
+                let storage = storage_tries.entry(address).or_default();
+                for &(slot, value) in staking_storage {
+                    if !value.is_zero() {
+                        storage.insert(keccak256(B256::from(slot)), alloy_rlp::encode(value));
+                    }
+                    db.insert_account_storage(address, slot, value).unwrap();
+                }
+                storage.hash_slow()
+            } else {
+                alloy_trie::EMPTY_ROOT_HASH
+            };
             state_trie.insert(
                 keccak256(address),
                 alloy_rlp::encode(TrieAccount {
                     nonce: info.nonce,
                     balance: info.balance,
-                    storage_root: alloy_trie::EMPTY_ROOT_HASH,
+                    storage_root,
                     code_hash: info.code_hash,
                 }),
             );
@@ -852,3 +875,5 @@ fn owned_input_independent_rejects_foreign_authority_json() {
         assert!(serde_json::from_value::<RangeInput>(encoded).is_err());
     }
 }
+
+mod consensus;

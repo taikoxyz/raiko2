@@ -1,5 +1,10 @@
 //! Etna blob payload projection and native strict execution.
 
+mod consensus;
+pub use consensus::{
+    verify_blob_range_statement_consensus, ConsensusParameters, ConsensusWitness,
+    L1CommitteeWitness, ParentConsensusWitness,
+};
 mod execution;
 pub use execution::{verify_blob_range_statement_execution, EtnaBlockExecutionWitness};
 mod input;

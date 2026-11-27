@@ -17,6 +17,67 @@ RISC0 3.0.5 and SP1 6.8.1 at the recorded feasibility checkpoint.
 **Spec:** [Shared proving design](../specs/2026-11-17-etna-shared-proving-design.md),
 including its current planning-baseline amendment.
 
+## Active L2-managed QC integration (2026-11-27)
+
+The user explicitly resumed QC implementation against [design #22425 at
+`4bb5cff1`](https://github.com/taikoxyz/taiko-mono/tree/4bb5cff1e9e4f96506a8ee971e430014188619ac/packages/protocol/docs/etna),
+client #22280 at `87f95412` and contracts #22286 at `9b8d5b4c`. This supersedes
+QC's earlier blanket hold and the old registry/epoch/21-word implementation
+target. These are development pins, not merged/frozen/released deployment claims.
+Preserve the existing EVM, sparse trie, witnesses, queues and providers. FI phase
+two and actual SDK/ELF/image/deployment/chain acceptance remain separately gated.
+
+### Task 15: Current shared core and landing encoding
+
+- [ ] Carry the existing exact raw-L1-header API onto current no_std etna-core
+  without restoring registry/epoch APIs or reorganizing the client. Preserve
+  the existing #22426 extraction history; no duplicate dependency PR or force
+  update of the shared development branch. Inspect the complete minimal carrier.
+- [ ] Adopt the immutable carrier; align current params/domain/member APIs and
+  seven-field LandInput / 19-word (608-byte) statement and the current
+  three-field `[block, anchor, forced]` envelope. Reject the old four-field
+  committee-witness form and preserve forced-witness positioning. Reuse authoritative
+  config hashing. Reject old registry/active-snapshot inputs, preserve every
+  ordered cut and full-width public field, and retire the unused superseded
+  certified-envelope gate rather than add an always-failing compatibility path.
+- [ ] Independently check encoding against current contract ABI and exercise
+  codec/range regressions through exact-source native CI.
+
+### Task 16: Authenticated state to committee, bitmap and certificates
+
+- [ ] Reuse core committee::decide, staking storage layout, fallback keys and
+  miss bitmap functions. Derive all inputs from authenticated L2 parent/post-state
+  and SSZ-bound L1 anchor state; verify origin/bootstrap and current/next hashes.
+  No supplied schedule, detached state root or host approval authorizes a set.
+  This is input verification only: no vote/QC collection, RPC acquisition,
+  synchronization, signing, validator updates or producer policy is added.
+- [ ] Read required snapshot/key-to-seat/Inbox words using the existing sparse
+  witness engine, with one hydration per batch. Missing material fails; proven
+  absence remains distinguishable. Do not duplicate account/trie verification
+  or reimplement staking penalties that the existing EVM executes.
+- [ ] Authenticate LastCommit bytes and derive every bitmap without adding
+  signature checks the spec omits for that purpose. Verify strict weighted QCs
+  at the terminal and before actual key/power changes, with exact coverage,
+  stock canonical bytes, generation domain and parent/range boundary checks.
+- [ ] Compose these checks with existing strict DA/SSZ/EVM verification in an
+  actual native consumer. Keep remaining profile/time/rules/FI and L1 landing
+  authority obligations explicit; no partial-result signing route.
+
+### Task 17: Independent integration verification and publication
+
+- [ ] Independently review the complete source/pins/ABI and exercise genuine
+  EVM/MPT plus signed-QC success and mutation cases, including parent bootstrap,
+  fallback, source-equivalent sets, absent witness material and forged roots.
+  Fix and have the raiser recheck all material findings.
+- [ ] Run focused native CI at the exact source and effective merge, inspect
+  actual tests and steps, update this plan and draft #305, and report remaining
+  gates. Use the existing shared target only; at the current disk reserve do
+  not start local Cargo/SDK/ELF/image builds. Record unexecuted RED separately.
+
+The approved explicit lander-selected Q and native uniform SSZ components remain
+in use. Their normative history/recovery reconciliation is still open; the QC
+migration neither changes reference policy nor declares onchain acceptance.
+
 ## Native input checkpoint (2026-11-27)
 
 Continue the SGX-first plan through owned input plumbing. The current native
@@ -88,8 +149,9 @@ The generic SGX wrapper was rechecked against live protocol source
 subverifier address, statement digest, instance address); `SgxVerifier` accepts
 89 bytes (uint32 instance ID, address, recoverable signature). This confirms
 reuse potential, not an Etna Inbox deployment or complete signing relation.
-The fresh branch SPEC retains the approved 21-word statement and per-height
-cuts, with no ValState settlement fields. Concrete verifier/Inbox identity,
+This historical checkpoint used the previous 21-word statement and per-height
+cuts, with no ValState settlement fields. The active L2-staking migration above
+supersedes that layout with 19 words. Concrete verifier/Inbox identity,
 complete authenticated context and QC relation must precede signing and landing.
 
 ## Native execution source checkpoint (2026-11-27)

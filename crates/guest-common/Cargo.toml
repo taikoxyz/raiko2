@@ -27,6 +27,7 @@ alloy-eips-execution = { package = "alloy-eips", version = "=2.5.0", default-fea
 alloy-sol-types = { version = "=1.6.1", default-features = false }
 alloy-rlp = { version = "=0.3.16", default-features = false }
 alloy-hardforks = "=0.4.9"
+tendermint = { version = "0.40", default-features = false }
 anyhow = "=1.0.102"
 flate2 = { workspace = true, features = ["zlib"] }
 reth-ethereum-primitives = { git = "https://github.com/ethereum-optimism/reth", tag = "op-v2.7.0-1", default-features = false, features = [
@@ -34,6 +35,9 @@ reth-ethereum-primitives = { git = "https://github.com/ethereum-optimism/reth", 
 ] }
 
 [dev-dependencies]
+k256 = { workspace = true, features = ["ecdsa"] }
+prost = { version = "0.13", default-features = false }
+tendermint-proto = { version = "0.40", default-features = false }
 serde_json.workspace = true
 alloy-trie.workspace = true
 reth-evm.workspace = true

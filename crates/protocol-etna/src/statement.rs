@@ -9,10 +9,13 @@
 
 use alloy_primitives::{Address, B256, Keccak256, U256, keccak256};
 use alloy_sol_types::{SolValue, sol};
-use etna_core::schedule::UINT48_MAX;
+use etna_core::params::UINT48_MAX;
+
+/// Canonical ENC-A-36 configuration commitment shared with the L2 committee core.
+pub use etna_core::params::config_hash;
 
 sol! {
-    /// The eight static fields of the proposed Etna Inbox landing input.
+    /// The seven static fields of the proposed Etna Inbox landing input.
     #[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     #[serde(deny_unknown_fields)]
     struct LandInput {
@@ -30,8 +33,6 @@ sol! {
         uint256 l1_reference_block_number;
         /// Forced inclusion cursor after the terminal block.
         uint256 forced_inclusion_head;
-        /// Selection snapshot of the committee signing the terminal block.
-        uint256 active_committee_snapshot;
     }
 }
 
@@ -43,17 +44,14 @@ pub struct LandStatement<'a> {
     pub l2_chain_id: U256,
     /// L1 Etna Inbox address.
     pub inbox: Address,
-    /// L1 Etna Registry address.
-    pub registry: Address,
     /// Generation of the proof range.
     pub generation: U256,
     /// Execution block hash at the proof origin.
     pub parent_hash: B256,
     /// `CometBFT` block hash at the proof origin.
     pub parent_comet_hash: B256,
-    /// Hash in authenticated Inbox slot 269, with its configuration opened
-    /// under ENC-A-36.
-    pub committee_config_hash: B256,
+    /// Hash in authenticated Inbox slot 269, opened with [`config_hash`] under ENC-A-36.
+    pub config_hash: B256,
     /// The corresponding Etna Inbox landing input.
     pub input: LandInput,
     /// Hash of the reference L1 block.
@@ -110,23 +108,22 @@ impl LandStatement<'_> {
         Ok(())
     }
 
-    /// Encodes the raw 21-word ENC-A-35 preimage without checking range or cut count.
+    /// Encodes the raw 19-word ENC-A-35 preimage without checking range or cut count.
     ///
     /// Use [`Self::try_digest`] for runtime statement inputs.
     #[must_use]
-    pub fn preimage(&self) -> [u8; 672] {
+    pub fn preimage(&self) -> [u8; 608] {
         let input = &self.input;
         let encoded = (
             B256::right_padding_from(b"TAIKO_ETNA_LAND_V1"),
             self.l1_chain_id,
             self.l2_chain_id,
             self.inbox,
-            self.registry,
             self.generation,
             input.parent_height,
             self.parent_hash,
             self.parent_comet_hash,
-            self.committee_config_hash,
+            self.config_hash,
             input.last_height,
             input.last_block_hash,
             input.last_comet_hash,
@@ -136,7 +133,6 @@ impl LandStatement<'_> {
             hash_packed_words(self.blob_hashes),
             self.forced_inclusion_head_before,
             input.forced_inclusion_head,
-            input.active_committee_snapshot,
             cut_hash(
                 self.generation,
                 input.parent_height,
@@ -145,7 +141,7 @@ impl LandStatement<'_> {
             ),
         )
             .abi_encode_params();
-        let mut preimage = [0; 672];
+        let mut preimage = [0; 608];
         preimage.copy_from_slice(&encoded);
         preimage
     }

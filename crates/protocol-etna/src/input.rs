@@ -23,7 +23,7 @@ use crate::{
     statement::{LandInput, LandStatement},
 };
 
-/// Owned fields of the complete 21-word landing statement, without changing its encoding.
+/// Owned fields of the complete 19-word landing statement.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LandStatementInput {
@@ -33,17 +33,15 @@ pub struct LandStatementInput {
     pub l2_chain_id: U256,
     /// Requested Inbox address.
     pub inbox: Address,
-    /// Requested Registry address.
-    pub registry: Address,
     /// Requested generation.
     pub generation: U256,
     /// Execution block hash at the excluded origin.
     pub parent_hash: B256,
     /// Comet block hash at the excluded origin.
     pub parent_comet_hash: B256,
-    /// Requested committee configuration commitment.
-    pub committee_config_hash: B256,
-    /// Existing eight-field landing input.
+    /// Requested deployment configuration commitment.
+    pub config_hash: B256,
+    /// Seven-field landing input.
     pub input: LandInput,
     /// Hash of the explicit L1 reference Q.
     pub l1_reference_block_hash: B256,
@@ -63,11 +61,10 @@ impl LandStatementInput {
             l1_chain_id: self.l1_chain_id,
             l2_chain_id: self.l2_chain_id,
             inbox: self.inbox,
-            registry: self.registry,
             generation: self.generation,
             parent_hash: self.parent_hash,
             parent_comet_hash: self.parent_comet_hash,
-            committee_config_hash: self.committee_config_hash,
+            config_hash: self.config_hash,
             input: self.input.clone(),
             l1_reference_block_hash: self.l1_reference_block_hash,
             blob_hashes: &self.blob_hashes,
@@ -83,11 +80,10 @@ impl From<&LandStatement<'_>> for LandStatementInput {
             l1_chain_id: value.l1_chain_id,
             l2_chain_id: value.l2_chain_id,
             inbox: value.inbox,
-            registry: value.registry,
             generation: value.generation,
             parent_hash: value.parent_hash,
             parent_comet_hash: value.parent_comet_hash,
-            committee_config_hash: value.committee_config_hash,
+            config_hash: value.config_hash,
             input: value.input.clone(),
             l1_reference_block_hash: value.l1_reference_block_hash,
             blob_hashes: value.blob_hashes.to_vec(),

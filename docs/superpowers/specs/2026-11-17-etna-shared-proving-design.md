@@ -1,5 +1,26 @@
 # Shared upstream Etna proving implementation
 
+## L2-managed committee adoption (2026-11-27)
+
+The user resumed implementation against #22425 at `4bb5cff1`, #22280 at
+`87f95412` and #22286 at `9b8d5b4c`. This supersedes the 2026-11-22 QC hold
+below and older registry/epoch/committee-snapshot settlement fields. Those
+historical notes remain evidence of previous work, not the active target.
+
+Use current etna-core's pure committee decision, staking layout, fallback keys,
+validator and miss-bitmap helpers. The existing EVM executes L2 staking changes;
+the guest reads authenticated snapshot/key-to-seat words and derives the H+2
+sets, origin fallback sets, current/next hashes and required weighted QCs. The
+new landing interface is seven fields and the statement is 19 words / 608 bytes;
+no old-format compatibility path is needed for the unlaunched fork. State reads
+reuse the existing witness/trie engine with batched hydration. Host-supplied
+words or schedules are not authority.
+
+Retain the explicit Q/SSZ direction below, FI phase-one scope, existing Raiko2
+architecture and SGX-first delivery. Broader context/time/rules and normative
+anchor/landing gates stay explicit. Native component completion is not actual
+enclave signing, image registration or L1 acceptance.
+
 ## Agreed direction: one explicit reference Q, owned by the lander (2026-11-27)
 
 This replaces the optional-Q/outer-attachment amendment discussed earlier on

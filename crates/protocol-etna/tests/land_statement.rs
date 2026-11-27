@@ -2,9 +2,9 @@
 
 use alloy_primitives::{B256, U256, address, b256, hex};
 use alloy_sol_types::SolValue;
-use etna_core::schedule::UINT48_MAX;
+use etna_core::params::UINT48_MAX;
 use raiko2_protocol_etna::statement::{
-    LandInput, LandStatement, LandStatementError, cut_hash, cut_leaf,
+    LandInput, LandStatement, LandStatementError, config_hash, cut_hash, cut_leaf,
 };
 
 const FIRST_LEAF: B256 = b256!("28e9b5992610c677081b2c4a3ba51d9ffea50c5e8cac87c1729b3dca5a78e89d");
@@ -29,11 +29,10 @@ fn vector_statement() -> LandStatement<'static> {
         l1_chain_id: wide_uint(255, 0x11),
         l2_chain_id: wide_uint(192, 0x12),
         inbox: address!("0102030405060708090a0b0c0d0e0f1011121314"),
-        registry: address!("35363738393a3b3c3d3e3f404142434445464748"),
         generation: wide_uint(235, 0x15),
         parent_hash: B256::repeat_byte(0x17),
         parent_comet_hash: B256::repeat_byte(0x18),
-        committee_config_hash: B256::repeat_byte(0x19),
+        config_hash: B256::repeat_byte(0x19),
         input: LandInput {
             parent_height: wide_uint(208, 0x16),
             last_height: wide_uint(208, 0x19),
@@ -42,7 +41,6 @@ fn vector_statement() -> LandStatement<'static> {
             last_state_root: B256::repeat_byte(0x1d),
             l1_reference_block_number: wide_uint(224, 0x1e),
             forced_inclusion_head: wide_uint(252, 0x54),
-            active_committee_snapshot: wide_uint(240, 0x23),
         },
         l1_reference_block_hash: B256::repeat_byte(0x1f),
         blob_hashes: &BLOBS,
@@ -134,9 +132,9 @@ fn checked_digest_rejects_cut_count_that_would_truncate_on_32_bit() {
 }
 
 #[test]
-fn encodes_the_exact_21_word_statement_preimage() {
+fn encodes_the_exact_19_word_statement_preimage() {
     let expected = fixture(include_str!("fixtures/land-statement.hex"));
-    let preimage: [u8; 672] = vector_statement().preimage();
+    let preimage: [u8; 608] = vector_statement().preimage();
 
     assert_eq!(preimage.as_slice(), expected);
 }
@@ -147,7 +145,7 @@ fn hashes_the_statement_preimage_with_the_v1_layout() {
 
     assert_eq!(
         digest,
-        b256!("957553e9ac714349a0ab05c026715927edbf5ea07210ed9013bf9c4cbfed3be6")
+        b256!("c3b39e559702afadd3307220996e7656d5db202f8800c02ae68ceb84c6612f21")
     );
     assert_ne!(
         digest,
@@ -156,10 +154,55 @@ fn hashes_the_statement_preimage_with_the_v1_layout() {
 }
 
 #[test]
-fn encodes_the_eight_field_land_input() {
+fn encodes_the_seven_field_land_input() {
     let expected = fixture(include_str!("fixtures/land-input.hex"));
 
     assert_eq!(vector_statement().input.abi_encode(), expected);
+}
+
+#[test]
+fn config_hash_opens_exactly_the_chain_staking_and_window_words() {
+    let chain = 167_001_u64;
+    let staking = address!("0102030405060708090a0b0c0d0e0f1011121314");
+    let window = 151_200_u64;
+    // Construct the four ABI words directly, independently of the production encoder.
+    let mut preimage = [0_u8; 128];
+    preimage[..14].copy_from_slice(b"ETNA_CONFIG_V1");
+    preimage[32..64].copy_from_slice(&U256::from(chain).to_be_bytes::<32>());
+    preimage[76..96].copy_from_slice(staking.as_slice());
+    preimage[96..128].copy_from_slice(&U256::from(window).to_be_bytes::<32>());
+    assert_eq!(
+        config_hash(chain, staking, window),
+        alloy_primitives::keccak256(preimage)
+    );
+    for changed in [
+        config_hash(chain + 1, staking, window),
+        config_hash(chain, alloy_primitives::Address::ZERO, window),
+        config_hash(chain, staking, window + 1),
+    ] {
+        assert_ne!(changed, config_hash(chain, staking, window));
+    }
+}
+
+#[test]
+fn statement_binds_generation_config_and_both_range_endpoints() {
+    let original = statement_for_range(1000, 1003, &LEAVES);
+    let digest = original.digest();
+    for index in 0..8 {
+        let mut changed = statement_for_range(1000, 1003, &LEAVES);
+        match index {
+            0 => changed.generation += U256::ONE,
+            1 => changed.config_hash = B256::ZERO,
+            2 => changed.input.parent_height += U256::ONE,
+            3 => changed.parent_hash = B256::ZERO,
+            4 => changed.parent_comet_hash = B256::ZERO,
+            5 => changed.input.last_height += U256::ONE,
+            6 => changed.input.last_block_hash = B256::ZERO,
+            7 => changed.input.last_comet_hash = B256::ZERO,
+            _ => unreachable!(),
+        }
+        assert_ne!(changed.digest(), digest, "mutation {index}");
+    }
 }
 
 #[test]

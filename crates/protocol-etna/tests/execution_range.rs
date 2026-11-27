@@ -9,7 +9,7 @@ use etna_core::{
         verify::{data_hash, header_hash},
     },
     domain::{DeploymentDomain, chain_id},
-    schedule::UINT48_MAX,
+    params::UINT48_MAX,
 };
 use raiko2_protocol_etna::projection::{ExecutionProjection, ProjectionError};
 use raiko2_protocol_etna::range::{
@@ -24,7 +24,6 @@ use tendermint::{
 
 const FIRST_ANCHOR_NUMBER: u64 = 0x01_02_03;
 const ANCHOR: &[u8] = &[0xc1, 0x11];
-const COMMITTEE: &[u8] = &[0xc1, 0x22];
 const FORCED: &[u8] = &[0xc1, 0x33];
 const BLOBS: [B256; 1] = [B256::repeat_byte(0x79)];
 
@@ -87,12 +86,7 @@ impl BlockFixture {
         };
         self.comet_transactions[0] = [
             vec![6],
-            list(&[
-                &self.execution_item(),
-                &anchor,
-                &list(&[COMMITTEE]),
-                &list(&[FORCED]),
-            ]),
+            list(&[&self.execution_item(), &anchor, &list(&[FORCED])]),
         ]
         .concat();
         self.comet_header.data_hash = Some(data_hash(&self.comet_transactions));
@@ -241,11 +235,10 @@ impl RangeFixture {
             l1_chain_id: self.context.domain.l1_chain_id,
             l2_chain_id: self.context.domain.l2_chain_id,
             inbox: self.context.domain.inbox,
-            registry: Address::repeat_byte(0x54),
             generation: U256::from(self.context.domain.generation),
             parent_hash: self.context.parent_el_hash,
             parent_comet_hash: self.context.parent_comet_hash,
-            committee_config_hash: B256::repeat_byte(0x59),
+            config_hash: B256::repeat_byte(0x59),
             input: LandInput {
                 parent_height: U256::from(self.context.parent_height),
                 last_height: U256::from(self.context.last_height),
@@ -254,7 +247,6 @@ impl RangeFixture {
                 last_state_root: self.blocks.last().unwrap().execution_header.state_root,
                 l1_reference_block_number: U256::from(2_050),
                 forced_inclusion_head: U256::from(after),
-                active_committee_snapshot: U256::from(23),
             },
             l1_reference_block_hash: B256::repeat_byte(0x56),
             blob_hashes: &BLOBS,
@@ -372,12 +364,11 @@ fn expected_digest(statement: &LandStatement<'_>) -> B256 {
             integer(statement.l1_chain_id),
             integer(statement.l2_chain_id),
             address(statement.inbox),
-            address(statement.registry),
             integer(statement.generation),
             integer(input.parent_height),
             statement.parent_hash.0,
             statement.parent_comet_hash.0,
-            statement.committee_config_hash.0,
+            statement.config_hash.0,
             integer(input.last_height),
             input.last_block_hash.0,
             input.last_comet_hash.0,
@@ -387,7 +378,6 @@ fn expected_digest(statement: &LandStatement<'_>) -> B256 {
             packed_hash(statement.blob_hashes),
             integer(statement.forced_inclusion_head_before),
             integer(input.forced_inclusion_head),
-            integer(input.active_committee_snapshot),
             cut_hash.0,
         ]
         .concat(),
@@ -449,7 +439,6 @@ fn binds_historical_range_to_derived_cuts_and_preserves_original_spans() {
         }
         for (actual, bytes) in [
             (projection.anchor_witness(), ANCHOR),
-            (projection.committee_witness(), COMMITTEE),
             (projection.forced_witness(), FORCED),
         ] {
             assert!(core::ptr::eq(actual.unwrap(), block.original_span(bytes)));
@@ -630,11 +619,7 @@ fn includes_external_l1_fields_and_blob_order_in_statement_digest() {
     let (_, digest) = fixture.verify_statement(&baseline(), &[31]).unwrap();
     for statement in [
         LandStatement {
-            registry: Address::repeat_byte(0x32),
-            ..baseline()
-        },
-        LandStatement {
-            committee_config_hash: B256::repeat_byte(0x33),
+            config_hash: B256::repeat_byte(0x33),
             ..baseline()
         },
         LandStatement {
@@ -690,7 +675,6 @@ fn projects_three_consecutive_blocks_and_preserves_original_spans() {
         }
         for (actual, bytes) in [
             (projection.anchor_witness(), ANCHOR),
-            (projection.committee_witness(), COMMITTEE),
             (projection.forced_witness(), FORCED),
         ] {
             assert!(core::ptr::eq(actual.unwrap(), block.original_span(bytes)));

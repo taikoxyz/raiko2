@@ -18,7 +18,7 @@ use etna_core::{
         verify::{data_hash, header_hash},
     },
     domain::{DeploymentDomain, DomainError, chain_id},
-    schedule::UINT48_MAX,
+    params::UINT48_MAX,
 };
 use tendermint::Hash;
 
@@ -59,7 +59,6 @@ pub struct ExecutionProjection<'a> {
     comet_hash: B256,
     anchor_number: u64,
     anchor_witness: Option<&'a [u8]>,
-    committee_witness: Option<&'a [u8]>,
     forced_witness: Option<&'a [u8]>,
 }
 
@@ -103,12 +102,6 @@ impl<'a> ExecutionProjection<'a> {
     #[must_use]
     pub const fn anchor_witness(&self) -> Option<&'a [u8]> {
         self.anchor_witness
-    }
-
-    /// Raw inner committee item, whose fields still require strict decoding and verification.
-    #[must_use]
-    pub const fn committee_witness(&self) -> Option<&'a [u8]> {
-        self.committee_witness
     }
 
     /// Raw inner forced-inclusion item, whose fields still require strict decoding and verification.
@@ -228,7 +221,6 @@ pub fn verify_execution_projection<'a, T: Encodable2718>(
         return Err(ProjectionError::ExecutionItemSize);
     }
     let anchor_witness = optional_witness(&mut fields)?;
-    let committee_witness = optional_witness(&mut fields)?;
     let forced_witness = optional_witness(&mut fields)?;
     require_empty(fields)?;
 
@@ -243,7 +235,6 @@ pub fn verify_execution_projection<'a, T: Encodable2718>(
         comet_hash,
         anchor_number,
         anchor_witness,
-        committee_witness,
         forced_witness,
     })
 }

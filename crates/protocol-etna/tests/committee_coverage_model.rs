@@ -1,10 +1,9 @@
 //! Independent end-of-run model for Etna committee coverage.
 
-use alloy_primitives::{U256, hex};
+use alloy_primitives::hex;
 use etna_core::{
     comet::{codec::decode_canonical_block, validators::Validators},
     key::ConsensusKey,
-    types::Member,
 };
 use raiko2_protocol_etna::coverage::{
     CoverageContext, ExpectedValidatorSets, bind_committee_schedule,
@@ -24,13 +23,10 @@ struct Committee {
 }
 
 impl Committee {
-    fn new(members: [(usize, u64, u64); 2]) -> Self {
-        let signing_members = members.map(|(key, power, _)| (PUBLIC_KEYS[key], power));
-        let native_members = members.map(|(key, power, stake_remainder)| Member {
-            pubkey: ConsensusKey::from_slice(&PUBLIC_KEYS[key]).unwrap(),
-            power,
-            eff_stake: U256::from(100 * power + stake_remainder),
-        });
+    fn new(members: [(usize, u64); 2]) -> Self {
+        let signing_members = members.map(|(key, power)| (PUBLIC_KEYS[key], power));
+        let native_members = members
+            .map(|(key, power)| (ConsensusKey::from_slice(&PUBLIC_KEYS[key]).unwrap(), power));
         let mut signing_set = signing_members.to_vec();
         signing_set.sort_unstable();
         Self {
@@ -42,10 +38,10 @@ impl Committee {
 
 fn committees() -> [Committee; 4] {
     [
-        Committee::new([(0, 10, 0), (1, 10, 0)]),
-        Committee::new([(1, 10, 9), (0, 10, 5)]),
-        Committee::new([(0, 10, 0), (2, 10, 0)]),
-        Committee::new([(0, 11, 0), (1, 10, 0)]),
+        Committee::new([(0, 10), (1, 10)]),
+        Committee::new([(1, 10), (0, 10)]),
+        Committee::new([(0, 10), (2, 10)]),
+        Committee::new([(0, 11), (1, 10)]),
     ]
 }
 

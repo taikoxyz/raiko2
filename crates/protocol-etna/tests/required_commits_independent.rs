@@ -9,8 +9,7 @@ use etna_core::{
     },
     domain::{DeploymentDomain, DomainError, chain_id},
     key::ConsensusKey,
-    schedule::UINT48_MAX,
-    types::Member,
+    params::UINT48_MAX,
 };
 use k256::ecdsa::SigningKey;
 use raiko2_protocol_etna::coverage::{
@@ -42,16 +41,17 @@ struct Signers {
 impl Signers {
     fn new(seeds: [u8; 3], powers: [u64; 3]) -> Self {
         let keys = seeds.map(|seed| SigningKey::from_slice(&[seed; 32]).unwrap());
-        let members = std::array::from_fn::<_, 3, _>(|index| Member {
-            pubkey: ConsensusKey::from_slice(
-                keys[index]
-                    .verifying_key()
-                    .to_encoded_point(true)
-                    .as_bytes(),
+        let members = std::array::from_fn::<_, 3, _>(|index| {
+            (
+                ConsensusKey::from_slice(
+                    keys[index]
+                        .verifying_key()
+                        .to_encoded_point(true)
+                        .as_bytes(),
+                )
+                .unwrap(),
+                powers[index],
             )
-            .unwrap(),
-            eff_stake: U256::ZERO,
-            power: powers[index],
         });
         let validators = Validators::from_members(&members).unwrap();
         Self { keys, validators }
@@ -423,5 +423,85 @@ fn preserves_the_pinned_version_gate_and_strict_weighted_slot_policy() {
             Err(CommitVerificationError::Certificate { height: 10, source: BftError::Certificate(message) })
             if message.contains("APP_VERSION")
         ));
+    }
+}
+
+// Append to tests/required_commits_independent.rs: reuses its input-only test fixture helpers.
+#[test]
+fn independent_fixed_total_exact_two_thirds_rejects_and_one_more_unit_accepts() {
+    let signers = Signers::new([1, 2, 3], [4, 1, 1]);
+    let domain = domain();
+    let expected = [sets(&signers, &signers)];
+    let h = header(10, expected[0], domain);
+    let context = CoverageContext {
+        parent_height: 9,
+        last_height: 10,
+        max_blocks: 1,
+    };
+    let exact = signed(
+        &h,
+        &h.chain_id,
+        &signers,
+        [Slot::Block, Slot::Absent, Slot::Absent],
+    );
+    assert!(
+        verify_required_native_commits(
+            std::slice::from_ref(&h),
+            &expected,
+            &context,
+            std::slice::from_ref(&exact),
+            &domain
+        )
+        .is_err()
+    );
+    let plus_one = signed(
+        &h,
+        &h.chain_id,
+        &signers,
+        [Slot::Block, Slot::Block, Slot::Absent],
+    );
+    verify_required_native_commits(
+        std::slice::from_ref(&h),
+        &expected,
+        &context,
+        &[plus_one],
+        &domain,
+    )
+    .unwrap();
+    let mut duplicate = exact;
+    duplicate.signatures[1] = duplicate.signatures[0].clone();
+    assert!(
+        verify_required_native_commits(&[h], &expected, &context, &[duplicate], &domain).is_err()
+    );
+}
+
+#[test]
+fn independent_signatures_bind_both_full_block_id_part_set_fields() {
+    let signers = Signers::new([1, 2, 3], [4, 1, 1]);
+    let domain = domain();
+    let expected = [sets(&signers, &signers)];
+    let h = header(10, expected[0], domain);
+    let context = CoverageContext {
+        parent_height: 9,
+        last_height: 10,
+        max_blocks: 1,
+    };
+    let qc = all_block(&h, &signers);
+    for part_set in [
+        parts::Header::new(4, qc.block_id.part_set_header.hash).unwrap(),
+        parts::Header::new(3, Hash::Sha256([0x30; 32])).unwrap(),
+    ] {
+        let mut changed = qc.clone();
+        changed.block_id.part_set_header = part_set;
+        assert!(
+            verify_required_native_commits(
+                std::slice::from_ref(&h),
+                &expected,
+                &context,
+                &[changed],
+                &domain
+            )
+            .is_err()
+        );
     }
 }

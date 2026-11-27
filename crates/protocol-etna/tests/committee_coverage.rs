@@ -1,11 +1,10 @@
 //! Validator schedule binding over a complete Etna landing range.
 
-use alloy_primitives::{U256, hex};
+use alloy_primitives::hex;
 use etna_core::{
     comet::{codec::decode_canonical_block, validators::Validators},
     key::ConsensusKey,
-    schedule::UINT48_MAX,
-    types::Member,
+    params::UINT48_MAX,
 };
 use raiko2_protocol_etna::coverage::{
     CoverageContext, CoverageError, ExpectedValidatorSets, bind_committee_schedule,
@@ -15,12 +14,8 @@ use tendermint::{Hash, block::Header};
 const KEY_A: [u8; 33] = hex!("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798");
 const KEY_B: [u8; 33] = hex!("02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5");
 
-fn member(key: &[u8; 33], power: u64) -> Member {
-    Member {
-        pubkey: ConsensusKey::from_slice(key).unwrap(),
-        eff_stake: U256::ZERO,
-        power,
-    }
+fn member(key: &[u8; 33], power: u64) -> (ConsensusKey, u64) {
+    (ConsensusKey::from_slice(key).unwrap(), power)
 }
 
 fn headers(parent: u64, expected: &[ExpectedValidatorSets<'_>]) -> Vec<Header> {
@@ -133,18 +128,11 @@ fn power_only_change_requires_the_outgoing_commit_even_beyond_u32() {
 }
 
 #[test]
-fn reordering_and_stake_metadata_do_not_require_extra_commits() {
+fn reordering_does_not_require_extra_commits() {
     let first = member(&KEY_A, 10);
     let second = member(&KEY_B, 10);
-    let a = Validators::from_members(&[first.clone(), second.clone()]).unwrap();
-    let equivalent = Validators::from_members(&[
-        second,
-        Member {
-            eff_stake: U256::from(1),
-            ..first
-        },
-    ])
-    .unwrap();
+    let a = Validators::from_members(&[first, second]).unwrap();
+    let equivalent = Validators::from_members(&[second, first]).unwrap();
     let expected = [sets(&a, &equivalent), sets(&equivalent, &a), sets(&a, &a)];
 
     let requirements =

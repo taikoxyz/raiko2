@@ -66,7 +66,7 @@ impl Fixture {
         let tx_items: Vec<_> = encoded_transactions.iter().map(Vec::as_slice).collect();
         let execution_item = list(&[&alloy_rlp::encode(&execution_header), &list(&tx_items)]);
         let mut envelope = vec![6];
-        envelope.extend(list(&[&execution_item, &[0xc0], &[0xc0], &[0xc0]]));
+        envelope.extend(list(&[&execution_item, &[0xc0], &[0xc0]]));
         let comet_transactions = [envelope];
 
         let raw = hex::decode(include_str!("fixtures/first-block.hex").trim_end()).unwrap();

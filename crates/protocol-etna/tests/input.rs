@@ -15,11 +15,10 @@ fn statement() -> LandStatementInput {
         l1_chain_id: U256::from(1),
         l2_chain_id: U256::from(2),
         inbox: Address::repeat_byte(3),
-        registry: Address::repeat_byte(4),
         generation: U256::from(5),
         parent_hash: B256::repeat_byte(6),
         parent_comet_hash: B256::repeat_byte(7),
-        committee_config_hash: B256::repeat_byte(8),
+        config_hash: B256::repeat_byte(8),
         input: LandInput {
             parent_height: U256::from(9),
             last_height: U256::from(11),
@@ -28,7 +27,6 @@ fn statement() -> LandStatementInput {
             last_state_root: B256::repeat_byte(12),
             l1_reference_block_number: U256::from(13),
             forced_inclusion_head: U256::from(14),
-            active_committee_snapshot: U256::from(15),
         },
         l1_reference_block_hash: B256::repeat_byte(16),
         blob_hashes: vec![B256::repeat_byte(17)],
@@ -88,6 +86,25 @@ fn owned_statement_roundtrip_preserves_complete_preimage() {
     );
     let mut encoded = serde_json::to_value(original).unwrap();
     encoded["input"]["host_verified"] = true.into();
+    assert!(serde_json::from_value::<LandStatementInput>(encoded).is_err());
+}
+
+#[test]
+fn current_statement_rejects_superseded_registry_and_snapshot_fields() {
+    for field in ["registry", "committee_config_hash"] {
+        let mut encoded = serde_json::to_value(statement()).unwrap();
+        encoded[field] = if field == "registry" {
+            serde_json::to_value(Address::ZERO).unwrap()
+        } else {
+            serde_json::to_value(B256::ZERO).unwrap()
+        };
+        assert!(
+            serde_json::from_value::<LandStatementInput>(encoded).is_err(),
+            "{field}"
+        );
+    }
+    let mut encoded = serde_json::to_value(statement()).unwrap();
+    encoded["input"]["active_committee_snapshot"] = serde_json::json!("0x0");
     assert!(serde_json::from_value::<LandStatementInput>(encoded).is_err());
 }
 

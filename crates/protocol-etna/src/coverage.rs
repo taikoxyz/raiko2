@@ -14,7 +14,7 @@ use etna_core::{
         verify::{BftError, verify_native_commit},
     },
     domain::{DeploymentDomain, DomainError, chain_id},
-    schedule::UINT48_MAX,
+    params::UINT48_MAX,
 };
 use tendermint::block::Header;
 

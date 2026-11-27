@@ -4784,10 +4784,11 @@ dependencies = [
 [[package]]
 name = "etna-core"
 version = "2.3.0"
-source = "git+https://github.com/taikoxyz/taiko-mono?rev=4827fea0e844236d14cceafd6bd84a820bff2dd0#4827fea0e844236d14cceafd6bd84a820bff2dd0"
+source = "git+https://github.com/taikoxyz/taiko-mono?rev=ddce3fb8d70dc89cd3fa270cea03ff4762ced482#ddce3fb8d70dc89cd3fa270cea03ff4762ced482"
 dependencies = [
  "alloy-primitives",
  "alloy-rlp",
+ "alloy-sol-types",
  "base64 0.22.1",
  "k256",
  "prost 0.13.5",
@@ -8535,7 +8536,9 @@ dependencies = [
  "alloy-trie 0.9.8",
  "anyhow",
  "etna-core",
+ "k256",
  "flate2",
+ "prost 0.13.5",
  "protocol",
  "raiko2-primitives",
  "raiko2-primitives-shasta",
@@ -8551,6 +8554,8 @@ dependencies = [
  "risc0-ethereum-trie",
  "serde_json",
  "sha2 0.10.9",
+ "tendermint",
+ "tendermint-proto",
 ]
 
 [[package]]

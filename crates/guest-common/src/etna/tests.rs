@@ -438,7 +438,7 @@ impl RangeFixture {
             // The range fixture exercises structural anchor carriage on each advance.
             let anchor_witness = list(&[&alloy_rlp::encode(raw_l1.as_slice()), &[0xc0]]);
             let optional_anchor = list(&[&anchor_witness]);
-            envelope.extend(list(&[&item, &optional_anchor, &[0xc0], &[0xc0]]));
+            envelope.extend(list(&[&item, &optional_anchor, &[0xc0]]));
 
             let (_, mut comet) = decode_canonical_block(&stock_block).unwrap();
             comet.header.chain_id = chain_id(&domain).unwrap().parse().unwrap();
@@ -525,7 +525,7 @@ impl RangeFixture {
                 .as_ref()
                 .map_or_else(|| vec![0xc0], |raw| list(&[raw]));
             let mut envelope = vec![0x06];
-            envelope.extend(list(&[&block.item, &optional_anchor, &[0xc0], &[0xc0]]));
+            envelope.extend(list(&[&block.item, &optional_anchor, &[0xc0]]));
             block.comet.data = vec![envelope];
             if let Some(hash) = previous {
                 block.comet.header.last_block_id.as_mut().unwrap().hash = hash;
@@ -572,11 +572,10 @@ impl RangeFixture {
             l1_chain_id: context.domain.l1_chain_id,
             l2_chain_id: context.domain.l2_chain_id,
             inbox: context.domain.inbox,
-            registry: Address::repeat_byte(0x65),
             generation: U256::from(context.domain.generation),
             parent_hash: context.parent_el_hash,
             parent_comet_hash: context.parent_comet_hash,
-            committee_config_hash: B256::repeat_byte(0x66),
+            config_hash: B256::repeat_byte(0x66),
             input: LandInput {
                 parent_height: U256::from(context.parent_height),
                 last_height: U256::from(context.last_height),
@@ -585,7 +584,6 @@ impl RangeFixture {
                 last_state_root: self.blocks.last().unwrap().execution.state_root,
                 l1_reference_block_number: U256::from(17 + self.l1_headers.len()),
                 forced_inclusion_head: U256::ZERO,
-                active_committee_snapshot: U256::from(50),
             },
             l1_reference_block_hash: alloy_primitives::keccak256(self.l1_headers.last().unwrap()),
             blob_hashes: hashes,
@@ -1147,7 +1145,7 @@ fn cut_leaves_for_constant_cursor(range: &RangeFixture, cursor: u64) -> Vec<B256
 #[test]
 fn phase_one_preserves_nonzero_and_maximum_cursors() {
     let fixture = authenticated_range_fixture();
-    for cursor in [7, etna_core::schedule::UINT48_MAX] {
+    for cursor in [7, etna_core::params::UINT48_MAX] {
         let cuts = cut_leaves_for_constant_cursor(&fixture.range, cursor);
         let mut statement = fixture.range.statement(&fixture.hashes, &cuts);
         statement.forced_inclusion_head_before = U256::from(cursor);
@@ -1190,7 +1188,6 @@ fn phase_one_rejects_carried_fi_witnesses_without_cursor_consumption() {
         envelope.extend(list(&[
             &range.blocks[index].item,
             &list(&[range.blocks[index].anchor_witness.as_ref().unwrap()]),
-            &[0xc0],
             &[0xc2, 0xc1, 0x01],
         ]));
         range.blocks[index].comet.data = vec![envelope];

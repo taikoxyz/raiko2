@@ -16,7 +16,7 @@ use alloy_consensus::Header as ExecutionHeader;
 use alloy_eips::eip2718::Encodable2718;
 use alloy_primitives::{B256, U256, keccak256};
 use core::cmp::Ordering;
-use etna_core::{comet::verify::header_hash, domain::DeploymentDomain, schedule::UINT48_MAX};
+use etna_core::{comet::verify::header_hash, domain::DeploymentDomain, params::UINT48_MAX};
 use tendermint::{Hash, block::Header as CometHeader};
 
 use crate::{
@@ -218,7 +218,7 @@ pub enum RangeStatementProjectionError {
 /// Each post-block FI cursor is checked for its uint48 width and for a valid
 /// step relative to the previous cursor. The composing verifier authenticates
 /// the origin cursor and checks each supplied cursor against actual FI behavior.
-/// It also authenticates the L1 reference, registry, configuration, committee
+/// It also authenticates the L1 reference, configuration, committee
 /// selection and blob commitments and verifies certificates, nested witnesses,
 /// strict execution, DA equality and proof framing.
 ///

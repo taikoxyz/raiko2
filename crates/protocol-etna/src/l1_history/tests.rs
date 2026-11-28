@@ -644,7 +644,7 @@ fn replace_header_field(raw: &[u8], position: usize, replacement: &[u8]) -> Vec<
     else {
         panic!("expected raw header list")
     };
-    assert_eq!(cursor, []);
+    assert_eq!(cursor, &[] as &[u8]);
     fields[position] = replacement;
     let mut encoded = Vec::new();
     alloy_rlp::Header {

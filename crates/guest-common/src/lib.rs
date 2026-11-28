@@ -1,5 +1,8 @@
 //! Helpers for zkVM guest programs.
 
+pub mod etna;
+mod l1;
+
 use alethia_reth_block::config::{TaikoEvmConfig, TaikoNextBlockEnvAttributes};
 use alethia_reth_chainspec::{
     hardfork::{TaikoHardfork, TaikoHardforks},
@@ -12,7 +15,7 @@ use alloy_consensus::{
 };
 use alloy_primitives::{Address, B256, U256};
 use alloy_sol_types::{sol, SolCall};
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{ensure, Context, Result};
 use raiko2_primitives::{
     builtin_taiko_chain_spec, shasta_checkpoint_storage_slots, shasta_checkpoint_store_address,
     shasta_taiko_l2_address, StatelessInput, WitnessHeader,
@@ -249,36 +252,13 @@ fn validate_l1_anchor_linkage(
         .get(l1_header_anchor_start_index..)
         .context("invalid L1 header anchor checkpoint range")?;
 
-    if guest_input.taiko.l1_ancestor_headers.is_empty() {
-        bail!("taiko.l1_ancestor_headers must not be empty");
-    }
-
     let mut checkpoint_index = 0usize;
-    let mut previous_header_number = None;
-    let mut previous_header_hash = None;
-    let mut last_header_number = 0u64;
-    let mut last_header_hash = B256::ZERO;
-
-    for (index, header) in guest_input.taiko.l1_ancestor_headers.iter().enumerate() {
+    let headers = guest_input.taiko.l1_ancestor_headers.iter().map(|header| {
         let header_hash = header.hash_slow();
-        if let Some(previous_number) = previous_header_number {
-            ensure!(
-                header.number == previous_number + 1,
-                "taiko.l1_ancestor_headers must be contiguous at index {index}"
-            );
-        }
-        if let Some(previous_hash) = previous_header_hash {
-            ensure!(
-                header.parent_hash == previous_hash,
-                "taiko.l1_ancestor_headers parent hash mismatch at index {index}"
-            );
-        }
-
         while let Some(checkpoint) = header_anchor_checkpoints.get(checkpoint_index) {
             if checkpoint.block_number != header.number {
                 break;
             }
-
             ensure!(
                 checkpoint.block_hash == header_hash && checkpoint.state_root == header.state_root,
                 "anchor checkpoint ({}, {:?}, {:?}) not found in taiko.l1_ancestor_headers",
@@ -288,23 +268,18 @@ fn validate_l1_anchor_linkage(
             );
             checkpoint_index += 1;
         }
-
-        previous_header_number = Some(header.number);
-        previous_header_hash = Some(header_hash);
-        last_header_number = header.number;
-        last_header_hash = header_hash;
-    }
-
-    ensure!(
-        last_header_number == origin_block_number,
-        "taiko.l1_ancestor_headers last block number mismatch: expected {}, got {}",
+        Ok(l1::L1HeaderLink {
+            number: header.number,
+            hash: header_hash,
+            parent_hash: header.parent_hash,
+        })
+    });
+    l1::verify_l1_header_chain(
+        headers,
         origin_block_number,
-        last_header_number
-    );
-    ensure!(
-        last_header_hash == origin_block_hash,
-        "taiko.l1_ancestor_headers last hash mismatch"
-    );
+        origin_block_hash,
+        "taiko.l1_ancestor_headers",
+    )?;
     if let Some(checkpoint) = header_anchor_checkpoints.get(checkpoint_index) {
         ensure!(
             false,

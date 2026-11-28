@@ -350,6 +350,7 @@ pub enum TaikoFork {
     Pacaya,
     Shasta,
     Unzen,
+    Etna,
 }
 
 impl TaikoFork {
@@ -360,6 +361,7 @@ impl TaikoFork {
             Self::Pacaya => "PACAYA",
             Self::Shasta => "SHASTA",
             Self::Unzen => "UNZEN",
+            Self::Etna => "ETNA",
         }
     }
 
@@ -370,6 +372,7 @@ impl TaikoFork {
             "PACAYA" => Ok(Self::Pacaya),
             "SHASTA" => Ok(Self::Shasta),
             "UNZEN" => Ok(Self::Unzen),
+            "ETNA" => Ok(Self::Etna),
             _ => Err(format!("unknown Taiko fork: {value}")),
         }
     }
@@ -385,7 +388,7 @@ impl ForkId {
     const fn as_spec_id(self) -> SpecId {
         match self {
             Self::Standard(spec_id) => spec_id,
-            Self::Taiko(TaikoFork::Unzen) => SpecId::OSAKA,
+            Self::Taiko(TaikoFork::Unzen | TaikoFork::Etna) => SpecId::OSAKA,
             Self::Taiko(_) => SpecId::SHANGHAI,
         }
     }
@@ -655,6 +658,7 @@ const TAIKO_EXECUTION_FORKS: &[(AlethiaTaikoHardfork, TaikoFork)] = &[
     (AlethiaTaikoHardfork::Pacaya, TaikoFork::Pacaya),
     (AlethiaTaikoHardfork::Shasta, TaikoFork::Shasta),
     (AlethiaTaikoHardfork::Unzen, TaikoFork::Unzen),
+    (AlethiaTaikoHardfork::Etna, TaikoFork::Etna),
 ];
 
 fn canonical_chain_spec(name: &str) -> Option<CanonicalChainSpec> {
@@ -697,11 +701,16 @@ fn canonical_l1_chain_spec(spec: &RethChainSpec) -> CanonicalChainSpec {
 fn canonical_taiko_chain_spec(spec: &TaikoChainSpec) -> CanonicalChainSpec {
     let hard_forks = TAIKO_EXECUTION_FORKS
         .iter()
-        .map(|(alethia_fork, taiko_fork)| {
-            (
+        .filter_map(|(alethia_fork, taiko_fork)| {
+            let condition = spec.inner.hardforks.fork(*alethia_fork);
+            // Preserve the canonical pre-Etna config shape while the fork remains unscheduled.
+            if *taiko_fork == TaikoFork::Etna && condition == AlethiaForkCondition::Never {
+                return None;
+            }
+            Some((
                 ForkId::Taiko(*taiko_fork),
-                from_alethia_fork_condition(spec.inner.hardforks.fork(*alethia_fork)),
-            )
+                from_alethia_fork_condition(condition),
+            ))
         })
         .collect::<BTreeMap<_, _>>();
 
@@ -1048,6 +1057,8 @@ impl ChainSpec {
     ///
     /// Returns an error when the chain is not Taiko or not supported.
     pub fn to_taiko_chain_spec(&self) -> Result<Arc<TaikoChainSpec>> {
+        use alethia_reth_chainspec::hardfork::TaikoHardforks as _;
+
         if !self.is_taiko {
             bail!(
                 "chain spec is not a Taiko chain and cannot be converted (chain_id={})",
@@ -1059,6 +1070,15 @@ impl ChainSpec {
 
         let mut spec = self.base_taiko_chain_spec_with_configured_devnet_unzen(base.as_ref())?;
         self.apply_configured_taiko_forks(&mut spec);
+        alethia_reth_chainspec::spec::validate_etna_staking_address(&spec)?;
+        match spec.taiko_fork_activation(AlethiaTaikoHardfork::Etna) {
+            AlethiaForkCondition::Never => {}
+            AlethiaForkCondition::Timestamp(timestamp) => ensure!(
+                spec.is_unzen_active(timestamp),
+                "Etna cannot activate before Unzen"
+            ),
+            other => bail!("unsupported Etna fork condition: {other:?}; expected timestamp"),
+        }
         Ok(Arc::new(spec))
     }
 
@@ -1114,6 +1134,7 @@ const fn alethia_taiko_fork(fork: TaikoFork) -> Option<AlethiaTaikoHardfork> {
         TaikoFork::Pacaya => Some(AlethiaTaikoHardfork::Pacaya),
         TaikoFork::Shasta => Some(AlethiaTaikoHardfork::Shasta),
         TaikoFork::Unzen => Some(AlethiaTaikoHardfork::Unzen),
+        TaikoFork::Etna => Some(AlethiaTaikoHardfork::Etna),
     }
 }
 
@@ -1828,5 +1849,83 @@ mod tests {
         );
 
         assert!(spec.to_taiko_chain_spec().is_err());
+    }
+}
+
+#[cfg(test)]
+mod etna_schedule_tests {
+    use super::*;
+    use alethia_reth_chainspec::hardfork::TaikoHardforks;
+
+    fn configured(chain_id: u64) -> ChainSpec {
+        let mut spec = ChainSpec::new_single(
+            "execution_fixture".to_owned(),
+            chain_id,
+            SpecId::OSAKA,
+            Eip1559Constants::default(),
+            true,
+        );
+        spec.hard_forks
+            .insert(ForkId::Taiko(TaikoFork::Unzen), ForkCondition::Timestamp(0));
+        spec.hard_forks.insert(
+            ForkId::from_str("ETNA").expect("ETNA config key"),
+            ForkCondition::Timestamp(100),
+        );
+        spec
+    }
+
+    #[test]
+    fn explicit_etna_schedule_converts_without_changing_legacy_devnet_unzen() {
+        let config = configured(167_001);
+        let native = config.to_taiko_chain_spec().unwrap();
+        assert!(native.is_unzen_active(0));
+        assert!(!native.is_etna_active(99));
+        assert!(native.is_etna_active(100));
+        assert_eq!(config.spec_id(1, 100), Some(SpecId::OSAKA));
+        let old = ChainSpec::new_single(
+            "execution_fixture".to_owned(),
+            167_001,
+            SpecId::OSAKA,
+            Eip1559Constants::default(),
+            true,
+        )
+        .to_taiko_chain_spec()
+        .unwrap();
+        assert!(!old.is_etna_active(100));
+    }
+
+    #[test]
+    fn etna_schedule_rejects_activation_before_unzen_and_non_timestamp_conditions() {
+        let mut config = configured(167_001);
+        config.hard_forks.insert(
+            ForkId::Taiko(TaikoFork::Unzen),
+            ForkCondition::Timestamp(101),
+        );
+        assert!(
+            config
+                .to_taiko_chain_spec()
+                .unwrap_err()
+                .to_string()
+                .contains("before Unzen")
+        );
+        let mut config = configured(167_001);
+        config
+            .hard_forks
+            .insert(ForkId::from_str("ETNA").unwrap(), ForkCondition::Block(1));
+        assert!(
+            config
+                .to_taiko_chain_spec()
+                .unwrap_err()
+                .to_string()
+                .contains("expected timestamp")
+        );
+    }
+
+    #[test]
+    fn etna_schedule_rejects_networks_without_staking_address() {
+        for chain in [167_000, 167_013] {
+            let error = configured(chain).to_taiko_chain_spec().unwrap_err();
+            assert!(error.to_string().contains("EtnaStaking"), "{error:?}");
+        }
     }
 }

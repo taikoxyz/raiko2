@@ -12,6 +12,8 @@ mod analysis;
 #[cfg(feature = "mpt-metrics")]
 mod mpt_metrics;
 mod sparse;
+mod storage;
+pub use storage::read_storage_batch_with_witness_resources;
 mod trie;
 mod validation;
 mod witness_db;

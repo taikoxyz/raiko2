@@ -1,0 +1,29 @@
+[package]
+name = "raiko2-protocol-etna"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Etna consensus input verification for Raiko V2"
+
+[lints]
+workspace = true
+
+[dependencies]
+alethia-reth-primitives.workspace = true
+alloy-consensus.workspace = true
+alloy-eips.workspace = true
+alloy-primitives.workspace = true
+alloy-rlp.workspace = true
+alloy-sol-types.workspace = true
+etna-core.workspace = true
+serde.workspace = true
+sha2.workspace = true
+tendermint = { version = "0.40", default-features = false }
+thiserror = { version = "2.0.17", default-features = false }
+
+[dev-dependencies]
+serde_json.workspace = true
+k256 = { workspace = true, features = ["ecdsa"] }
+prost = { version = "0.13", default-features = false }
+tendermint-proto = { version = "0.40", default-features = false }

@@ -42,6 +42,10 @@ pub struct StorageRangeQueryResponseEntry {
 
 /// An extension trait for Alloy providers that adds custom debug RPC methods.
 #[async_trait]
+#[expect(
+    clippy::double_must_use,
+    reason = "async-trait adds must_use to already must-use boxed futures"
+)]
 pub trait DebugApi<N: Network>: Provider<N> {
     /// Fetches the next storage key for an address using `debug_storageRangeAt`.
     async fn get_next_storage_key(

@@ -84,11 +84,39 @@ pub(crate) fn proof_result_from_input_hash<P: TeeProvider>(
     instance_id: u32,
     input_hash: B256,
 ) -> Result<Raiko2ProofResult> {
+    proof_result_with_hash(provider, instance_id, |_| Ok(input_hash))
+}
+
+pub(crate) fn proof_result_from_etna_statement<P: TeeProvider>(
+    provider: &P,
+    instance_id: u32,
+    statement: B256,
+    verifier: Address,
+    chain_id: u64,
+) -> Result<Raiko2ProofResult> {
+    // Reject before touching instance key or quote material.
+    anyhow::ensure!(
+        !statement.is_zero(),
+        "Etna statement digest must be nonzero"
+    );
+    proof_result_with_hash(provider, instance_id, |signer| {
+        Ok(raiko2_protocol_shasta::libhash::hash_public_input(
+            statement, chain_id, verifier, signer,
+        ))
+    })
+}
+
+fn proof_result_with_hash<P: TeeProvider>(
+    provider: &P,
+    instance_id: u32,
+    input_hash: impl FnOnce(Address) -> Result<B256>,
+) -> Result<Raiko2ProofResult> {
     let secret_key = provider
         .load_private_key()
         .context("load SGX private key")?;
     let public_key = PublicKey::from_secret_key(&Secp256k1::new(), &secret_key);
     let instance_address = public_key_to_address(&public_key);
+    let input_hash = input_hash(instance_address)?;
     let quote = provider
         .load_quote(instance_address)
         .context("load SGX quote")?;
@@ -200,5 +228,111 @@ mod tests {
             .expect("build proof result");
 
         assert_eq!(result.quote, None);
+    }
+}
+
+// Append to sgx-runtime/src/protocol.rs; fake deterministic keys never leave test code.
+#[cfg(test)]
+mod etna_independent_tests {
+    use super::*;
+    use secp256k1::ecdsa::{RecoverableSignature, RecoveryId};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Default)]
+    struct TestProvider {
+        key_reads: AtomicUsize,
+        quote_reads: AtomicUsize,
+    }
+
+    impl TeeProvider for TestProvider {
+        fn save_private_key(&self, _: &SecretKey) -> Result<()> {
+            panic!("verification must not write a key")
+        }
+        fn load_private_key(&self) -> Result<SecretKey> {
+            let read = self.key_reads.fetch_add(1, Ordering::SeqCst);
+            // Alternating test identities expose a domain/signing identity split if
+            // helper stages independently reload the key during one proof operation.
+            Ok(SecretKey::from_slice(
+                &[if read.is_multiple_of(2) { 7 } else { 8 }; 32],
+            )?)
+        }
+        fn load_quote(&self, _: Address) -> Result<Vec<u8>> {
+            self.quote_reads.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![0x12, 0x34])
+        }
+    }
+
+    fn independent_domain(statement: B256, verifier: Address, signer: Address, chain: u64) -> B256 {
+        let mut words = [0u8; 160];
+        words[..12].copy_from_slice(b"VERIFY_PROOF");
+        words[56..64].copy_from_slice(&chain.to_be_bytes());
+        words[76..96].copy_from_slice(verifier.as_slice());
+        words[96..128].copy_from_slice(statement.as_slice());
+        words[140..160].copy_from_slice(signer.as_slice());
+        alloy_primitives::keccak256(words)
+    }
+
+    fn recover(hash: B256, bytes: &[u8]) -> Address {
+        let id = RecoveryId::try_from(i32::from(bytes[64]) - 27).unwrap();
+        let signature = RecoverableSignature::from_compact(&bytes[..64], id).unwrap();
+        let message = Message::from_digest_slice(hash.as_slice()).unwrap();
+        public_key_to_address(
+            &Secp256k1::new()
+                .recover_ecdsa(&message, &signature)
+                .unwrap(),
+        )
+    }
+
+    #[test]
+    fn independent_etna_wrapper_is_89_bytes_and_recovers_only_under_contract_domain() {
+        let provider = TestProvider::default();
+        let statement = B256::repeat_byte(0x22);
+        let verifier = Address::repeat_byte(0x11);
+        let result =
+            proof_result_from_etna_statement(&provider, 0x0102_0304, statement, verifier, 167_001)
+                .unwrap();
+        let raw = hex::decode(result.proof.unwrap().strip_prefix("0x").unwrap()).unwrap();
+        assert_eq!(raw.len(), 89);
+        assert_eq!(&raw[..4], &[1, 2, 3, 4]);
+        let signer = Address::from_slice(&raw[4..24]);
+        let expected = independent_domain(statement, verifier, signer, 167_001);
+        assert_eq!(result.input, format!("{expected:#x}"));
+        assert_eq!(result.instance_address.unwrap(), format!("{signer:#x}"));
+        assert!(matches!(raw[88], 27 | 28));
+        let compact = secp256k1::ecdsa::Signature::from_compact(&raw[24..88]).unwrap();
+        let mut normalized = compact;
+        normalized.normalize_s();
+        assert_eq!(
+            compact, normalized,
+            "the onchain ECDSA checker requires low-s"
+        );
+        assert_eq!(recover(expected, &raw[24..]), signer);
+        for wrong in [
+            statement,
+            independent_domain(statement, verifier, signer, 167_002),
+            independent_domain(statement, Address::ZERO, signer, 167_001),
+            independent_domain(B256::repeat_byte(0x23), verifier, signer, 167_001),
+        ] {
+            assert_ne!(recover(wrong, &raw[24..]), signer);
+        }
+        assert_eq!(result.quote.as_deref(), Some("0x1234"));
+        assert_eq!(provider.quote_reads.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn independent_zero_etna_statement_rejects_before_private_key_or_quote_access() {
+        let provider = TestProvider::default();
+        assert!(
+            proof_result_from_etna_statement(
+                &provider,
+                1,
+                B256::ZERO,
+                Address::repeat_byte(0x11),
+                167_001
+            )
+            .is_err()
+        );
+        assert_eq!(provider.key_reads.load(Ordering::SeqCst), 0);
+        assert_eq!(provider.quote_reads.load(Ordering::SeqCst), 0);
     }
 }

@@ -221,6 +221,10 @@ pub(crate) async fn acquire_submission_checkpoint_permit(
 }
 
 #[async_trait::async_trait]
+#[expect(
+    clippy::double_must_use,
+    reason = "async-trait adds must_use to already must-use boxed futures"
+)]
 pub trait ProverProgressObserver: Send + Sync {
     async fn acquire_submission_checkpoint_permit(
         &self,
@@ -482,7 +486,7 @@ pub(crate) fn shasta_image_id_words_from_uuid(raw: &str) -> Result<[u32; 8], Str
         }
 
         let mut words = [0u32; 8];
-        for (index, chunk) in bytes.chunks_exact(4).enumerate() {
+        for (index, chunk) in bytes.as_chunks::<4>().0.iter().enumerate() {
             let mut word = [0u8; 4];
             word.copy_from_slice(chunk);
             words[index] = u32::from_le_bytes(word);
@@ -585,6 +589,10 @@ fn require_external_aggregate_proof_carry(
 
 /// Common prover trait for all proving backends.
 #[async_trait::async_trait]
+#[expect(
+    clippy::double_must_use,
+    reason = "async-trait adds must_use to already must-use boxed futures"
+)]
 pub trait Prover<B>: Send + Sync
 where
     B: ProverBackend,

@@ -41,6 +41,10 @@ impl fmt::Display for L2ProviderKind {
 }
 
 #[async_trait::async_trait]
+#[expect(
+    clippy::double_must_use,
+    reason = "async-trait adds must_use to already must-use boxed futures"
+)]
 pub(crate) trait L2Provider: Send + Sync {
     async fn batch_blocks(&self, block_numbers: &[u64]) -> RaikoResult<Vec<RethBlock>>;
 

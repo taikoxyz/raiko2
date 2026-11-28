@@ -30,7 +30,7 @@ use std::sync::Arc;
 
 /// Injection point for derived-block execution during stateless reconstruction.
 ///
-/// Stateless entrypoints enforce the Unzen-only boundary before execution; storage changes are
+/// Candidate reconstruction enforces the legacy Unzen boundary before execution; storage changes are
 /// ordinary per-slot deltas applied to the witnessed parent state.
 pub trait DerivedBlockExecutor {
     /// Executes the prepared candidate block against the witness-backed database.
@@ -500,6 +500,11 @@ where
     E: DerivedBlockExecutor,
 {
     ensure_unzen_active(chain_spec, block_env.timestamp)?;
+    if chain_spec.is_etna_active(block_env.timestamp) {
+        return Err(StatelessValidationError::Custom(
+            "Etna committed blocks require strict supplied-block validation",
+        ));
+    }
     ensure_supported_parent_beacon_block_root(block_env.parent_beacon_block_root)?;
 
     let parent_header = sealed_parent_header(ancestor_headers)?;
@@ -576,14 +581,18 @@ where
     let output = executor
         .execute(current_block)
         .map_err(|e| StatelessValidationError::StatelessExecutionFailed(e.to_string()))?;
-    ensure_anchor_receipt_success(&output.receipts)?;
+    if !chain_spec.is_etna_active(current_block.timestamp) {
+        ensure_anchor_receipt_success(&output.receipts)?;
+    }
 
     // Post validation checks
     validate_block_post_execution(current_block, chain_spec, &output, None, None)
         .map_err(StatelessValidationError::ConsensusValidationFailed)?;
 
-    validate_anchor_transaction_in_block(current_block, chain_spec)
-        .map_err(StatelessValidationError::ConsensusValidationFailed)?;
+    if !chain_spec.is_etna_active(current_block.timestamp) {
+        validate_anchor_transaction_in_block(current_block, chain_spec)
+            .map_err(StatelessValidationError::ConsensusValidationFailed)?;
+    }
 
     // Compute and check the post state root
     let hashed_state = HashedPostState::from_bundle_state::<KeccakKeyHasher>(&output.state.state);
@@ -673,7 +682,19 @@ pub(crate) fn validate_block_consensus(
     block: &RecoveredBlock<Block>,
     ancestor_headers: &[WitnessHeader],
 ) -> Result<(), StatelessValidationError> {
-    ensure_canonical_parent_beacon_block_root(block.header().parent_beacon_block_root)?;
+    if chain_spec.is_etna_active(block.header().timestamp()) {
+        if block
+            .header()
+            .parent_beacon_block_root
+            .is_none_or(|root| root.is_zero())
+        {
+            return Err(StatelessValidationError::Custom(
+                "Etna requires a non-zero parent_beacon_block_root",
+            ));
+        }
+    } else {
+        ensure_canonical_parent_beacon_block_root(block.header().parent_beacon_block_root)?;
+    }
     ensure_full_ancestor_headers(ancestor_headers)?;
 
     let parent_header = ancestor_headers
@@ -1518,3 +1539,7 @@ mod tests {
         assert!(ensure_anchor_receipt_success(&[ok]).is_ok());
     }
 }
+
+#[cfg(test)]
+#[path = "validation/etna_tests.rs"]
+mod etna_tests;

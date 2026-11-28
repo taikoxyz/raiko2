@@ -35,6 +35,10 @@ pub type StorageProofTargets = Vec<Vec<(Address, Vec<B256>)>>;
 ///
 /// All methods return a [`RaikoResult`] wrapping the respective data type.
 #[async_trait::async_trait]
+#[expect(
+    clippy::double_must_use,
+    reason = "async-trait adds must_use to already must-use boxed futures"
+)]
 pub trait Provider: Send + Sync {
     async fn batch_blocks(&self, blocks: &[u64]) -> RaikoResult<Vec<Block>>;
 

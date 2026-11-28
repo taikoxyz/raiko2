@@ -85,6 +85,10 @@ pub enum CanonicalPreflightDeleteResult {
 }
 
 #[async_trait]
+#[expect(
+    clippy::double_must_use,
+    reason = "async-trait adds must_use to already must-use boxed futures"
+)]
 pub trait CanonicalPreflightStore: std::fmt::Debug + Send + Sync {
     async fn get_canonical_preflight(
         &self,

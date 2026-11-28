@@ -326,6 +326,10 @@ impl ProofCompletionPermit {
 }
 
 #[async_trait]
+#[expect(
+    clippy::double_must_use,
+    reason = "async-trait adds must_use to already must-use boxed futures"
+)]
 pub trait EngineObserver: Send + Sync {
     async fn acquire_task_execution_permit(
         &self,

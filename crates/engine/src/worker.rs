@@ -34,6 +34,10 @@ impl Default for WorkerConfig {
 
 /// Trait for types that can be run by a worker.
 #[async_trait::async_trait]
+#[expect(
+    clippy::double_must_use,
+    reason = "async-trait adds must_use to already must-use boxed futures"
+)]
 pub trait Runnable: Clone + Send + Sync + 'static {
     /// Run one unit of work. Returns true if work was done, false if idle.
     async fn run_one(&self, worker_id: &str) -> Result<bool, String>;

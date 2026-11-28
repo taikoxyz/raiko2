@@ -63,6 +63,10 @@ enum GcsWriteResult {
 }
 
 #[async_trait]
+#[expect(
+    clippy::double_must_use,
+    reason = "async-trait adds must_use to already must-use boxed futures"
+)]
 trait GcsTransport: std::fmt::Debug + Send + Sync {
     async fn read(&self, name: &str) -> Result<Option<GcsObject>>;
     async fn list_prefix_page(

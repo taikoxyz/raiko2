@@ -91,3 +91,18 @@ contains proof material only, not the full state dump or an endpoint-specific cl
 The SSZ helper schemas use the same consensus-spec revision pinned above. Recreating
 this fixture was an offline conversion, not a reusable live proof-generation service.
 Native test execution and the SGX composition remain distinct validation gates.
+
+
+### Fresh portable-producer output
+
+`devnet-live.json` is a second frozen input from the temporary portable producer,
+using explicit Q **55,995** and anchors **53,995 / 55,595** on 2026-11-28.
+Its SHA-256 is `3f903b00e5826b749bbed212f78de71ac323615d8a653702f42b2554b913e0a4`.
+The producer input itself has SHA-256
+`3c762381cf29ebc5c0bdaa3cd3eb122849a28ea025f8bbd688f79e8d2de15111`.
+One reference state and 32 shared helpers authenticate the two anchors. The
+native test deserializes this actual producer output through the existing owned
+carrier and verifies its exact Q and both header/state-root identities. No live
+network call or new transport codec is part of the native test. A passing native
+CI run is required before treating producer-format/native-history replay as
+verified; complete SGX range verification and L1 acceptance remain separate gates.

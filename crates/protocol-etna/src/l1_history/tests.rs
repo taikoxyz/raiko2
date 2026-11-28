@@ -602,10 +602,13 @@ fn owned_input_independent_replays_public_mainnet_sparse_history() {
 const INTERNAL_L1_CHAIN_ID: u64 = 32_382;
 
 fn devnet_fixture() -> (u64, B256, crate::input::L1HistoryInput, Value) {
-    let fixture: Value = serde_json::from_str(include_str!(
+    devnet_fixture_from_json(include_str!(
         "../../tests/fixtures/l1-history/devnet-recent.json"
     ))
-    .unwrap();
+}
+
+fn devnet_fixture_from_json(json: &str) -> (u64, B256, crate::input::L1HistoryInput, Value) {
+    let fixture: Value = serde_json::from_str(json).unwrap();
     assert_eq!(fixture["chain_id"], INTERNAL_L1_CHAIN_ID);
     (
         fixture["reference_number"].as_u64().unwrap(),
@@ -696,6 +699,32 @@ fn actual_devnet_recent_anchors_share_one_owned_native_reference() {
             .state_helpers
             .windows(2)
             .all(|pair| pair[0].index < pair[1].index)
+    );
+}
+
+#[test]
+fn actual_devnet_live_producer_output_replays_as_owned_native_history() {
+    let (number, hash, input, fixture) = devnet_fixture_from_json(include_str!(
+        "../../tests/fixtures/l1-history/devnet-live.json"
+    ));
+    assert_eq!(number, 55_995);
+    let got = verify_devnet(&input, number, hash).unwrap();
+    let expected = fixture["expected_anchors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|target| {
+            (
+                target["number"].as_u64().unwrap(),
+                root(&target["hash"]),
+                root(&target["state_root"]),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(got, expected);
+    assert_eq!(
+        got.iter().map(|header| header.0).collect::<Vec<_>>(),
+        [53_995, 55_595]
     );
 }
 

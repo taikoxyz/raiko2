@@ -1968,10 +1968,10 @@ The live two-sample evidence and detailed TODOs are recorded in
   and target block roots, canonical EL hashes and Q's parent beacon binding;
   verify both 34-sibling paths and reject 68 individual sibling mutations.
   This uses offline Python tooling, not the native Raiko2/SGX verifier.
-- [ ] **S03 — Trusted internal-L1 profile and native/SGX replay:** the current
-  history verifier has no chain-32382 profile, and the deployed genesis differs
-  from the old default configuration. Review the real profile, adapt the
-  supplied witness, and replay both samples before claiming devnet acceptance.
+- [ ] **S03 — Trusted internal-L1 profile and native/SGX replay:** native
+  profile/input replay is now complete at `51ba09b8` (checkpoint below). The
+  complete real devnet SGX request remains open. Captured genesis differs from
+  the old default configuration; no arbitrary host override is accepted.
 - [ ] **Later — At-least-14-day coverage:** retained completed-period data and
   arbitrary-used-height lookup, including missed slots and restart behavior.
 - [ ] **Later — Selective provider proofs:** build near the node and transport
@@ -1997,8 +1997,9 @@ choice remains pending user review, and no new API is implemented yet.
   Add the review's deployment U/checkpoint-cadence preflight to the draft.
 - [ ] Confirm/freeze the API milestone and child statement/trust obligations
   before implementing the corresponding new API or aggregation relation.
-- [ ] Finish S03 native anchor input/profile conversion with real shared-anchor
-  evidence and focused negative regressions; review and run native checks.
+- [x] Finish S03 native anchor input/profile conversion with real shared-anchor
+  evidence and focused negative regressions; independent review and focused
+  native checks passed at `51ba09b8` (checkpoint below).
 - [ ] Before the 100-block run, confirm authenticated U/checkpoints support that
   cadence, measure request/resource bounds, then test any 64 -> 100 service
   limit change. Do not bypass a consensus limit to fit the batch target.
@@ -2006,3 +2007,29 @@ choice remains pending user review, and no new API is implemented yet.
 The anchor input conversion may proceed independently of the API choice. A real
 SGX proof and L1 acceptance remain separate gates; two offline SSZ samples do
 not establish the complete PoC or the live production witness builder.
+
+## S03 native history checkpoint (2026-11-28)
+
+Source `51ba09b8` passed all five focused jobs in
+[CI run 46100845137](https://github.com/taikoxyz/raiko2/actions/runs/46100845137):
+fmt, Clippy, foundation, pipeline and runtime. Effective merge
+`db287f7f3555b57b2c28bb1d6510eacbcef33563` uses base `3f4ec387`.
+All five added devnet tests and all 16 L1-history tests actually executed and
+passed, including the unchanged public-network/window regressions. Independent
+source review and independent offline proof checks passed. Review found and
+fixed a test-only RLP encoder method error; CI then exposed test-only lint and
+empty-slice type-inference issues, which were fixed without changing verification.
+
+The runtime change is only the immutable captured L1 chain-32382 schedule; the
+real owned-input fixture opens both anchors under one Q using 32 shared state
+helpers and two nine-sibling body paths. Existing proof obligations and caller
+coverage checks remain authoritative. Fixture SHA-256:
+`f074bc005a0613fa4b7a698160da1eac762f62ef052ecd475a068f4387daee85`.
+
+A temporary portable host tool has additionally fetched a fresh explicit Q
+55,995 and anchors 53,995/55,595 from the live devnet. It fetched one reference
+state and emitted the existing input format. This is a PoC data producer, not a
+production provider/API or native/SGX execution of that fresh request.
+Independent tool verification and the real SGX/L1 acceptance remain distinct.
+The API design stays a draft; no new endpoint modes, 100-block admission limit,
+child-proof relation, image registration, transaction or deployment is enabled.

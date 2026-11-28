@@ -153,22 +153,32 @@ the actual produced block by root; a 404 at a requested slot alone does not
 establish unavailable historical data. The endpoint's finalized checkpoint was
 well behind its head; this observation is not a finality or L1 acceptance claim.
 
-This establishes real-data SSZ witness feasibility, not the production Raiko2
-or enclave path. In particular, the current native history verifier supports
-Ethereum, Sepolia and Hoodi profiles, but not internal L1 chain 32382. Native
-and SGX acceptance of this devnet fixture remains a separate integration gate.
+The initial standalone checkpoint established witness feasibility. The next
+native checkpoint at `51ba09b8` adds the captured internal-L1 chain-32382 profile
+and replays both anchors in one owned `L1HistoryInput`. All five focused native
+CI jobs passed: fmt, Clippy, foundation, pipeline and runtime. The actual logs
+include all five new devnet cases and all 16 L1-history cases; independent source
+review and proof checks passed. [Native/SGX software CI](https://github.com/taikoxyz/raiko2/actions/runs/46100845137).
+The overall workflow remains red in RISC0-dependent lanes; this is not an
+all-CI-green or real-enclave/L1-acceptance claim. The two-anchor fixture closes
+native history verification, not the complete live devnet SGX request.
 
 - [x] Read actual devnet genesis/spec and obtain reference state, old beacon
   blocks and matching execution headers for both short-window samples.
 - [x] Reconstruct roots and verify the complete recent-history membership paths
   with standalone offline tooling, including sibling mutations.
-- [ ] Add a trusted, reviewed internal-L1 deployment profile using the observed
-  genesis, fork schedule and preset. Do not make the host's arbitrary settings
-  authoritative in the guest; do not mistake the existing L2 profile for this.
-- [ ] Adapt real recent-vector witnesses to `L1HistoryInput` and replay through
-  the existing native verifier and SGX request path; retain Q selection/retry
-  in the lander. Reject an out-of-window anchor in this limited builder rather
-  than substitute a root or weaken verification.
+- [x] Add a trusted, reviewed internal-L1 deployment profile using the observed
+  genesis, fork schedule and compatible preset dimensions. No host-selected
+  consensus constants or extra genesis-membership obligations are introduced.
+- [x] Adapt both real recent-vector witnesses to one `L1HistoryInput` and replay
+  through the actual native history verifier, with malformed/root/identity/
+  helper/coverage boundary regressions. Q selection/retry remains in the lander.
+- [ ] Replay this history profile as part of a complete real devnet SGX request;
+  standalone history and synthetic/software-signing tests are separate evidence.
+- [ ] Integrate a reusable host producer into the application. A temporary CLI
+  has generated fresh existing-format input from explicit Q and two anchors;
+  its independent verification/packaging is separate from production wiring.
+  Reject out-of-window anchors rather than omit them or weaken verification.
 - [ ] **Deferred:** guarantee arbitrary used anchor heights over at least two
   weeks, including completed-period data, missed slots, boundaries and restarts.
 - [ ] **Deferred:** generate small selective proofs near the beacon node and

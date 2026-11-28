@@ -111,6 +111,71 @@ Only the SSZ transport/builder is a new witness capability in this inventory.
 Other items use existing data, existing RPCs or ordinary backend adaptation.
 No missing API is represented by a host-approved flag inside the verifier.
 
+## Short-window anchor-history PoC (2026-11-28)
+
+The initial devnet target is a 24-hour anchor lookback; four hours is an
+acceptable fallback while bringing up the integration. The at-least-two-week
+history guarantee and provider-side selective proof API are deferred TODOs,
+not prerequisites for the first SGX PoC. Q remains selected by the lander.
+
+Read-only observations of the actual L1 devnet (chain ID 32382) confirm 12-second
+slots, 32 slots per epoch, 8,192 historical block roots and Fulu active from
+slot zero. Thus the recent-vector path spans about 27.3 hours in slot time.
+The observed genesis time is 1794749112, differing from the older default chain
+configuration; fetch and review the actual deployment profile rather than
+silently reusing that default.
+
+A standalone offline PoC reconstructed the complete reference state root and
+both target beacon roots, checked canonical execution-header RLP/Keccak, and
+verified both paths to Q's `parentBeaconBlockRoot`:
+
+| Reference or target | Execution height | Beacon slot | Lookback from reference |
+| --- | --- | --- | --- |
+| Q | 55,788 | 89,936 | — |
+| Q's parent beacon header | — | 89,935 | — |
+| Four-hour anchor | 55,363 | 88,735 | 1,200 slots / 4 hours |
+| One-day anchor | 53,231 | 82,735 | 7,200 slots / 24 hours |
+
+Q's frozen execution hash is
+`0x4d952b19a2fb11c494570a8b10de9c126b60cad4d0e1424b945c77a42750a10b`;
+its parent beacon root is
+`0x52bb9361b8e07410807867be48e806348da82add04fe546d663336164062fc38`.
+The reference state root is
+`0xba2cb2c025672b7d7b857e3a1ea653a004061bebde354c24fa21de4b840dfc07`.
+Each standalone path has 34 SHA-256 siblings (1,088 bytes of siblings, excluding
+headers and framing). Flipping each sibling independently was rejected in all
+68 cases. These are separate proofs; a shared multiproof can deduplicate nodes.
+
+Only one reference state was needed: approximately 2.8 MB as SSZ, or 5.95 MB in
+the downloaded JSON representation. Old complete states were not requested.
+Resolve skipped slots through the authenticated `block_roots` entry and fetch
+the actual produced block by root; a 404 at a requested slot alone does not
+establish unavailable historical data. The endpoint's finalized checkpoint was
+well behind its head; this observation is not a finality or L1 acceptance claim.
+
+This establishes real-data SSZ witness feasibility, not the production Raiko2
+or enclave path. In particular, the current native history verifier supports
+Ethereum, Sepolia and Hoodi profiles, but not internal L1 chain 32382. Native
+and SGX acceptance of this devnet fixture remains a separate integration gate.
+
+- [x] Read actual devnet genesis/spec and obtain reference state, old beacon
+  blocks and matching execution headers for both short-window samples.
+- [x] Reconstruct roots and verify the complete recent-history membership paths
+  with standalone offline tooling, including sibling mutations.
+- [ ] Add a trusted, reviewed internal-L1 deployment profile using the observed
+  genesis, fork schedule and preset. Do not make the host's arbitrary settings
+  authoritative in the guest; do not mistake the existing L2 profile for this.
+- [ ] Adapt real recent-vector witnesses to `L1HistoryInput` and replay through
+  the existing native verifier and SGX request path; retain Q selection/retry
+  in the lander. Reject an out-of-window anchor in this limited builder rather
+  than substitute a root or weaken verification.
+- [ ] **Deferred:** guarantee arbitrary used anchor heights over at least two
+  weeks, including completed-period data, missed slots, boundaries and restarts.
+- [ ] **Deferred:** generate small selective proofs near the beacon node and
+  transmit only required fields/helpers, with shared-node deduplication. A
+  host-side full reference-state fetch is a temporary PoC allowance, not this
+  final transport requirement.
+
 ## Verified source checkpoint
 
 At `f94ece85`, [native/SGX CI](https://github.com/taikoxyz/raiko2/actions/runs/45978411297)

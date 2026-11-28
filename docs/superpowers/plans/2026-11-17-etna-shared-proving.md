@@ -1950,3 +1950,33 @@ patched-SDK preflight map to P00; the `845ecbcb` slice maps to partial P02; old
 Task 3b context maps to P03, Task 4 to P04, Task 5 to P05, Task 6 to P06/P07 and
 Task 7 to P08. The previous plan remains available in Git at `845ecbcb`; the
 design document and diagnostic README retain its source/checkpoint provenance.
+
+## P03/P06 short-window devnet staging update (2026-11-28)
+
+The user explicitly deferred the at-least-14-day arbitrary-height history
+coverage and small selective proof service. Prioritize a real devnet 24-hour
+SSZ witness PoC, allowing a four-hour fallback, then the existing SGX path.
+This changes staging, not the authentication relation or the lander's Q role.
+The live two-sample evidence and detailed TODOs are recorded in
+[the client integration checklist](../../etna-client-integration.md#short-window-anchor-history-poc-2026-11-28).
+
+- [x] **S01 — Actual devnet API/profile/window check:** read genesis/spec and
+  freeze Q plus its parent beacon state; read real four-hour and one-day beacon
+  blocks and matching execution headers. The public hostname returned 503, but
+  published node beacon APIs supplied the data. No deployment was changed.
+- [x] **S02 — Standalone real-data membership PoC:** reproduce reference state
+  and target block roots, canonical EL hashes and Q's parent beacon binding;
+  verify both 34-sibling paths and reject 68 individual sibling mutations.
+  This uses offline Python tooling, not the native Raiko2/SGX verifier.
+- [ ] **S03 — Trusted internal-L1 profile and native/SGX replay:** the current
+  history verifier has no chain-32382 profile, and the deployed genesis differs
+  from the old default configuration. Review the real profile, adapt the
+  supplied witness, and replay both samples before claiming devnet acceptance.
+- [ ] **Later — At-least-14-day coverage:** retained completed-period data and
+  arbitrary-used-height lookup, including missed slots and restart behavior.
+- [ ] **Later — Selective provider proofs:** build near the node and transport
+  only required nodes/fields, with sharing across anchors. Fetching one full
+  reference state on the host is permitted only for the initial PoC.
+
+No local Cargo/SDK/image compilation or enclave/registration/L1 landing was
+performed for S01/S02. Existing P03/P06/P07 completion gates remain open.

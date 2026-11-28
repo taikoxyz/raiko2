@@ -644,7 +644,7 @@ fn replace_header_field(raw: &[u8], position: usize, replacement: &[u8]) -> Vec<
     else {
         panic!("expected raw header list")
     };
-    assert!(cursor.is_empty());
+    assert_eq!(cursor, []);
     fields[position] = replacement;
     let mut encoded = Vec::new();
     alloy_rlp::Header {
@@ -779,14 +779,14 @@ fn actual_devnet_q_identity_roots_slots_and_unknown_profiles_fail_closed() {
                     &changed.anchors[0].raw_header,
                     3,
                     &alloy_rlp::encode(B256::repeat_byte(0xaa)),
-                )
+                );
             }
             "target_height" => {
                 changed.anchors[0].raw_header = replace_header_field(
                     &changed.anchors[0].raw_header,
                     8,
                     &alloy_rlp::encode(53_232u64),
-                )
+                );
             }
             "substituted_anchor" => changed.anchors[0] = changed.anchors[1].clone(),
             _ => unreachable!(),

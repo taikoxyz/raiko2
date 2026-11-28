@@ -135,13 +135,18 @@ encoding/hash domains and the verified-versus-deferred predicate table must be
 reviewed before child-producing code is implemented. There is no host boolean
 that marks an unverified child or context assumption as trusted.
 
-SGX parents must verify child signatures **and signer authorization under the
-approved child program policy**, including proof purpose and typed statement.
-A self-declared address/quote, or a signature from an arbitrary enclave, is not
-sufficient. The attested/registered-key trust mechanism and revocation rules must
-be specified and tested before enabling `source.type = "proofs"`. Current
-software-signature tests do not establish that mechanism. ZK recursion later
-uses the corresponding authenticated image/VK policy, not SGX signature rules.
+For the initial SGX child implementation, reuse the current same-instance rule
+in `crates/sgx-runtime/src/aggregation.rs`: the parent obtains its own identity
+from the existing TEE provider, requires every child to name that exact instance
+ID/address and verifies its signature against the typed child statement/domain.
+The caller cannot choose the expected signer. Add Etna purpose/profile checks;
+do not reuse Shasta carry-data or accept cross-purpose signatures. Existing
+software tests do not establish actual enclave isolation or L1 registration.
+
+Cross-instance child acceptance is deferred and explicitly unsupported until
+attested/registered-key authorization and revocation are specified and tested.
+A self-declared address/quote or arbitrary enclave signature is insufficient.
+ZK recursion later uses authenticated image/VK policy, not SGX signature rules.
 
 ## Aggregation and finalization rules
 

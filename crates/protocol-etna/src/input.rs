@@ -135,25 +135,31 @@ pub struct BeaconHistoryInput {
     pub periods: Vec<HistoricalPeriodInput>,
 }
 
-/// Owned L1 history material. Resource limits are supplied only by the trusted caller.
+/// Untrusted owned L1 blocks anchored to one exact execution reference Q.
+///
+/// Carries Q's raw header, distinct anchor headers `a_i`, and one shared beacon-history witness.
+/// Verification authenticates every pre-Q anchor relative to Q's `parentBeaconBlockRoot`;
+/// a direct-Q opening must match Q's exact identity. The composing range checks which anchors
+/// it requires. This material does not define an advancing L2 synchronization boundary.
+/// Resource limits are supplied separately by the caller.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct L1HistoryInput {
-    /// Exact original raw Q header.
+pub struct AnchoredL1Blocks {
+    /// Original raw execution header for the requested reference Q.
     pub reference_header: Vec<u8>,
-    /// Original anchor openings in supplied order.
+    /// Distinct anchor openings `a_i`, supplied in increasing execution-height order.
     pub anchors: Vec<AnchorHeaderInput>,
-    /// Original optional beacon history material.
+    /// Shared history for every pre-Q anchor; absent when opening only Q directly.
     pub beacon: Option<BeaconHistoryInput>,
 }
 
-impl L1HistoryInput {
-    /// Builds temporary borrowed views only after checking caller-supplied count budgets.
+impl AnchoredL1Blocks {
+    /// Builds temporary borrowed views after enforcing caller-supplied count budgets.
     ///
-    /// The callback cannot return a reference to the temporary view arrays. Existing L1-history
-    /// verification remains responsible for all semantic checks, including raw-header validity,
-    /// identities, canonical helper sets and Merkle authentication. Outer encoded-byte limits
-    /// must already have been enforced before serde allocation.
+    /// This conversion does not verify headers or membership. Authentication belongs to
+    /// [`crate::l1_history::verify_l1_history`], with exact anchor coverage checked by the
+    /// composing range. The callback cannot retain references to the temporary view arrays.
+    /// Outer encoded-byte limits must already have been enforced before serde allocation.
     ///
     /// # Errors
     /// Returns [`L1HistoryError::Budget`] if header or helper counts exceed trusted limits.
@@ -221,7 +227,7 @@ impl L1HistoryInput {
     }
 }
 
-impl From<L1HistoryProof<'_>> for L1HistoryInput {
+impl From<L1HistoryProof<'_>> for AnchoredL1Blocks {
     fn from(value: L1HistoryProof<'_>) -> Self {
         Self {
             reference_header: value.reference_header.to_vec(),
@@ -280,8 +286,8 @@ pub struct RangeInput {
     pub post_block_cursors: Vec<u64>,
     /// Supplied excluded execution parent, authenticated by the caller's context.
     pub parent_execution_header: Header,
-    /// Original raw L1 and SSZ authentication material.
-    pub l1_history: L1HistoryInput,
+    /// Q-relative L1 anchor headers and their shared authentication material.
+    pub l1_history: AnchoredL1Blocks,
 }
 
 /// Owned proof resources for one distinct L1 anchor; its root is derived by the verifier.

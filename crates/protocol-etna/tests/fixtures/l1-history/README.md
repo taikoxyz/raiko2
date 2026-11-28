@@ -26,7 +26,7 @@ The verifier uses the mainnet preset, consensus container definitions through Fu
 
 ## Captured internal L1 recent-window witness
 
-`devnet-recent.json` contains the existing owned `L1HistoryInput` representation for
+`devnet-recent.json` contains the existing owned `AnchoredL1Blocks` representation for
 internal **L1 chain 32382**, frozen from read-only observations on **2026-11-28**.
 Its SHA-256 is `f074bc005a0613fa4b7a698160da1eac762f62ef052ecd475a068f4387daee85`.
 This is L1 history evidence; it does not establish an L2 execution, a live enclave

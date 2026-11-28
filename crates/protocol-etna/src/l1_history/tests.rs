@@ -516,7 +516,7 @@ fn schedules_have_explicit_unsupported_and_simultaneous_fork_boundaries() {
 
 #[test]
 fn owned_input_independent_replays_public_mainnet_sparse_history() {
-    use crate::input::L1HistoryInput;
+    use crate::input::AnchoredL1Blocks;
     with_mainnet(|q_number, q_hash, proof| {
         let original = verify_l1_history(U256::from(1), q_number, q_hash, &proof).unwrap();
         let expected: Vec<_> = original
@@ -530,8 +530,8 @@ fn owned_input_independent_replays_public_mainnet_sparse_history() {
                 )
             })
             .collect();
-        let encoded = serde_json::to_vec(&L1HistoryInput::from(proof)).unwrap();
-        let decoded: L1HistoryInput = serde_json::from_slice(&encoded).unwrap();
+        let encoded = serde_json::to_vec(&AnchoredL1Blocks::from(proof)).unwrap();
+        let decoded: AnchoredL1Blocks = serde_json::from_slice(&encoded).unwrap();
         let actual = decoded
             .with_proof(proof.limits, |borrowed| {
                 verify_l1_history(U256::from(1), q_number, q_hash, &borrowed).map(|headers| {
@@ -561,7 +561,7 @@ fn owned_input_independent_replays_public_mainnet_sparse_history() {
             "summary_length",
             "raw_q",
         ] {
-            let mut changed: L1HistoryInput = serde_json::from_slice(&encoded).unwrap();
+            let mut changed: AnchoredL1Blocks = serde_json::from_slice(&encoded).unwrap();
             match mutation {
                 "state_root" => changed.beacon.as_mut().unwrap().state_helpers[0].root[0] ^= 1,
                 "state_index" => changed.beacon.as_mut().unwrap().state_helpers[0].index = 0,
@@ -601,13 +601,13 @@ fn owned_input_independent_replays_public_mainnet_sparse_history() {
 
 const INTERNAL_L1_CHAIN_ID: u64 = 32_382;
 
-fn devnet_fixture() -> (u64, B256, crate::input::L1HistoryInput, Value) {
+fn devnet_fixture() -> (u64, B256, crate::input::AnchoredL1Blocks, Value) {
     devnet_fixture_from_json(include_str!(
         "../../tests/fixtures/l1-history/devnet-recent.json"
     ))
 }
 
-fn devnet_fixture_from_json(json: &str) -> (u64, B256, crate::input::L1HistoryInput, Value) {
+fn devnet_fixture_from_json(json: &str) -> (u64, B256, crate::input::AnchoredL1Blocks, Value) {
     let fixture: Value = serde_json::from_str(json).unwrap();
     assert_eq!(fixture["chain_id"], INTERNAL_L1_CHAIN_ID);
     (
@@ -626,7 +626,7 @@ fn devnet_limits() -> L1HistoryLimits {
 }
 
 fn verify_devnet(
-    input: &crate::input::L1HistoryInput,
+    input: &crate::input::AnchoredL1Blocks,
     number: u64,
     hash: B256,
 ) -> Result<Vec<(u64, B256, B256)>, L1HistoryError> {
@@ -665,7 +665,7 @@ fn replace_header_field(raw: &[u8], position: usize, replacement: &[u8]) -> Vec<
 fn actual_devnet_recent_anchors_share_one_owned_native_reference() {
     let (number, hash, input, fixture) = devnet_fixture();
     let bytes = serde_json::to_vec(&input).unwrap();
-    let decoded: crate::input::L1HistoryInput = serde_json::from_slice(&bytes).unwrap();
+    let decoded: crate::input::AnchoredL1Blocks = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(serde_json::to_vec(&decoded).unwrap(), bytes);
     assert_eq!(decoded.anchors.len(), 2);
     assert_eq!(decoded.beacon.as_ref().unwrap().state_helpers.len(), 32);
@@ -899,9 +899,9 @@ fn actual_devnet_all_shared_and_payload_helpers_are_required_and_authenticated()
 // Derive a minimal authenticated subset from the already valid shared multiproof. This is test
 // code only: requested anchor coverage belongs to the guest composer, not this membership API.
 fn devnet_subset(
-    mut input: crate::input::L1HistoryInput,
+    mut input: crate::input::AnchoredL1Blocks,
     keep: usize,
-) -> crate::input::L1HistoryInput {
+) -> crate::input::AnchoredL1Blocks {
     let beacon = input.beacon.as_ref().unwrap();
     let mut leaves = BTreeMap::new();
     leaves.insert(66, scalar(beacon.reference.slot));

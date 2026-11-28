@@ -97,7 +97,7 @@ are not implicitly part of an inline witness. `staking_reads` values and
   Raiko2 composer, including anchors where the candidate wins. The client's
   existing list-by-hash lookup can provide it; `fallback_key_lists` currently
   retains only lists for actual fallback decisions.
-- [ ] **Extend history witness transport:** supply `L1HistoryInput` for the
+- [ ] **Extend history witness transport:** supply `AnchoredL1Blocks` for the
   lander-selected Q, including beacon reference header, execution payload
   openings and historical/state multiproof helpers for older anchors. Current
   `reference_headers` are a raw EL parent chain and cannot be passed as SSZ
@@ -155,7 +155,7 @@ well behind its head; this observation is not a finality or L1 acceptance claim.
 
 The initial standalone checkpoint established witness feasibility. The next
 native checkpoint at `51ba09b8` adds the captured internal-L1 chain-32382 profile
-and replays both anchors in one owned `L1HistoryInput`. All five focused native
+and replays both anchors in one owned `AnchoredL1Blocks`. All five focused native
 CI jobs passed: fmt, Clippy, foundation, pipeline and runtime. The actual logs
 include all five new devnet cases and all 16 L1-history cases; independent source
 review and proof checks passed. [Native/SGX software CI](https://github.com/taikoxyz/raiko2/actions/runs/46100845137).
@@ -170,7 +170,7 @@ native history verification, not the complete live devnet SGX request.
 - [x] Add a trusted, reviewed internal-L1 deployment profile using the observed
   genesis, fork schedule and compatible preset dimensions. No host-selected
   consensus constants or extra genesis-membership obligations are introduced.
-- [x] Adapt both real recent-vector witnesses to one `L1HistoryInput` and replay
+- [x] Adapt both real recent-vector witnesses to one `AnchoredL1Blocks` and replay
   through the actual native history verifier, with malformed/root/identity/
   helper/coverage boundary regressions. Q selection/retry remains in the lander.
 - [ ] Replay this history profile as part of a complete real devnet SGX request;

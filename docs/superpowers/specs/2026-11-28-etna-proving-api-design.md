@@ -74,7 +74,7 @@ Illustrative landing request (field names are proposed, not an existing codec):
   "landing": {
     "statement": "current 19-word statement inputs",
     "data_source": "original ordered blobs, KZG commitments and proofs",
-    "l1_history": "L1HistoryInput, including exact Q header and all required anchors",
+    "l1_history": "AnchoredL1Blocks, including exact Q header and all required anchors",
     "reference_state": "existing Q-rooted Inbox account/storage witnesses",
     "verifier_address": "0x..."
   }
@@ -200,20 +200,22 @@ existing byte/node budgets are not silently removed. Measure the real range's
 request size/memory and set reviewed bounds if needed; a count target is not a
 guarantee that every maximally sized 100-block range fits the service.
 
-
-Also preflight the actual deployment's unsettled limit U and checkpoint
-synchronization. Existing acceptance requires
-`block_height - anchor.checkpoint <= unsettled_limit` for every block. A valid
-100-block landing cadence needs enough U headroom for all those differences,
-including landing/anchor synchronization delay. Merely raising the service count
-cap does not make that cadence valid. Read current authenticated configuration
-and observe the checkpoint path before claiming this PoC schedule works; do not
-relax the predicate or mutate deployment settings as part of this design task.
+The ordinary unsettled-depth invariant remains
+`block_height - anchor.checkpoint <= unsettled_limit`. The PoC-pinned and latest
+`DeployEtnaDevnet` sources both default U to **151,200 L2 blocks**, documented
+as seven days of four-second blocks; 100 such blocks take 400 seconds. Under
+that default, U is not a blocker for the proposed 100-block cadence and does
+not require a new checkpoint mechanism or a separate implementation task.
+See the [pinned deployment default](https://github.com/taikoxyz/taiko-mono/blob/9b8d5b4c2ff4c4dcf23f3c217626070cd261d4a5/packages/protocol/script/layer1/etna/DeployEtnaDevnet.s.sol#L69).
+This verifies source defaults, not a deployed getter value. Existing config-hash
+binding still authenticates the U used by the prover. The separate 64-block
+service count limit and actual request/resource bounds still need the planned
+100-block change and validation.
 
 ## Delivery order and acceptance evidence
 
 1. **Anchor connection:** trusted actual devnet L1 profile; a recent-window host
-   witness builder; native `L1HistoryInput` verification for the real 4h/24h
+   witness builder; native `AnchoredL1Blocks` verification for the real 4h/24h
    samples and multiple distinct anchors in one request. Include skipped slots,
    mismatched Q/root/height, omitted/substituted anchors and out-of-window cases.
 2. **Direct 100-block proof:** construct a real complete request without client

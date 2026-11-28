@@ -552,7 +552,7 @@ fn native_etna_recovers_signers_from_original_transaction_signatures() {
 impl ExecutingRange {
     fn input(&self) -> raiko2_protocol_etna::input::RangeInput {
         use raiko2_protocol_etna::input::{
-            L1HistoryInput, LandStatementInput, RangeBlockInput, RangeInput,
+            AnchoredL1Blocks, LandStatementInput, RangeBlockInput, RangeInput,
         };
         let range = &self.authenticated.range;
         let cuts = range.cut_leaves();
@@ -575,7 +575,7 @@ impl ExecutingRange {
             statement: LandStatementInput::from(&statement),
             post_block_cursors: vec![0; range.blocks.len()],
             parent_execution_header: range.parent.clone(),
-            l1_history: L1HistoryInput::from(range.l1_proof(&range.openings(&range.l1_headers))),
+            l1_history: AnchoredL1Blocks::from(range.l1_proof(&range.openings(&range.l1_headers))),
         }
     }
 

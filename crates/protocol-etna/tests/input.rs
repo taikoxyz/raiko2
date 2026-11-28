@@ -3,7 +3,7 @@
 use alloy_primitives::{Address, B256, U256};
 use raiko2_protocol_etna::{
     input::{
-        AnchorHeaderInput, BeaconHistoryInput, HistoricalPeriodInput, L1HistoryInput,
+        AnchorHeaderInput, AnchoredL1Blocks, BeaconHistoryInput, HistoricalPeriodInput,
         LandStatementInput,
     },
     l1_history::{BeaconHeader, L1HistoryError, L1HistoryLimits, SszProofNode},
@@ -35,7 +35,7 @@ fn statement() -> LandStatementInput {
     }
 }
 
-fn history() -> L1HistoryInput {
+fn history() -> AnchoredL1Blocks {
     let header = BeaconHeader {
         slot: 1,
         proposer_index: 2,
@@ -43,7 +43,7 @@ fn history() -> L1HistoryInput {
         state_root: B256::repeat_byte(4),
         body_root: B256::repeat_byte(5),
     };
-    L1HistoryInput {
+    AnchoredL1Blocks {
         reference_header: vec![0, 128, 255],
         anchors: vec![AnchorHeaderInput {
             raw_header: vec![255, 0, 1],
@@ -111,7 +111,7 @@ fn current_statement_rejects_superseded_registry_and_snapshot_fields() {
 #[test]
 fn owned_ssz_roundtrip_preserves_all_material_and_metadata() {
     let original = history();
-    let decoded: L1HistoryInput =
+    let decoded: AnchoredL1Blocks =
         serde_json::from_slice(&serde_json::to_vec(&original).unwrap()).unwrap();
     assert_eq!(
         serde_json::to_value(&decoded).unwrap(),
@@ -157,7 +157,7 @@ fn owned_ssz_roundtrip_preserves_all_material_and_metadata() {
     beacon.summary_length = None;
     beacon.legacy_length = None;
     beacon.periods[0].legacy_state_roots = None;
-    let decoded: L1HistoryInput =
+    let decoded: AnchoredL1Blocks =
         serde_json::from_slice(&serde_json::to_vec(&no_metadata).unwrap()).unwrap();
     assert_eq!(
         serde_json::to_value(decoded).unwrap(),
@@ -172,7 +172,7 @@ fn json_cannot_supply_limits_or_extra_carrier_fields() {
         encoded[field] =
             serde_json::json!({ "max_headers": 1_000_000, "max_proof_nodes": 1_000_000 });
         assert!(
-            serde_json::from_value::<L1HistoryInput>(encoded).is_err(),
+            serde_json::from_value::<AnchoredL1Blocks>(encoded).is_err(),
             "{field}"
         );
     }
@@ -188,13 +188,13 @@ fn json_cannot_supply_limits_or_extra_carrier_fields() {
         };
         target["unexpected"] = true.into();
         assert!(
-            serde_json::from_value::<L1HistoryInput>(encoded).is_err(),
+            serde_json::from_value::<AnchoredL1Blocks>(encoded).is_err(),
             "{path}"
         );
     }
     let mut encoded = serde_json::to_value(history()).unwrap();
     encoded["reference_header"][0] = 256.into();
-    assert!(serde_json::from_value::<L1HistoryInput>(encoded).is_err());
+    assert!(serde_json::from_value::<AnchoredL1Blocks>(encoded).is_err());
 }
 
 #[test]
@@ -209,7 +209,7 @@ fn trusted_limits_reject_before_borrowed_view_callback() {
             max_proof_nodes: 3,
         },
     ] {
-        let decoded: L1HistoryInput =
+        let decoded: AnchoredL1Blocks =
             serde_json::from_slice(&serde_json::to_vec(&history()).unwrap()).unwrap();
         assert!(matches!(
             decoded.with_proof(limits, |_| panic!("over-budget callback")),

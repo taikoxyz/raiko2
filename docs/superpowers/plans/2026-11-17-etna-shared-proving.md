@@ -1994,15 +1994,16 @@ choice remains pending user review, and no new API is implemented yet.
 - [x] Inspect current endpoint, statements, SGX acceptance and client boundary;
   identify the current 64-block cap and Q-bound existing proof relation.
 - [x] Write a proposed API protocol and obtain an independent builder review.
-  Add the review's deployment U/checkpoint-cadence preflight to the draft.
+  Resolve the review's U/checkpoint concern against source defaults: U is
+  151,200 blocks, so it is not an additional 100-block PoC blocker.
 - [ ] Confirm/freeze the API milestone and child statement/trust obligations
   before implementing the corresponding new API or aggregation relation.
 - [x] Finish S03 native anchor input/profile conversion with real shared-anchor
   evidence and focused negative regressions; independent review and focused
   native checks passed at `51ba09b8` (checkpoint below).
-- [ ] Before the 100-block run, confirm authenticated U/checkpoints support that
-  cadence, measure request/resource bounds, then test any 64 -> 100 service
-  limit change. Do not bypass a consensus limit to fit the batch target.
+- [ ] Before the 100-block run, measure request/resource bounds and test the
+  64 -> 100 service limit change. The existing U/config consistency checks
+  remain in force; no separate checkpoint mechanism is pending.
 
 The anchor input conversion may proceed independently of the API choice. A real
 SGX proof and L1 acceptance remain separate gates; two offline SSZ samples do
@@ -2052,3 +2053,20 @@ L1 landing, 100-block execution or production host/API integration.
 
 No local Cargo/SDK/guest build or new target directory was used. The API draft
 still awaits the first-milestone choice; no new operation is implemented.
+
+## Naming and U clarification (2026-11-28)
+
+The owned Q-relative anchor carrier is named `AnchoredL1Blocks`. Its comments
+explain that supplied material is untrusted, all pre-Q anchor memberships must
+be verified, direct Q is an exact-identity case, and range coverage belongs to
+the composing verifier. The Rust type rename preserves the JSON fields and
+fixture bytes; it adds no second representation or compatibility alias.
+
+The PoC-pinned protocol source `9b8d5b4c` and latest inspected source `1cdf40d0`
+both set `DeployEtnaDevnet.DEFAULT_UNSETTLED_LIMIT = 151_200`, explicitly about
+seven days at four seconds per block. This resolves the earlier generic cadence
+concern for a 100-block default-profile PoC; no U/checkpoint feature is pending.
+This was source/default verification, not a live Etna Inbox getter read. The
+actual U used in proof verification is still authenticated by the existing
+configuration commitment. The concrete current service cap remains 64 blocks
+until the planned 100-block admission/resource change is implemented.

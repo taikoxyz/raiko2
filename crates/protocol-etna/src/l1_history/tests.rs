@@ -598,3 +598,386 @@ fn owned_input_independent_replays_public_mainnet_sparse_history() {
         }
     });
 }
+
+const INTERNAL_L1_CHAIN_ID: u64 = 32_382;
+
+fn devnet_fixture() -> (u64, B256, crate::input::L1HistoryInput, Value) {
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../tests/fixtures/l1-history/devnet-recent.json"
+    ))
+    .unwrap();
+    assert_eq!(fixture["chain_id"], INTERNAL_L1_CHAIN_ID);
+    (
+        fixture["reference_number"].as_u64().unwrap(),
+        root(&fixture["reference_hash"]),
+        serde_json::from_value(fixture["input"].clone()).unwrap(),
+        fixture,
+    )
+}
+
+fn devnet_limits() -> L1HistoryLimits {
+    L1HistoryLimits {
+        max_headers: 3,
+        max_proof_nodes: 50,
+    }
+}
+
+fn verify_devnet(
+    input: &crate::input::L1HistoryInput,
+    number: u64,
+    hash: B256,
+) -> Result<Vec<(u64, B256, B256)>, L1HistoryError> {
+    input.with_proof(devnet_limits(), |proof| {
+        verify_l1_history(U256::from(INTERNAL_L1_CHAIN_ID), number, hash, &proof).map(|headers| {
+            headers
+                .iter()
+                .map(|header| (header.number(), header.hash(), header.state_root()))
+                .collect()
+        })
+    })?
+}
+
+fn replace_header_field(raw: &[u8], position: usize, replacement: &[u8]) -> Vec<u8> {
+    let mut cursor = raw;
+    let alloy_rlp::PayloadView::List(mut fields) =
+        alloy_rlp::Header::decode_raw(&mut cursor).unwrap()
+    else {
+        panic!("expected raw header list")
+    };
+    assert!(cursor.is_empty());
+    fields[position] = replacement;
+    let mut encoded = Vec::new();
+    alloy_rlp::Header {
+        list: true,
+        payload_length: fields.iter().map(|field| field.len()).sum(),
+    }
+    .encode(&mut encoded);
+    for field in fields {
+        encoded.extend_from_slice(field);
+    }
+    encoded
+}
+
+#[test]
+fn actual_devnet_recent_anchors_share_one_owned_native_reference() {
+    let (number, hash, input, fixture) = devnet_fixture();
+    let bytes = serde_json::to_vec(&input).unwrap();
+    let decoded: crate::input::L1HistoryInput = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(serde_json::to_vec(&decoded).unwrap(), bytes);
+    assert_eq!(decoded.anchors.len(), 2);
+    assert_eq!(decoded.beacon.as_ref().unwrap().state_helpers.len(), 32);
+    assert!(decoded.beacon.as_ref().unwrap().periods.is_empty());
+    assert_eq!(decoded.beacon.as_ref().unwrap().reference.slot, 89_935);
+    let got = verify_devnet(&decoded, number, hash).unwrap();
+    let expected = fixture["expected_anchors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|target| {
+            (
+                target["number"].as_u64().unwrap(),
+                root(&target["hash"]),
+                root(&target["state_root"]),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(got, expected);
+    assert_eq!(
+        got.iter().map(|header| header.0).collect::<Vec<_>>(),
+        [53_231, 55_363]
+    );
+    assert_eq!(fixture["expected_anchors"][0]["age_seconds"], 86_400);
+    assert_eq!(fixture["expected_anchors"][1]["age_seconds"], 14_400);
+    assert!(
+        decoded
+            .beacon
+            .as_ref()
+            .unwrap()
+            .state_helpers
+            .windows(2)
+            .all(|pair| pair[0].index < pair[1].index)
+    );
+}
+
+#[test]
+fn actual_devnet_q_identity_roots_slots_and_unknown_profiles_fail_closed() {
+    let (number, hash, input, _) = devnet_fixture();
+    assert_eq!(
+        verify_devnet(&input, number - 1, hash).unwrap_err(),
+        L1HistoryError::Identity
+    );
+    assert_eq!(
+        verify_devnet(&input, number, B256::ZERO).unwrap_err(),
+        L1HistoryError::Identity
+    );
+    for id in [
+        U256::ZERO,
+        U256::from(1),
+        U256::from(11_155_111),
+        U256::from(560_048),
+        U256::from(INTERNAL_L1_CHAIN_ID + 1),
+    ] {
+        assert!(
+            input
+                .with_proof(devnet_limits(), |proof| verify_l1_history(
+                    id, number, hash, &proof
+                )
+                .map(|_| ()))
+                .unwrap()
+                .is_err(),
+            "{id}"
+        );
+    }
+    let alias = U256::from(INTERNAL_L1_CHAIN_ID) | (U256::from(1) << 200usize);
+    assert!(matches!(
+        input
+            .with_proof(devnet_limits(), |proof| verify_l1_history(
+                alias, number, hash, &proof
+            )
+            .map(|_| ()))
+            .unwrap(),
+        Err(L1HistoryError::Schema)
+    ));
+    for mutation in [
+        "raw_q",
+        "reference_root",
+        "q_parent_root",
+        "q_slot",
+        "target_slot",
+        "target_state_root",
+        "target_height",
+        "substituted_anchor",
+    ] {
+        let mut changed = input.clone();
+        let mut expected_hash = hash;
+        match mutation {
+            "raw_q" => changed.reference_header.push(0),
+            "reference_root" => changed.beacon.as_mut().unwrap().reference.state_root = B256::ZERO,
+            "q_parent_root" => {
+                changed.reference_header = replace_header_field(
+                    &changed.reference_header,
+                    19,
+                    &alloy_rlp::encode(B256::repeat_byte(0xaa)),
+                );
+                expected_hash = keccak256(&changed.reference_header);
+            }
+            "q_slot" => {
+                let timestamp = L1HeaderView::from_raw(&changed.reference_header)
+                    .unwrap()
+                    .timestamp()
+                    - 12;
+                changed.reference_header = replace_header_field(
+                    &changed.reference_header,
+                    11,
+                    &alloy_rlp::encode(timestamp),
+                );
+                expected_hash = keccak256(&changed.reference_header);
+            }
+            "target_slot" => changed.anchors[0].beacon_header.as_mut().unwrap().slot += 1,
+            "target_state_root" => {
+                changed.anchors[0].raw_header = replace_header_field(
+                    &changed.anchors[0].raw_header,
+                    3,
+                    &alloy_rlp::encode(B256::repeat_byte(0xaa)),
+                )
+            }
+            "target_height" => {
+                changed.anchors[0].raw_header = replace_header_field(
+                    &changed.anchors[0].raw_header,
+                    8,
+                    &alloy_rlp::encode(53_232u64),
+                )
+            }
+            "substituted_anchor" => changed.anchors[0] = changed.anchors[1].clone(),
+            _ => unreachable!(),
+        }
+        assert!(
+            verify_devnet(&changed, number, expected_hash).is_err(),
+            "{mutation}"
+        );
+    }
+}
+
+#[test]
+fn actual_devnet_all_shared_and_payload_helpers_are_required_and_authenticated() {
+    let (number, hash, input, _) = devnet_fixture();
+    for index in 0..input.beacon.as_ref().unwrap().state_helpers.len() {
+        let mut changed = input.clone();
+        changed.beacon.as_mut().unwrap().state_helpers[index].root[0] ^= 1;
+        assert!(
+            verify_devnet(&changed, number, hash).is_err(),
+            "shared node {index}"
+        );
+        let mut changed = input.clone();
+        changed.beacon.as_mut().unwrap().state_helpers.remove(index);
+        assert!(
+            verify_devnet(&changed, number, hash).is_err(),
+            "missing shared node {index}"
+        );
+    }
+    for target in 0..input.anchors.len() {
+        for index in 0..input.anchors[target].payload_siblings.len() {
+            let mut changed = input.clone();
+            changed.anchors[target].payload_siblings[index][0] ^= 1;
+            assert!(
+                verify_devnet(&changed, number, hash).is_err(),
+                "payload node {target}/{index}"
+            );
+        }
+    }
+    let mut changed = input.clone();
+    changed.beacon.as_mut().unwrap().state_helpers.swap(0, 1);
+    assert!(verify_devnet(&changed, number, hash).is_err());
+    let mut changed = input.clone();
+    changed.beacon.as_mut().unwrap().state_helpers[0].index = 0;
+    assert!(verify_devnet(&changed, number, hash).is_err());
+    let mut changed = input.clone();
+    changed.beacon.as_mut().unwrap().state_helpers.insert(
+        0,
+        SszProofNode {
+            index: 1,
+            root: B256::ZERO,
+        },
+    );
+    let roomy = L1HistoryLimits {
+        max_headers: 3,
+        max_proof_nodes: 51,
+    };
+    assert!(
+        changed
+            .with_proof(roomy, |proof| verify_l1_history(
+                U256::from(INTERNAL_L1_CHAIN_ID),
+                number,
+                hash,
+                &proof
+            )
+            .map(|_| ()))
+            .unwrap()
+            .is_err()
+    );
+    assert!(matches!(
+        input.with_proof(
+            L1HistoryLimits {
+                max_headers: 3,
+                max_proof_nodes: 49
+            },
+            |_| panic!("budget callback reached")
+        ),
+        Err(L1HistoryError::Budget)
+    ));
+}
+
+// Derive a minimal authenticated subset from the already valid shared multiproof. This is test
+// code only: requested anchor coverage belongs to the guest composer, not this membership API.
+fn devnet_subset(
+    mut input: crate::input::L1HistoryInput,
+    keep: usize,
+) -> crate::input::L1HistoryInput {
+    let beacon = input.beacon.as_ref().unwrap();
+    let mut leaves = BTreeMap::new();
+    leaves.insert(66, scalar(beacon.reference.slot));
+    let mut version = B256::ZERO;
+    version[..4].copy_from_slice(&[0x20, 0, 0, 0x95]);
+    leaves.insert(269, version);
+    for anchor in &input.anchors {
+        let target = anchor.beacon_header.as_ref().unwrap();
+        leaves.insert(69 * 8192 + target.slot % 8192, header_root(target));
+    }
+    let mut all = leaves.clone();
+    all.extend(
+        beacon
+            .state_helpers
+            .iter()
+            .map(|node| (node.index, node.root)),
+    );
+    let mut pending = all.clone();
+    while let Some((index, node)) = pending.pop_last() {
+        if index == 1 {
+            assert_eq!(node, beacon.reference.state_root);
+            break;
+        }
+        let sibling = pending
+            .remove(&(index ^ 1))
+            .expect("valid shared proof sibling");
+        let parent = if index & 1 == 0 {
+            pair(node, sibling)
+        } else {
+            pair(sibling, node)
+        };
+        assert!(pending.insert(index / 2, parent).is_none());
+        all.insert(index / 2, parent);
+    }
+    let selected = input.anchors[keep].clone();
+    let removed = input.anchors[1 - keep].beacon_header.as_ref().unwrap();
+    leaves.remove(&(69 * 8192 + removed.slot % 8192));
+    let mut helpers = Vec::new();
+    while let Some((index, node)) = leaves.pop_last() {
+        if index == 1 {
+            assert_eq!(node, beacon.reference.state_root);
+            break;
+        }
+        let sibling = leaves.remove(&(index ^ 1)).unwrap_or_else(|| {
+            let root = all[&(index ^ 1)];
+            helpers.push(SszProofNode {
+                index: index ^ 1,
+                root,
+            });
+            root
+        });
+        let parent = if index & 1 == 0 {
+            pair(node, sibling)
+        } else {
+            pair(sibling, node)
+        };
+        assert!(leaves.insert(index / 2, parent).is_none());
+    }
+    helpers.sort_by_key(|node| node.index);
+    input.anchors = alloc::vec![selected];
+    input.beacon.as_mut().unwrap().state_helpers = helpers;
+    input
+}
+
+#[test]
+fn actual_devnet_anchor_coverage_is_a_composer_obligation() {
+    let (number, hash, input, _) = devnet_fixture();
+    // Merely removing an anchor leaves a noncanonical/incomplete shared proof and must fail.
+    let mut missing = input.clone();
+    missing.anchors.remove(0);
+    assert!(verify_devnet(&missing, number, hash).is_err());
+    // A correctly rebuilt one-anchor witness authenticates that subset. This API has no
+    // expected-anchor list. guest-common::etna::verify_l1_anchor_roots checks every projected
+    // block consumes an opening and rejects unused/missing openings against the real EL range.
+    for index in 0..2 {
+        let subset = devnet_subset(input.clone(), index);
+        let got = verify_devnet(&subset, number, hash).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].0, [53_231, 55_363][index]);
+    }
+    let mut empty = input.clone();
+    empty.anchors.clear();
+    assert!(verify_devnet(&empty, number, hash).is_err());
+}
+
+#[test]
+fn internal_l1_schedule_is_compiled_for_the_captured_deployment() {
+    let network = Network::from_id(U256::from(INTERNAL_L1_CHAIN_ID)).unwrap();
+    assert_eq!(network.genesis, 1_794_749_112);
+    assert_eq!(network.epochs, [0; 5]);
+    assert_eq!(
+        network.versions,
+        [
+            0x2000_0091,
+            0x2000_0092,
+            0x2000_0093,
+            0x2000_0094,
+            0x2000_0095
+        ]
+    );
+    assert_eq!(network.slot(1_795_828_344).unwrap(), 89_936);
+    assert!(network.slot(network.genesis - 1).is_err());
+    assert!(network.slot(network.genesis + 1).is_err());
+    let fulu = network.schema(0).unwrap();
+    assert_eq!(fulu.state_base, 64);
+    assert_eq!(fulu.payload_base, 32);
+    assert_eq!(fulu.version, [0x20, 0, 0, 0x95]);
+}

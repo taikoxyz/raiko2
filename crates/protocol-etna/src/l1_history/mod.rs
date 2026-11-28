@@ -155,6 +155,22 @@ impl Network {
                 ],
                 unsupported_epoch: Some(353_024),
             }),
+            // Internal L1 deployment captured on 2026-11-28; see the fixture README for
+            // genesis/spec provenance. These reviewed constants are image policy, not host
+            // input. A deployment reset or schedule change requires a profile review/update.
+            Some(32_382) => Ok(Self {
+                genesis: 1_794_749_112,
+                epochs: [0; 5],
+                versions: [
+                    0x2000_0091,
+                    0x2000_0092,
+                    0x2000_0093,
+                    0x2000_0094,
+                    0x2000_0095,
+                ],
+                // The captured deployment disables Gloas with the maximum uint64 epoch.
+                unsupported_epoch: Some(u64::MAX),
+            }),
             Some(560_048) => Ok(Self {
                 genesis: 1_742_213_400,
                 epochs: [0, 0, 0, 2048, 50_688],

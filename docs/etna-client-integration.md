@@ -179,6 +179,14 @@ native history verification, not the complete live devnet SGX request.
   has generated fresh existing-format input from explicit Q and two anchors;
   its independent verification/packaging is separate from production wiring.
   Reject out-of-window anchors rather than omit them or weaken verification.
+
+Fresh producer output is additionally replayed by the actual native history
+verifier at source `fcf9f850`: Q 55,995, anchors 53,995 / 55,595. All six devnet
+cases and all 17 history cases passed, along with fmt, Clippy, foundation,
+pipeline and runtime in [CI 46101835480](https://github.com/taikoxyz/raiko2/actions/runs/46101835480).
+Independent source/producer/native verification passed. This closes the PoC
+producer-to-owned-native-history path, while application provider wiring,
+complete real SGX range execution and L1 acceptance remain open.
 - [ ] **Deferred:** guarantee arbitrary used anchor heights over at least two
   weeks, including completed-period data, missed slots, boundaries and restarts.
 - [ ] **Deferred:** generate small selective proofs near the beacon node and

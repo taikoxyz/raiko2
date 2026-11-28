@@ -2033,3 +2033,22 @@ production provider/API or native/SGX execution of that fresh request.
 Independent tool verification and the real SGX/L1 acceptance remain distinct.
 The API design stays a draft; no new endpoint modes, 100-block admission limit,
 child-proof relation, image registration, transaction or deployment is enabled.
+
+### Fresh producer-to-native replay checkpoint
+
+Source `fcf9f850` closes the temporary producer's exact output-to-native-history
+replay. The producer's frozen Q-55,995 fixture is byte-identical to
+`devnet-live.json` (SHA-256
+`3f903b00e5826b749bbed212f78de71ac323615d8a653702f42b2554b913e0a4`).
+The actual native verifier accepts both anchors and their hash/state-root
+identities. All six devnet tests and all 17 history tests passed in
+[CI 46101835480](https://github.com/taikoxyz/raiko2/actions/runs/46101835480),
+along with all five focused fmt/Clippy/foundation/pipeline/runtime jobs.
+Effective merge: `ee001cdc47836f8049c8c3e80a24ca3a1fda3a9f`.
+Independent source review, producer replay and native CI verification passed;
+all five relevant file blobs match the effective CI checkout. This supersedes
+the earlier fresh-output/native gap, without claiming real SGX, registration,
+L1 landing, 100-block execution or production host/API integration.
+
+No local Cargo/SDK/guest build or new target directory was used. The API draft
+still awaits the first-milestone choice; no new operation is implemented.

@@ -1980,3 +1980,29 @@ The live two-sample evidence and detailed TODOs are recorded in
 
 No local Cargo/SDK/image compilation or enclave/registration/L1 landing was
 performed for S01/S02. Existing P03/P06/P07 completion gates remain open.
+
+## Proving API design and 100-block target (2026-11-28)
+
+The user requested an API design before implementation and proposed initially
+landing one 100-block range. Client production integration is not urgent.
+The [API design draft](../specs/2026-11-28-etna-proving-api-design.md) proposes
+one tagged backend endpoint for block/range/landing artifacts, with Q chosen
+by the lander at finalization. It separates a recommended direct-range first
+milestone from future genuine reuse of Q-free child proofs; the first-milestone
+choice remains pending user review, and no new API is implemented yet.
+
+- [x] Inspect current endpoint, statements, SGX acceptance and client boundary;
+  identify the current 64-block cap and Q-bound existing proof relation.
+- [x] Write a proposed API protocol and obtain an independent builder review.
+  Add the review's deployment U/checkpoint-cadence preflight to the draft.
+- [ ] Confirm/freeze the API milestone and child statement/trust obligations
+  before implementing the corresponding new API or aggregation relation.
+- [ ] Finish S03 native anchor input/profile conversion with real shared-anchor
+  evidence and focused negative regressions; review and run native checks.
+- [ ] Before the 100-block run, confirm authenticated U/checkpoints support that
+  cadence, measure request/resource bounds, then test any 64 -> 100 service
+  limit change. Do not bypass a consensus limit to fit the batch target.
+
+The anchor input conversion may proceed independently of the API choice. A real
+SGX proof and L1 acceptance remain separate gates; two offline SSZ samples do
+not establish the complete PoC or the live production witness builder.
